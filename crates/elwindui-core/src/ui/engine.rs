@@ -1537,25 +1537,14 @@ mod tests {
     }
 
     #[test]
-    fn subtree_cancel_during_release_suppresses_the_pending_tap() {
+    fn subtree_cancel_during_release_clears_all_retained_state_without_active_press() {
         let leaf = native("a", size(50.0, 50.0));
         layout_tree::<FakeHandle>(&leaf, size(50.0, 50.0));
         let dispatcher = Rc::new(crate::input::PointerDispatcher::new());
-        let weak_dispatcher = Rc::downgrade(&dispatcher);
-        let subtree = Rc::clone(&leaf);
-        leaf.as_ui_element()
-            .register_routed_handler::<crate::input::PointerEventArgs>(
-                "on_pointer_released",
-                Box::new(move |_, _| {
-                    weak_dispatcher
-                        .upgrade()
-                        .expect("dispatcher should outlive dispatch")
-                        .cancel_for_subtree(&subtree);
-                }),
-            );
-        let tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_tapped");
         let focus = crate::focus::FocusTracker::new();
+        let tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_tapped");
 
+        // Seed both the completed-tap record and hover chain with references to `leaf`.
         dispatcher.handle(
             &leaf,
             &focus,
@@ -1566,9 +1555,46 @@ mod tests {
             &focus,
             release_event(5.0, 5.0, crate::input::MouseButton::Left, 10.0),
         );
+        assert_eq!(*tapped.borrow(), 1);
+        *tapped.borrow_mut() = 0;
+
+        let weak_dispatcher = Rc::downgrade(&dispatcher);
+        let weak_subtree = Rc::downgrade(&leaf);
+        leaf.as_ui_element()
+            .register_routed_handler::<crate::input::PointerEventArgs>(
+                "on_pointer_released",
+                Box::new(move |_, _| {
+                    let dispatcher = weak_dispatcher
+                        .upgrade()
+                        .expect("dispatcher should outlive dispatch");
+                    let subtree = weak_subtree
+                        .upgrade()
+                        .expect("subtree should remain alive during release dispatch");
+                    // `prepare_release` has already removed the active press. The subtree cleanup
+                    // must still remove the pending tap, prior tap record, and hover chain.
+                    assert!(!dispatcher.cancel_for_subtree(&subtree));
+                }),
+            );
+
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            press_event(5.0, 5.0, crate::input::MouseButton::Left, 100.0),
+        );
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            release_event(5.0, 5.0, crate::input::MouseButton::Left, 110.0),
+        );
 
         assert_eq!(*tapped.borrow(), 0);
         assert!(!dispatcher.cancel_for_subtree(&leaf));
+        let weak_leaf = Rc::downgrade(&leaf);
+        drop(leaf);
+        assert!(
+            weak_leaf.upgrade().is_none(),
+            "pending_tap, last_tap, and last_hover must not retain the removed subtree"
+        );
     }
 
     #[test]

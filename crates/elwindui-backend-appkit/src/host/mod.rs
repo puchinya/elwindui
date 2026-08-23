@@ -775,8 +775,9 @@ impl TreeHostView {
     }
 
     fn cancel_and_unregister_current_tree(&self) {
-        self.ivars().pointer.cancel();
-        if let Some(old_tree) = self.ivars().tree.borrow().as_ref() {
+        let old_tree = self.ivars().tree.borrow().clone();
+        if let Some(old_tree) = old_tree {
+            self.ivars().pointer.cancel_for_subtree(&old_tree);
             old_tree.set_invalidate_host(None);
             old_tree.set_coordinate_host(None);
             old_tree.set_pointer_gesture_host(None);

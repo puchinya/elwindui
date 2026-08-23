@@ -824,8 +824,11 @@ pub trait PopupHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graphics::{Brush, IconSource, ImageSource, SystemIcon, VectorNode, VectorPaint};
     use crate::ui::testsupport::FakeMenu;
-    use crate::ui::{LayoutExt, ListExt, MenuItemExt, TextBlock, VerticalLayout};
+    use crate::ui::{
+        HorizontalLayout, Image, LayoutExt, ListExt, MenuItemExt, TextBlock, VerticalLayout,
+    };
     use std::cell::{Cell, RefCell};
 
     struct FakePopupHandle {
@@ -1861,5 +1864,242 @@ mod tests {
         assert!(!item2_selected.get());
         assert!(item3_selected.get());
         assert!(closed.get());
+    }
+
+    /// §8.2: `set_icon` replaces then clears, and never touches `text`/`shortcut`/`enabled`.
+    #[test]
+    fn menu_item_icon_set_replace_clear_preserves_other_state() {
+        let item = crate::ui::testsupport::FakeMenuItem::new();
+        item.set_text("Item");
+        item.set_shortcut("X");
+        item.set_enabled(true);
+
+        item.set_icon(Some(IconSource::System(SystemIcon::Copy)));
+        match item.icon() {
+            Some(IconSource::System(SystemIcon::Copy)) => {}
+            other => panic!("expected Some(System(Copy)) after first set_icon, got {other:?}"),
+        }
+
+        item.set_icon(Some(IconSource::System(SystemIcon::Delete)));
+        match item.icon() {
+            Some(IconSource::System(SystemIcon::Delete)) => {}
+            other => {
+                panic!("expected Some(System(Delete)) after replacing set_icon, got {other:?}")
+            }
+        }
+
+        item.set_icon(None);
+        assert!(item.icon().is_none(), "set_icon(None) must clear the icon");
+
+        assert_eq!(item.text(), "Item");
+        assert_eq!(item.shortcut().as_deref(), Some("X"));
+        assert!(item.enabled());
+    }
+
+    /// The row's leading icon slot — `None` unless the row's first child is actually an `Image`
+    /// (as opposed to the label `TextBlock`, which is first when the menu has no icon column at
+    /// all). Still type-erased but `Rc`-owned so a caller can `.as_any().downcast_ref::<Image>()`
+    /// it in its own scope.
+    fn icon_slot(row: &Rc<dyn UIElementExt>) -> Option<Rc<dyn UIElementExt>> {
+        let row_layout = row.as_any().downcast_ref::<HorizontalLayout>()?;
+        let first = crate::ui::LayoutExt::children(row_layout)
+            .to_vec()
+            .into_iter()
+            .next()?;
+        if first.as_any().downcast_ref::<Image>().is_some() {
+            Some(first)
+        } else {
+            None
+        }
+    }
+
+    /// §8.5/§8.6: a leading 16x16 icon slot is reserved on every row once *any* item in the menu
+    /// has an icon (aligning icon-less rows' labels with icon rows'), and no such column exists at
+    /// all when no item has an icon (the pre-icon-support layout, unchanged).
+    #[test]
+    fn build_menu_view_reserves_icon_column_only_when_any_item_has_icon() {
+        // No icons anywhere: no row gets a leading Image slot.
+        let plain_menu = FakeMenu::new();
+        let plain_item = crate::ui::testsupport::FakeMenuItem::new();
+        plain_item.set_text("Plain");
+        plain_menu.add(Rc::clone(&plain_item) as Rc<dyn MenuItemExt>);
+        let plain_view = ContextMenuPresenter::build_menu_view(&*plain_menu, Rc::new(|| {}));
+        let plain_layout = plain_view
+            .as_any()
+            .downcast_ref::<VerticalLayout>()
+            .expect("build_menu_view returns a VerticalLayout");
+        let plain_rows = crate::ui::LayoutExt::children(plain_layout).to_vec();
+        assert_eq!(plain_rows.len(), 1);
+        assert!(
+            icon_slot(&plain_rows[0]).is_none(),
+            "a menu with no icons must not gain an icon column"
+        );
+
+        // Mixed menu: SystemIcon item, icon-less item, user ImageSource item — all three rows must
+        // reserve the same leading Image slot.
+        let mixed_menu = FakeMenu::new();
+        let with_system_icon = crate::ui::testsupport::FakeMenuItem::new();
+        with_system_icon.set_text("System");
+        with_system_icon.set_icon(Some(IconSource::System(SystemIcon::Copy)));
+        let without_icon = crate::ui::testsupport::FakeMenuItem::new();
+        without_icon.set_text("No Icon");
+        let with_user_icon = crate::ui::testsupport::FakeMenuItem::new();
+        with_user_icon.set_text("User");
+        let bitmap = crate::graphics::BitmapImage::from_rgba8(
+            1,
+            1,
+            4,
+            vec![255u8, 0, 0, 255],
+            crate::graphics::AlphaMode::Straight,
+        )
+        .expect("1x1 rgba8 buffer is well-formed");
+        with_user_icon.set_icon(Some(IconSource::Image(ImageSource::Raster(bitmap))));
+        mixed_menu.add(Rc::clone(&with_system_icon) as Rc<dyn MenuItemExt>);
+        mixed_menu.add(Rc::clone(&without_icon) as Rc<dyn MenuItemExt>);
+        mixed_menu.add(Rc::clone(&with_user_icon) as Rc<dyn MenuItemExt>);
+        let mixed_view = ContextMenuPresenter::build_menu_view(&*mixed_menu, Rc::new(|| {}));
+        let mixed_layout = mixed_view
+            .as_any()
+            .downcast_ref::<VerticalLayout>()
+            .expect("build_menu_view returns a VerticalLayout");
+        let mixed_rows = crate::ui::LayoutExt::children(mixed_layout).to_vec();
+        assert_eq!(mixed_rows.len(), 3);
+        for (i, row) in mixed_rows.iter().enumerate() {
+            assert!(
+                icon_slot(row).is_some(),
+                "row {i} must reserve the leading icon slot once any item in the menu has an icon"
+            );
+        }
+        // The icon-less row's Image slot has no source set (empty slot, not a shifted label).
+        let empty_slot = icon_slot(&mixed_rows[1]).expect("row 1 has an Image slot");
+        let empty_image = empty_slot
+            .as_any()
+            .downcast_ref::<Image>()
+            .expect("icon slot is an Image");
+        assert!(empty_image.source().is_none());
+    }
+
+    /// §8.7: a disabled item's canonical `SystemIcon` vector uses the disabled foreground color
+    /// path (the same color `build_menu_view` gives the disabled label), not the enabled one.
+    #[test]
+    fn build_menu_view_disabled_system_icon_uses_disabled_color() {
+        let menu = FakeMenu::new();
+        let disabled_item = crate::ui::testsupport::FakeMenuItem::new();
+        disabled_item.set_text("Disabled");
+        disabled_item.set_enabled(false);
+        disabled_item.set_icon(Some(IconSource::System(SystemIcon::Delete)));
+        menu.add(Rc::clone(&disabled_item) as Rc<dyn MenuItemExt>);
+
+        let view = ContextMenuPresenter::build_menu_view(&*menu, Rc::new(|| {}));
+        let layout = view
+            .as_any()
+            .downcast_ref::<VerticalLayout>()
+            .expect("build_menu_view returns a VerticalLayout");
+        let rows = crate::ui::LayoutExt::children(layout).to_vec();
+        let slot = icon_slot(&rows[0]).expect("disabled row has an Image slot");
+        let icon_image = slot
+            .as_any()
+            .downcast_ref::<Image>()
+            .expect("icon slot is an Image");
+        let source = icon_image
+            .source()
+            .expect("disabled item's icon source is set");
+        let ImageSource::Vector(vector) = source else {
+            panic!("SystemIcon must render as the Core canonical vector fallback");
+        };
+        let node = vector
+            .root()
+            .children
+            .first()
+            .expect("canonical icon geometry has at least one node");
+        let color = match node {
+            VectorNode::Path(path_node) => match (&path_node.fill, &path_node.stroke) {
+                (Some(fill), None) => match &fill.paint {
+                    VectorPaint::Brush(Brush::Solid(color)) => *color,
+                    other => panic!("unexpected fill paint: {other:?}"),
+                },
+                (None, Some(stroke)) => match &stroke.paint {
+                    VectorPaint::Brush(Brush::Solid(color)) => *color,
+                    other => panic!("unexpected stroke paint: {other:?}"),
+                },
+                other => panic!("expected exactly one of fill/stroke, got {other:?}"),
+            },
+            other => panic!("expected a path node, got {other:?}"),
+        };
+        // Matches the disabled label color `build_menu_view` itself uses.
+        assert_eq!(color, crate::graphics::Color::rgb(128, 128, 128));
+    }
+
+    /// §8.8: keyboard navigation/selection/close-once behavior is unchanged when icon slots are
+    /// present (regression against the pre-icon-support behavior already covered by
+    /// `custom_menu_keyboard_navigation_and_item_state` above).
+    #[test]
+    fn custom_menu_keyboard_navigation_still_works_with_icons_present() {
+        let menu = FakeMenu::new();
+
+        let item1 = crate::ui::testsupport::FakeMenuItem::new();
+        item1.set_text("Item 1");
+        item1.set_icon(Some(IconSource::System(SystemIcon::Cut)));
+        let item1_selected = Rc::new(Cell::new(false));
+        let item1_sel_clone = Rc::clone(&item1_selected);
+        item1.set_on_select(Box::new(move || item1_sel_clone.set(true)));
+
+        let item2_disabled = crate::ui::testsupport::FakeMenuItem::new();
+        item2_disabled.set_text("Item 2 Disabled");
+        item2_disabled.set_enabled(false);
+        item2_disabled.set_icon(Some(IconSource::System(SystemIcon::Delete)));
+        let item2_selected = Rc::new(Cell::new(false));
+        let item2_sel_clone = Rc::clone(&item2_selected);
+        item2_disabled.set_on_select(Box::new(move || item2_sel_clone.set(true)));
+
+        let item3 = crate::ui::testsupport::FakeMenuItem::new();
+        item3.set_text("Item 3");
+        // Deliberately icon-less, to also cover a mixed icon/no-icon row during keyboard nav.
+        let item3_selected = Rc::new(Cell::new(false));
+        let item3_sel_clone = Rc::clone(&item3_selected);
+        item3.set_on_select(Box::new(move || item3_sel_clone.set(true)));
+
+        menu.add(Rc::clone(&item1) as Rc<dyn MenuItemExt>);
+        menu.add(Rc::clone(&item2_disabled) as Rc<dyn MenuItemExt>);
+        menu.add(Rc::clone(&item3) as Rc<dyn MenuItemExt>);
+
+        let closed = Rc::new(Cell::new(false));
+        let close_count = Rc::new(Cell::new(0u32));
+        let closed_clone = Rc::clone(&closed);
+        let close_count_clone = Rc::clone(&close_count);
+        let menu_view = ContextMenuPresenter::build_menu_view(
+            &*menu,
+            Rc::new(move || {
+                closed_clone.set(true);
+                close_count_clone.set(close_count_clone.get() + 1);
+            }),
+        );
+
+        let routed_args = crate::input::RoutedEventArgs::default();
+        for key in [
+            crate::input::Key::Down,
+            crate::input::Key::Down,
+            crate::input::Key::Enter,
+        ] {
+            crate::ui::dispatch_routed(
+                &menu_view,
+                "on_key_down",
+                &crate::input::KeyEventArgs {
+                    key,
+                    modifiers: crate::input::KeyModifiers::default(),
+                    is_repeat: false,
+                },
+                &routed_args,
+            );
+        }
+
+        assert!(!item1_selected.get());
+        assert!(!item2_selected.get());
+        assert!(
+            item3_selected.get(),
+            "second enabled row (item3) must be selected"
+        );
+        assert!(closed.get());
+        assert_eq!(close_count.get(), 1, "popup must close exactly once");
     }
 }

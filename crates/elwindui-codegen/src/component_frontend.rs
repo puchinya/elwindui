@@ -1483,6 +1483,11 @@ mod tests {
         let generated = generate(Some("Control"), src);
         syn::parse2::<syn::File>(generated.clone())
             .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
+        let rendered = generated.to_string();
+        assert!(
+            rendered.contains("__set_template_root"),
+            "Control body composition must attach its authored root through the private template-root path: {rendered}"
+        );
     }
 
     /// Issue #68 bug 5: `format!("{field}!")`'s inline capture (RFC 2795) only sees whatever raw

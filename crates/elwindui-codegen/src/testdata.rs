@@ -311,9 +311,8 @@ pub(crate) fn test_builtin_modules() -> Vec<Module> {
             false,
             false,
             true,
-            Some("children"),
+            None,
             r#"
-            children: UIElementCollection,
             padding: Option<f32>,
             "#,
         )),

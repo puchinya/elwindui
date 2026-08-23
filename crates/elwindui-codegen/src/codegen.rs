@@ -4046,7 +4046,7 @@ fn generate_view(
     // `construct()`. Forced here — before the `struct_fields`/`field_inits` loop below reads
     // `node.stored` — for the same reason `is_host_composition`'s rename just above runs this early.
     if is_shape_composition {
-        if resolved_root.type_path == "ContentControl" {
+        if resolved_root.type_path == "ContentControl" || resolved_root.type_path == "Control" {
             if let Some(content_binding) = plan
                 .last()
                 .and_then(|root| root.child_bindings.first())
@@ -5820,17 +5820,17 @@ fn generate_view(
         // `field_inits` above), reachable directly off `&self` — no capture step needed. Reads
         // through `OnceCell` (CI-4 of #80): this statement now runs from `__build_view()` right
         // after `child_construct_stmts` populates it, so it is always already set here.
-        let content = into_node_if_needed(
+        let content_value = if content_type == PASSTHROUGH_NODE {
+            quote! { self.#content_binding() }
+        } else {
             quote! {
                 self.#content_binding
                     .get()
                     .expect("content_attach: component is not yet mounted")
                     .clone()
-            },
-            content_type,
-            from,
-            table,
-        );
+            }
+        };
+        let content = into_node_if_needed(content_value, content_type, from, table);
         let attach = if is_control_template_enabled {
             quote! {
                 {
@@ -5847,6 +5847,48 @@ fn generate_view(
             }
         };
         (TokenStream::new(), attach)
+    } else if is_shape_composition && resolved_root.type_path == "Control" {
+        // `Control` deliberately has no public collection content property. A component body that
+        // inherits it supplies one authored visual root, which is attached through Control's
+        // private template-root path once the component's outer Rc exists. Keeping this separate
+        // from the Layout branch preserves the content-model boundary: collection children belong
+        // to Layout, while Control owns only its private Visual presentation.
+        let children = plan
+            .last()
+            .map(|root| {
+                root.child_bindings
+                    .iter()
+                    .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
+                    .map(|(binding, child_ty)| {
+                        let child_value = if child_ty == PASSTHROUGH_NODE {
+                            quote! { self.#binding() }
+                        } else {
+                            quote! {
+                                self.#binding
+                                    .get()
+                                    .expect("content_attach: component is not yet mounted")
+                                    .clone()
+                            }
+                        };
+                        into_node_if_needed(child_value, child_ty, from, table)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let attach = match children.as_slice() {
+            [] => TokenStream::new(),
+            [root] => quote! {
+                {
+                    use elwindui::core::ui::ControlExt as _;
+                    self.__set_template_root(#root);
+                }
+            },
+            _ => panic!(
+                "Control composition requires exactly one authored visual root, found {}",
+                children.len()
+            ),
+        };
+        (TokenStream::new(), attach)
     } else if is_shape_composition
         && (resolved_root.type_path == "VerticalLayout"
             || resolved_root.type_path == "HorizontalLayout"
@@ -5860,17 +5902,17 @@ fn generate_view(
                     .iter()
                     .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
                     .map(|(binding, child_ty)| {
-                        into_node_if_needed(
+                        let child_value = if child_ty == PASSTHROUGH_NODE {
+                            quote! { self.#binding() }
+                        } else {
                             quote! {
                                 self.#binding
                                     .get()
                                     .expect("content_attach: component is not yet mounted")
                                     .clone()
-                            },
-                            child_ty,
-                            from,
-                            table,
-                        )
+                            }
+                        };
+                        into_node_if_needed(child_value, child_ty, from, table)
                     })
                     .collect::<Vec<_>>()
             })
@@ -10207,7 +10249,8 @@ fn build_component_args(
         // `ty` is one of `synthesize_external_base_fields`'s synthesized fields (a type-position
         // macro invocation, always containing a literal `!` — Refs #90): `strip_option`'s string
         // matching can't tell whether the base declared it `Option<T>` or bare `T` (`padding` is the
-        // former, `Control`'s own `children` the latter), so `is_option` above is unreliable here —
+        // former; collection fields such as Layout's `children` are the latter), so `is_option`
+        // above is unreliable here —
         // always `false`, since the opaque string never literally starts with `"Option<"`. `.into()`
         // resolves this generically at the *consumer's* own expansion time instead of guessing here:
         // the blanket `impl<T> From<T> for Option<T>` handles the `Option<T>`-declared case (`value`
@@ -10286,7 +10329,7 @@ fn build_component_setters(
         // destination field's own declared type, not from which of the two mechanisms named it —
         // `Vec<T>` (e.g. `TabView`'s `children`) uses the former; `ListExt<T>` (e.g. `Menu`/
         // `MenuBar`'s `#[content(items)]` `items: ListExt<MenuItem>`, docs/specs/ui_spec.md#menu)
-        // uses the latter, mirroring `Layout`/`Control`'s own `.children().add(..)`
+        // uses the latter, mirroring `Layout`'s own `.children().add(..)`
         // convention for virtual builtins (`build_virtual_value`) one level up.
         if (name == "children" || is_this_field_content) && ty.trim_start().starts_with("Vec<") {
             let wants_node = ty.contains("dyn UIElement");
@@ -15557,7 +15600,8 @@ struct NotepadWindow {
     }
 
     /// `ContentControl inherits Control` (docs/specs/ui_spec.md#contentcontrol) — the
-    /// `#[param] content` field is forwarded as a bare child into `Control`'s own children via the
+    /// `#[param] content` field is forwarded as a bare child into `ContentControl`'s single content
+    /// slot via the
     /// `PASSTHROUGH_NODE`-tagged `lets_map` seeding in `generate_view`, and every `#[param]` field
     /// (not just `#[id(...)]` lets) gets a generated named accessor.
     #[test]
@@ -15589,7 +15633,7 @@ struct NotepadWindow {
 
         // `ContentControl`'s own generated code (produced when `builtin_modules()` is fed through
         // `generate_module` directly, mirroring how a real consumer's own component
-        // would be generated) forwards `content` into `Control`'s children and exposes both
+        // would be generated) forwards `content` into `ContentControl`'s content slot and exposes both
         // `#[param]` fields as public accessors. The builtin shape source bundled every builtin into one
         // module, so only `ContentControl`'s own `Item::Component`/`Item::View` pair is kept —
         // `generate_module` would otherwise also try (and fail) to generate every shape-only

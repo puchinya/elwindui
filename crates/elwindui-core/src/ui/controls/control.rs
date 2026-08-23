@@ -2,11 +2,11 @@
 
 use super::*;
 
-/// A composable, multi-part component (WinUI3's `Control`) — Visually built from any number of
-/// other `UIElement`s (`VerticalLayout`/`HorizontalLayout`/`Shape`/`TextBlock`/
-/// `NativeControlImpl`/other `Control`s), stored as its own `UIElementCollection` (the Logical
-/// tree this component declares, docs/design/runtime/ui_tree_design.md) — unlike `Shape`, which has
-/// no children at all. `padding` shrinks the area its children are overlaid into, the
+/// A composable, templated component base (WinUI3's `Control`). `Control` has no public collection
+/// content slot: its visual presentation is owned by the private template-root path. A component
+/// body that inherits `Control` may provide one authored visual root, which is attached through
+/// that path; collection content belongs to `Layout`, while a single logical content slot belongs
+/// to `ContentControl`. `padding` shrinks the area its visual root is arranged into, the
 /// `Control`-level analog of `margin` on an individual element.
 ///
 /// Scope note: this is intentionally minimal for now — `content_horizontal_alignment`/
@@ -18,8 +18,6 @@ use super::*;
 /// `elwindui-core::ui`) delegates to.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
 #[text_style]
-#[content(children)]
-#[prop(children: crate::ui::UIElementCollection)]
 #[prop(padding: Option<f32>)]
 pub struct Control {
     pub padding: Cell<f32>,

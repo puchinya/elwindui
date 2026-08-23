@@ -14,7 +14,7 @@ pub trait Menu {
     /// nested `MenuItem { .. }` children through the same generic `ListExt`-typed
     /// content-field path every other multi-child builtin (`VerticalLayout`/`Grid`/`TabView`/...)
     /// already uses, instead of `elwindui-codegen` needing a `Menu`-specific construction branch.
-    /// A borrow (mirroring `Layout::children`/`Control::children`), not an owned `Rc` — no backend
+    /// A borrow (mirroring `Layout::children`), not an owned `Rc` — no backend
     /// needs to hand out an independently-owned handle here.
     fn items(&self) -> &dyn ListExt<dyn MenuItemExt>;
 }

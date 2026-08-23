@@ -155,6 +155,14 @@ generatorは検証済みASTから次を組み立てる。
 
 event名とpayload型は宣言metadataから導出する。特定event名をcode generatorへ追加して意味を決める方式は採らない。
 
+#### Control body composition
+
+`Control` は `children` collection を持たないため、`#[component(inherits Control)]` の
+body compositionは一般的な collection-content lowering ではない。単一の authored visual rootを
+構築した後、generatorは `ControlExt::__set_template_root` を呼び出してprivateな template-root
+ownershipへ接続する。`Layout` の `children().add(...)` と `ContentControl` の `set_content(...)`
+はそれぞれ従来の経路を維持し、Controlへ汎用collectionを追加しない。
+
 ## 4. Diagnostic設計
 
 各AST nodeは可能な限り元tokenのspanを保持する。parser、resolver、validatorのerrorは、原因となるDSL tokenまたはRust attributeへ関連付ける。複数の独立したerrorを収集できる場合はまとめて返すが、invalid ASTから意味を推測してgenerationを継続しない。

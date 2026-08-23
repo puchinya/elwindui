@@ -24,6 +24,12 @@ rootの更新は一つのinternal methodに集約し、次をatomicな操作と�
 template rootはControlのVisual childであり、logical `parent`は設定しない。
 初期版ではmount中に一度設定されるが、replace helper自体はdetach/attach invariantを守る。
 
+`Control` は公開 collection content を所有しない。`Layout` が collection children、
+`ContentControl` が単一の logical content を所有する。`#[component(inherits Control)]` の
+default body に authored visual root がある場合、codegen はその単一 root を
+`ControlExt::__set_template_root` で接続する。`template_root` は依然として private であり、
+ユーザーへ公開する children collection や別の汎用 content slot は追加しない。
+
 ## 3. Generated mount path
 
 `#[component(template = key)]`はComponent metadataへtyped key nameを保存する。
@@ -41,6 +47,9 @@ run target wiring and on_mount
 
 default body用node storageは既存通り`OnceCell`等でstructに確保してよいが、custom branchではsetせず、
 default node construction・event wiring・subscriptionを実行しない。
+shape-composed `Control` の default body では、構築済みの単一 authored visual root を
+private template-root pathへ接続する。collection compositionは `Layout` のみが担当し、
+`ContentControl` は従来どおり `set_content`/`ContentPresenter` pathを使用する。
 Keyへはsubscribeしないためtemplate choiceはmount lifetime中固定される。
 
 ## 4. control_template authoring

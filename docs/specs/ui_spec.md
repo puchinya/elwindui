@@ -136,7 +136,8 @@ ElwindUI のイベント伝播はルーティングイベントモデルを採�
 #### 3. Input Dispatch & Hit Testing
 
 - **ポインタイベント**:
-  - 画面座標を基に視覚ツリーを検索（`hit_test`）し、クリッピング、表示状態（`visibility`）、ヒットテスト有効性（`hit_test_visible`）を考慮して最前面のターゲット要素を決定した後、Bubbling/Direct ルーティングを開始する。
+  - host-root-relative論理座標を基に視覚ツリーを検索（`hit_test`）し、クリッピング、表示状態（`visibility`）、ヒットテスト有効性（`hit_test_visible`）を考慮して最前面のターゲット要素を決定した後、Bubbling/Direct ルーティングを開始する。
+  - press中は暗黙captureを維持し、pointerが元要素またはhost boundsの外へ移動しても`moved`/`released`をpress targetへ配送する。hoverの`entered`/`exited`判定は実cursor位置を使い続ける。
 - **キーボードイベント**:
   - フォーカス管理機構（Focus Tracker）が保持する現在のフォーカス要素をターゲットとして決定した後、Bubbling ルーティングを開始する。
 
@@ -190,6 +191,19 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
 | `on_pointer_wheel_changed` | `fn(PointerWheelEventArgs)` | Bubbling | マウスホイール操作時に発火 |
 | `on_tapped` | `fn(TappedEventArgs)` | Bubbling | タップ/クリック操作時に発火 |
 | `on_double_tapped` | `fn(TappedEventArgs)` | Bubbling | ダブルタップ操作時に発火 |
+
+`PointerEventArgs.position`は常にhost root左上を原点とするY-down論理座標であり、bubble先要素相対ではない。`screen_position: Option<Point>`は同じnative eventの位置をprimary desktop左上基準のY-down論理座標へ正規化した値である。backendがnative変換を提供できない場合は`None`とし、Windowの外形位置やtitlebar寸法から推定してはならない。
+
+`CoordinateHost`はhosted treeに同じ座標変換を提供する。
+
+```rust
+pub trait CoordinateHost {
+    fn root_to_screen(&self, point: Point) -> Option<Point>;
+    fn screen_to_root(&self, point: Point) -> Option<Point>;
+}
+```
+
+両方向とも論理座標を受け取り、native変換に失敗した場合は`None`を返す。
 #### Common UIElement Properties
 
 | Name | Type | Binding | Description |

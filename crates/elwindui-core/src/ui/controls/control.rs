@@ -2,11 +2,11 @@
 
 use super::*;
 
-/// A composable, multi-part component (WinUI3's `Control`) — Visually built from any number of
-/// other `UIElement`s (`VerticalLayout`/`HorizontalLayout`/`Shape`/`TextBlock`/
-/// `NativeControlImpl`/other `Control`s), stored as its own `UIElementCollection` (the Logical
-/// tree this component declares, docs/design/runtime/ui_tree_design.md) — unlike `Shape`, which has
-/// no children at all. `padding` shrinks the area its children are overlaid into, the
+/// A composable, templated component base (WinUI3's `Control`). `Control` has no public collection
+/// content slot: its visual presentation is owned by the private template-root path. A component
+/// body that inherits `Control` may provide one authored visual root, which is attached through
+/// that path; collection content belongs to `Layout`, while a single logical content slot belongs
+/// to `ContentControl`. `padding` shrinks the area its visual root is arranged into, the
 /// `Control`-level analog of `margin` on an individual element.
 ///
 /// Scope note: this is intentionally minimal for now — `content_horizontal_alignment`/
@@ -18,9 +18,9 @@ use super::*;
 /// `elwindui-core::ui`) delegates to.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
 #[text_style]
-#[content(children)]
-#[prop(children: crate::ui::UIElementCollection)]
+#[content(visual_root)]
 #[prop(padding: Option<f32>)]
+#[prop(visual_root: std::rc::Rc<dyn crate::ui::UIElementExt>)]
 pub struct Control {
     pub padding: Cell<f32>,
     pub content_horizontal_alignment: Cell<HorizontalAlignment>,
@@ -85,6 +85,14 @@ impl Control {
     fn set_padding(&self, padding: f32) {
         self.padding.set(padding);
         self.invalidate_measure();
+    }
+    /// Installs the authored visual root through the same private template-root ownership path
+    /// used by selected [`ControlTemplate`](crate::ui::ControlTemplate) presentations. This is an
+    /// internal scalar content-property surface for DSL/codegen lowering, not a second root store
+    /// or a public generic child collection.
+    #[doc(hidden)]
+    fn set_visual_root(&self, root: Rc<dyn UIElementExt>) {
+        self.__set_template_root(root);
     }
     fn set_content_horizontal_alignment(&self, alignment: HorizontalAlignment) {
         self.content_horizontal_alignment.set(alignment);

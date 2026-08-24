@@ -6,7 +6,6 @@ use super::*;
 /// (not on `Layout`) since it's meaningless to `Grid`, `Layout`'s other concrete subclass — see
 /// `Layout`'s own doc comment.
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
-#[content(children)]
 #[prop(spacing: Option<f32>)]
 pub struct VerticalLayout {
     spacing: Cell<f32>,

@@ -77,6 +77,10 @@ elwindui::ui::<Type>
 - **Single Content**: 単一のコンテンツスロット（`#[content(content)]`）を持つ要素（例: `ContentControl`, `ScrollView`, `Window`）。
 - **Collection Content**: 複数の子要素コレクション（`#[content(children)]` または `#[content(items)]`）を持つ要素（例: `VerticalLayout`, `Grid`, `Menu`, `TabView`）。
 
+`Control` はこの分類の汎用 collection/content slot を持たない基底である。`Layout` が
+collection children を所有し、`ContentControl` が単一 content を所有する。タブや項目などを
+必要とする specialized control は、自身の型付き `children`/`items`/`content` を宣言する。
+
 ### 2.5 Layout and rendering semantics
 
 ElwindUI のすべてのビジュアル要素（`UIElement`）は、**Measure（計測）**、**Arrange（配置）**、**Render（描画）** の3段階のライフサイクルに従ってレイアウト計算および描画更新を行う。
@@ -287,12 +291,18 @@ pub trait CoordinateHost {
 スタイリング、テーマ設定、テンプレート合成に対応した汎用コントロール基底。
 template-enabled派生型ではmount時に選択した単一template rootをVisual childとして保持し、logical childにはしない。
 typed factoryと選択規則は[ControlTemplate Specification](control_template_spec.md)で定義する。
+`Control` 自身は公開 content collection を持たない。`#[component(inherits Control)]` の
+`view!` body に書かれた単一の authored visual root は、private な `template_root` 経路を通じて
+Visual child として接続される。collection children は `Layout`、単一の logical content は
+`ContentControl`、専用の複数項目は各 specialized control が所有する。DSL/codegen の内部では
+この authored root を受ける scalar `visual_root` content destination が使われるが、これは
+通常の公開プロパティではなく、`template_root` の private ownership を二重化しないための
+metadata surface である。
 
 #### Properties
 
 | Name | Type | Binding | Description |
 |---|---|---|---|
-| `children` | `UIElementCollection` | OneWay | 子要素のコレクション |
 | `padding` | `Option<f32>` | OneWay | 内側余白 |
 
 ### `ContentControl`

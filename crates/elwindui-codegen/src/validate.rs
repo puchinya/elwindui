@@ -440,6 +440,13 @@ pub(crate) fn validate_classified(modules: &[Module]) -> Vec<ValidationDiagnosti
                                 &table,
                                 &mut errors,
                             );
+                            check_static_content_shapes(
+                                &let_binding.element,
+                                module,
+                                &c.name,
+                                &table,
+                                &mut errors,
+                            );
                             check_attached_properties(
                                 &let_binding.element,
                                 module,
@@ -492,6 +499,13 @@ pub(crate) fn validate_classified(modules: &[Module]) -> Vec<ValidationDiagnosti
                                     &mut errors,
                                 );
                                 check_dynamic_child_hosts(
+                                    &resolved_root,
+                                    module,
+                                    &c.name,
+                                    &table,
+                                    &mut errors,
+                                );
+                                check_static_content_shapes(
                                     &resolved_root,
                                     module,
                                     &c.name,
@@ -1596,6 +1610,104 @@ fn check_closure_expr_body(
     }
 }
 
+/// Static bare children are lowered through the effective `#[content(...)]` destination just like
+/// dynamic children. Keep this check independent of any concrete type name: the field metadata
+/// decides whether the destination is scalar or collection. Dynamic branch arity is checked by
+/// `check_dynamic_child_hosts`; this helper covers the static/no-destination cases that would
+/// otherwise reach codegen's defensive assertions.
+fn check_static_content_shapes(
+    node: &ElementNode,
+    from: &Module,
+    component_name: &str,
+    table: &SymbolTable,
+    errors: &mut ValidationErrors,
+) {
+    if let Some(info) = table.resolve(from, &node.type_path) {
+        // A fully-qualified user component may be resolved through the local symbol table while
+        // its external ancestor's content metadata is intentionally unavailable to this frontend
+        // expansion. Defer that cross-crate/sibling case to the generated shape macro instead of
+        // misclassifying it as a known no-content leaf (the inheritance-demo `LoudPanel` chain is
+        // the regression case). Builtin and locally-declared unqualified components remain fully
+        // decidable here.
+        let content_is_external = info.content_field.is_none() && !info.is_builtin && info.has_view;
+        let has_dynamic_child = node.children.iter().any(|child| {
+            matches!(
+                child,
+                ChildEntry::If { .. } | ChildEntry::Match { .. } | ChildEntry::For { .. }
+            )
+        });
+        if !has_dynamic_child && !node.children.is_empty() {
+            if content_is_external {
+                // The external base's effective destination is checked by the generated shape
+                // macro at the actual call site.
+            } else {
+                match info.content_field.as_deref() {
+                None => errors.registry_dependent(format!(
+                    "{component_name}: `{}` has bare children but no effective #[content(...)] destination",
+                    node.type_path
+                )),
+                Some(field) => {
+                    let field_ty = info
+                        .field_types
+                        .get(field)
+                        .map(String::as_str)
+                        .unwrap_or("<missing>");
+                    let is_collection = field_ty.contains("UIElementCollection")
+                        || field_ty.trim_start().starts_with("Vec<")
+                        || field_ty.contains("ListExt<");
+                    if !is_collection && node.children.len() > 1 {
+                        errors.registry_dependent(format!(
+                            "{component_name}: `{}` has scalar #[content({field})] type `{field_ty}` but received {} bare children; exactly one child is allowed",
+                            node.type_path,
+                            node.children.len()
+                        ));
+                    }
+                }
+            }
+            }
+        }
+    }
+    for child in &node.children {
+        check_static_content_shape_in_child(child, from, component_name, table, errors);
+    }
+}
+
+fn check_static_content_shape_in_child(
+    child: &ChildEntry,
+    from: &Module,
+    component_name: &str,
+    table: &SymbolTable,
+    errors: &mut ValidationErrors,
+) {
+    match child {
+        ChildEntry::Literal(element) => {
+            check_static_content_shapes(element, from, component_name, table, errors)
+        }
+        ChildEntry::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            for child in then_branch.iter().chain(else_branch) {
+                check_static_content_shape_in_child(child, from, component_name, table, errors);
+            }
+        }
+        ChildEntry::Match { arms, .. } => {
+            for arm in arms {
+                for child in &arm.body {
+                    check_static_content_shape_in_child(child, from, component_name, table, errors);
+                }
+            }
+        }
+        ChildEntry::For { body, .. } => {
+            for child in body {
+                check_static_content_shape_in_child(child, from, component_name, table, errors);
+            }
+        }
+        ChildEntry::Ref(_) => {}
+    }
+}
+
 /// Dynamic child ranges are meaningful only for an ordered content collection. A scalar
 /// `#[content(content)]` / `#[content(submenu)]` cannot host `if`/`match`/`for`, because there is
 /// no insertion position or retained child range to reconcile.
@@ -1613,6 +1725,14 @@ fn check_dynamic_child_hosts(
         )
     }) {
         if let Some(info) = table.resolve(from, &node.type_path) {
+            let content_is_external =
+                info.content_field.is_none() && !info.is_builtin && info.has_view;
+            if content_is_external {
+                for child in &node.children {
+                    check_dynamic_child_host_in_child(child, from, component_name, table, errors);
+                }
+                return;
+            }
             let field = info.content_field.as_deref().unwrap_or("children");
             let is_collection = info.field_types.get(field).is_some_and(|ty| {
                 ty.contains("UIElementCollection")
@@ -2893,16 +3013,14 @@ mod tests {
         );
     }
 
-    /// Phase 0 (docs/design/runtime/ui_tree_design.md) removed the old "own `view`'s root element must
-    /// literally construct `base`" requirement entirely — a composable base's `view` body is always
-    /// implicitly its own attributes/children now, so there's no longer a *root shape* for
-    /// `validate::validate` to reject here. `Shape` has no `#[content(...)]` field to bind a bare
-    /// `VerticalLayout {}` child to at all — a pre-existing gap unrelated to Phase 0,
-    /// `generate_module` silently constructs and discards it rather than erroring (unlike a
-    /// hand-written/logical component's own `build_component_args`, which does reject this same
-    /// shape — see `codegen.rs`'s `panics_on_bare_child_with_no_content_field_declared`).
+    /// A component body may still use an inherited shape as its composition root, but a nested
+    /// bare child must have an effective `#[content(...)]` destination. `Shape` deliberately has
+    /// none, so the generic metadata-driven validator diagnoses the child before codegen.
+    ///
+    /// Previous Phase 0 behavior allowed this invalid shape to reach codegen; it is now diagnosed
+    /// before lowering under the metadata-driven content contract.
     #[test]
-    fn accepts_inherits_regardless_of_bare_child_shape_since_composition_is_now_always_implicit() {
+    fn rejects_bare_child_with_no_effective_content_destination() {
         let src = r#"
         struct RoundedPanel {
             #[param]
@@ -2915,7 +3033,13 @@ mod tests {
         let modules: Vec<_> = std::iter::once(component_module(Some("Shape"), src))
             .chain(crate::test_builtin_modules())
             .collect();
-        assert_eq!(validate(&modules), Ok(()));
+        let errors = validate(&modules).expect_err("Shape has no content destination");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("no effective #[content(...)]")),
+            "errors: {errors:?}"
+        );
     }
 
     /// Phase 2 (docs/design/runtime/ui_tree_design.md): a scalar `#[content(...)]` field (`ContentControl`'s
@@ -2999,6 +3123,69 @@ mod tests {
             errs.iter()
                 .any(|e| e.contains("scalar type") && e.contains("ContentControl")),
             "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_multiple_static_children_under_control_scalar_content() {
+        let src = r#"
+        struct Foo {
+            body: view! {
+                Control {
+                    TextBlock { text: "a" }
+                    TextBlock { text: "b" }
+                }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src))
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let errors = validate(&modules).expect_err("Control has scalar visual_root content");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("scalar #[content(visual_root)]")
+                    && error.contains("Control")),
+            "errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_child_branch_under_control_scalar_content() {
+        let vm_module = viewmodel_module_from_rust(
+            r#"
+            mod dynamic_view_model_mod_control_empty {
+                struct DynamicViewModel {
+                    #[observable(default = true)]
+                    show_a: bool,
+                }
+            }
+            "#,
+        );
+        let host_src = r#"
+        struct DynamicHost {
+            #[param]
+            #[inject]
+            vm: DynamicViewModel,
+            body: view! {
+                if vm.show_a {
+                } else {
+                    TextBlock { text: "b" }
+                }
+            },
+        }
+        "#;
+        let modules: Vec<_> = [vm_module, component_module(Some("Control"), host_src)]
+            .into_iter()
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let errors = validate(&modules).expect_err("empty scalar branch must be rejected");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("scalar type") && error.contains("Control")),
+            "errors: {errors:?}"
         );
     }
 

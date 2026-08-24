@@ -4037,41 +4037,29 @@ fn generate_view(
             .binding = format_ident!("base");
     }
 
-    // A shape-composition `ContentControl` root's content child must also survive past
-    // construction: `new()`'s post-construction `this.set_content(this.<content_binding>.clone())`
-    // (below, `content_attach_stmt`) needs to reach it as a real `self.<binding>` field — but
-    // `plan_element`'s ordinary `is_root || !attributes.is_empty()` rule leaves a bare child with no
-    // attributes of its own (e.g. `HorizontalLayout { .. }`, just nested children, no top-level
-    // attribute) unstored, since nothing about *that* node alone says it needs to live past
-    // `construct()`. Forced here — before the `struct_fields`/`field_inits` loop below reads
-    // `node.stored` — for the same reason `is_host_composition`'s rename just above runs this early.
+    // A shape-composition root's authored children are attached after the outer `Rc` exists,
+    // through the root's effective `#[content(...)]` property. The child therefore has to survive
+    // the root's plain-value construction whenever it is a real (non-dynamic) child. This is
+    // intentionally derived from content metadata rather than from the root type's name: a scalar
+    // slot, a `Vec`, and a live collection all use the same ownership boundary here.
     if is_shape_composition {
-        if resolved_root.type_path == "ContentControl" {
-            if let Some(content_binding) = plan
+        let has_content_destination = table
+            .resolve(from, &resolved_root.type_path)
+            .map_or(true, |info| info.content_field.is_some());
+        if has_content_destination {
+            let bindings: Vec<_> = plan
                 .last()
-                .and_then(|root| root.child_bindings.first())
-                .map(|(binding, _)| binding.clone())
-            {
-                if let Some(content_node) = plan.iter_mut().find(|n| n.binding == content_binding) {
-                    content_node.stored = true;
-                }
-            }
-        } else if resolved_root.type_path == "VerticalLayout"
-            || resolved_root.type_path == "HorizontalLayout"
-            || resolved_root.type_path == "Grid"
-            || resolved_root.type_path == "Layout"
-        {
-            if let Some(root) = plan.last() {
-                let bindings: Vec<_> = root
-                    .child_bindings
-                    .iter()
-                    .filter(|(_, ty)| *ty != DYNAMIC_CHILD_SLOT_MARKER)
-                    .map(|(b, _)| b.clone())
-                    .collect();
-                for b in bindings {
-                    if let Some(node) = plan.iter_mut().find(|n| n.binding == b) {
-                        node.stored = true;
-                    }
+                .map(|root| {
+                    root.child_bindings
+                        .iter()
+                        .filter(|(_, ty)| *ty != DYNAMIC_CHILD_SLOT_MARKER)
+                        .map(|(binding, _)| binding.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for binding in bindings {
+                if let Some(node) = plan.iter_mut().find(|n| n.binding == binding) {
+                    node.stored = true;
                 }
             }
         }
@@ -4978,26 +4966,29 @@ fn generate_view(
         // stateless `set_<field>(..)` swap, so it gets no struct field here (see
         // `dynamic_region_refresh_method`'s own scalar/list split).
         let parent = find_dynamic_region_anchor(&plan, &node.binding);
-        // External (no local `TypeInfo`): can't check `content_field_is_list` at all without a
-        // shape table, so this assumes list-shaped — true for every real external parent a dynamic
-        // region actually reaches today (`TabView`'s `Vec<..>`, `VerticalLayout`/`HorizontalLayout`/
-        // `Grid`'s inherited `UIElementCollection`; a genuinely scalar-content external parent under
-        // dynamic control flow isn't exercised by any current builtin/example). A real fix needs
-        // `@content_item_dyn`'s own shape-macro query extended with a matching "is this list-shaped"
-        // one — not attempted here; Refs #14.
-        let is_list = table
-            .resolve(from, &parent.type_path)
-            .map_or(true, content_field_is_list);
-        if !is_list {
+        // Local scalar content needs no slot at all. For an external class the field declaration
+        // remains unconditional because macro_rules cannot expand to a struct-field list; its
+        // defining shape macro selects `()` for scalar content and `DynamicChildSlot<_>` for
+        // collection content in type position.
+        let parent_info = table.resolve(from, &parent.type_path);
+        if parent_info.is_some_and(|info| !content_field_is_list(info)) {
             continue;
         }
         let slot = dynamic_slot_ident(&node.binding);
         let item_ext = dynamic_collection_item_trait_ty(parent, from, table);
+        let slot_type = if parent_info.is_some() {
+            quote! { elwindui::core::ui::DynamicChildSlot<#item_ext> }
+        } else {
+            let props_macro = format_ident!("__elwindui_props_{}", parent.type_path);
+            quote! {
+                elwindui::core::#props_macro!(@content_slot_type #item_ext)
+            }
+        };
         struct_fields.extend(quote! {
-            #slot: elwindui::core::ui::DynamicChildSlot<#item_ext>,
+            #slot: #slot_type,
         });
         field_inits.extend(quote! {
-            #slot: elwindui::core::ui::DynamicChildSlot::default(),
+            #slot: ::std::default::Default::default(),
         });
     }
     // `RefCell<Option<Rc<..>>>` per lazily-materialized `if`/`match` branch leaf
@@ -5036,7 +5027,7 @@ fn generate_view(
                     .resolve(from, &resolved_root.type_path)
                     .is_some_and(|i| i.is_virtual_builtin)
                 {
-                    let value = build_virtual_value(node, &ctx, from, table);
+                    let value = build_virtual_value(node, &ctx, from, table, true);
                     let base_impl_ty = shape_composition_base_type(&resolved_root.type_path);
                     construct_stmts.extend(quote! { let #binding: #base_impl_ty = #value; });
                 } else {
@@ -5401,57 +5392,67 @@ fn generate_view(
             let parent_ext = format_ident!("{}Ext", parent.type_path);
             let item_ext = dynamic_collection_item_trait_ty(parent, from, table);
             let parent_info = table.resolve(from, &parent.type_path);
-            // External (no local `TypeInfo`): assumes list-shaped — see the matching struct-field
-            // creation site's own doc comment (a few dozen lines up) for why.
-            let is_list = parent_info.map_or(true, content_field_is_list);
-            let body = if is_list {
-                // The getter `#[content(..)]` names, not always literally `children` (`Dropdown`'s
-                // is `items`, `Menu`'s is `items`) — a local `TypeInfo` names it directly; an
-                // external (cross-crate) builtin has none, so the call is deferred to its own
-                // `@content_field_get` shape-macro query (`elwindui-macros::class`'s own doc
-                // comment on that arm), resolved once the generated code actually compiles against
-                // that builtin's real crate.
-                let host = match parent_info.and_then(|info| info.content_field.as_deref()) {
-                    Some(field) => {
-                        let field_ident = format_ident!("{field}");
-                        quote! {
-                            self.#parent_binding
-                                .get()
-                                .expect("__refresh_dynamic_regions: component is not yet mounted")
-                                .#field_ident()
-                        }
-                    }
-                    None => {
-                        let props_macro = format_ident!("__elwindui_props_{}", parent.type_path);
-                        let recv = quote! {
-                            self.#parent_binding
-                                .get()
-                                .expect("__refresh_dynamic_regions: component is not yet mounted")
-                        };
-                        quote! { elwindui::core::#props_macro!(@content_field_get #recv) }
-                    }
-                };
-                emit_dynamic_node_refresh(&plan, node, &host, &item_ext, &ctx, from, table)
+            let parent_is_self = (is_shape_composition || is_host_composition)
+                && parent.binding == plan[root_index].binding;
+            let parent_receiver = if parent_is_self {
+                quote! { self }
             } else {
+                quote! {
+                    self.#parent_binding
+                        .get()
+                        .expect("__refresh_dynamic_regions: component is not yet mounted")
+                }
+            };
+            let scalar_body = {
                 // Phase 2: a scalar `#[content(...)]` field needs no `DynamicChildSlot` at all —
                 // every branch resolves to exactly one element (`validate::validate`'s
                 // `dynamic_children_reduce_to_one_element` already guarantees this), so refreshing
                 // is just picking the active branch's already-constructed value and swapping it in
                 // via the field's own setter.
-                let field = parent_info
+                let setter = parent_info
                     .and_then(|i| i.content_field.as_deref())
-                    .unwrap_or("children");
-                let setter = format_ident!("set_{field}");
+                    .map(|field| format_ident!("set_{field}"));
                 emit_scalar_dynamic_node_refresh(
                     &plan,
                     node,
                     parent_binding,
-                    &setter,
+                    setter.as_ref(),
+                    parent_is_self,
+                    &parent.type_path,
                     &item_ext,
                     &ctx,
                     from,
                     table,
                 )
+            };
+            let body = if let Some(info) = parent_info {
+                if content_field_is_list(info) {
+                    // The getter `#[content(..)]` names, not always literally `children` (`Dropdown`'s
+                    // is `items`, `Menu`'s is `items`) — a local `TypeInfo` names it directly.
+                    let field = info
+                        .content_field
+                        .as_deref()
+                        .expect("collection content must name a field");
+                    let field_ident = format_ident!("{field}");
+                    let host = quote! { #parent_receiver.#field_ident() };
+                    emit_dynamic_node_refresh(&plan, node, &host, &item_ext, &ctx, from, table)
+                } else {
+                    scalar_body
+                }
+            } else {
+                // External classes do not contribute a local `TypeInfo`. Dispatch both lowering
+                // blocks through the defining class's shape macro; the macro chooses the scalar
+                // or collection branch from effective `#[content]` metadata, so external Control
+                // remains scalar without a codegen type-name special case.
+                let props_macro = format_ident!("__elwindui_props_{}", parent.type_path);
+                let host = quote! {
+                    elwindui::core::#props_macro!(@content_field_get #parent_receiver)
+                };
+                let collection_body =
+                    emit_dynamic_node_refresh(&plan, node, &host, &item_ext, &ctx, from, table);
+                quote! {
+                    elwindui::core::#props_macro!(@content_shape { #scalar_body }, { #collection_body });
+                }
             };
             // `.children()` (called inside `#body`, when the parent is a `Layout` family type —
             // `VerticalLayout`/`HorizontalLayout`/`Grid`, always a virtual builtin) is `LayoutExt`'s
@@ -5805,80 +5806,132 @@ fn generate_view(
 
     let methods = emit_methods(&component.methods);
 
-    // A composed ContentControl starts with an empty bare base. Content can only be attached once
-    // the outer `Rc` exists (`set_content`'s own parent-pointer wiring needs a real, upgradable
-    // self-weak — see `UIElement::construct`'s own `__self_weak` doc comment), so this always runs
-    // from the generated `on_constructed`, never from `construct` itself.
-    let (content_capture_stmt, content_attach_stmt) = if is_shape_composition
-        && resolved_root.type_path == "ContentControl"
-    {
-        let (content_binding, content_type) = plan
-            .last()
-            .and_then(|root| root.child_bindings.first())
-            .unwrap_or_else(|| panic!("ContentControl composition requires one content child"));
-        // `#content_binding` is a real, already-stored struct field (see `struct_fields`/
-        // `field_inits` above), reachable directly off `&self` — no capture step needed. Reads
-        // through `OnceCell` (CI-4 of #80): this statement now runs from `__build_view()` right
-        // after `child_construct_stmts` populates it, so it is always already set here.
-        let content = into_node_if_needed(
-            quote! {
-                self.#content_binding
-                    .get()
-                    .expect("content_attach: component is not yet mounted")
-                    .clone()
-            },
-            content_type,
-            from,
-            table,
-        );
-        let attach = if is_control_template_enabled {
-            quote! {
-                {
-                    use elwindui::core::ui::ControlExt as _;
-                    self.__set_template_root(#content);
-                }
-            }
-        } else {
-            quote! {
-                {
-                    use elwindui::core::ui::ContentControlExt as _;
-                    self.set_content(#content);
-                }
-            }
-        };
-        (TokenStream::new(), attach)
-    } else if is_shape_composition
-        && (resolved_root.type_path == "VerticalLayout"
-            || resolved_root.type_path == "HorizontalLayout"
-            || resolved_root.type_path == "Grid"
-            || resolved_root.type_path == "Layout")
-    {
-        let children = plan
-            .last()
+    // A shape-composition root receives authored children only after the outer `Rc` exists. The
+    // destination and its scalar/collection lowering are derived from the effective content
+    // metadata. External builtins use their exported shape macro, which applies the same rule
+    // without requiring a local type table.
+    let (content_capture_stmt, content_attach_stmt) = if is_shape_composition {
+        let root = plan.last();
+        let children: Vec<(syn::Ident, String)> = root
             .map(|root| {
                 root.child_bindings
                     .iter()
-                    .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
-                    .map(|(binding, child_ty)| {
-                        into_node_if_needed(
+                    .filter(|(_, child_ty)| *child_ty != DYNAMIC_CHILD_SLOT_MARKER)
+                    .map(|(binding, child_ty)| (binding.clone(), child_ty.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let child_value = |binding: &syn::Ident, child_ty: &str| {
+            if child_ty == PASSTHROUGH_NODE {
+                quote! { self.#binding() }
+            } else {
+                quote! {
+                    self.#binding
+                        .get()
+                        .expect("content_attach: component is not yet mounted")
+                        .clone()
+                }
+            }
+        };
+        let attach = if children.is_empty() {
+            TokenStream::new()
+        } else if let Some(info) = table.resolve(from, &resolved_root.type_path) {
+            match info.content_field.as_deref() {
+                Some(field) => {
+                    let field_ty = info
+                        .field_types
+                        .get(field)
+                        .map(String::as_str)
+                        .unwrap_or_default();
+                    let is_collection = field_ty.contains("UIElementCollection")
+                        || field_ty.trim_start().starts_with("Vec<")
+                        || field_ty.contains("ListExt<");
+                    let field_ident = format_ident!("{field}");
+                    let receiver = quote! { self };
+                    let trait_use = builtin_trait_use(&resolved_root.type_path, Some(info));
+                    if is_collection {
+                        let values = children.iter().map(|(binding, child_ty)| {
+                            let value = child_value(binding, child_ty);
+                            if field_ty.trim_start().starts_with("Vec<") {
+                                if field_ty.contains("dyn UIElement") {
+                                    into_node_if_needed(value, child_ty, from, table)
+                                } else {
+                                    value
+                                }
+                            } else {
+                                into_node_if_needed(value, child_ty, from, table)
+                            }
+                        });
+                        if field_ty.trim_start().starts_with("Vec<") {
+                            emit_field_setter_call(
+                                field,
+                                &resolved_root.type_path,
+                                &format_ident!("set_{field}"),
+                                quote! { vec![ #(#values),* ] },
+                                &receiver,
+                                from,
+                                table,
+                            )
+                        } else {
+                            let values = children
+                                .iter()
+                                .map(|(binding, child_ty)| child_value(binding, child_ty));
                             quote! {
-                                self.#binding
-                                    .get()
-                                    .expect("content_attach: component is not yet mounted")
-                                    .clone()
-                            },
+                                #trait_use
+                                for __child in vec![ #(#values),* ] {
+                                    self.#field_ident().add(__child);
+                                }
+                            }
+                        }
+                    } else if let Some((binding, child_ty)) = children.first() {
+                        let value = into_node_if_needed(
+                            child_value(binding, child_ty),
                             child_ty,
                             from,
                             table,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let attach = quote! {
-            for __child in vec![ #(#children),* ] {
-                use elwindui::core::ui::LayoutExt as _;
-                self.children().add(__child);
+                        );
+                        if is_control_template_enabled {
+                            quote! {
+                                {
+                                    use elwindui::core::ui::ControlExt as _;
+                                    self.__set_template_root(#value);
+                                }
+                            }
+                        } else {
+                            let setter = format_ident!("set_{field}");
+                            let set = emit_field_setter_call(
+                                field,
+                                &resolved_root.type_path,
+                                &setter,
+                                value,
+                                &receiver,
+                                from,
+                                table,
+                            );
+                            quote! { #trait_use #set }
+                        }
+                    } else {
+                        TokenStream::new()
+                    }
+                }
+                None => TokenStream::new(),
+            }
+        } else {
+            let props_macro = format_ident!("__elwindui_props_{}", resolved_root.type_path);
+            let values = children
+                .iter()
+                .map(|(binding, child_ty)| child_value(binding, child_ty));
+            let erased = children
+                .iter()
+                .any(|(_, child_ty)| child_ty == PASSTHROUGH_NODE);
+            if erased {
+                quote! {
+                    elwindui::core::#props_macro!(@children_erased self, [#(#values),*]);
+                }
+            } else {
+                quote! {
+                    elwindui::core::#props_macro!(@children self, [#(#values),*]);
+                }
             }
         };
         (TokenStream::new(), attach)
@@ -7919,9 +7972,21 @@ fn initial_dynamic_content_value(
             else_lazy,
         } => {
             let condition = emit_expr(condition, ctx, &EmitMode::Construction);
+            let Some(then_entry) = then_bindings.first() else {
+                return quote! {
+                    compile_error!("a dynamic branch cannot be empty for scalar content");
+                    unreachable!()
+                };
+            };
+            let Some(else_entry) = else_bindings.first() else {
+                return quote! {
+                    compile_error!("a dynamic branch cannot be empty for scalar content");
+                    unreachable!()
+                };
+            };
             let then_value = initial_dynamic_branch_value(
                 plan,
-                &then_bindings[0],
+                then_entry,
                 then_lazy.as_deref(),
                 inner_ty,
                 ctx,
@@ -7930,7 +7995,7 @@ fn initial_dynamic_content_value(
             );
             let else_value = initial_dynamic_branch_value(
                 plan,
-                &else_bindings[0],
+                else_entry,
                 else_lazy.as_deref(),
                 inner_ty,
                 ctx,
@@ -7942,21 +8007,34 @@ fn initial_dynamic_content_value(
         DynamicPlan::Match { value, arms } => {
             let value = emit_expr(value, ctx, &EmitMode::Construction);
             let arm_stmts = arms.iter().map(|(pattern, children, lazy)| {
-                let arm_value = initial_dynamic_branch_value(
-                    plan,
-                    &children[0],
-                    lazy.as_deref(),
-                    inner_ty,
-                    ctx,
-                    from,
-                    table,
+                let arm_value = children.first().map_or_else(
+                    || {
+                        quote! {
+                            compile_error!("a dynamic branch cannot be empty for scalar content");
+                            unreachable!()
+                        }
+                    },
+                    |entry| {
+                        initial_dynamic_branch_value(
+                            plan,
+                            entry,
+                            lazy.as_deref(),
+                            inner_ty,
+                            ctx,
+                            from,
+                            table,
+                        )
+                    },
                 );
                 quote! { #pattern => #arm_value }
             });
             quote! { match #value { #(#arm_stmts)* } }
         }
         DynamicPlan::For { .. } => {
-            panic!("a `for` region cannot be the sole content of a scalar content field")
+            quote! {
+                compile_error!("a `for` region cannot be the sole content of a scalar content field");
+                unreachable!()
+            }
         }
     }
 }
@@ -8369,7 +8447,9 @@ fn emit_scalar_dynamic_node_refresh(
     plan: &[PlannedNode],
     node: &PlannedNode,
     owner_binding: &syn::Ident,
-    setter: &syn::Ident,
+    setter: Option<&syn::Ident>,
+    owner_is_self: bool,
+    owner_type: &str,
     item_ext: &ItemTraitTokens,
     ctx: &ViewCtx,
     from: &Module,
@@ -8381,7 +8461,9 @@ fn emit_scalar_dynamic_node_refresh(
         .expect("only called for a dynamic node")
     {
         DynamicPlan::For { .. } => {
-            panic!("a `for` region cannot be the sole content of a scalar content field")
+            quote! {
+                compile_error!("a `for` region cannot be the sole content of a scalar content field");
+            }
         }
         DynamicPlan::If {
             condition,
@@ -8391,12 +8473,24 @@ fn emit_scalar_dynamic_node_refresh(
             else_lazy,
         } => {
             let condition = emit_expr(condition, ctx, &EmitMode::WithSelf(quote! { self }));
+            let Some(then_entry) = then_bindings.first() else {
+                return quote! {
+                    compile_error!("a dynamic branch cannot be empty for scalar content");
+                };
+            };
+            let Some(else_entry) = else_bindings.first() else {
+                return quote! {
+                    compile_error!("a dynamic branch cannot be empty for scalar content");
+                };
+            };
             let then_value = emit_scalar_branch_value(
                 plan,
-                &then_bindings[0],
+                then_entry,
                 then_lazy.as_deref(),
                 owner_binding,
                 setter,
+                owner_is_self,
+                owner_type,
                 item_ext,
                 ctx,
                 from,
@@ -8404,10 +8498,12 @@ fn emit_scalar_dynamic_node_refresh(
             );
             let else_value = emit_scalar_branch_value(
                 plan,
-                &else_bindings[0],
+                else_entry,
                 else_lazy.as_deref(),
                 owner_binding,
                 setter,
+                owner_is_self,
+                owner_type,
                 item_ext,
                 ctx,
                 from,
@@ -8419,20 +8515,30 @@ fn emit_scalar_dynamic_node_refresh(
         }
         DynamicPlan::Match { value, arms } => {
             let value = emit_expr(value, ctx, &EmitMode::WithSelf(quote! { self }));
-            let arm_stmts = arms.iter().map(|(pattern, children, lazy)| {
-                let arm_value = emit_scalar_branch_value(
-                    plan,
-                    &children[0],
-                    lazy.as_deref(),
-                    owner_binding,
-                    setter,
-                    item_ext,
-                    ctx,
-                    from,
-                    table,
+            let arm_stmts =
+                arms.iter().map(|(pattern, children, lazy)| {
+                    let arm_value = children.first().map_or_else(
+                    || quote! {
+                        compile_error!("a dynamic branch cannot be empty for scalar content");
+                    },
+                    |entry| {
+                        emit_scalar_branch_value(
+                            plan,
+                            entry,
+                            lazy.as_deref(),
+                            owner_binding,
+                            setter,
+                            owner_is_self,
+                            owner_type,
+                            item_ext,
+                            ctx,
+                            from,
+                            table,
+                        )
+                    },
                 );
-                quote! { #pattern => { #arm_value } }
-            });
+                    quote! { #pattern => { #arm_value } }
+                });
             quote! {
                 match #value { #(#arm_stmts)* }
             }
@@ -8451,7 +8557,9 @@ fn emit_scalar_branch_value(
     entry: &(syn::Ident, String),
     lazy: Option<&[PlannedNode]>,
     owner_binding: &syn::Ident,
-    setter: &syn::Ident,
+    setter: Option<&syn::Ident>,
+    owner_is_self: bool,
+    owner_type: &str,
     item_ext: &ItemTraitTokens,
     ctx: &ViewCtx,
     from: &Module,
@@ -8468,6 +8576,8 @@ fn emit_scalar_branch_value(
             nested,
             owner_binding,
             setter,
+            owner_is_self,
+            owner_type,
             item_ext,
             ctx,
             from,
@@ -8476,11 +8586,22 @@ fn emit_scalar_branch_value(
     }
     let value = lazy_leaf_or_field_value(lazy, binding, ctx, from, table);
     let value = dynamic_child_binding(value, ty, item_ext, from, table);
-    quote! {
-        self.#owner_binding
-            .get()
-            .expect("__refresh_dynamic_regions: component is not yet mounted")
-            .#setter(#value);
+    let receiver = if owner_is_self {
+        quote! { self }
+    } else {
+        quote! {
+            self.#owner_binding
+                .get()
+                .expect("__refresh_dynamic_regions: component is not yet mounted")
+        }
+    };
+    if let Some(setter) = setter {
+        quote! { #receiver.#setter(#value); }
+    } else {
+        let props_macro = format_ident!("__elwindui_props_{owner_type}");
+        quote! {
+            elwindui::core::#props_macro!(@children_erased #receiver, [#value]);
+        }
     }
 }
 
@@ -9879,7 +10000,7 @@ fn emit_construction(
         // target's own deferred `Option<T>` fields (`is_deferred_field`) from the positional list —
         // `build_component_optional_setters` supplies the matching trailing `.set_<field>(value)`
         // calls for whichever of them this use site actually gives a value.
-        let args = build_component_args(node, ctx, from, table, info, plan);
+        let args = build_component_args(node, ctx, from, table, info, plan, false);
         let optional_setters = build_component_optional_setters(node, ctx, from, table, info);
         // CI-7 of #80 (docs/design/runtime/component_lifecycle_design.md §4f): a node declared
         // inside an `EnvironmentScope` constructs via `__new_unmounted` (no automatic self-mount)
@@ -10058,6 +10179,7 @@ fn build_component_args(
     table: &SymbolTable,
     info: &TypeInfo,
     plan: &[PlannedNode],
+    defer_content: bool,
 ) -> Vec<TokenStream> {
     // A bare nested child element (no `name:` attribute) only ever has somewhere to go if this
     // component declares a `children`-named param (a list, consumed in full below) or a
@@ -10090,6 +10212,17 @@ fn build_component_args(
     let mut args = Vec::new();
     for (name, ty) in &info.param_fields {
         if is_deferred_field(info, &node.type_path, name, ty) {
+            continue;
+        }
+        // A shape-composition root is first constructed as a plain base value and only receives
+        // its effective content after the enclosing component has an `Rc`/self-weak. This keeps
+        // parent links and scalar root replacement on the same generic post-construction path as
+        // collection insertion. Ordinary element construction keeps the historical positional
+        // argument behavior (`defer_content == false`).
+        if defer_content
+            && info.content_field.as_deref() == Some(name.as_str())
+            && !node.child_bindings.is_empty()
+        {
             continue;
         }
         if name == "children" {
@@ -10207,7 +10340,8 @@ fn build_component_args(
         // `ty` is one of `synthesize_external_base_fields`'s synthesized fields (a type-position
         // macro invocation, always containing a literal `!` — Refs #90): `strip_option`'s string
         // matching can't tell whether the base declared it `Option<T>` or bare `T` (`padding` is the
-        // former, `Control`'s own `children` the latter), so `is_option` above is unreliable here —
+        // former; collection fields such as Layout's `children` are the latter), so `is_option`
+        // above is unreliable here —
         // always `false`, since the opaque string never literally starts with `"Option<"`. `.into()`
         // resolves this generically at the *consumer's* own expansion time instead of guessing here:
         // the blanket `impl<T> From<T> for Option<T>` handles the `Option<T>`-declared case (`value`
@@ -10286,7 +10420,7 @@ fn build_component_setters(
         // destination field's own declared type, not from which of the two mechanisms named it —
         // `Vec<T>` (e.g. `TabView`'s `children`) uses the former; `ListExt<T>` (e.g. `Menu`/
         // `MenuBar`'s `#[content(items)]` `items: ListExt<MenuItem>`, docs/specs/ui_spec.md#menu)
-        // uses the latter, mirroring `Layout`/`Control`'s own `.children().add(..)`
+        // uses the latter, mirroring `Layout`'s own `.children().add(..)`
         // convention for virtual builtins (`build_virtual_value`) one level up.
         if (name == "children" || is_this_field_content) && ty.trim_start().starts_with("Vec<") {
             let wants_node = ty.contains("dyn UIElement");
@@ -10548,10 +10682,7 @@ fn build_component_value(
     };
     let construct_path = qualified_construct_path(component, &node.type_path)
         .unwrap_or_else(|| composed_construct_path(&node.type_path, info.is_builtin));
-    if info.is_builtin && node.type_path == "ContentControl" {
-        return quote! { #construct_path() };
-    }
-    let args = build_component_args(node, ctx, from, table, info, plan);
+    let args = build_component_args(node, ctx, from, table, info, plan, true);
     quote! { #construct_path(#(#args),*) }
 }
 
@@ -10898,7 +11029,7 @@ fn emit_virtual_construction(
     out: &mut TokenStream,
 ) {
     let binding = &node.binding;
-    let value = build_virtual_value(node, ctx, from, table);
+    let value = build_virtual_value(node, ctx, from, table, false);
     let info = table.resolve(from, &node.type_path);
     let concrete_ty = concrete_type_ident(&node.type_path, info);
     out.extend(quote! {
@@ -10928,6 +11059,7 @@ fn build_virtual_value(
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
+    defer_content: bool,
 ) -> TokenStream {
     let info = table
         .resolve(from, &node.type_path)
@@ -10972,7 +11104,35 @@ fn build_virtual_value(
     let mut needs_text_style_trait = false;
     for (name, ty) in &info.param_fields {
         let setter = format_ident!("set_{name}");
+        let field_ident = format_ident!("{name}");
         let is_content = info.content_field.as_deref() == Some(name.as_str());
+        // Shape-composition content is attached after the outer component has an `Rc`/self-weak.
+        // Leave the temporary plain value empty so the generic post-construction path owns the
+        // child exactly once. Ordinary virtual elements (including a nested `Control`) attach
+        // through the same metadata-selected setter while their `Rc` already exists.
+        if is_content && find_attr(node, name).is_none() && !node.child_bindings.is_empty() {
+            if defer_content {
+                continue;
+            }
+            let children = node
+                .child_bindings
+                .iter()
+                .filter(|(_, child_ty)| *child_ty != DYNAMIC_CHILD_SLOT_MARKER);
+            if ty == "UIElementCollection" {
+                needs_ui_element_trait = true;
+                let children = children.map(|(binding, child_ty)| {
+                    into_node_if_needed(quote! { #binding }, child_ty, from, table)
+                });
+                setters.extend(
+                    quote! { for __child in vec![ #(#children),* ] { __v.#field_ident().add(__child); } },
+                );
+            } else if let Some((binding, child_ty)) = children.clone().next() {
+                let value = into_node_if_needed(quote! { #binding }, child_ty, from, table);
+                needs_type_trait = true;
+                setters.extend(quote! { __v.#setter(#value); });
+            }
+            continue;
+        }
         if is_content && ty == "UIElementCollection" {
             needs_ui_element_trait = true;
             let children = node
@@ -10983,7 +11143,7 @@ fn build_virtual_value(
                     into_node_if_needed(quote! { #binding }, child_ty, from, table)
                 });
             setters.extend(
-                quote! { for __child in vec![ #(#children),* ] { __v.children().add(__child); } },
+                quote! { for __child in vec![ #(#children),* ] { __v.#field_ident().add(__child); } },
             );
             continue;
         }
@@ -13206,6 +13366,109 @@ mod tests {
         }
     }
 
+    #[test]
+    fn builtin_content_metadata_is_scalar_or_collection() {
+        let modules = crate::test_builtin_modules();
+        let table = build_symbol_table(&modules);
+        let module = modules.first().expect("builtin fixture module");
+        let control = table.resolve(module, "Control").expect("Control metadata");
+        assert_eq!(control.content_field.as_deref(), Some("visual_root"));
+        assert!(
+            control
+                .field_types
+                .get("visual_root")
+                .is_some_and(|ty| ty.contains("dyn UIElement")),
+            "{:#?}",
+            control.field_types
+        );
+        let content_control = table
+            .resolve(module, "ContentControl")
+            .expect("ContentControl metadata");
+        assert_eq!(content_control.content_field.as_deref(), Some("content"));
+        assert!(
+            content_control
+                .field_types
+                .get("content")
+                .is_some_and(|ty| ty.contains("dyn UIElement"))
+        );
+        let layout = table.resolve(module, "Layout").expect("Layout metadata");
+        assert_eq!(layout.content_field.as_deref(), Some("children"));
+        assert_eq!(
+            layout.field_types.get("children").map(String::as_str),
+            Some("UIElementCollection")
+        );
+    }
+
+    #[test]
+    fn derived_content_metadata_overrides_control_visual_root() {
+        let module = multi_item_module(&[
+            TestItem::Component(
+                Some("Control"),
+                r#"
+                #[content(children)]
+                struct CustomTabView {
+                    children: Vec<std::rc::Rc<dyn UIElement>>,
+
+                    body: view! {
+                        VerticalLayout { }
+                    },
+                }
+                "#,
+            ),
+            TestItem::Component(
+                None,
+                r#"
+                struct Host {
+                    body: view! {
+                        CustomTabView {
+                            TextBlock { text: "tab" }
+                        }
+                    },
+                }
+                "#,
+            ),
+        ]);
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let info = table
+            .resolve(&module, "CustomTabView")
+            .expect("derived component metadata");
+        assert_eq!(info.content_field.as_deref(), Some("children"));
+        assert!(
+            info.field_types
+                .get("children")
+                .is_some_and(|ty| ty.trim_start().starts_with("Vec<"))
+        );
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("derived_content_override", &generated);
+        let rendered = generated.to_string();
+        assert!(
+            rendered.contains("CustomTabView :: new (vec !"),
+            "nested children must lower through the derived collection: {rendered}"
+        );
+    }
+
+    #[test]
+    fn nested_control_scalar_content_uses_the_generic_setter() {
+        let src = r#"
+        struct Host {
+            body: view! {
+                VerticalLayout {
+                    Control {
+                        TextBlock { text: "content" }
+                    }
+                }
+            },
+        }
+        "#;
+        let module = crate::test_module(&[(None, src, None)]).expect("nested Control should parse");
+        let table = build_symbol_table_with_builtins(std::slice::from_ref(&module));
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("nested_control_scalar_content", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("set_visual_root"), "{rendered}");
+        assert!(!rendered.contains("set_children"), "{rendered}");
+    }
+
     /// PR #169 review remediation, round 4, T-R4-6 (AD-R4-8): `generate_component`'s own-field
     /// membership must come only from `component_public_shape(source_component, None)` — an
     /// inherited field (present in the effective/flattened `c` this function's other logic still
@@ -14003,6 +14266,95 @@ struct NotepadWindow {
             rendered.contains("__lazy_branch_"),
             "both branches are childless literals: {rendered}"
         );
+    }
+
+    /// Control's internal scalar content destination follows the same metadata-driven dynamic
+    /// path as ContentControl: no collection slot is allocated, and each branch replaces the
+    /// authored visual root through `set_visual_root`.
+    #[test]
+    fn generates_scalar_content_dynamic_region_via_control() {
+        let module = viewmodel_and_component_module(
+            r#"
+            mod dynamic_view_model_mod_control {
+                struct DynamicViewModel {
+                    #[observable(default = true)]
+                    show_a: bool,
+                }
+            }
+            "#,
+            Some("Control"),
+            r#"
+            struct DynamicHost {
+                #[param]
+                #[inject]
+                vm: DynamicViewModel,
+
+                body: view! {
+                    if vm.show_a {
+                        TextBlock { text: "a" }
+                    } else {
+                        TextBlock { text: "b" }
+                    }
+                },
+            }
+            "#,
+        );
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let all_modules: Vec<_> = std::iter::once(module.clone())
+            .chain(crate::test_builtin_modules())
+            .collect();
+        assert_eq!(crate::validate::validate(&all_modules), Ok(()));
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("scalar_dynamic_control", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("set_visual_root"), "{rendered}");
+        assert!(!rendered.contains("DynamicChildSlot"), "{rendered}");
+    }
+
+    /// A `match` uses the same scalar replacement lowering as an `if`; the target is selected by
+    /// effective content metadata rather than by the inherited base's type name.
+    #[test]
+    fn generates_scalar_content_dynamic_match_via_control() {
+        let module = multi_item_module(&[
+            TestItem::Enum("enum ControlState { First, Second }"),
+            TestItem::ViewModel(
+                r#"
+                mod dynamic_view_model_mod_control_match {
+                    struct DynamicViewModel {
+                        #[observable(default = ControlState::First)]
+                        state: ControlState,
+                    }
+                }
+                "#,
+            ),
+            TestItem::Component(
+                Some("Control"),
+                r#"
+                struct DynamicMatchHost {
+                    #[param]
+                    #[inject]
+                    vm: DynamicViewModel,
+
+                    body: view! {
+                        match vm.state {
+                            ControlState::First => { TextBlock { text: "first" } }
+                            ControlState::Second => { TextBlock { text: "second" } }
+                        }
+                    },
+                }
+                "#,
+            ),
+        ]);
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let all_modules: Vec<_> = std::iter::once(module.clone())
+            .chain(crate::test_builtin_modules())
+            .collect();
+        assert_eq!(crate::validate::validate(&all_modules), Ok(()));
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("scalar_dynamic_control_match", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("set_visual_root"), "{rendered}");
+        assert!(!rendered.contains("DynamicChildSlot"), "{rendered}");
     }
 
     // Issue #52 §4's documented asymmetry (`lazy_branch_plan`'s own doc comment) turns out to be
@@ -15557,7 +15909,8 @@ struct NotepadWindow {
     }
 
     /// `ContentControl inherits Control` (docs/specs/ui_spec.md#contentcontrol) — the
-    /// `#[param] content` field is forwarded as a bare child into `Control`'s own children via the
+    /// `#[param] content` field is forwarded as a bare child into `ContentControl`'s single content
+    /// slot via the
     /// `PASSTHROUGH_NODE`-tagged `lets_map` seeding in `generate_view`, and every `#[param]` field
     /// (not just `#[id(...)]` lets) gets a generated named accessor.
     #[test]
@@ -15589,7 +15942,7 @@ struct NotepadWindow {
 
         // `ContentControl`'s own generated code (produced when `builtin_modules()` is fed through
         // `generate_module` directly, mirroring how a real consumer's own component
-        // would be generated) forwards `content` into `Control`'s children and exposes both
+        // would be generated) forwards `content` into `ContentControl`'s content slot and exposes both
         // `#[param]` fields as public accessors. The builtin shape source bundled every builtin into one
         // module, so only `ContentControl`'s own `Item::Component`/`Item::View` pair is kept —
         // `generate_module` would otherwise also try (and fail) to generate every shape-only

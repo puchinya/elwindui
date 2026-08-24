@@ -20,9 +20,8 @@ struct ContentWrapper {
     // `padding` is *not* redeclared here — it's auto-inherited from `Control` and forwarded below
     // by the bare same-name reference `padding: padding`, exactly as dsl_spec.md §3 documents.
     body: view! {
-        // No `Control { .. }` wrapper is written — `view!`'s own body implicitly *is* `Control`'s
-        // attributes/children (dsl_spec.md §3's second `inherits` case: `Control` is a `view`-less
-        // primitive shape family, so it composes rather than nests).
+    // No `Control { .. }` wrapper is written — `view!`'s own body supplies Control's attributes
+    // and its single authored visual/template root (dsl_spec.md §3's shape-composition case).
         padding: padding
         content
     },

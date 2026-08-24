@@ -30,7 +30,6 @@ pub(crate) fn grid_cell_of(child: &Rc<dyn UIElementExt>) -> GridCell {
 }
 
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
-#[content(children)]
 #[prop(rows: Vec<crate::layout::GridLength>)]
 #[prop(columns: Vec<crate::layout::GridLength>)]
 #[prop(attached, row: i32 = 0)]

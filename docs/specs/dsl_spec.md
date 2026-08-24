@@ -123,7 +123,7 @@ if let Some(path) = platform::file_dialog::open().await {
 | 書く内容 | 型・制約・初期値のみ | `if`/`for`/`match`による要素ツリーの組み立て |
 | 変更頻度 | 低い(型は安定) | 高い(レイアウト調整で頻繁に変わる) |
 
-**`body: view! { .. }` フィールドを持つcomponentは、必ず`inherits`(次項)で何らかのbaseを指定する。** これは単なる制限ではなく、`view!`の中身の書き込み先そのものがbaseに依存するためである——`view!`のトップレベルの属性設定(`padding: padding`のような`key: value`行)はbaseが持つ同名フィールドへの設定・バインディングであり、属性名を書かない裸のネスト子要素は、baseが宣言する`#[content(field_name)]`(§12/付録A参照)が指定するbase自身のフィールドへの格納である。`inherits`で指定するbaseが無ければ、このどちらにも書き込み先が存在しない。したがってbase無しで自分自身の視覚ツリーを一から組み立てるcomponentは現状サポートされない——`view`を持つcomponentは常に何らかの合成可能なbase(`VerticalLayout`/`HorizontalLayout`/`Control`等、または他のユーザー定義component)の上に構築する。子要素を並べたいだけの単純なcomponentは、`inherits VerticalLayout`/`inherits HorizontalLayout`(次項の2番目のケース、シェイプ合成)を使うのが最も基本的な書き方になる——この場合`view`の中身がそのままそのレイアウトの子要素になるため、ラッパー要素を書く必要もない。`view!`を持たないcomponent(データ定義のみ、§4参照)にはこの制約はない。
+**`body: view! { .. }` フィールドを持つcomponentは、必ず`inherits`(次項)で何らかのbaseを指定する。** これは単なる制限ではなく、`view!`の中身の書き込み先そのものがbaseに依存するためである——`view!`のトップレベルの属性設定(`padding: padding`のような`key: value`行)はbaseが持つ同名フィールドへの設定・バインディングであり、属性名を書かない裸のネスト子要素は、baseの**実効**`#[content(field_name)]` metadataが指定するフィールドへ lower される。destination の型が scalar なら `set_<field>(child)` に、collection なら collection surface への順序付き挿入になる。`Control`を直接継承するcomponentでは、内部 scalar `visual_root` destination を経由して単一の authored visual rootがprivateなtemplate-root経路へ接続されるが、これは公開`children` collectionではない。`inherits`で指定するbaseが無ければ、このどちらにも書き込み先が存在しない。したがってbase無しで自分自身の視覚ツリーを一から組み立てるcomponentは現状サポートされない——`view`を持つcomponentは常に何らかの合成可能なbase(`VerticalLayout`/`HorizontalLayout`/`Control`等、または他のユーザー定義component)の上に構築する。子要素を並べたいだけの単純なcomponentは、`inherits VerticalLayout`/`inherits HorizontalLayout`(次項の2番目のケース、シェイプ合成)を使うのが最も基本的な書き方になる——この場合`view`の中身がそのままそのレイアウトの子要素になるため、ラッパー要素を書く必要もない。`view!`を持たないcomponent(データ定義のみ、§4参照)にはこの制約はない。
 
 ```rust
 #[elwindui::component(inherits VerticalLayout)]
@@ -220,8 +220,8 @@ struct ContentControl {
     // padding は Control から自動的に継承される — 再宣言不要、self.padding() がそのまま使える
 
     body: view! {
-        // `Control { .. }` というラッパーは書かない — `view!`の中身がそのまま暗黙に Control の
-        // 属性・子要素になる(2番目のケース)
+        // `Control { .. }` というラッパーは書かない — `view!`の中身が Control の属性と
+        // private template-root 用の単一 visual root になる
         padding: padding
         content
     }
@@ -233,7 +233,7 @@ impl ContentControl {}
 
 ここで`Control`は`elwindui::ui::Control`(ビルトイン、裸名で参照)で、`ContentControl`は上記の例で定義しているユーザー自身のcomponent名——ビルトインの同名`ContentControl`(`docs/specs/ui_spec.md`参照)と衝突しない。ローカルに定義された`ContentControl`は、`elwindui::ui::*`の自動`use`(§2)より常に優先して解決される(Rustの通常の名前解決が、同一スコープのグロブ`use`よりローカル定義を優先するのと同じ)。
 
-`view`の中身が暗黙に`Base`自身になるかどうかは、`Base`が実際に合成可能(2番目のケースに当てはまるか)によって決まり、`Name`自身がラッパーを書くかどうかでは選べない――合成可能な`Base`を持つ`component`の`view`は常にこの形で書く。3番目のケース(合成されていない論理コンポーネントの継承)だけが、今まで通り「独自のルート要素を持つ完全なテンプレート上書き」になる。
+`view`の中身が暗黙に`Base`自身になるかどうかは、`Base`が実際に合成可能(2番目のケースに当てはまるか)によって決まり、`Name`自身がラッパーを書くかどうかでは選べない――合成可能な`Base`を持つ`component`の`view`は常にこの形で書く。`Control`の実効content destinationは内部scalar property `visual_root`であるため、`Control`派生componentは同じgenericな`#[content]` lowering ruleを通じて単一の authored visual rootを受け取り、そのsetterがprivate template-root ownershipへ委譲する。3番目のケース(合成されていない論理コンポーネントの継承)だけが、今まで通り「独自のルート要素を持つ完全なテンプレート上書き」になる。
 
 継承したフィールドは、派生component自身の`view`が**同名のまま裸で参照**している場合のみ、派生側の実効フィールド(＝コンストラクタ引数)になる。リテラル値で上書きしている場合(例:`Rectangle { fill: "#3a3a3c" }`)や、そもそも参照していない場合は、その基底フィールドは派生側の公開APIには現れない。
 
@@ -1336,7 +1336,7 @@ impl VolumeControl {}
 - **`#[sealed]`** — このコンポーネントを`component X inherits Y`の`Y`(継承元)として指定できないようにする。具象的な末端形状(`Rectangle`/`Ellipse` — 継承したければ合成可能な`Shape`を使う)や、そもそも継承先を持たないネイティブ末端要素(`Button`/`TextArea`/`TabView`/`TabViewItem`)に付与する。
 - **`#[abstract]`(Rust形式:`#[abstract_]`)** — componentを`view`内で直接instantiateできなくする。`inherits`先には指定できる。唯一の例外として、descendant自身が名指ししたabstract baseを、そのdescendantの`view`ルートとして構築する形を許可する。abstract componentには公開constructorを生成しない。
 - **`#[text_style]`**([`text_style_spec.md`](text_style_spec.md)) — 共通text-style propertyをcomponentへ追加する。同名fieldを自前で宣言したcomponentへの付与は静的エラーとなる。共有基底で宣言したpropertyはdescendantから利用できる。
-- **`#[content(field_name)]`** — WinUI3の`ContentPropertyAttribute`相当。ある要素の`view`本体に「属性名を書かない裸のネスト子要素」(`Type { .. }`を`name: value`形式でなく直接`{}`内に書く)を渡した際、それがどのフィールドに束縛されるかを明示する。例:`MenuBarItem`は`#[content(submenu)]`を宣言しており、`MenuBarItem { text: "File", Menu { .. } }`の`Menu { .. }`は`submenu`フィールドに束縛される(`Window`/`ContentControl`/`TabViewItem`の`content`フィールドも同様に`#[content(content)]`を宣言している)。`field_name`は実在するフィールド名でなければならず(静的検証)、componentにつき最大1個。裸のネスト子要素があるのに`#[content(..)]`(または`children: Vec<..>`のようなリストフィールド)が無いcomponentにそれを渡すのはコード生成時エラーになる。この属性はビルトイン限定ではなく、ユーザー定義コンポーネントでも使える。
+- **`#[content(field_name)]`** — WinUI3の`ContentPropertyAttribute`相当。ある要素の`view`本体に「属性名を書かない裸のネスト子要素」(`Type { .. }`を`name: value`形式でなく直接`{}`内に書く)を渡した際、それがどのフィールドに束縛されるかを明示する。実効 metadata と field 型により lowering が決まり、scalar field はちょうど一つの child を `set_<field>(child)` へ、collection field は宣言された collection surface へ順序を保って渡す。例:`MenuBarItem`は`#[content(submenu)]`を宣言しており、`MenuBarItem { text: "File", Menu { .. } }`の`Menu { .. }`は`submenu`フィールドに束縛される(`Window`/`ContentControl`/`TabViewItem`の`content`フィールドも同様に`#[content(content)]`を宣言している)。`Control`は内部 scalar `#[content(visual_root)]` destinationを持つが、これは公開 collectionではなくprivate template-root ownershipへ委譲するためのDSL/codegen surfaceである。派生component自身の`#[content(...)]`は継承した destination を置き換えるため、将来の typed `CustomTabView::children` は`Control::visual_root`と衝突しない。lowering は型名`Control`を特別扱いせず、実効metadataとfield型だけから決まる。`field_name`は実在するフィールド名でなければならず(静的検証)、componentにつき最大1個。裸のネスト子要素があるのに実効`#[content(..)]`(または専用の children/items surface)が無いcomponentにそれを渡すのは静的診断になる。この属性はビルトイン限定ではなく、ユーザー定義コンポーネントでも使える。
 
 `#[sealed]`/`#[abstract_]`はユーザー定義componentでも利用できる。`#[text_style]`はtext-style owner contractを実装するcomponentで利用する。
 

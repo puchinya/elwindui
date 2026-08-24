@@ -155,6 +155,24 @@ generatorは検証済みASTから次を組み立てる。
 
 event名とpayload型は宣言metadataから導出する。特定event名をcode generatorへ追加して意味を決める方式は採らない。
 
+#### Effective content lowering
+
+裸の子要素の格納先は、要素の実効 `#[content(field)]` metadata と、その field の型だけから
+決める。generator は型名 (`Control` など) を検査して lowering 経路を選択してはならない。
+
+```text
+effective #[content(field)] metadata
+        + field type
+        -> scalar or collection lowering
+```
+
+scalar field は静的にちょうど一つの子を検証し、`set_<field>(child)` へ lower する。
+collection field は宣言された collection surface へ順序を保って挿入し、既存の dynamic
+reconciliation を使う。`Control` は内部 scalar `visual_root` content destination を宣言し、
+setter が private `template_root` replacement path へ委譲するが、この runtime 実装は generic
+lowering からは見えない。`Layout` の `children`、`ContentControl` の `content`、将来の
+specialized control の typed `children` はすべて同じ metadata-driven rule を通る。
+
 ## 4. Diagnostic設計
 
 各AST nodeは可能な限り元tokenのspanを保持する。parser、resolver、validatorのerrorは、原因となるDSL tokenまたはRust attributeへ関連付ける。複数の独立したerrorを収集できる場合はまとめて返すが、invalid ASTから意味を推測してgenerationを継続しない。

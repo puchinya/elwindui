@@ -66,6 +66,17 @@ Every class also emits a `__elwindui_props_{Name}!` declarative macro carrying i
 - `@routed`/`@routed_from` — registers a `#[routed]` callback, building the bubbling adapter around a bare DSL-supplied closure.
 - `@attached_set` — a `#[attached]` property's setter, one hop only (no ancestor forwarding — the DSL's `Owner::field` syntax always names the owning class explicitly).
 - `@children`/`@children_into` — attaches bare nested child elements to whichever property `#[content(..)]` names, forwarding up the chain until the declaring class is found.
+- `@children_erased`/`@children_erased_into` — the same metadata-selected destination for a child that is
+  already an `Rc<dyn UIElementExt>` (or another erased content trait). This path calls the declaring
+  extension trait with the value unchanged, so cross-crate scalar content does not attempt an
+  `into_ui_element_node()` conversion on a trait object. It is a transport detail, not a second
+  content model.
+- `@content_shape` — selects one of caller-supplied scalar/collection lowering blocks from the
+  effective content property's declared shape. Codegen uses this only when an external class has no
+  local field table; the decision still comes from `#[content(..)]` metadata and field type.
+- `@content_slot_type` — the type-position companion to `@content_shape`, selecting `()` for an
+  external scalar content destination and `DynamicChildSlot<T>` for a collection destination. It
+  keeps generated storage metadata-driven when the declaring class is outside the codegen crate.
 - `@field_type`/`@field_type_from` — expands, in **type position**, to the real Rust type a declared property was given (`elwindui-codegen`'s `resolve_effective_fields`/`synthesize_external_base_fields`, Refs #90: a consumer component that bare-forwards an inherited attribute value from a genuinely external base — `padding: padding` on `#[elwindui::component(inherits Control)]`, dsl_spec.md §3's `ContentControl` pattern — has no local `TypeInfo` to read `padding`'s declared type from, so the synthesized field's own `FieldDef::ty` is instead the literal text `elwindui::core::__elwindui_props_Control!(@field_type padding)`; `generate_view`'s `syn::parse_str::<syn::Type>` already parses an arbitrary type-position macro invocation as an ordinary `syn::Type::Macro`, so this needs no special casing downstream). Same per-property arm/forwarding/terminal-`compile_error!` shape as `@set`, restricted to the same `takes_set_arm`-eligible property set (a routed/attached/collection-content property has no single settable "value type" a struct field could hold).
 - `@content_item_dyn`/`@content_field_get` — cross-crate queries backing dynamic (`for`/`if`/`match`) region reconciliation against a content-collection field with no local `TypeInfo`.
 - `@assert_undeclared`/`@assert_declared` — compile-time collision/designation probes, emitted in item position next to the class declaration rather than consulted from a use site.

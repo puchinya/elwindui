@@ -24,6 +24,7 @@ use super::*;
 /// construct()` for their own `base` field (see e.g. `Shape::construct`/`Control::construct` for the
 /// same shape one level up the hierarchy, where the base *is* directly instantiable).
 #[elwindui_macros::class(inherits = crate::ui::UIElement, abstract_class)]
+#[content(children)]
 #[prop(children: crate::ui::UIElementCollection)]
 #[prop(semantic_brush, background: Option<crate::graphics::Brush>)]
 pub struct Layout {

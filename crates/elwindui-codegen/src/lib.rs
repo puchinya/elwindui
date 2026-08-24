@@ -1907,6 +1907,11 @@ mod component_impl_tests {
             out.contains("self . __base_label ()") || out.contains("self.__base_label()"),
             "`base::label()` should be rewritten onto the shadow: {out}"
         );
+        assert_eq!(
+            out.matches("fn __base_label").count(),
+            1,
+            "component-to-component inheritance must not emit duplicate base shadows: {out}"
+        );
     }
 
     #[test]

@@ -3586,6 +3586,50 @@ fn emit_class_methods(methods: &[MethodDef], own_methods: &[MethodDef]) -> Token
             });
         }
     }
+
+    // `resolve_effective_methods` can provide a private `__base_<name>` shadow when the
+    // immediate ancestor is another generated component. A hand-written class ancestor does not
+    // participate in that component-only flattening, but an override body is rewritten to the
+    // same `self.__base_<name>(..)` surface regardless of where the ancestor method originated.
+    // Fill only the missing shadows by forwarding through this component's concrete `base` field;
+    // the class macro remains the sole owner of the virtual dispatch chain, and no type/method
+    // names are consulted here.
+    let existing_shadows: HashSet<&str> = methods
+        .iter()
+        .filter(|method| method.name.starts_with("__base_"))
+        .map(|method| method.name.as_str())
+        .collect();
+    for method in own_methods
+        .iter()
+        .filter(|method| method.is_override)
+        .filter(|method| !existing_shadows.contains(format!("__base_{}", method.name).as_str()))
+    {
+        let name = format_ident!("{}", method.name);
+        let shadow_name = format_ident!("__base_{}", method.name);
+        let params: Vec<_> = method
+            .params
+            .iter()
+            .map(|(param_name, ty)| {
+                let ident = format_ident!("{}", param_name);
+                quote! { #ident: #ty }
+            })
+            .collect();
+        let args: Vec<_> = method
+            .params
+            .iter()
+            .map(|(param_name, _)| format_ident!("{}", param_name))
+            .collect();
+        let ret = match &method.return_ty {
+            Some(ty) => quote! { -> #ty },
+            None => quote! {},
+        };
+        out.extend(quote! {
+            #[inherent]
+            fn #shadow_name(&self, #(#params),*) #ret {
+                self.base.#name(#(#args),*)
+            }
+        });
+    }
     out
 }
 
@@ -6361,7 +6405,6 @@ fn generate_view(
         let root_embed_method = mark_inherent(root_embed_method);
         let window_lifecycle_overrides = window_lifecycle_overrides.map(mark_inherent);
         let named_accessors = mark_inherent(named_accessors);
-        let methods = mark_inherent(methods);
         let shadow_hooks = mark_inherent(shadow_hooks);
         let on_unmount_method = on_unmount_method.map(mark_inherent);
         let composed_unmount_method = composed_unmount_method.map(mark_inherent);

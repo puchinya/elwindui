@@ -18,14 +18,15 @@ struct OverrideProbe {
 impl OverrideProbe {
     #[overrides]
     fn hit_test_content(&self) -> bool {
-        true
+        !base::hit_test_content()
     }
 
     #[overrides]
-    fn measure_override(&self, _available: Size) -> Size {
+    fn measure_override(&self, available: Size) -> Size {
+        let base = base::measure_override(available);
         Size {
-            width: 37.0,
-            height: 29.0,
+            width: base.width + 17.0,
+            height: base.height + 19.0,
         }
     }
 
@@ -74,8 +75,8 @@ fn component_hit_test_override_reaches_ui_element_trait_path() {
     assert_eq!(
         root.measured_size(),
         Some(Size {
-            width: 37.0,
-            height: 29.0
+            width: 17.0,
+            height: 19.0
         })
     );
 
@@ -106,8 +107,8 @@ fn component_measure_and_arrange_overrides_reach_layout_root() {
     assert_eq!(
         root.measured_size(),
         Some(Size {
-            width: 37.0,
-            height: 29.0
+            width: 17.0,
+            height: 19.0
         })
     );
     layout_root(

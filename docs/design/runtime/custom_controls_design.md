@@ -14,11 +14,15 @@ default visual composition. Standard `Grid`, `HorizontalLayout`,
 None of these controls, nor their private presenters, implements `render()` to
 draw chrome through `RenderContext`.
 
-`CustomTabViewItem` declares an internal scalar header-root content destination
-for its authored template. The inherited `ContentControl::content` remains the
-single logical page-content property. The generated header root is installed
-through Control’s private template-root ownership path; it is not a second
-logical content store.
+`CustomTabViewItem` keeps the inherited `ContentControl::content` as its single
+logical page-content property. Its authored `body: view!` is header presentation
+only; it must be installed as the component's default visual template through
+the existing ContentControl template path, without replacing the inherited
+`#[content(content)]` destination or introducing a second content property.
+The generic component default-template path is tracked separately in
+[#187](https://github.com/puchinya/elwindui/issues/187); until that prerequisite
+lands, this separation is an implementation gate rather than a completed
+claim for #173.
 
 The tab view body is a `Grid` with two rows. The private
 `CustomTabStripPresenter` is a `HorizontalLayout` that owns the ordered item

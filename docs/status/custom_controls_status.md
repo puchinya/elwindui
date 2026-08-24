@@ -27,10 +27,14 @@ Snapshot: 2026-08-24. The public contract is
   is merged. Host-path tests exercise `layout_root`, `RenderTree`, routed input,
   and PointerDispatcher implicit capture; no ignored test remains for the old
   override or direct-render architectures.
+- The inherited `ContentControl::content` plus authored default header-template
+  separation is blocked by [#187](https://github.com/puchinya/elwindui/issues/187),
+  which owns the missing generic component default-template path. #173 remains
+  open until that prerequisite replaces the temporary implementation bridge.
 
 ## Verification
 
-The focused custom-controls suite passes with 27 tests and no ignored tests.
+The focused custom-controls suite passes with 30 tests and no ignored tests.
 Core, codegen, AppKit-enabled facade, inheritance-demo, workspace build/check,
 and workspace test results are recorded in the PR completion report against
 the final head. Workspace-wide formatter or rust-analyzer diagnostics are

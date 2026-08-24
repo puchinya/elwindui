@@ -85,6 +85,9 @@ The item’s authored visual subtree is the tab header: it contains a
 the header. A private content presenter owns the visual presentation of all
 current item contents while preserving each item as the logical owner;
 selection only changes arrangement and never reparents content.
+The item header tracks are `30` logical pixels for the header and `2` for the
+indicator at `Top`, and `2` for the indicator followed by `30` for the header at
+`Bottom`; the total item height remains `32`.
 
 The default close affordance is a private composed component using a 20-pixel
 slot and a `TextBlock` `×` glyph. `Always` and `OnPointerOver` reserve the same

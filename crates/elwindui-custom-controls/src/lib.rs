@@ -249,6 +249,18 @@ pub struct CustomTabViewItem {
     header_row: i32,
     #[computed(expr = if tab_strip_position == TabStripPosition::Top { 1 } else { 0 })]
     indicator_row: i32,
+    #[computed(expr = if tab_strip_position == TabStripPosition::Top {
+        vec![
+            elwindui::core::layout::GridLength::Fixed(30.0),
+            elwindui::core::layout::GridLength::Fixed(2.0),
+        ]
+    } else {
+        vec![
+            elwindui::core::layout::GridLength::Fixed(2.0),
+            elwindui::core::layout::GridLength::Fixed(30.0),
+        ]
+    })]
+    header_grid_rows: Vec<elwindui::core::layout::GridLength>,
     #[computed(expr = if icon.is_some() { Visibility::Visible } else { Visibility::Collapsed })]
     icon_visibility: Visibility,
     #[computed(expr = closable && close_button_presentation != CloseButtonPresentation::Never)]
@@ -276,10 +288,7 @@ pub struct CustomTabViewItem {
             glyph_visible: close_glyph_visible
         };
         Grid {
-            rows: [
-                elwindui::core::layout::GridLength::Fixed(30.0),
-                elwindui::core::layout::GridLength::Fixed(2.0),
-            ]
+            rows: header_grid_rows
             columns: [
                 elwindui::core::layout::GridLength::Fixed(10.0),
                 elwindui::core::layout::GridLength::Auto,
@@ -868,13 +877,32 @@ impl CustomTabViewItem {
         if self.is_pointer_over() != is_pointer_over {
             self.set_is_pointer_over(is_pointer_over);
         }
-        if self.tab_strip_position() != tab_strip_position {
+        let position_changed = self.tab_strip_position() != tab_strip_position;
+        if position_changed {
             self.set_tab_strip_position(tab_strip_position);
+            self.sync_header_rows();
         }
         if self.close_button_presentation() != close_button_presentation {
             self.set_close_button_presentation(close_button_presentation);
         }
         self.sync_close_button();
+    }
+
+    fn sync_header_rows(&self) {
+        let Some(root) = self.__template_root() else {
+            return;
+        };
+        let children = root.visual_children();
+        if let Some(header) = children.first() {
+            header
+                .as_ui_element()
+                .set_attached::<i32>("Grid", "row", self.header_row());
+        }
+        if let Some(indicator) = children.get(1) {
+            indicator
+                .as_ui_element()
+                .set_attached::<i32>("Grid", "row", self.indicator_row());
+        }
     }
 
     fn bind_header_handlers(&self) {

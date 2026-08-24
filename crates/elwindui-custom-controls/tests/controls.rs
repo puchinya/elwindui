@@ -315,6 +315,161 @@ fn close_pointer_sequence_never_selects_the_tab() {
 }
 
 #[test]
+fn close_pointer_release_outside_does_not_request_close_or_select() {
+    let first = CustomTabViewItem::new_item();
+    let second = CustomTabViewItem::new_item();
+    let view = CustomTabView::new_view();
+    view.set_close_button_presentation(CloseButtonPresentation::Always);
+    view.set_children(vec![first, second.clone()]);
+
+    let selection = Rc::new(RefCell::new(Vec::new()));
+    let selection_for_callback = selection.clone();
+    view.set_on_selected_index_change(Box::new(move |index| {
+        selection_for_callback.borrow_mut().push(index);
+    }));
+    let close_requests = Rc::new(RefCell::new(Vec::new()));
+    let close_requests_for_callback = close_requests.clone();
+    view.set_on_close_request(Box::new(move |index| {
+        close_requests_for_callback.borrow_mut().push(index);
+    }));
+
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    let close: Rc<dyn UIElementExt> = second.close_button();
+    let close_origin = absolute_offset(&close);
+    let close_point = Point {
+        x: close_origin.x + close.arranged_width().unwrap_or(20.0) / 2.0,
+        y: close_origin.y + close.arranged_height().unwrap_or(32.0) / 2.0,
+    };
+    let outside = Point { x: 400.0, y: 160.0 };
+    assert!(hit_test(&root, close_point).is_some());
+
+    let dispatcher = elwindui_custom_controls::core::input::PointerDispatcher::new();
+    let focus = elwindui_custom_controls::core::focus::FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Pressed(MouseButton::Left),
+            close_point,
+            0.0,
+        ),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(RawPointerEventKind::Moved, outside, 1.0),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Released(MouseButton::Left),
+            outside,
+            2.0,
+        ),
+    );
+
+    assert!(close_requests.borrow().is_empty());
+    assert_eq!(view.selected_index(), 0);
+    assert!(selection.borrow().is_empty());
+    assert_eq!(view.children().len(), 2);
+
+    // A completion event after the captured release must be harmless.
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Released(MouseButton::Left),
+            outside,
+            3.0,
+        ),
+    );
+    assert!(close_requests.borrow().is_empty());
+    assert!(selection.borrow().is_empty());
+}
+
+#[test]
+fn close_pointer_canceled_does_not_request_close_or_select() {
+    let first = CustomTabViewItem::new_item();
+    let second = CustomTabViewItem::new_item();
+    let view = CustomTabView::new_view();
+    view.set_close_button_presentation(CloseButtonPresentation::Always);
+    view.set_children(vec![first, second.clone()]);
+
+    let selection = Rc::new(RefCell::new(Vec::new()));
+    let selection_for_callback = selection.clone();
+    view.set_on_selected_index_change(Box::new(move |index| {
+        selection_for_callback.borrow_mut().push(index);
+    }));
+    let close_requests = Rc::new(RefCell::new(Vec::new()));
+    let close_requests_for_callback = close_requests.clone();
+    view.set_on_close_request(Box::new(move |index| {
+        close_requests_for_callback.borrow_mut().push(index);
+    }));
+
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    let close: Rc<dyn UIElementExt> = second.close_button();
+    let close_origin = absolute_offset(&close);
+    let close_point = Point {
+        x: close_origin.x + close.arranged_width().unwrap_or(20.0) / 2.0,
+        y: close_origin.y + close.arranged_height().unwrap_or(32.0) / 2.0,
+    };
+    assert!(hit_test(&root, close_point).is_some());
+
+    let dispatcher = elwindui_custom_controls::core::input::PointerDispatcher::new();
+    let focus = elwindui_custom_controls::core::focus::FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Pressed(MouseButton::Left),
+            close_point,
+            0.0,
+        ),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Canceled,
+            Point { x: 400.0, y: 160.0 },
+            1.0,
+        ),
+    );
+
+    assert!(close_requests.borrow().is_empty());
+    assert_eq!(view.selected_index(), 0);
+    assert!(selection.borrow().is_empty());
+
+    // Repeated cancellation after the gesture has been cleared is a no-op.
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Canceled,
+            Point { x: 400.0, y: 160.0 },
+            2.0,
+        ),
+    );
+    assert!(close_requests.borrow().is_empty());
+    assert!(selection.borrow().is_empty());
+}
+
+#[test]
 fn pointer_over_hover_changes_close_template_without_width_jitter() {
     let item = CustomTabViewItem::new_item();
     item.set_header("hover".to_string());
@@ -712,6 +867,49 @@ fn selected_indicator_moves_without_recreating_header_items() {
     );
     assert!(first.visual_parent().is_some());
     assert!(second.visual_parent().is_some());
+}
+
+#[test]
+fn tab_item_header_and_indicator_tracks_follow_strip_position() {
+    let item = CustomTabViewItem::new_item();
+    item.set_header("document".to_string());
+    let view = CustomTabView::new_view();
+    view.set_children(vec![item.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    let item_root: Rc<dyn UIElementExt> = item.clone();
+    let header = find_visual(&item_root, "HorizontalLayout").expect("header row");
+    let indicator = find_visual(&item_root, "Rectangle").expect("indicator row");
+    assert_eq!(header.arranged_offset().expect("header offset").y, 0.0);
+    assert_eq!(header.arranged_height(), Some(30.0));
+    assert_eq!(
+        indicator.arranged_offset().expect("indicator offset").y,
+        30.0
+    );
+    assert_eq!(indicator.arranged_height(), Some(2.0));
+
+    view.set_tab_position(TabStripPosition::Bottom);
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    assert_eq!(
+        indicator.arranged_offset().expect("indicator offset").y,
+        0.0
+    );
+    assert_eq!(indicator.arranged_height(), Some(2.0));
+    assert_eq!(header.arranged_offset().expect("header offset").y, 2.0);
+    assert_eq!(header.arranged_height(), Some(30.0));
 }
 
 #[test]

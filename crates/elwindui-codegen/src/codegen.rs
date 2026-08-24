@@ -4094,6 +4094,19 @@ fn generate_view(
         )
             });
 
+    // Presentation mode is selected by the effective root/base props macro. Local-vs-external
+    // resolution only determines where that macro is exported; it must not decide whether an
+    // authored body is a template root or ordinary content.
+    let root_props_macro = format_ident!("__elwindui_props_{}", resolved_root.type_path);
+    let root_props_macro_path = if table
+        .resolve(from, &resolved_root.type_path)
+        .is_none_or(|info| info.is_builtin)
+    {
+        quote! { elwindui::core::#root_props_macro }
+    } else {
+        quote! { crate::#root_props_macro }
+    };
+
     plan_element(
         &resolved_root,
         &ctx,
@@ -4136,24 +4149,19 @@ fn generate_view(
     // intentionally derived from content metadata rather than from the root type's name: a scalar
     // slot, a `Vec`, and a live collection all use the same ownership boundary here.
     if is_shape_composition {
-        let has_content_destination = table
-            .resolve(from, &resolved_root.type_path)
-            .map_or(true, |info| info.content_field.is_some());
-        if has_content_destination {
-            let bindings: Vec<_> = plan
-                .last()
-                .map(|root| {
-                    root.child_bindings
-                        .iter()
-                        .filter(|(_, ty)| *ty != DYNAMIC_CHILD_SLOT_MARKER)
-                        .map(|(binding, _)| binding.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
-            for binding in bindings {
-                if let Some(node) = plan.iter_mut().find(|n| n.binding == binding) {
-                    node.stored = true;
-                }
+        let bindings: Vec<_> = plan
+            .last()
+            .map(|root| {
+                root.child_bindings
+                    .iter()
+                    .filter(|(_, ty)| *ty != DYNAMIC_CHILD_SLOT_MARKER)
+                    .map(|(binding, _)| binding.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for binding in bindings {
+            if let Some(node) = plan.iter_mut().find(|n| n.binding == binding) {
+                node.stored = true;
             }
         }
     }
@@ -5297,12 +5305,12 @@ fn generate_view(
                     }
                 }
             }
-        } else if is_shape_composition && table.resolve(from, &resolved_root.type_path).is_none() {
+        } else if is_shape_composition {
             // An implicit ContentControl body uses the same ContentPresenter binding contract as
-            // an explicit ControlTemplate. The external base's shape macro selects this block for
-            // template-root-capable classes and expands to nothing for ordinary controls, keeping
-            // the decision metadata-driven and cross-crate.
-            let props_macro = format_ident!("__elwindui_props_{}", resolved_root.type_path);
+            // an explicit ControlTemplate. Always ask the effective root/base props macro: a
+            // local composed descendant may forward through several component macros before the
+            // ContentControl opt-in selects this block. Local-vs-external resolution only chooses
+            // the macro path; it never chooses presentation mode.
             for node in &plan {
                 if node.dynamic.is_some()
                     || !node
@@ -5335,7 +5343,7 @@ fn generate_view(
                     }
                 };
                 wiring_stmts.extend(quote! {
-                    elwindui::core::#props_macro!(@component_body_presentation
+                    #root_props_macro_path!(@component_body_presentation
                         { #bind },
                         {}
                     );
@@ -5981,89 +5989,7 @@ fn generate_view(
         };
         let attach = if children.is_empty() {
             TokenStream::new()
-        } else if let Some(info) = table.resolve(from, &resolved_root.type_path) {
-            match info.content_field.as_deref() {
-                Some(field) => {
-                    let field_ty = info
-                        .field_types
-                        .get(field)
-                        .map(String::as_str)
-                        .unwrap_or_default();
-                    let is_collection = field_ty.contains("UIElementCollection")
-                        || field_ty.trim_start().starts_with("Vec<")
-                        || field_ty.contains("ListExt<");
-                    let field_ident = format_ident!("{field}");
-                    let receiver = quote! { self };
-                    let trait_use = builtin_trait_use(&resolved_root.type_path, Some(info));
-                    if is_collection {
-                        let values = children.iter().map(|(binding, child_ty)| {
-                            let value = child_value(binding, child_ty);
-                            if field_ty.trim_start().starts_with("Vec<") {
-                                if field_ty.contains("dyn UIElement") {
-                                    into_node_if_needed(value, child_ty, from, table)
-                                } else {
-                                    value
-                                }
-                            } else {
-                                into_node_if_needed(value, child_ty, from, table)
-                            }
-                        });
-                        if field_ty.trim_start().starts_with("Vec<") {
-                            emit_field_setter_call(
-                                field,
-                                &resolved_root.type_path,
-                                &format_ident!("set_{field}"),
-                                quote! { vec![ #(#values),* ] },
-                                &receiver,
-                                from,
-                                table,
-                            )
-                        } else {
-                            let values = children
-                                .iter()
-                                .map(|(binding, child_ty)| child_value(binding, child_ty));
-                            quote! {
-                                #trait_use
-                                for __child in vec![ #(#values),* ] {
-                                    self.#field_ident().add(__child);
-                                }
-                            }
-                        }
-                    } else if let Some((binding, child_ty)) = children.first() {
-                        let value = into_node_if_needed(
-                            child_value(binding, child_ty),
-                            child_ty,
-                            from,
-                            table,
-                        );
-                        if is_control_template_enabled {
-                            quote! {
-                                {
-                                    use elwindui::core::ui::ControlExt as _;
-                                    self.__set_template_root(#value);
-                                }
-                            }
-                        } else {
-                            let setter = format_ident!("set_{field}");
-                            let set = emit_field_setter_call(
-                                field,
-                                &resolved_root.type_path,
-                                &setter,
-                                value,
-                                &receiver,
-                                from,
-                                table,
-                            );
-                            quote! { #trait_use #set }
-                        }
-                    } else {
-                        TokenStream::new()
-                    }
-                }
-                None => TokenStream::new(),
-            }
         } else {
-            let props_macro = format_ident!("__elwindui_props_{}", resolved_root.type_path);
             let values = children
                 .iter()
                 .map(|(binding, child_ty)| child_value(binding, child_ty));
@@ -6072,11 +5998,11 @@ fn generate_view(
                 .any(|(_, child_ty)| child_ty == PASSTHROUGH_NODE);
             let content_attach = if erased {
                 quote! {
-                    elwindui::core::#props_macro!(@children_erased self, [#(#values),*]);
+                    #root_props_macro_path!(@children_erased self, [#(#values),*]);
                 }
             } else {
                 quote! {
-                    elwindui::core::#props_macro!(@children self, [#(#values),*]);
+                    #root_props_macro_path!(@children self, [#(#values),*]);
                 }
             };
             let template_value = children
@@ -6096,22 +6022,15 @@ fn generate_view(
             // choose presentation mode; caller bare-child construction continues to use
             // `@children` independently.
             quote! {
-                elwindui::core::#props_macro!(@component_body_presentation
+                #root_props_macro_path!(@component_body_presentation
                     { #template_attach },
                     { #content_attach }
                 );
             }
         };
-        // A known local shape can still use the explicit ControlTemplate key path above. The
-        // implicit default-body protocol is exported by external/core classes, so only generate
-        // its preparation query when the root is not present in the local symbol table.
-        if table.resolve(from, &resolved_root.type_path).is_none()
-            && !is_control_template_enabled
-            && has_root_children
-        {
-            let props_macro = format_ident!("__elwindui_props_{}", resolved_root.type_path);
+        if !is_control_template_enabled && has_root_children {
             let prepare = quote! {
-                elwindui::core::#props_macro!(@component_body_presentation
+                #root_props_macro_path!(@component_body_presentation
                     { use elwindui::core::ui::ControlExt as _; self.__prepare_template_presentation(); },
                     {}
                 );

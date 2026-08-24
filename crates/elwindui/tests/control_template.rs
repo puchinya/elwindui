@@ -7,6 +7,15 @@ use elwindui::core::ui::{
 use std::cell::Cell;
 use std::rc::Rc;
 
+#[path = "control_template/local_body_template_base.rs"]
+mod local_body_template_base;
+
+#[path = "control_template/local_body_template_descendant.rs"]
+mod local_body_template_descendant;
+
+pub use local_body_template_base::*;
+use local_body_template_descendant::LocalBodyTemplateDescendantProbe;
+
 thread_local! {
     static DEFAULT_TEMPLATE_MOUNTS: Cell<u32> = const { Cell::new(0) };
     static TARGET_MOUNTS: Cell<u32> = const { Cell::new(0) };
@@ -45,6 +54,21 @@ struct DefaultBodyContentUseProbe {
 
 #[elwindui::component]
 impl DefaultBodyContentUseProbe {}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct LocalBodyTemplateUseProbe {
+    body: view! {
+        #[id("probe")]
+        let probe = LocalBodyTemplateDescendantProbe {
+            TextBlock { text: "logical page" }
+        };
+
+        probe
+    },
+}
+
+#[elwindui::component]
+impl LocalBodyTemplateUseProbe {}
 
 #[elwindui::component(inherits ContentControl)]
 struct DefaultBodyPresenterProbe {
@@ -278,6 +302,26 @@ fn implicit_content_control_body_presenter_owns_logical_content_visual() {
     assert!(replacement
         .visual_parent()
         .is_some_and(|parent| Rc::ptr_eq(&parent, &presenter_node)));
+}
+
+#[test]
+fn local_multi_hop_content_control_body_uses_template_root_metadata() {
+    let parent = LocalBodyTemplateUseProbe::new();
+    let probe = parent.probe();
+    let logical = probe.content();
+
+    assert_eq!(text_values(probe.as_ref()), vec!["descendant header"]);
+    assert_eq!(
+        logical
+            .as_any()
+            .downcast_ref::<TextBlock>()
+            .expect("bare content is the authored TextBlock")
+            .text
+            .borrow()
+            .as_str(),
+        "logical page"
+    );
+    assert!(logical.visual_parent().is_none());
 }
 
 #[test]

@@ -1485,12 +1485,8 @@ mod tests {
             .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
         let rendered = generated.to_string();
         assert!(
-            rendered.contains("set_visual_root"),
-            "an authored root must target the effective scalar content property: {rendered}"
-        );
-        assert!(
-            !rendered.contains("__set_template_root"),
-            "the frontend test must not depend on Control's private template-root implementation: {rendered}"
+            rendered.contains("component_body_presentation"),
+            "an authored root must target the effective scalar content property through the generic presentation protocol: {rendered}"
         );
     }
 

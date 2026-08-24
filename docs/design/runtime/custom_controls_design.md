@@ -57,12 +57,22 @@ separate target-to-source operation and invokes its callback once only when the
 value changes. An out-of-range source value is preserved and produces no
 selected content.
 
+Pointer selection is interpreted only by the left-press handler. The close
+rectangle is resolved before the header, so a close press never also selects a
+tab; routed tap delivery is not a second selection path. Hovered close
+affordances update only the paint state and use equality-guarded render
+invalidation (not measure invalidation).
+
 Tab presses and splitter presses establish gesture state before external
-callbacks. State is cleared before completion/cancellation callbacks, and every
-callback receives cloned data so reentrant mutations cannot borrow the live
-state. Tab dragging starts at 4 logical pixels; splitter orientation is frozen
-at press time and zero deltas are suppressed. `screen_position` is passed
-through unchanged. The Core `PointerDispatcher` owns implicit capture, while
+callbacks. State is cleared before completion/cancellation callbacks. When a
+drag-start callback mutates the child list, the gesture is re-read by item
+identity and the moved index is resolved again; removal emits only canceled
+completion, while reordering reports the new index. When a cancellation
+completion callback replaces children, reconciliation restarts from the
+current property value instead of continuing with a stale snapshot. Tab
+dragging starts at 4 logical pixels; splitter orientation is frozen at press
+time and zero deltas are suppressed. `screen_position` is passed through
+unchanged. The Core `PointerDispatcher` owns implicit capture, while
 `on_pointer_canceled` terminates active gestures without synthetic release.
 
 ## Lifetime and prerequisite boundaries

@@ -1,10 +1,11 @@
 use elwindui_custom_controls::core::base::{Point, Size};
 use elwindui_custom_controls::core::graphics::{IconSource, RenderCommand, RenderTree, SystemIcon};
 use elwindui_custom_controls::core::input::{
-    KeyModifiers, MouseButton, PointerEventArgs, RoutedEventArgs,
+    KeyModifiers, MouseButton, PointerEventArgs, RoutedEventArgs, TappedEventArgs,
 };
 use elwindui_custom_controls::core::ui::{
-    ContentControlExt, ListExt, UIElementExt, dispatch_routed, layout_root,
+    ContentControlExt, InvalidationKind, ListExt, RelayoutHost, UIElementExt, dispatch_routed,
+    layout_root,
 };
 use elwindui_custom_controls::{
     CloseButtonPresentation, CustomSplitter, CustomSplitterExt, CustomTabView, CustomTabViewExt,
@@ -178,6 +179,269 @@ fn tab_pointer_sequence_emits_drag_payloads_and_cancel() {
     );
     assert_eq!(completed.borrow().len(), 2);
     assert!(completed.borrow()[1].canceled);
+}
+
+#[test]
+fn close_pointer_sequence_never_selects_the_tab() {
+    let first = CustomTabViewItem::new_item();
+    let second = CustomTabViewItem::new_item();
+    let view = CustomTabView::new_view();
+    view.set_close_button_presentation(CloseButtonPresentation::Always);
+    view.set_children(vec![first.clone(), second.clone()]);
+
+    let selection = Rc::new(RefCell::new(Vec::new()));
+    let selection_for_callback = selection.clone();
+    view.set_on_selected_index_change(Box::new(move |index| {
+        selection_for_callback.borrow_mut().push(index);
+    }));
+    let close_requests = Rc::new(RefCell::new(Vec::new()));
+    let close_requests_for_callback = close_requests.clone();
+    view.set_on_close_request(Box::new(move |index| {
+        close_requests_for_callback.borrow_mut().push(index);
+    }));
+
+    // Empty labels make each tab's deterministic 46px header fit the 20px close slot. The
+    // second tab therefore has a close point at x=62, y=16 after its direct arrange pass.
+    let size = Size {
+        width: 240.0,
+        height: 120.0,
+    };
+    view.measure_override(size);
+    view.arrange_override(size);
+    let target: Rc<dyn UIElementExt> = second;
+    let close_point = Point { x: 64.0, y: 16.0 };
+    dispatch_routed(
+        &target,
+        "on_pointer_pressed",
+        &pointer(close_point, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_released",
+        &pointer(close_point, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+    // A normal dispatcher may also produce a tap after release. It must not reintroduce a
+    // second selection interpretation for the close rectangle.
+    dispatch_routed(
+        &target,
+        "on_tapped",
+        &TappedEventArgs {
+            position: close_point,
+            modifiers: KeyModifiers::default(),
+        },
+        &RoutedEventArgs::default(),
+    );
+
+    assert_eq!(&*close_requests.borrow(), &[1]);
+    assert_eq!(view.selected_index(), 0);
+    assert!(selection.borrow().is_empty());
+    assert_eq!(view.children().len(), 2);
+    let _ = first;
+}
+
+#[test]
+fn pointer_over_hover_transitions_request_render_only() {
+    struct RecordingHost {
+        kinds: Rc<RefCell<Vec<InvalidationKind>>>,
+    }
+    impl RelayoutHost for RecordingHost {
+        fn request_relayout(&self, _dirty_group_id: u64, kind: InvalidationKind) {
+            self.kinds.borrow_mut().push(kind);
+        }
+    }
+
+    let item = CustomTabViewItem::new_item();
+    let view = CustomTabView::new_view();
+    view.set_close_button_presentation(CloseButtonPresentation::OnPointerOver);
+    view.set_children(vec![item.clone()]);
+    let kinds = Rc::new(RefCell::new(Vec::new()));
+    view.as_ui_element()
+        .set_invalidate_host(Some(Rc::new(RecordingHost {
+            kinds: kinds.clone(),
+        })));
+
+    let target: Rc<dyn UIElementExt> = item;
+    let args = pointer(Point { x: 1.0, y: 1.0 }, None);
+    dispatch_routed(
+        &target,
+        "on_pointer_entered",
+        &args,
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_moved",
+        &args,
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_exited",
+        &args,
+        &RoutedEventArgs::default(),
+    );
+
+    assert_eq!(
+        &*kinds.borrow(),
+        &[InvalidationKind::Render, InvalidationKind::Render]
+    );
+}
+
+#[test]
+fn drag_started_callback_removing_item_only_cancels() {
+    let item = CustomTabViewItem::new_item();
+    let view = CustomTabView::new_view();
+    view.set_children(vec![item.clone()]);
+    let events = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+    let events_for_completed = events.clone();
+    view.set_on_tab_drag_completed(Box::new(move |payload| {
+        if payload.canceled {
+            events_for_completed
+                .borrow_mut()
+                .push("completed(canceled=true)");
+        } else {
+            events_for_completed
+                .borrow_mut()
+                .push("completed(canceled=false)");
+        }
+    }));
+    let weak_view = Rc::downgrade(&view);
+    let events_for_started = events.clone();
+    view.set_on_tab_drag_started(Box::new(move |_| {
+        events_for_started.borrow_mut().push("started");
+        weak_view
+            .upgrade()
+            .expect("view alive during callback")
+            .set_children(Vec::new());
+    }));
+
+    let target: Rc<dyn UIElementExt> = item;
+    dispatch_routed(
+        &target,
+        "on_pointer_pressed",
+        &pointer(Point { x: 1.0, y: 1.0 }, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_moved",
+        &pointer(Point { x: 8.0, y: 1.0 }, None),
+        &RoutedEventArgs::default(),
+    );
+
+    assert_eq!(&*events.borrow(), &["started", "completed(canceled=true)"]);
+    dispatch_routed(
+        &target,
+        "on_pointer_released",
+        &pointer(Point { x: 8.0, y: 1.0 }, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+    assert_eq!(&*events.borrow(), &["started", "completed(canceled=true)"]);
+}
+
+#[test]
+fn drag_started_callback_reorder_refreshes_moved_index() {
+    let first = CustomTabViewItem::new_item();
+    let second = CustomTabViewItem::new_item();
+    let view = CustomTabView::new_view();
+    view.set_children(vec![first.clone(), second.clone()]);
+    let size = Size {
+        width: 240.0,
+        height: 120.0,
+    };
+    view.measure_override(size);
+    view.arrange_override(size);
+    let started = Rc::new(RefCell::new(Vec::new()));
+    let moved = Rc::new(RefCell::new(Vec::new()));
+    let started_for_callback = started.clone();
+    let weak_view = Rc::downgrade(&view);
+    let first_for_callback = first.clone();
+    let second_for_callback = second.clone();
+    view.set_on_tab_drag_started(Box::new(move |payload| {
+        started_for_callback.borrow_mut().push(payload.index);
+        weak_view
+            .upgrade()
+            .expect("view alive during callback")
+            .set_children(vec![
+                second_for_callback.clone(),
+                first_for_callback.clone(),
+            ]);
+    }));
+    let moved_for_callback = moved.clone();
+    view.set_on_tab_drag_moved(Box::new(move |payload| {
+        moved_for_callback.borrow_mut().push(payload.index);
+    }));
+
+    let target: Rc<dyn UIElementExt> = first;
+    dispatch_routed(
+        &target,
+        "on_pointer_pressed",
+        &pointer(Point { x: 1.0, y: 1.0 }, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_moved",
+        &pointer(Point { x: 8.0, y: 1.0 }, None),
+        &RoutedEventArgs::default(),
+    );
+
+    assert_eq!(&*started.borrow(), &[0]);
+    assert_eq!(&*moved.borrow(), &[1]);
+}
+
+#[test]
+fn canceled_completion_reconciliation_restarts_from_reentrant_children() {
+    let first = CustomTabViewItem::new_item();
+    let replacement = CustomTabViewItem::new_item();
+    let final_item = CustomTabViewItem::new_item();
+    let view = CustomTabView::new_view();
+    view.set_children(vec![first.clone()]);
+    let completion_count = Rc::new(RefCell::new(0));
+    let completion_count_for_callback = completion_count.clone();
+    let weak_view = Rc::downgrade(&view);
+    let final_for_callback = final_item.clone();
+    view.set_on_tab_drag_completed(Box::new(move |payload| {
+        if payload.canceled {
+            *completion_count_for_callback.borrow_mut() += 1;
+            weak_view
+                .upgrade()
+                .expect("view alive during callback")
+                .set_children(vec![final_for_callback.clone()]);
+        }
+    }));
+
+    let target: Rc<dyn UIElementExt> = first.clone();
+    dispatch_routed(
+        &target,
+        "on_pointer_pressed",
+        &pointer(Point { x: 1.0, y: 1.0 }, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_moved",
+        &pointer(Point { x: 8.0, y: 1.0 }, None),
+        &RoutedEventArgs::default(),
+    );
+    view.set_children(vec![replacement.clone()]);
+
+    assert_eq!(*completion_count.borrow(), 1);
+    assert_eq!(view.children().len(), 1);
+    assert!(Rc::ptr_eq(
+        &view.children().to_vec()[0],
+        &(final_item.clone() as Rc<dyn CustomTabViewItemExt>)
+    ));
+    assert!(first.visual_parent().is_none());
+    assert!(replacement.visual_parent().is_none());
+    let view_node: Rc<dyn UIElementExt> = view;
+    assert!(
+        final_item
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &view_node))
+    );
 }
 
 #[test]

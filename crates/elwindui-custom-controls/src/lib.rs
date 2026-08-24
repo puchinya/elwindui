@@ -10,7 +10,7 @@ pub use elwindui_macros::{class, component};
 
 use core::base::{Point, Rect, Size};
 use core::graphics::{Brush, IconSource, RenderContext, StrokeStyle};
-use core::input::{MouseButton, PointerEventArgs, TappedEventArgs};
+use core::input::{MouseButton, PointerEventArgs};
 pub use core::layout::Orientation;
 use core::ui::{ControlExt, IconSourceElementExt, ListExt, TextBlockExt, UIElementExt};
 use std::rc::Rc;
@@ -843,7 +843,13 @@ impl CustomTabView {
             return;
         }
 
-        self.cancel_removed_gesture(&children);
+        if self.cancel_removed_gesture(&children) {
+            // The completion callback is external and may have replaced `children` reentrantly.
+            // Do not continue with this stale snapshot: restart from the current authoritative
+            // property state after the gesture has already been cleared.
+            self.reconcile_children();
+            return;
+        }
         let old_items = self.bound_items();
         for old in old_items.into_iter().filter_map(|item| item.upgrade()) {
             old.set_owner_chrome_changed(None);
@@ -933,9 +939,9 @@ impl CustomTabView {
         }
     }
 
-    fn cancel_removed_gesture(&self, children: &[Rc<CustomTabViewItem>]) {
+    fn cancel_removed_gesture(&self, children: &[Rc<CustomTabViewItem>]) -> bool {
         let Some(gesture) = self.tab_gesture() else {
-            return;
+            return false;
         };
         let still_present = gesture.item.upgrade().is_some_and(|item| {
             children
@@ -943,7 +949,7 @@ impl CustomTabView {
                 .any(|candidate| Rc::ptr_eq(candidate, &item))
         });
         if still_present {
-            return;
+            return false;
         }
         self.set_tab_gesture(None);
         if matches!(gesture.kind, TabGestureKind::Dragging) {
@@ -954,8 +960,10 @@ impl CustomTabView {
                     screen_position: gesture.last_screen_position,
                     canceled: true,
                 });
+                return true;
             }
         }
+        false
     }
 
     fn refresh_item_chrome(&self, item: &CustomTabViewItem) {
@@ -1045,18 +1053,7 @@ impl CustomTabView {
             "on_pointer_exited",
             Box::new(move |_, _| {
                 if let Some(view) = weak_view.upgrade() {
-                    view.set_hovered_index(None);
-                }
-            }),
-        );
-        let weak_view = self.weak_self();
-        self.register_routed_handler::<TappedEventArgs>(
-            "on_tapped",
-            Box::new(move |event, _| {
-                if let Some(view) = weak_view.upgrade() {
-                    if let Some(index) = view.header_at(view.root_local_position(event.position)) {
-                        let _ = view.select_index(index);
-                    }
+                    view.update_hovered_index(None);
                 }
             }),
         );
@@ -1119,21 +1116,40 @@ impl CustomTabView {
                 }
                 gesture.kind = TabGestureKind::Dragging;
                 self.set_tab_gesture(Some(gesture.clone()));
-                if let Some(index) = self.item_index_from_weak(&gesture.item) {
-                    if let Some(callback) = self.tab_drag_started_callback() {
-                        callback(TabDragStartedEventArgs {
-                            index,
-                            position: gesture.press_position,
-                            screen_position: gesture.press_screen_position,
-                        });
-                    }
-                    if let Some(callback) = self.tab_drag_moved_callback() {
-                        callback(TabDragMovedEventArgs {
-                            index,
-                            position: event.position,
-                            screen_position: event.screen_position,
-                        });
-                    }
+                let gesture_item = gesture.item.clone();
+                let Some(index) = self.item_index_from_weak(&gesture_item) else {
+                    return;
+                };
+                if let Some(callback) = self.tab_drag_started_callback() {
+                    callback(TabDragStartedEventArgs {
+                        index,
+                        position: gesture.press_position,
+                        screen_position: gesture.press_screen_position,
+                    });
+                }
+
+                // The started callback is external and may remove or reorder the item. Re-read
+                // the gesture and resolve its index by identity before emitting the first move.
+                let Some(current) = self.tab_gesture() else {
+                    return;
+                };
+                let same_item = current
+                    .item
+                    .upgrade()
+                    .zip(gesture_item.upgrade())
+                    .is_some_and(|(current, original)| Rc::ptr_eq(&current, &original));
+                if !same_item || !matches!(current.kind, TabGestureKind::Dragging) {
+                    return;
+                }
+                let Some(index) = self.item_index_from_weak(&current.item) else {
+                    return;
+                };
+                if let Some(callback) = self.tab_drag_moved_callback() {
+                    callback(TabDragMovedEventArgs {
+                        index,
+                        position: event.position,
+                        screen_position: event.screen_position,
+                    });
                 }
             }
             TabGestureKind::Dragging => {
@@ -1209,7 +1225,15 @@ impl CustomTabView {
 
     fn update_hover(&self, position: Point) {
         let point = self.root_local_position(position);
-        self.set_hovered_index(self.header_at(point));
+        self.update_hovered_index(self.header_at(point));
+    }
+
+    fn update_hovered_index(&self, hovered: Option<usize>) {
+        if self.hovered_index() == hovered {
+            return;
+        }
+        self.set_hovered_index(hovered);
+        self.invalidate_render();
     }
 
     fn root_local_position(&self, position: Point) -> Point {

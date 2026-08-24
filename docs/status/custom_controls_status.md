@@ -17,8 +17,13 @@ Snapshot: 2026-08-24. The public contract is
   presentation state, 4-pixel tab drag cancellation, splitter axis/delta
   semantics, weak callbacks, and Core `IconSourceElement` realization are
   implemented.
+- Close presses are resolved before header selection, hover transitions use
+  equality-guarded paint invalidation, drag-start callbacks re-resolve item
+  identity/index, and cancellation reconciliation restarts after reentrant
+  child replacement.
 - Core-only tests cover ownership, metadata/icon realization, selection and
-  callback behavior, tab gestures, cancellation, and splitter gestures.
+  callback behavior, tab gestures, cancellation, reentrant drag mutations, and
+  splitter gestures.
 
 ## Known implementation gap (C — newly discovered requirement)
 
@@ -29,13 +34,14 @@ Consequently the custom `measure_override`, `arrange_override`, `render`, and
 `hit_test_content` implementations can be exercised directly, but the normal
 host `layout_root`/`RenderTree` path still uses the inherited Control behavior.
 The close-geometry render regression is therefore kept as an ignored test with
-an explicit C-class reason. Fixing the component override bridge requires a
-separate approved codegen/core prerequisite; this PR does not silently refactor
-codegen or fall back to new `#[class]` controls.
+an explicit C-class reason. Fixing the component override bridge is tracked by
+the separate prerequisite [#185](https://github.com/puchinya/elwindui/issues/185);
+this PR does not silently refactor codegen or fall back to new `#[class]`
+controls.
 
 ## Verification
 
-The focused crate test command passes with 12 tests and one ignored C-class
+The focused crate test command passes with 17 tests and one ignored C-class
 render test. Core, codegen, AppKit-enabled facade check, inheritance-demo
 check, workspace check/build, and `git diff --check` also pass. Workspace-wide
 `cargo fmt --all -- --check` still reports pre-existing formatting differences
@@ -49,7 +55,8 @@ run; Windows runtime verification remains outside #173 in #178/#180.
 
 ## Follow-up
 
-- Open/track the C-class component override-vtable prerequisite before claiming
+- Complete the C-class component override-vtable prerequisite in
+  [#185](https://github.com/puchinya/elwindui/issues/185) before claiming
   host-level custom layout/render parity.
 - Docking integration remains Issue #172 and must stay a downstream crate.
 - This crate does not add or own common pointer-cancellation infrastructure.

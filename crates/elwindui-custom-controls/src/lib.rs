@@ -122,7 +122,7 @@ enum TabItemPointerEvent {
 
 struct ContentEntry {
     item: std::rc::Weak<CustomTabViewItem>,
-    content: Rc<dyn UIElementExt>,
+    content: Option<Rc<dyn UIElementExt>>,
     #[allow(dead_code)]
     subscription: Subscription,
 }
@@ -431,25 +431,26 @@ impl CustomTabContentPresenter {
         let state = self.state();
         let old_entries = std::mem::take(&mut *state.borrow_mut());
         for entry in old_entries {
-            let old = entry.content;
-            self.as_ui_element().visual_collection.remove(&old);
+            if let Some(old) = entry.content {
+                self.as_ui_element().visual_collection.remove(&old);
+            }
         }
         let mut entries = Vec::with_capacity(items.len());
         for item in &items {
             item.prepare_content_presentation();
-            let Some(content) = item.__content_opt() else {
-                continue;
-            };
-            if let Some(parent) = content.visual_parent() {
-                let owner = self.as_ui_element().visual_collection.owner_rc();
-                assert!(
-                    owner
-                        .as_ref()
-                        .is_some_and(|owner| Rc::ptr_eq(&parent, owner)),
-                    "CustomTabContentPresenter cannot steal content owned by another visual parent"
-                );
+            let content = item.__content_opt();
+            if let Some(content) = content.as_ref() {
+                if let Some(parent) = content.visual_parent() {
+                    let owner = self.as_ui_element().visual_collection.owner_rc();
+                    assert!(
+                        owner
+                            .as_ref()
+                            .is_some_and(|owner| Rc::ptr_eq(&parent, owner)),
+                        "CustomTabContentPresenter cannot steal content owned by another visual parent"
+                    );
+                }
+                self.as_ui_element().visual_collection.add(content.clone());
             }
-            self.as_ui_element().visual_collection.add(content.clone());
             let weak_presenter = self.weak_self();
             let weak_item = Rc::downgrade(item);
             let subscription = item.__subscribe_content_changed(Rc::new(move |replacement| {
@@ -484,8 +485,9 @@ impl CustomTabContentPresenter {
         }) else {
             return;
         };
-        let old = entry.content.clone();
-        self.as_ui_element().visual_collection.remove(&old);
+        if let Some(old) = entry.content.take() {
+            self.as_ui_element().visual_collection.remove(&old);
+        }
         if let Some(content) = replacement {
             if let Some(parent) = content.visual_parent() {
                 let owner = self.as_ui_element().visual_collection.owner_rc();
@@ -497,13 +499,13 @@ impl CustomTabContentPresenter {
                 );
             }
             self.as_ui_element().visual_collection.add(content.clone());
-            entry.content = content;
+            entry.content = Some(content);
         }
         drop(entries);
         self.invalidate_measure();
     }
 
-    fn entries(&self) -> Vec<(usize, Rc<dyn UIElementExt>)> {
+    fn entries(&self) -> Vec<(usize, Option<Rc<dyn UIElementExt>>)> {
         self.state()
             .borrow()
             .iter()
@@ -533,12 +535,14 @@ impl CustomTabContentPresenter {
         }
         let entries = self.entries();
         for (_, content) in &entries {
-            content.measure(available);
+            if let Some(content) = content {
+                content.measure(available);
+            }
         }
         entries
             .iter()
             .find(|(index, _)| *index == self.selected_index())
-            .and_then(|(_, content)| content.measured_size())
+            .and_then(|(_, content)| content.as_ref()?.measured_size())
             .unwrap_or_default()
     }
 
@@ -554,6 +558,9 @@ impl CustomTabContentPresenter {
             });
         }
         for (index, content) in self.entries() {
+            let Some(content) = content else {
+                continue;
+            };
             let rect = if index == self.selected_index() {
                 Rect {
                     x: 0.0,

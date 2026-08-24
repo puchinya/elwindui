@@ -30,7 +30,7 @@ Snapshot: 2026-08-24. The public contract is
 
 ## Verification
 
-The focused custom-controls suite passes with 26 tests and no ignored tests.
+The focused custom-controls suite passes with 27 tests and no ignored tests.
 Core, codegen, AppKit-enabled facade, inheritance-demo, workspace build/check,
 and workspace test results are recorded in the PR completion report against
 the final head. Workspace-wide formatter or rust-analyzer diagnostics are

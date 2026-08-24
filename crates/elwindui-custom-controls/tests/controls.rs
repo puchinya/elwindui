@@ -773,6 +773,28 @@ fn content_replacement_detaches_old_visual_before_attaching_new_visual() {
 }
 
 #[test]
+fn content_presenter_preserves_item_indices_when_a_tab_has_no_content() {
+    let first = CustomTabViewItem::new_item();
+    let second = CustomTabViewItem::new_item();
+    let second_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    second.set_content(second_content.clone());
+    let view = CustomTabView::new_view();
+    view.set_children(vec![first, second]);
+    view.set_selected_index(1);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+
+    assert_eq!(second_content.arranged_width(), Some(240.0));
+    assert_eq!(second_content.arranged_height(), Some(88.0));
+}
+
+#[test]
 fn removing_item_detaches_header_and_content_without_destroying_external_content() {
     let first = CustomTabViewItem::new_item();
     let second = CustomTabViewItem::new_item();

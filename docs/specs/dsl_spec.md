@@ -276,7 +276,7 @@ impl ContentControl {
 - `impl`側の`#[elwindui::component]`は**引数なし**で書く。`#[class]`と同じく、対応する`struct`が同一ソース上で先に宣言されている必要がある
 - **`impl`ブロックはメソッドが無くても必須**。型を生成するのは`impl`側であり、`struct`側は宣言を登録するだけである(`#[class]`が`struct`側で引数を保存し`impl`側で生成するのと同じ分担)。メソッドを持たないコンポーネントも`#[elwindui::component] impl Name {}`を書く
 - `fn`には`#[overridable]`か`#[overrides]`のいずれかが必須。`&self`レシーバ・プレーンな識別子引数のみで、ジェネリクス・`where`句・`async`/`unsafe`・トレイト`impl`は受け付けない(通常の`impl`ブロックに書く)
-- `#[elwindui_macros::class]`(ビルトインのRustクラス階層マクロ、`docs/specs/macro_class_spec.md`§8.3)にも同じ`#[overridable]`/`#[overrides]`があるが、そちらは`elwindui-core`/バックエンドが手書きするRustクラス階層に対する仕組みで、こちらはコンポーネント継承チェーン上のメソッドオーバーライド(AST上の`MethodDef`)である。属性名と意味論を意図的に揃えてあるが、実装もスコープも独立している
+- `#[elwindui_macros::class]`(ビルトインのRustクラス階層マクロ、`docs/specs/macro_class_spec.md`§8.3)にも同じ`#[overridable]`/`#[overrides]`がある。componentのcompanion `impl`で宣言したoverride metadataは、合成される`#[class]` implへそのまま渡され、最終的なruntime dispatchは既存のclass-managed ancestor chainが担う。したがって属性名・意味論・dispatch authorityは一つのoverride modelを共有し、component側に別のvtableや転送表を持たない
 
 `#[computed]`フィールドも同様に、基底の同名フィールドを`#[overrides]`なしで再宣言するとエラーになり、`#[overrides]`を付けると上書きとして扱われる(型は基底と一致していなければならない)。
 

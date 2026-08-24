@@ -173,6 +173,18 @@ setter が private `template_root` replacement path へ委譲するが、この 
 lowering からは見えない。`Layout` の `children`、`ContentControl` の `content`、将来の
 specialized control の typed `children` はすべて同じ metadata-driven rule を通る。
 
+#### Component override bridge
+
+`#[elwindui::component]` の companion `impl` にある `#[overridable]` / `#[overrides]` は
+`ComponentDef.methods` / `MethodDef` の metadata として保持し、view を持つ component の
+生成時に、合成された `#[class]` impl の同じ method itemへ再付与する。これは component
+専用のvtableやmethod-name/type-name dispatchを追加する処理ではない。生成された class implを
+`#[class]` macroへ渡し、ancestor Ext trait / `UIElementExt` の既存override chainを唯一の
+runtime authorityとして利用する。viewを持たないcomponentの通常のcomponent override lowering
+も同じmetadata semanticsを保ち、component-to-componentの既存挙動を変更しない。生成された
+component型に残る同名のinherent compatibility methodは、既存の具象component APIを保つための
+直接呼出し面であり、hostのtrait-object dispatchや別のoverride chainではない。
+
 ## 4. Diagnostic設計
 
 各AST nodeは可能な限り元tokenのspanを保持する。parser、resolver、validatorのerrorは、原因となるDSL tokenまたはRust attributeへ関連付ける。複数の独立したerrorを収集できる場合はまとめて返すが、invalid ASTから意味を推測してgenerationを継続しない。

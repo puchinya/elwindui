@@ -46,6 +46,11 @@ ordinary/root classは、classの公開操作をdyn dispatch可能にするexten
 
 `#[overridable]` / `#[overrides]` methodは `&self` receiverとmacroが対応するplain argumentを使う。generic、`where`、`async`、`unsafe`、trait `impl`等の非対応形はcompile-time errorとなる。
 
+`#[elwindui::component]` の view component が companion `impl` に同じ属性を記述した場合も、
+生成される `#[class]` impl へその metadata が渡される。したがって `Rc<dyn UIElementExt>`
+からの通常の host dispatch は、この仕様の class-managed override chainを通り、component専用の
+別vtableやmethod-nameごとの転送規則は存在しない。
+
 `struct_only` は新しいper-class traitを持たないため、そのclassだけの `#[overridable]` slotを追加できない。overrideが必要な操作は既存interface側で定義する。
 
 `struct_only` implementorはこのoverride契約に対して**透過(transparent)**である: あるinterfaceが `#[overridable]` として宣言したmethodは、そのinterfaceを実装する `struct_only` classを経由したordinary descendant chainのどの深さからでも、通常の `#[overrides]` で置き換えられる — chainの途中に `struct_only` implementorが挟まっていることをdescendant側が意識する必要はない。この透過性は:

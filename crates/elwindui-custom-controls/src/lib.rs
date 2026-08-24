@@ -1,4 +1,4 @@
-//! Reusable custom-rendered controls shared by Docking and application code.
+//! Reusable templated custom controls shared by Docking and application code.
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
@@ -9,21 +9,18 @@ pub use elwindui_core::ui;
 pub use elwindui_macros::{class, component};
 
 use core::base::{Point, Rect, Size};
-use core::graphics::{Brush, IconSource, RenderContext, StrokeStyle};
+use core::graphics::IconSource;
 use core::input::{MouseButton, PointerEventArgs};
 pub use core::layout::Orientation;
-use core::ui::{ControlExt, IconSourceElementExt, ListExt, TextBlockExt, UIElementExt};
+use core::layout::Visibility;
+use core::reactive::Subscription;
+use core::ui::{
+    ContentControlExt, ControlExt, IconSourceElementExt, LayoutExt, ListExt, UIElementExt,
+};
 use std::rc::Rc;
 
 const TAB_STRIP_HEIGHT: f32 = 32.0;
-const TAB_HORIZONTAL_PADDING: f32 = 10.0;
-const TAB_ELEMENT_GAP: f32 = 6.0;
-const TAB_ICON_SIZE: f32 = 16.0;
-const TAB_CLOSE_SLOT: f32 = 20.0;
-const TAB_CLOSE_GLYPH: f32 = 10.0;
 const TAB_DRAG_THRESHOLD: f32 = 4.0;
-const SELECTED_INDICATOR_THICKNESS: f32 = 2.0;
-const SPLITTER_THICKNESS: f32 = 6.0;
 
 /// The edge on which a tab strip is authored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -102,7 +99,6 @@ pub type TabCloseRequested = TabCloseRequestedEventArgs;
 enum TabGestureKind {
     Pressed,
     Dragging,
-    Close { rect: Rect },
 }
 
 #[derive(Clone, Debug)]
@@ -115,13 +111,20 @@ struct TabGesture {
     kind: TabGestureKind,
 }
 
-#[derive(Clone)]
-struct TabChrome {
+enum TabItemPointerEvent {
+    Pressed(PointerEventArgs),
+    Moved(PointerEventArgs),
+    Released(PointerEventArgs),
+    Canceled(PointerEventArgs),
+    Entered,
+    Exited,
+}
+
+struct ContentEntry {
     item: std::rc::Weak<CustomTabViewItem>,
-    header: Rc<core::ui::TextBlock>,
-    icon: Option<Rc<core::ui::IconSourceElement>>,
-    header_rect: Rect,
-    close_rect: Option<Rect>,
+    content: Rc<dyn UIElementExt>,
+    #[allow(dead_code)]
+    subscription: Subscription,
 }
 
 #[derive(Clone, Debug)]
@@ -174,9 +177,54 @@ pub type SplitterDragDelta = SplitterDragDeltaEventArgs;
 /// Backwards-compatible short name for [`SplitterDragCompletedEventArgs`].
 pub type SplitterDragCompleted = SplitterDragCompletedEventArgs;
 
-/// One item displayed by [`CustomTabView`].
+/// Private close-slot control used by [`CustomTabViewItem`]'s authored header template.
+#[elwindui::component(inherits Control)]
+struct CustomTabCloseButton {
+    #[prop(default = true)]
+    slot_visible: bool,
+    #[prop(default = false)]
+    glyph_visible: bool,
+    #[state(default = None)]
+    close_callback: Option<Rc<dyn Fn()>>,
+    #[state(default = false)]
+    pressed: bool,
+    #[state(default = false)]
+    handlers_bound: bool,
+    #[computed(expr = if slot_visible { Visibility::Visible } else { Visibility::Collapsed })]
+    slot_visibility: Visibility,
+    #[computed(expr = if glyph_visible { "×".to_string() } else { String::new() })]
+    glyph_text: String,
+    body: view! {
+        on_mount {
+            this.bind_pointer_handlers();
+        }
+        Grid {
+            width: 20.0
+            height: 32.0
+            visibility: slot_visibility
+            TextBlock {
+                text: glyph_text
+                text_alignment: elwindui::core::ui::TextAlignment::Center
+            }
+        }
+    },
+}
+
+#[elwindui::component]
+impl CustomTabCloseButton {
+    #[overrides]
+    fn hit_test_content(&self) -> bool {
+        self.slot_visible()
+    }
+}
+
+/// One item displayed by [`CustomTabView`]. Its visual template is the tab header; its inherited
+/// `ContentControl` content remains the logical page presented by the private content presenter.
 #[elwindui::component(inherits ContentControl)]
+#[content(header_root)]
 pub struct CustomTabViewItem {
+    #[prop(default = elwindui::core::ui::TextBlock::new())]
+    header_root: Rc<dyn UIElementExt>,
     #[prop(default = String::new())]
     header: String,
     #[prop(default = None)]
@@ -184,18 +232,351 @@ pub struct CustomTabViewItem {
     #[prop(default = true)]
     closable: bool,
     #[state(default = None)]
-    owner_chrome_callback: Option<Rc<dyn Fn()>>,
+    owner_pointer_callback: Option<Rc<dyn Fn(TabItemPointerEvent)>>,
+    #[state(default = None)]
+    owner_close_callback: Option<Rc<dyn Fn()>>,
+    #[state(default = false)]
+    header_handlers_bound: bool,
+    #[state(default = false)]
+    is_selected: bool,
+    #[state(default = false)]
+    is_pointer_over: bool,
+    #[state(default = TabStripPosition::Top)]
+    tab_strip_position: TabStripPosition,
+    #[state(default = CloseButtonPresentation::Always)]
+    close_button_presentation: CloseButtonPresentation,
+    #[computed(expr = if tab_strip_position == TabStripPosition::Top { 0 } else { 1 })]
+    header_row: i32,
+    #[computed(expr = if tab_strip_position == TabStripPosition::Top { 1 } else { 0 })]
+    indicator_row: i32,
+    #[computed(expr = if icon.is_some() { Visibility::Visible } else { Visibility::Collapsed })]
+    icon_visibility: Visibility,
+    #[computed(expr = closable && close_button_presentation != CloseButtonPresentation::Never)]
+    close_slot_visible: bool,
+    #[computed(expr = closable && match close_button_presentation {
+        CloseButtonPresentation::Always => true,
+        CloseButtonPresentation::OnPointerOver => is_pointer_over,
+        CloseButtonPresentation::Never => false,
+    })]
+    close_glyph_visible: bool,
+    #[computed(expr = if is_selected { Visibility::Visible } else { Visibility::Collapsed })]
+    indicator_visibility: Visibility,
     body: view! {
-        on_update(header, icon, closable) {
-            this.notify_owner_chrome_changed();
+        on_mount {
+            this.prepare_content_presentation();
+            this.bind_header_handlers();
+            this.sync_close_button();
+        }
+        on_update(header, icon, closable, is_selected, is_pointer_over, tab_strip_position, close_button_presentation) {
+            this.sync_close_button();
+        }
+        #[id("close_button")]
+        let close_button = CustomTabCloseButton {
+            slot_visible: close_slot_visible
+            glyph_visible: close_glyph_visible
+        };
+        Grid {
+            rows: [
+                elwindui::core::layout::GridLength::Fixed(30.0),
+                elwindui::core::layout::GridLength::Fixed(2.0),
+            ]
+            columns: [
+                elwindui::core::layout::GridLength::Fixed(10.0),
+                elwindui::core::layout::GridLength::Auto,
+                elwindui::core::layout::GridLength::Fixed(10.0),
+            ]
+            HorizontalLayout {
+                Grid::row: header_row
+                Grid::column: 1
+                height: 30.0
+                spacing: 6.0
+                IconSourceElement {
+                    width: 16.0
+                    height: 16.0
+                    icon_source: icon
+                    visibility: icon_visibility
+                }
+                TextBlock {
+                    text: header
+                    text_alignment: elwindui::core::ui::TextAlignment::Center
+                }
+                close_button
+            }
+            Rectangle {
+                Grid::row: indicator_row
+                Grid::column: 1
+                fill: "#0078d4"
+                visibility: indicator_visibility
+            }
         }
     },
 }
 
 #[elwindui::component]
-impl CustomTabViewItem {}
+impl CustomTabViewItem {
+    #[overrides]
+    fn hit_test_content(&self) -> bool {
+        true
+    }
+}
 
-/// A self-drawn tab strip and selected-content host.
+/// Private presenter that owns the ordered tab-header controls and delegates layout to
+/// `HorizontalLayout`.
+#[elwindui::component(inherits HorizontalLayout)]
+struct CustomTabStripPresenter {
+    #[prop(default = Vec::new())]
+    items: Vec<Rc<CustomTabViewItem>>,
+    #[prop(default = 0)]
+    selected_index: usize,
+    #[prop(default = TabStripPosition::Top)]
+    tab_strip_position: TabStripPosition,
+    #[prop(default = CloseButtonPresentation::Always)]
+    close_button_presentation: CloseButtonPresentation,
+    #[state(default = Vec::new())]
+    bound_items: Vec<std::rc::Weak<CustomTabViewItem>>,
+    body: view! {
+        on_mount {
+            this.reconcile_items();
+        }
+        on_update(items, selected_index, tab_strip_position, close_button_presentation) {
+            this.reconcile_items();
+        }
+    },
+}
+
+impl CustomTabStripPresenter {
+    fn reconcile_items(&self) {
+        let items = self.items();
+        let unchanged = self.bound_items().len() == items.len()
+            && self
+                .bound_items()
+                .iter()
+                .zip(items.iter())
+                .all(|(old, new)| old.upgrade().is_some_and(|old| Rc::ptr_eq(&old, new)));
+        if !unchanged {
+            LayoutExt::children(self).clear();
+            for item in &items {
+                let visual: Rc<dyn UIElementExt> = item.clone();
+                LayoutExt::children(self).add(visual);
+            }
+            self.set_bound_items(items.iter().map(Rc::downgrade).collect());
+        }
+        self.sync_items(&items);
+    }
+
+    fn sync_items(&self, items: &[Rc<CustomTabViewItem>]) {
+        let selected = self.selected_index();
+        let position = self.tab_strip_position();
+        let presentation = self.close_button_presentation();
+        for (index, item) in items.iter().enumerate() {
+            item.set_presentation(
+                index == selected,
+                item.is_pointer_over(),
+                position,
+                presentation,
+            );
+        }
+    }
+}
+
+#[elwindui::component]
+impl CustomTabStripPresenter {}
+
+/// Private presenter that keeps every tab page content visually attached while arranging only the
+/// selected page into the available content rectangle.
+#[elwindui::component(inherits Control)]
+struct CustomTabContentPresenter {
+    #[prop(default = Vec::new())]
+    items: Vec<Rc<CustomTabViewItem>>,
+    #[prop(default = 0)]
+    selected_index: usize,
+    #[state(default = Vec::new())]
+    bound_items: Vec<std::rc::Weak<CustomTabViewItem>>,
+    #[state(default = None)]
+    presentation_state: Option<Rc<std::cell::RefCell<Vec<ContentEntry>>>>,
+    body: view! {
+        on_mount {
+            this.reconcile_contents();
+        }
+        on_update(items, selected_index) {
+            this.reconcile_contents();
+            this.invalidate_measure();
+        }
+        Grid {}
+    },
+}
+
+impl CustomTabContentPresenter {
+    fn state(&self) -> Rc<std::cell::RefCell<Vec<ContentEntry>>> {
+        if let Some(state) = self.presentation_state() {
+            return state;
+        }
+        let state = Rc::new(std::cell::RefCell::new(Vec::new()));
+        self.set_presentation_state(Some(state.clone()));
+        state
+    }
+
+    fn reconcile_contents(&self) {
+        let items = self.items();
+        let unchanged = self.bound_items().len() == items.len()
+            && self
+                .bound_items()
+                .iter()
+                .zip(items.iter())
+                .all(|(old, new)| old.upgrade().is_some_and(|old| Rc::ptr_eq(&old, new)));
+        if unchanged {
+            return;
+        }
+
+        let state = self.state();
+        let old_entries = std::mem::take(&mut *state.borrow_mut());
+        for entry in old_entries {
+            let old = entry.content;
+            self.as_ui_element().visual_collection.remove(&old);
+        }
+        let mut entries = Vec::with_capacity(items.len());
+        for item in &items {
+            item.prepare_content_presentation();
+            let Some(content) = item.__content_opt() else {
+                continue;
+            };
+            if let Some(parent) = content.visual_parent() {
+                let owner = self.as_ui_element().visual_collection.owner_rc();
+                assert!(
+                    owner
+                        .as_ref()
+                        .is_some_and(|owner| Rc::ptr_eq(&parent, owner)),
+                    "CustomTabContentPresenter cannot steal content owned by another visual parent"
+                );
+            }
+            self.as_ui_element().visual_collection.add(content.clone());
+            let weak_presenter = self.weak_self();
+            let weak_item = Rc::downgrade(item);
+            let subscription = item.__subscribe_content_changed(Rc::new(move |replacement| {
+                if let (Some(presenter), Some(item)) =
+                    (weak_presenter.upgrade(), weak_item.upgrade())
+                {
+                    presenter.replace_item_content(&item, replacement);
+                }
+            }));
+            entries.push(ContentEntry {
+                item: Rc::downgrade(item),
+                content,
+                subscription,
+            });
+        }
+        *state.borrow_mut() = entries;
+        self.set_bound_items(items.iter().map(Rc::downgrade).collect());
+    }
+
+    fn replace_item_content(
+        &self,
+        item: &CustomTabViewItem,
+        replacement: Option<Rc<dyn UIElementExt>>,
+    ) {
+        let state = self.state();
+        let mut entries = state.borrow_mut();
+        let Some(entry) = entries.iter_mut().find(|entry| {
+            entry
+                .item
+                .upgrade()
+                .is_some_and(|candidate| std::ptr::eq(candidate.as_ref(), item))
+        }) else {
+            return;
+        };
+        let old = entry.content.clone();
+        self.as_ui_element().visual_collection.remove(&old);
+        if let Some(content) = replacement {
+            if let Some(parent) = content.visual_parent() {
+                let owner = self.as_ui_element().visual_collection.owner_rc();
+                assert!(
+                    owner
+                        .as_ref()
+                        .is_some_and(|owner| Rc::ptr_eq(&parent, owner)),
+                    "CustomTabContentPresenter cannot steal replacement content"
+                );
+            }
+            self.as_ui_element().visual_collection.add(content.clone());
+            entry.content = content;
+        }
+        drop(entries);
+        self.invalidate_measure();
+    }
+
+    fn entries(&self) -> Vec<(usize, Rc<dyn UIElementExt>)> {
+        self.state()
+            .borrow()
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (index, entry.content.clone()))
+            .collect()
+    }
+
+    fn weak_self(&self) -> std::rc::Weak<Self> {
+        self.__self_weak
+            .borrow()
+            .clone()
+            .upgrade()
+            .and_then(|rc| rc.downcast::<Self>().ok())
+            .map(|rc| Rc::downgrade(&rc))
+            .unwrap_or_default()
+    }
+}
+
+#[elwindui::component]
+impl CustomTabContentPresenter {
+    #[overrides]
+    fn measure_override(&self, available: Size) -> Size {
+        self.reconcile_contents();
+        if let Some(root) = self.__template_root() {
+            root.measure(available);
+        }
+        let entries = self.entries();
+        for (_, content) in &entries {
+            content.measure(available);
+        }
+        entries
+            .iter()
+            .find(|(index, _)| *index == self.selected_index())
+            .and_then(|(_, content)| content.measured_size())
+            .unwrap_or_default()
+    }
+
+    #[overrides]
+    fn arrange_override(&self, final_size: Size) -> Size {
+        self.reconcile_contents();
+        if let Some(root) = self.__template_root() {
+            root.arrange(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: final_size.width.max(0.0),
+                height: final_size.height.max(0.0),
+            });
+        }
+        for (index, content) in self.entries() {
+            let rect = if index == self.selected_index() {
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: final_size.width.max(0.0),
+                    height: final_size.height.max(0.0),
+                }
+            } else {
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                }
+            };
+            content.set_clip_to_bounds(Some(true));
+            content.arrange(rect);
+        }
+        final_size
+    }
+}
+
+/// A templated tab strip and selected-content host.
 #[elwindui::component(inherits Control)]
 #[content(children)]
 pub struct CustomTabView {
@@ -220,333 +601,65 @@ pub struct CustomTabView {
     tab_drag_completed_callback: Option<Rc<dyn Fn(TabDragCompletedEventArgs)>>,
     #[state(default = Vec::new())]
     bound_items: Vec<std::rc::Weak<CustomTabViewItem>>,
-    #[state(default = Vec::new())]
-    chrome: Vec<TabChrome>,
     #[state(default = None)]
     tab_gesture: Option<TabGesture>,
-    #[state(default = false)]
-    root_handlers_bound: bool,
-    #[state(default = None)]
-    hovered_index: Option<usize>,
+    #[computed(expr = if tab_strip_position == TabStripPosition::Top { 0 } else { 1 })]
+    tab_strip_row: i32,
+    #[computed(expr = if tab_strip_position == TabStripPosition::Top { 1 } else { 0 })]
+    content_row: i32,
+    #[computed(expr = if tab_strip_position == TabStripPosition::Top {
+        vec![
+            elwindui::core::layout::GridLength::Fixed(TAB_STRIP_HEIGHT),
+            elwindui::core::layout::GridLength::Star(1.0),
+        ]
+    } else {
+        vec![
+            elwindui::core::layout::GridLength::Star(1.0),
+            elwindui::core::layout::GridLength::Fixed(TAB_STRIP_HEIGHT),
+        ]
+    })]
+    grid_rows: Vec<elwindui::core::layout::GridLength>,
+    #[state(default = Vec::new())]
+    template_items: Vec<Rc<CustomTabViewItem>>,
+    #[computed(expr = template_items.clone())]
+    tab_items: Vec<Rc<CustomTabViewItem>>,
+    #[computed(expr = template_items.clone())]
+    content_items: Vec<Rc<CustomTabViewItem>>,
     body: view! {
         on_mount {
             this.set_clip_to_bounds(Some(true));
             this.reconcile_children();
-            this.bind_root_handlers();
         }
-        on_update(children, selected_index, tab_strip_position, close_button_presentation) {
+        on_update(children, template_items, selected_index, tab_strip_position, close_button_presentation) {
             this.reconcile_children();
-            this.invalidate_measure();
-            this.invalidate_render();
         }
-        // The transparent shape keeps the self-drawn surface hit-testable even though the
-        // inherited Control hit-test hook cannot currently be overridden by a composed
-        // `#[component]` (see the C-class limitation in the status document).  It is renderer
-        // chrome only; real item/content ownership remains below this node.
-        Rectangle {
-            fill: "#00000000"
+        #[id("tab_strip")]
+        let tab_strip = CustomTabStripPresenter {
+            items: tab_items
+            selected_index: selected_index
+            tab_strip_position: tab_strip_position
+            close_button_presentation: close_button_presentation
+            Grid::row: tab_strip_row
+        };
+        #[id("content_presenter")]
+        let content_presenter = CustomTabContentPresenter {
+            items: content_items
+            selected_index: selected_index
+            Grid::row: content_row
+        };
+        Grid {
+            rows: grid_rows
+            columns: [elwindui::core::layout::GridLength::Star(1.0)]
+            tab_strip
+            content_presenter
         }
     },
 }
 
 #[elwindui::component]
-impl CustomTabView {
-    #[overrides]
-    fn hit_test_content(&self) -> bool {
-        true
-    }
+impl CustomTabView {}
 
-    #[overrides]
-    fn measure_override(&self, available: Size) -> Size {
-        self.reconcile_children();
-        let content_available = Size {
-            width: available.width,
-            height: (available.height - TAB_STRIP_HEIGHT).max(0.0),
-        };
-        let mut header_width = 0.0;
-        let mut header_height = TAB_STRIP_HEIGHT;
-        let presentation = self.close_button_presentation();
-        for record in self.chrome() {
-            record.header.measure(Size {
-                width: available.width.max(0.0),
-                height: TAB_STRIP_HEIGHT,
-            });
-            let label_size = record.header.measured_size().unwrap_or_default();
-            let icon_size = record
-                .icon
-                .as_ref()
-                .map(|icon| {
-                    icon.measure(Size {
-                        width: TAB_ICON_SIZE,
-                        height: TAB_ICON_SIZE,
-                    });
-                    icon.measured_size().unwrap_or_default()
-                })
-                .unwrap_or_default();
-            let item = record.item.upgrade();
-            let has_icon = item.as_ref().and_then(|item| item.icon()).is_some();
-            let close_width = item
-                .as_ref()
-                .is_some_and(|item| {
-                    item.closable() && presentation != CloseButtonPresentation::Never
-                })
-                .then_some(TAB_CLOSE_SLOT)
-                .unwrap_or(0.0);
-            let icon_width = if has_icon {
-                TAB_ICON_SIZE.max(icon_size.width)
-            } else {
-                0.0
-            };
-            let gap = if has_icon { TAB_ELEMENT_GAP } else { 0.0 }
-                + if close_width > 0.0 {
-                    TAB_ELEMENT_GAP
-                } else {
-                    0.0
-                };
-            header_width +=
-                TAB_HORIZONTAL_PADDING * 2.0 + icon_width + gap + label_size.width + close_width;
-            header_height = header_height.max(label_size.height.max(icon_size.height));
-        }
-
-        let children = self.children_values();
-        for child in &children {
-            child.measure(content_available);
-        }
-        let content_size = self
-            .selected_item()
-            .and_then(|item| item.measured_size())
-            .unwrap_or_default();
-        Size {
-            width: header_width.max(content_size.width),
-            height: header_height.max(TAB_STRIP_HEIGHT) + content_size.height,
-        }
-    }
-
-    #[overrides]
-    fn arrange_override(&self, final_size: Size) -> Size {
-        self.reconcile_children();
-        let strip_y = match self.tab_strip_position() {
-            TabStripPosition::Top => 0.0,
-            TabStripPosition::Bottom => (final_size.height - TAB_STRIP_HEIGHT).max(0.0),
-        };
-        let content_y = match self.tab_strip_position() {
-            TabStripPosition::Top => TAB_STRIP_HEIGHT,
-            TabStripPosition::Bottom => 0.0,
-        };
-        let content_rect = Rect {
-            x: 0.0,
-            y: content_y,
-            width: final_size.width.max(0.0),
-            height: (final_size.height - TAB_STRIP_HEIGHT).max(0.0),
-        };
-
-        let presentation = self.close_button_presentation();
-        let mut x = 0.0;
-        let mut chrome = self.chrome();
-        for record in &mut chrome {
-            let item = record.item.upgrade();
-            let label_size = record.header.measured_size().unwrap_or_default();
-            let icon_size = record
-                .icon
-                .as_ref()
-                .and_then(|icon| icon.measured_size())
-                .unwrap_or_default();
-            let has_icon = item.as_ref().and_then(|item| item.icon()).is_some();
-            let close_visible = item.as_ref().is_some_and(|item| {
-                item.closable() && presentation != CloseButtonPresentation::Never
-            });
-            let icon_width = if has_icon {
-                TAB_ICON_SIZE.max(icon_size.width)
-            } else {
-                0.0
-            };
-            let close_width = close_visible.then_some(TAB_CLOSE_SLOT).unwrap_or(0.0);
-            let gap_before_label = if has_icon { TAB_ELEMENT_GAP } else { 0.0 };
-            let gap_before_close = if close_width > 0.0 {
-                TAB_ELEMENT_GAP
-            } else {
-                0.0
-            };
-            let width = TAB_HORIZONTAL_PADDING * 2.0
-                + icon_width
-                + gap_before_label
-                + label_size.width
-                + gap_before_close
-                + close_width;
-            let header_rect = Rect {
-                x,
-                y: strip_y,
-                width,
-                height: TAB_STRIP_HEIGHT.min(final_size.height.max(0.0)),
-            };
-            record.header_rect = header_rect;
-            let mut child_x = x + TAB_HORIZONTAL_PADDING;
-            if let Some(icon) = &record.icon {
-                if has_icon {
-                    icon.arrange(Rect {
-                        x: child_x,
-                        y: strip_y + (TAB_STRIP_HEIGHT - TAB_ICON_SIZE).max(0.0) * 0.5,
-                        width: TAB_ICON_SIZE,
-                        height: TAB_ICON_SIZE,
-                    });
-                    child_x += icon_width + TAB_ELEMENT_GAP;
-                } else {
-                    icon.arrange(Rect {
-                        x: child_x,
-                        y: strip_y,
-                        width: 0.0,
-                        height: 0.0,
-                    });
-                }
-            }
-            record.header.arrange(Rect {
-                x: child_x,
-                y: strip_y + (TAB_STRIP_HEIGHT - label_size.height).max(0.0) * 0.5,
-                width: label_size.width,
-                height: label_size.height,
-            });
-            record.close_rect = close_visible.then_some(Rect {
-                x: x + width - TAB_HORIZONTAL_PADDING - TAB_CLOSE_SLOT,
-                y: strip_y,
-                width: TAB_CLOSE_SLOT,
-                height: TAB_STRIP_HEIGHT.min(final_size.height.max(0.0)),
-            });
-            x += width;
-        }
-        self.set_chrome(chrome);
-
-        let selected = self.selected_index();
-        for (index, item) in self.children_values().into_iter().enumerate() {
-            let rect = (index == selected).then_some(content_rect).unwrap_or(Rect {
-                x: 0.0,
-                y: content_y,
-                width: 0.0,
-                height: 0.0,
-            });
-            item.set_clip_to_bounds(Some(true));
-            item.arrange(rect);
-        }
-        if let Some(root) = self.__template_root() {
-            root.arrange(Rect {
-                x: 0.0,
-                y: 0.0,
-                width: final_size.width.max(0.0),
-                height: final_size.height.max(0.0),
-            });
-        }
-        final_size
-    }
-
-    #[overrides]
-    fn render(&self, context: &mut RenderContext<'_>) {
-        let width = self.arranged_width().unwrap_or(0.0).max(0.0);
-        let height = self.arranged_height().unwrap_or(0.0).max(0.0);
-        let count = self.children_values().len();
-        let strip_height = TAB_STRIP_HEIGHT.min(height);
-        let strip_y = match self.tab_strip_position() {
-            TabStripPosition::Top => 0.0,
-            TabStripPosition::Bottom => (height - strip_height).max(0.0),
-        };
-        let strip_brush: Brush = "#f2f2f2".into();
-        context.fill_rect(
-            Rect {
-                x: 0.0,
-                y: strip_y,
-                width,
-                height: strip_height,
-            },
-            &strip_brush,
-        );
-        if count == 0 {
-            return;
-        }
-        let selected = self.selected_index();
-        let selected_brush = self
-            .as_ui_element()
-            .as_text_style_owner()
-            .map(|owner| owner.resolved_text_style().foreground)
-            .unwrap_or_else(|| core::ui::inherited_text_style(self.as_ui_element()).foreground);
-        let selected_x = self
-            .chrome()
-            .get(selected)
-            .map(|record| record.header_rect.x)
-            .unwrap_or(0.0);
-        let selected_width = self
-            .chrome()
-            .get(selected)
-            .map(|record| record.header_rect.width)
-            .unwrap_or(0.0);
-        let underline_y = match self.tab_strip_position() {
-            TabStripPosition::Top => strip_height - SELECTED_INDICATOR_THICKNESS,
-            TabStripPosition::Bottom => strip_y,
-        };
-        context.fill_rect(
-            Rect {
-                x: selected_x,
-                y: underline_y,
-                width: selected_width,
-                height: SELECTED_INDICATOR_THICKNESS,
-            },
-            &selected_brush,
-        );
-
-        let stroke = StrokeStyle {
-            width: 1.0,
-            ..Default::default()
-        };
-        let close_brush = self
-            .as_ui_element()
-            .as_text_style_owner()
-            .map(|owner| owner.resolved_text_style().foreground)
-            .unwrap_or_else(|| core::ui::inherited_text_style(self.as_ui_element()).foreground);
-        for (index, record) in self.chrome().into_iter().enumerate() {
-            let Some(close_rect) = record.close_rect else {
-                continue;
-            };
-            let active_close = self.hovered_index() == Some(index)
-                || matches!(self.tab_gesture(), Some(TabGesture { kind: TabGestureKind::Close { .. }, ref item, .. }) if item.upgrade().is_some_and(|active| record.item.upgrade().is_some_and(|record_item| Rc::ptr_eq(&active, &record_item))));
-            let visible = match self.close_button_presentation() {
-                CloseButtonPresentation::Always => true,
-                CloseButtonPresentation::OnPointerOver => active_close,
-                CloseButtonPresentation::Never => false,
-            };
-            if !visible {
-                continue;
-            }
-            let center = Point {
-                x: close_rect.x + close_rect.width * 0.5,
-                y: close_rect.y + close_rect.height * 0.5,
-            };
-            let half = TAB_CLOSE_GLYPH * 0.5;
-            context.draw_line(
-                Point {
-                    x: center.x - half,
-                    y: center.y - half,
-                },
-                Point {
-                    x: center.x + half,
-                    y: center.y + half,
-                },
-                &close_brush,
-                &stroke,
-            );
-            context.draw_line(
-                Point {
-                    x: center.x + half,
-                    y: center.y - half,
-                },
-                Point {
-                    x: center.x - half,
-                    y: center.y + half,
-                },
-                &close_brush,
-                &stroke,
-            );
-        }
-    }
-}
-
-/// A self-drawn splitter that reports logical-axis drag deltas.
+/// A templated splitter that reports logical-axis drag deltas.
 #[elwindui::component(inherits Control)]
 pub struct CustomSplitter {
     #[prop(default = Orientation::Horizontal)]
@@ -563,87 +676,132 @@ pub struct CustomSplitter {
         on_mount {
             this.bind_pointer_handlers();
         }
-        on_update(orientation) {
-            this.invalidate_measure();
-            this.invalidate_render();
-        }
-        Rectangle {
-            fill: "#d0d0d0"
+        match orientation {
+            Orientation::Horizontal => {
+                Rectangle {
+                    width: 6.0
+                    fill: "#d0d0d0"
+                }
+            }
+            Orientation::Vertical => {
+                Rectangle {
+                    height: 6.0
+                    fill: "#d0d0d0"
+                }
+            }
         }
     },
 }
 
 #[elwindui::component]
-impl CustomSplitter {
-    #[overrides]
-    fn hit_test_content(&self) -> bool {
-        true
+impl CustomSplitter {}
+
+impl CustomTabCloseButton {
+    fn set_on_close(&self, callback: Option<Rc<dyn Fn()>>) {
+        self.set_close_callback(callback);
     }
 
-    #[overrides]
-    fn measure_override(&self, available: Size) -> Size {
-        let desired = match self.orientation() {
-            Orientation::Horizontal => Size {
-                width: SPLITTER_THICKNESS,
-                height: 0.0,
-            },
-            Orientation::Vertical => Size {
-                width: 0.0,
-                height: SPLITTER_THICKNESS,
-            },
-        };
-        for child in self.visual_children() {
-            child.measure(available);
+    fn bind_pointer_handlers(&self) {
+        if self.handlers_bound() {
+            return;
         }
-        desired
+        let weak_self = self.weak_self();
+        if weak_self.upgrade().is_none() {
+            return;
+        }
+        self.set_handlers_bound(true);
+
+        let weak_self = weak_self.clone();
+        self.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_pressed",
+            Box::new(move |event, args| {
+                if args.handled.get()
+                    || event.button != Some(MouseButton::Left)
+                    || weak_self.upgrade().is_none()
+                {
+                    return;
+                }
+                let button = weak_self.upgrade().expect("close button alive");
+                if !button.slot_visible() {
+                    return;
+                }
+                button.set_pressed(true);
+                args.handled.set(true);
+            }),
+        );
+
+        let weak_self = self.weak_self();
+        self.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_released",
+            Box::new(move |event, args| {
+                let Some(button) = weak_self.upgrade() else {
+                    return;
+                };
+                if !button.pressed() {
+                    return;
+                }
+                button.set_pressed(false);
+                args.handled.set(true);
+                if button.slot_visible()
+                    && button.contains_root_point(event.position)
+                    && let Some(callback) = button.close_callback()
+                {
+                    callback();
+                }
+            }),
+        );
+
+        let weak_self = self.weak_self();
+        self.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_moved",
+            Box::new(move |_, args| {
+                if let Some(button) = weak_self.upgrade() {
+                    if button.pressed() {
+                        args.handled.set(true);
+                    }
+                }
+            }),
+        );
+
+        let weak_self = self.weak_self();
+        self.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_canceled",
+            Box::new(move |_, args| {
+                if let Some(button) = weak_self.upgrade() {
+                    button.set_pressed(false);
+                    args.handled.set(true);
+                }
+            }),
+        );
     }
 
-    #[overrides]
-    fn arrange_override(&self, final_size: Size) -> Size {
-        for child in self.visual_children() {
-            child.arrange(Rect {
-                x: 0.0,
-                y: 0.0,
-                width: final_size.width.max(0.0),
-                height: final_size.height.max(0.0),
-            });
+    fn contains_root_point(&self, point: Point) -> bool {
+        let mut offset = self.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+        let mut parent = self.visual_parent();
+        while let Some(element) = parent {
+            let child_offset = element
+                .arranged_offset()
+                .unwrap_or(Point { x: 0.0, y: 0.0 });
+            offset.x += child_offset.x;
+            offset.y += child_offset.y;
+            parent = element.visual_parent();
         }
-        final_size
+        let width = self.arranged_width().unwrap_or(20.0);
+        let height = self.arranged_height().unwrap_or(32.0);
+        point.x >= offset.x
+            && point.y >= offset.y
+            && point.x < offset.x + width
+            && point.y < offset.y + height
     }
 
-    #[overrides]
-    fn render(&self, context: &mut RenderContext<'_>) {
-        let foreground = self
-            .as_ui_element()
-            .as_text_style_owner()
-            .map(|owner| owner.resolved_text_style().foreground)
-            .unwrap_or_else(|| core::ui::inherited_text_style(self.as_ui_element()).foreground);
-        let stroke = StrokeStyle {
-            width: 1.0,
-            ..Default::default()
-        };
-        let width = self.arranged_width().unwrap_or(0.0).max(0.0);
-        let height = self.arranged_height().unwrap_or(0.0).max(0.0);
-        match self.orientation() {
-            Orientation::Horizontal => {
-                let x = width * 0.5;
-                context.draw_line(
-                    Point { x, y: 0.0 },
-                    Point { x, y: height },
-                    &foreground,
-                    &stroke,
-                );
-            }
-            Orientation::Vertical => {
-                let y = height * 0.5;
-                context.draw_line(
-                    Point { x: 0.0, y },
-                    Point { x: width, y },
-                    &foreground,
-                    &stroke,
-                );
-            }
-        }
+    fn weak_self(&self) -> std::rc::Weak<Self> {
+        self.__self_weak
+            .borrow()
+            .clone()
+            .upgrade()
+            .and_then(|rc| rc.downcast::<Self>().ok())
+            .map(|rc| Rc::downgrade(&rc))
+            .unwrap_or_default()
     }
 }
 
@@ -658,9 +816,7 @@ impl CustomTabViewItem {
         self.closable()
     }
 
-    /// Updates the tab label only when its value changes.  The generated property setter remains
-    /// the storage/notification path; this guard keeps equal assignments from rebuilding private
-    /// chrome or invalidating the owning tab.
+    /// Updates the tab label only when its value changes.
     pub fn set_header(&self, header: String) {
         if self.header() == header {
             return;
@@ -676,19 +832,164 @@ impl CustomTabViewItem {
         <Self as CustomTabViewItemExt>::set_closable(self, closable);
     }
 
-    /// Installs the tab-view-owned metadata callback. This is crate-private because the callback
-    /// is only a weak presentation back-link used to refresh private tab chrome.
-    fn set_owner_chrome_changed(&self, callback: Option<Box<dyn Fn()>>) {
-        self.set_owner_chrome_callback(callback.map(Rc::from));
+    fn set_owner_pointer_handler(&self, callback: Option<Box<dyn Fn(TabItemPointerEvent)>>) {
+        self.set_owner_pointer_callback(callback.map(Rc::from));
     }
 
-    fn notify_owner_chrome_changed(&self) {
-        if let Some(callback) = self.owner_chrome_callback() {
-            callback();
+    fn set_owner_close_handler(&self, callback: Option<Box<dyn Fn()>>) {
+        self.set_owner_close_callback(callback.map(Rc::from));
+        self.sync_close_button();
+    }
+
+    fn prepare_content_presentation(&self) {
+        if self.__template_root().is_none() {
+            self.set_visual_root(self.header_root());
         }
+        self.__prepare_template_presentation();
     }
 
-    /// Resolves the icon into the Core `IconSourceElement` realization used by custom chrome.
+    fn set_presentation(
+        &self,
+        is_selected: bool,
+        is_pointer_over: bool,
+        tab_strip_position: TabStripPosition,
+        close_button_presentation: CloseButtonPresentation,
+    ) {
+        if self.is_selected() != is_selected {
+            self.set_is_selected(is_selected);
+        }
+        if self.is_pointer_over() != is_pointer_over {
+            self.set_is_pointer_over(is_pointer_over);
+        }
+        if self.tab_strip_position() != tab_strip_position {
+            self.set_tab_strip_position(tab_strip_position);
+        }
+        if self.close_button_presentation() != close_button_presentation {
+            self.set_close_button_presentation(close_button_presentation);
+        }
+        self.sync_close_button();
+    }
+
+    fn bind_header_handlers(&self) {
+        if self.header_handlers_bound() {
+            return;
+        }
+        let weak_self = self.weak_self();
+        if weak_self.upgrade().is_none() {
+            return;
+        }
+        self.set_header_handlers_bound(true);
+
+        let weak_self = weak_self.clone();
+        self.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_pressed",
+            Box::new(move |event, args| {
+                if !args.handled.get() {
+                    if let Some(item) = weak_self.upgrade() {
+                        if let Some(callback) = item.owner_pointer_callback() {
+                            callback(TabItemPointerEvent::Pressed(*event));
+                        }
+                    }
+                }
+            }),
+        );
+        let weak_self = self.weak_self();
+        self.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_moved",
+            Box::new(move |event, args| {
+                if !args.handled.get() {
+                    if let Some(item) = weak_self.upgrade() {
+                        if let Some(callback) = item.owner_pointer_callback() {
+                            callback(TabItemPointerEvent::Moved(*event));
+                        }
+                    }
+                }
+            }),
+        );
+        let weak_self = self.weak_self();
+        self.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_released",
+            Box::new(move |event, args| {
+                if !args.handled.get() {
+                    if let Some(item) = weak_self.upgrade() {
+                        if let Some(callback) = item.owner_pointer_callback() {
+                            callback(TabItemPointerEvent::Released(*event));
+                        }
+                    }
+                }
+            }),
+        );
+        let weak_self = self.weak_self();
+        self.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_canceled",
+            Box::new(move |event, args| {
+                if !args.handled.get() {
+                    if let Some(item) = weak_self.upgrade() {
+                        if let Some(callback) = item.owner_pointer_callback() {
+                            callback(TabItemPointerEvent::Canceled(*event));
+                        }
+                    }
+                }
+            }),
+        );
+        let weak_self = self.weak_self();
+        self.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_entered",
+            Box::new(move |_, args| {
+                if !args.handled.get() {
+                    if let Some(item) = weak_self.upgrade() {
+                        item.set_is_pointer_over(true);
+                        if let Some(callback) = item.owner_pointer_callback() {
+                            callback(TabItemPointerEvent::Entered);
+                        }
+                    }
+                }
+            }),
+        );
+        let weak_self = self.weak_self();
+        self.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_exited",
+            Box::new(move |_, args| {
+                if !args.handled.get() {
+                    if let Some(item) = weak_self.upgrade() {
+                        item.set_is_pointer_over(false);
+                        if let Some(callback) = item.owner_pointer_callback() {
+                            callback(TabItemPointerEvent::Exited);
+                        }
+                    }
+                }
+            }),
+        );
+    }
+
+    fn sync_close_button(&self) {
+        let button = self.close_button();
+        button.set_slot_visible(
+            self.closable() && self.close_button_presentation() != CloseButtonPresentation::Never,
+        );
+        button.set_glyph_visible(
+            self.closable()
+                && match self.close_button_presentation() {
+                    CloseButtonPresentation::Always => true,
+                    CloseButtonPresentation::OnPointerOver => self.is_pointer_over(),
+                    CloseButtonPresentation::Never => false,
+                },
+        );
+        button.set_on_close(self.owner_close_callback());
+    }
+
+    fn weak_self(&self) -> std::rc::Weak<Self> {
+        self.__self_weak
+            .borrow()
+            .clone()
+            .upgrade()
+            .and_then(|rc| rc.downcast::<Self>().ok())
+            .map(|rc| Rc::downgrade(&rc))
+            .unwrap_or_default()
+    }
+
+    /// Resolves the icon into the Core `IconSourceElement` realization used by callers that need a
+    /// standalone icon element. The authored header template itself owns its icon element.
     pub fn realize_icon(&self) -> Option<Rc<dyn UIElementExt>> {
         self.icon().map(|icon_source| {
             let icon = core::ui::IconSourceElement::new();
@@ -714,7 +1015,7 @@ impl CustomTabView {
         self.set_tab_strip_position(position);
     }
 
-    /// Replaces the ordered tab list and reconciles its Visual ownership.
+    /// Replaces the ordered tab list and reconciles its logical and visual ownership.
     pub fn replace_children(&self, children: Vec<Rc<CustomTabViewItem>>) {
         self.set_children(children);
     }
@@ -813,7 +1114,7 @@ impl CustomTabView {
     pub fn set_on_tab_drag_completed(&self, callback: Box<dyn Fn(TabDragCompletedEventArgs)>) {
         self.set_tab_drag_completed_callback(Some(Rc::from(callback)));
     }
-    /// Returns the concrete list used internally by the component implementation.
+
     fn children_values(&self) -> Vec<Rc<CustomTabViewItem>> {
         <Self as CustomTabViewExt>::children(self)
     }
@@ -822,15 +1123,8 @@ impl CustomTabView {
     pub fn children_list(&self) -> &dyn ListExt<CustomTabViewItem> {
         self
     }
-    fn selected_item(&self) -> Option<Rc<CustomTabViewItem>> {
-        self.children_values().get(self.selected_index()).cloned()
-    }
 
     fn reconcile_children(&self) {
-        // Standalone Core tests can mutate a newly constructed component before a host sends its
-        // normal mount notification. Binding here is idempotent and keeps the control's routed
-        // behavior independent of native host timing.
-        self.bind_root_handlers();
         let children = self.children_values();
         self.validate_children(&children);
         let unchanged = self.bound_items().len() == children.len()
@@ -840,86 +1134,94 @@ impl CustomTabView {
                 .zip(children.iter())
                 .all(|(old, new)| old.upgrade().is_some_and(|old| Rc::ptr_eq(&old, new)));
         if unchanged {
+            self.sync_presenters(&children);
             return;
         }
 
         if self.cancel_removed_gesture(&children) {
-            // The completion callback is external and may have replaced `children` reentrantly.
-            // Do not continue with this stale snapshot: restart from the current authoritative
-            // property state after the gesture has already been cleared.
             self.reconcile_children();
             return;
         }
-        let old_items = self.bound_items();
-        for old in old_items.into_iter().filter_map(|item| item.upgrade()) {
-            old.set_owner_chrome_changed(None);
-            let old: Rc<dyn UIElementExt> = old;
-            self.as_ui_element().visual_collection.remove(&old);
-        }
-        for old in self.chrome() {
-            let header: Rc<dyn UIElementExt> = old.header;
-            self.as_ui_element().visual_collection.remove(&header);
-            if let Some(icon) = old.icon {
-                let icon: Rc<dyn UIElementExt> = icon;
-                self.as_ui_element().visual_collection.remove(&icon);
-            }
+
+        for old in self
+            .bound_items()
+            .into_iter()
+            .filter_map(|item| item.upgrade())
+        {
+            old.set_owner_pointer_handler(None);
+            old.set_owner_close_handler(None);
         }
 
         let weak_view = self.weak_self();
-        let mut chrome = Vec::with_capacity(children.len());
         for item in &children {
-            item.set_clip_to_bounds(Some(true));
             let weak_item = Rc::downgrade(item);
-            let weak_callback_view = weak_view.clone();
-            item.set_owner_chrome_changed(Some(Box::new(move || {
+            let weak_view_for_pointer = weak_view.clone();
+            item.set_owner_pointer_handler(Some(Box::new(move |event| {
                 if let (Some(view), Some(item)) =
-                    (weak_callback_view.upgrade(), weak_item.upgrade())
+                    (weak_view_for_pointer.upgrade(), weak_item.upgrade())
                 {
-                    view.refresh_item_chrome(&item);
+                    view.handle_item_pointer(&item, event);
                 }
             })));
-            let item_visual: Rc<dyn UIElementExt> = item.clone();
-            self.as_ui_element().visual_collection.add(item_visual);
-
-            let header = core::ui::TextBlock::new();
-            header.set_text(&item.header());
-            header.set_hit_test_visible(false);
-            self.as_ui_element()
-                .visual_collection
-                .add(header.clone() as Rc<dyn UIElementExt>);
-
-            let icon = item.icon().map(|source| {
-                let icon = core::ui::IconSourceElement::new();
-                icon.set_icon_source(Some(source));
-                icon.set_hit_test_visible(false);
-                self.as_ui_element()
-                    .visual_collection
-                    .add(icon.clone() as Rc<dyn UIElementExt>);
-                icon
-            });
-            chrome.push(TabChrome {
-                item: Rc::downgrade(item),
-                header,
-                icon,
-                header_rect: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 0.0,
-                    height: 0.0,
-                },
-                close_rect: None,
-            });
+            let weak_item = Rc::downgrade(item);
+            let weak_view_for_close = weak_view.clone();
+            item.set_owner_close_handler(Some(Box::new(move || {
+                if let (Some(view), Some(item)) =
+                    (weak_view_for_close.upgrade(), weak_item.upgrade())
+                {
+                    if let Some(index) = view.index_of(&item) {
+                        view.request_close(index);
+                    }
+                }
+            })));
         }
+
         self.set_bound_items(children.iter().map(Rc::downgrade).collect());
-        self.set_chrome(chrome);
-        self.invalidate_measure();
+        let template_matches = self.template_items().len() == children.len()
+            && self
+                .template_items()
+                .iter()
+                .zip(children.iter())
+                .all(|(old, new)| Rc::ptr_eq(old, new));
+        if !template_matches {
+            self.set_template_items(children.clone());
+            return;
+        }
+        self.tab_strip().set_items(children.clone());
+        self.tab_strip().set_selected_index(self.selected_index());
+        self.tab_strip()
+            .set_tab_strip_position(self.tab_strip_position());
+        self.tab_strip()
+            .set_close_button_presentation(self.close_button_presentation());
+        self.content_presenter().set_items(children.clone());
+        self.content_presenter()
+            .set_selected_index(self.selected_index());
+        self.sync_presenters(&children);
+    }
+
+    fn sync_presenters(&self, children: &[Rc<CustomTabViewItem>]) {
+        let selected = self.selected_index();
+        let position = self.tab_strip_position();
+        let close = self.close_button_presentation();
+        self.tab_strip().set_items(children.to_vec());
+        self.tab_strip().set_selected_index(selected);
+        self.tab_strip().set_tab_strip_position(position);
+        self.tab_strip().set_close_button_presentation(close);
+        self.content_presenter().set_items(children.to_vec());
+        self.content_presenter().set_selected_index(selected);
+        self.tab_strip()
+            .as_ui_element()
+            .set_attached::<i32>("Grid", "row", self.tab_strip_row());
+        self.content_presenter()
+            .as_ui_element()
+            .set_attached::<i32>("Grid", "row", self.content_row());
+        for (index, item) in children.iter().enumerate() {
+            item.set_presentation(index == selected, item.is_pointer_over(), position, close);
+        }
     }
 
     fn validate_children(&self, children: &[Rc<CustomTabViewItem>]) {
-        let owner = self.weak_self().upgrade().map(|owner| {
-            let owner: Rc<dyn UIElementExt> = owner;
-            owner
-        });
+        let owner: Rc<dyn UIElementExt> = self.tab_strip();
         for (index, child) in children.iter().enumerate() {
             assert!(
                 !children[..index]
@@ -928,11 +1230,8 @@ impl CustomTabView {
                 "CustomTabView cannot attach the same CustomTabViewItem twice; detach the duplicate first"
             );
             if let Some(parent) = child.visual_parent() {
-                let owned_by_self = owner
-                    .as_ref()
-                    .is_some_and(|owner| Rc::ptr_eq(&parent, owner));
                 assert!(
-                    owned_by_self,
+                    Rc::ptr_eq(&parent, &owner),
                     "CustomTabViewItem is already owned by another Visual parent; detach it before attaching"
                 );
             }
@@ -966,127 +1265,21 @@ impl CustomTabView {
         false
     }
 
-    fn refresh_item_chrome(&self, item: &CustomTabViewItem) {
-        let Some(index) = self.index_of(item) else {
-            return;
-        };
-        let mut chrome = self.chrome();
-        let Some(record) = chrome.get_mut(index) else {
-            return;
-        };
-        record.header.set_text(&item.header());
-        if let Some(old_icon) = record.icon.take() {
-            let old_icon: Rc<dyn UIElementExt> = old_icon;
-            self.as_ui_element().visual_collection.remove(&old_icon);
+    fn handle_item_pointer(&self, item: &Rc<CustomTabViewItem>, event: TabItemPointerEvent) {
+        match event {
+            TabItemPointerEvent::Pressed(event) => self.handle_pointer_pressed(item, &event),
+            TabItemPointerEvent::Moved(event) => self.handle_pointer_moved(item, &event),
+            TabItemPointerEvent::Released(event) => self.handle_pointer_released(item, &event),
+            TabItemPointerEvent::Canceled(event) => self.handle_pointer_canceled(item, &event),
+            TabItemPointerEvent::Entered => item.set_is_pointer_over(true),
+            TabItemPointerEvent::Exited => item.set_is_pointer_over(false),
         }
-        record.icon = item.icon().map(|source| {
-            let icon = core::ui::IconSourceElement::new();
-            icon.set_icon_source(Some(source));
-            icon.set_hit_test_visible(false);
-            self.as_ui_element()
-                .visual_collection
-                .add(icon.clone() as Rc<dyn UIElementExt>);
-            icon
-        });
-        self.set_chrome(chrome);
-        self.invalidate_measure();
-        self.invalidate_render();
     }
 
-    fn bind_root_handlers(&self) {
-        if self.root_handlers_bound() {
-            return;
-        }
-        let weak_view = self.weak_self();
-        if weak_view.upgrade().is_none() {
-            // Component property subscriptions can run while `Rc::new_cyclic` is still building
-            // the object. Defer registration until the first post-construction reconciliation.
-            return;
-        }
-        self.set_root_handlers_bound(true);
-        self.register_routed_handler::<PointerEventArgs>(
-            "on_pointer_pressed",
-            Box::new(move |event, _| {
-                if let Some(view) = weak_view.upgrade() {
-                    view.handle_pointer_pressed(event);
-                }
-            }),
-        );
-        let weak_view = self.weak_self();
-        self.register_routed_handler::<PointerEventArgs>(
-            "on_pointer_moved",
-            Box::new(move |event, _| {
-                if let Some(view) = weak_view.upgrade() {
-                    view.handle_pointer_moved(event);
-                }
-            }),
-        );
-        let weak_view = self.weak_self();
-        self.register_routed_handler::<PointerEventArgs>(
-            "on_pointer_released",
-            Box::new(move |event, _| {
-                if let Some(view) = weak_view.upgrade() {
-                    view.handle_pointer_released(event);
-                }
-            }),
-        );
-        let weak_view = self.weak_self();
-        self.register_routed_handler::<PointerEventArgs>(
-            "on_pointer_canceled",
-            Box::new(move |event, _| {
-                if let Some(view) = weak_view.upgrade() {
-                    view.handle_pointer_canceled(event);
-                }
-            }),
-        );
-        let weak_view = self.weak_self();
-        self.register_routed_handler::<PointerEventArgs>(
-            "on_pointer_entered",
-            Box::new(move |event, _| {
-                if let Some(view) = weak_view.upgrade() {
-                    view.update_hover(event.position);
-                }
-            }),
-        );
-        let weak_view = self.weak_self();
-        self.register_routed_handler::<PointerEventArgs>(
-            "on_pointer_exited",
-            Box::new(move |_, _| {
-                if let Some(view) = weak_view.upgrade() {
-                    view.update_hovered_index(None);
-                }
-            }),
-        );
-    }
-
-    fn handle_pointer_pressed(&self, event: &PointerEventArgs) {
+    fn handle_pointer_pressed(&self, item: &Rc<CustomTabViewItem>, event: &PointerEventArgs) {
         if event.button != Some(MouseButton::Left) {
             return;
         }
-        let point = self.root_local_position(event.position);
-        self.update_hover(event.position);
-        if let Some((index, rect)) = self.close_at(point) {
-            let children = self.children_values();
-            let Some(item) = children.get(index) else {
-                return;
-            };
-            self.set_tab_gesture(Some(TabGesture {
-                item: Rc::downgrade(item),
-                press_position: event.position,
-                press_screen_position: event.screen_position,
-                last_position: event.position,
-                last_screen_position: event.screen_position,
-                kind: TabGestureKind::Close { rect },
-            }));
-            return;
-        }
-        let Some(index) = self.header_at(point) else {
-            return;
-        };
-        let children = self.children_values();
-        let Some(item) = children.get(index) else {
-            return;
-        };
         self.set_tab_gesture(Some(TabGesture {
             item: Rc::downgrade(item),
             press_position: event.position,
@@ -1095,18 +1288,25 @@ impl CustomTabView {
             last_screen_position: event.screen_position,
             kind: TabGestureKind::Pressed,
         }));
-        let _ = self.select_index(index);
+        if let Some(index) = self.index_of(item) {
+            let _ = self.select_index(index);
+        }
     }
 
-    fn handle_pointer_moved(&self, event: &PointerEventArgs) {
-        self.update_hover(event.position);
+    fn handle_pointer_moved(&self, item: &Rc<CustomTabViewItem>, event: &PointerEventArgs) {
         let Some(mut gesture) = self.tab_gesture() else {
             return;
         };
+        if !gesture
+            .item
+            .upgrade()
+            .is_some_and(|active| Rc::ptr_eq(&active, item))
+        {
+            return;
+        }
         gesture.last_position = event.position;
         gesture.last_screen_position = event.screen_position;
         match gesture.kind.clone() {
-            TabGestureKind::Close { .. } => self.set_tab_gesture(Some(gesture)),
             TabGestureKind::Pressed => {
                 let dx = event.position.x - gesture.press_position.x;
                 let dy = event.position.y - gesture.press_position.y;
@@ -1128,8 +1328,6 @@ impl CustomTabView {
                     });
                 }
 
-                // The started callback is external and may remove or reorder the item. Re-read
-                // the gesture and resolve its index by identity before emitting the first move.
                 let Some(current) = self.tab_gesture() else {
                     return;
                 };
@@ -1167,48 +1365,42 @@ impl CustomTabView {
         }
     }
 
-    fn handle_pointer_released(&self, event: &PointerEventArgs) {
+    fn handle_pointer_released(&self, item: &Rc<CustomTabViewItem>, event: &PointerEventArgs) {
         let Some(gesture) = self.tab_gesture() else {
             return;
         };
+        if !gesture
+            .item
+            .upgrade()
+            .is_some_and(|active| Rc::ptr_eq(&active, item))
+        {
+            return;
+        }
         self.set_tab_gesture(None);
-        let point = self.root_local_position(event.position);
-        match gesture.kind {
-            TabGestureKind::Close { rect } => {
-                let Some(index) = self.item_index_from_weak(&gesture.item) else {
-                    return;
-                };
-                let visible = self.is_close_visible(index);
-                if visible
-                    && rect_contains(rect, point)
-                    && self
-                        .children_values()
-                        .get(index)
-                        .is_some_and(|item| item.closable())
-                    && let Some(callback) = self.close_requested_callback()
-                {
-                    callback(index);
-                }
-            }
-            TabGestureKind::Pressed => {}
-            TabGestureKind::Dragging => {
-                let index = gesture_index(&gesture, self);
-                if let Some(callback) = self.tab_drag_completed_callback() {
-                    callback(TabDragCompletedEventArgs {
-                        index,
-                        position: event.position,
-                        screen_position: event.screen_position,
-                        canceled: false,
-                    });
-                }
+        if matches!(gesture.kind, TabGestureKind::Dragging) {
+            let index = gesture_index(&gesture, self);
+            if let Some(callback) = self.tab_drag_completed_callback() {
+                callback(TabDragCompletedEventArgs {
+                    index,
+                    position: event.position,
+                    screen_position: event.screen_position,
+                    canceled: false,
+                });
             }
         }
     }
 
-    fn handle_pointer_canceled(&self, event: &PointerEventArgs) {
+    fn handle_pointer_canceled(&self, item: &Rc<CustomTabViewItem>, event: &PointerEventArgs) {
         let Some(gesture) = self.tab_gesture() else {
             return;
         };
+        if !gesture
+            .item
+            .upgrade()
+            .is_some_and(|active| Rc::ptr_eq(&active, item))
+        {
+            return;
+        }
         self.set_tab_gesture(None);
         if matches!(gesture.kind, TabGestureKind::Dragging) {
             if let Some(callback) = self.tab_drag_completed_callback() {
@@ -1223,81 +1415,10 @@ impl CustomTabView {
         let _ = event;
     }
 
-    fn update_hover(&self, position: Point) {
-        let point = self.root_local_position(position);
-        self.update_hovered_index(self.header_at(point));
-    }
-
-    fn update_hovered_index(&self, hovered: Option<usize>) {
-        if self.hovered_index() == hovered {
-            return;
-        }
-        self.set_hovered_index(hovered);
-        self.invalidate_render();
-    }
-
-    fn root_local_position(&self, position: Point) -> Point {
-        let mut offset = self.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-        let mut parent = self.visual_parent();
-        while let Some(element) = parent {
-            let child_offset = element
-                .arranged_offset()
-                .unwrap_or(Point { x: 0.0, y: 0.0 });
-            offset.x += child_offset.x;
-            offset.y += child_offset.y;
-            parent = element.visual_parent();
-        }
-        Point {
-            x: position.x - offset.x,
-            y: position.y - offset.y,
-        }
-    }
-
-    fn header_at(&self, point: Point) -> Option<usize> {
-        let chrome = self.chrome();
-        if let Some(index) = chrome
-            .iter()
-            .position(|record| rect_contains(record.header_rect, point))
-        {
-            return Some(index);
-        }
-        // Before the first host layout pass there are no cached header rectangles. A small,
-        // deterministic fallback keeps Core-only routed-event tests useful and is replaced by
-        // the measured rectangles as soon as arrange runs.
-        if chrome.iter().all(|record| record.header_rect.width == 0.0)
-            && point.x >= 0.0
-            && point.y >= 0.0
-            && self.children_values().len() == 1
-        {
-            return Some(0);
-        }
-        None
-    }
-
-    fn close_at(&self, point: Point) -> Option<(usize, Rect)> {
-        self.chrome()
-            .iter()
-            .enumerate()
-            .find_map(|(index, record)| {
-                let rect = record.close_rect?;
-                (self.is_close_visible(index) && rect_contains(rect, point))
-                    .then_some((index, rect))
-            })
-    }
-
-    fn is_close_visible(&self, index: usize) -> bool {
-        match self.close_button_presentation() {
-            CloseButtonPresentation::Always => true,
-            CloseButtonPresentation::OnPointerOver => self.hovered_index() == Some(index),
-            CloseButtonPresentation::Never => false,
-        }
-    }
-
     fn index_of(&self, item: &CustomTabViewItem) -> Option<usize> {
-        self.children_values().iter().position(|candidate| {
-            let candidate: &CustomTabViewItem = candidate;
-            std::ptr::eq(candidate, item)
-        })
+        self.children_values()
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate.as_ref(), item))
     }
 
     fn item_index_from_weak(&self, item: &std::rc::Weak<CustomTabViewItem>) -> Option<usize> {
@@ -1431,13 +1552,6 @@ impl ListExt<CustomTabViewItem> for CustomTabView {
     fn to_vec(&self) -> Vec<Rc<CustomTabViewItem>> {
         self.children_values()
     }
-}
-
-fn rect_contains(rect: Rect, point: Point) -> bool {
-    point.x >= rect.x
-        && point.y >= rect.y
-        && point.x < rect.x + rect.width
-        && point.y < rect.y + rect.height
 }
 
 fn gesture_index(gesture: &TabGesture, view: &CustomTabView) -> usize {

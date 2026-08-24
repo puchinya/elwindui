@@ -1,84 +1,82 @@
 # Custom controls runtime design
 
-`elwindui-custom-controls` is a component-layer prerequisite for Docking. It
-uses Core's tree, lifecycle, property, layout, render, and routed-event
+`elwindui-custom-controls` is the component-layer prerequisite for Docking. It
+uses Core’s tree, lifecycle, property, layout, render-tree, and routed-event
 machinery. There is no second observable system and no backend-specific code.
 
-## Component composition and ownership
+## Templated component architecture
 
-`CustomTabView` and `CustomSplitter` are `#[component(inherits Control)]`
-controls. `CustomTabViewItem` is a
-`#[component(inherits ContentControl)]`. Their authored `body: view!` is the
-default visual composition; low-level behavior is expressed with the existing
-component override surface where that surface is available.
+`CustomTabView` and `CustomSplitter` are
+`#[component(inherits = Control)]` controls. `CustomTabViewItem` is a
+`#[component(inherits = ContentControl)]`. Their authored `body: view!` is the
+default visual composition. Standard `Grid`, `HorizontalLayout`,
+`Rectangle`, `TextBlock`, and `IconSourceElement` nodes provide the chrome.
+None of these controls, nor their private presenters, implements `render()` to
+draw chrome through `RenderContext`.
 
-`CustomTabView` exposes the established `ListExt<dyn CustomTabViewItemExt>`
-surface and keeps an ordered typed item list. `set_children` is the concrete
-replacement convenience path; the erased list implementation validates that
-incoming values are actual `CustomTabViewItem` instances before transferring
-the Rc. Each attached item, its header
-`TextBlock`, and its optional `IconSourceElement` are Visual children owned by
-the tab view. Reconciliation clears old entries and weak metadata callbacks
-before attaching the new ordered set. An item already owned elsewhere, or the
-same item appearing twice, is a programming error and is rejected immediately.
-Selection only changes arrangement/visibility state; it never detaches,
-reparents, or unmounts item content. Removal detaches without destroying the
-subtree.
+`CustomTabViewItem` declares an internal scalar header-root content destination
+for its authored template. The inherited `ContentControl::content` remains the
+single logical page-content property. The generated header root is installed
+through Control’s private template-root ownership path; it is not a second
+logical content store.
 
-`CustomTabViewItem` delegates logical content entirely to `ContentControl` and
-does not add another content store. Header/closable changes use equality guards;
-icon changes may notify even when `IconSource` has no semantic equality.
+The tab view body is a `Grid` with two rows. The private
+`CustomTabStripPresenter` is a `HorizontalLayout` that owns the ordered item
+controls. The private `CustomTabContentPresenter` owns the visual presentation
+of every current item content. Top uses `Fixed(32)` then `Star(1)`; Bottom uses
+`Star(1)` then `Fixed(32)`, with the presenters’ attached `Grid::row` values
+updated together.
 
-## Private tab chrome
+## Visual ownership and reconciliation
 
-The tab surface uses these private logical-pixel metrics:
+`CustomTabView` strongly owns the ordered `Rc<CustomTabViewItem>` list. The
+strip presenter attaches the item controls without recreating them. The item
+content remains logically owned by `CustomTabViewItem`; the content presenter
+attaches each current content visual exactly once and keeps it attached while
+selection changes. The selected content is arranged to the full presenter
+rect; unselected content is arranged to `0 x 0` and clipped. Replacing content
+detaches the old visual before attaching the new one. Removing an item drops
+its weak subscription and detaches its content without destroying external
+`Rc` ownership.
 
-```text
-strip 32, horizontal padding 10, element gap 6, icon 16,
-close slot 20, close glyph 10, drag threshold 4, selected indicator 2
-```
+All reconciliation validates one visual owner and duplicate item identity.
+Callbacks and content subscriptions capture weak owners. If cancellation or a
+content callback mutates the public children/content property, internal state
+is committed before the callback and reconciliation restarts from the current
+authoritative value.
 
-Labels and icons are retained per item and have `hit_test_visible = false` so
-the self-drawn tab surface receives pointer routing. Icons are always realized
-through Core `IconSourceElement`; SystemIcon canonical geometry remains private
-to Core. The close mark is two private `RenderContext::draw_line` calls, not a
-public icon type and not `SystemIcon::Delete`.
+## Header template and close affordance
 
-Measurement reserves the close slot for both `Always` and `OnPointerOver`.
-Arrangement places headers left-to-right, keeps the selected item in the
-content rectangle, zero-arranges unselected items, and clips each item. Top and
-Bottom move the 32-pixel strip without changing content ownership. No overflow
-or scrolling subsystem is introduced.
+Each item header is a composed `Grid` containing a header row with an optional
+`IconSourceElement`, a bound `TextBlock`, and a private
+`CustomTabCloseButton`. A `Rectangle` in a fixed two-pixel slot is the selected
+indicator; the slot remains present for unselected items. The close helper uses
+a fixed 20-pixel slot and a composed `TextBlock` `×` glyph. `Always` and
+`OnPointerOver` reserve identical width; only glyph visibility changes for
+hover. `Never` collapses the slot. No SystemIcon geometry or direct close-X
+drawing is duplicated here.
+
+The item binds routed pointer handlers on its header root. The close helper
+handles its own press/release first and marks the routed event handled, so a
+close press cannot select or start a tab drag. Core’s `PointerDispatcher`
+provides implicit capture; release outside and cancellation clear the helper
+state without requesting close. Parent callbacks carry item identity rather
+than cached rectangles or indices.
 
 ## Selection and gestures
 
-`selected_index` has a source-to-target setter with no echo. User selection is a
-separate target-to-source operation and invokes its callback once only when the
-value changes. An out-of-range source value is preserved and produces no
-selected content.
+Source `selected_index` assignments do not echo. User selection writes back
+once only when the numeric value changes. Out-of-range values are preserved and
+produce no selected page. Tab drag state is owned by `CustomTabView`; item
+identity is the authority and indices are resolved at dispatch time. A
+threshold-crossing callback sets `Dragging` before invoking external code,
+then re-reads gesture state and current index before emitting `moved`. Removal
+or cancellation emits one canceled completion. Splitter orientation is frozen
+at press time, deltas are incremental on the active axis, and completion clears
+state before invoking callbacks.
 
-Pointer selection is interpreted only by the left-press handler. The close
-rectangle is resolved before the header, so a close press never also selects a
-tab; routed tap delivery is not a second selection path. Hovered close
-affordances update only the paint state and use equality-guarded render
-invalidation (not measure invalidation).
+## Scope boundary
 
-Tab presses and splitter presses establish gesture state before external
-callbacks. State is cleared before completion/cancellation callbacks. When a
-drag-start callback mutates the child list, the gesture is re-read by item
-identity and the moved index is resolved again; removal emits only canceled
-completion, while reordering reports the new index. When a cancellation
-completion callback replaces children, reconciliation restarts from the
-current property value instead of continuing with a stale snapshot. Tab
-dragging starts at 4 logical pixels; splitter orientation is frozen at press
-time and zero deltas are suppressed. `screen_position` is passed through
-unchanged. The Core `PointerDispatcher` owns implicit capture, while
-`on_pointer_canceled` terminates active gestures without synthetic release.
-
-## Lifetime and prerequisite boundaries
-
-Routed handlers and metadata callbacks capture only `Weak` owners. Dropping a
-tab view therefore releases its item/chrome graph without a strong callback
-cycle. Abnormal cancellation and capture-loss semantics remain the common Core
-prerequisite from Issue #179/PR #181. Docking is a separate downstream crate and
-is not referenced here.
+Common pointer cancellation/capture-loss semantics are owned by Issue #179/PR
+#181. These controls consume Core cancellation events and do not add capture
+APIs. Docking remains a downstream crate with no dependency from this crate.

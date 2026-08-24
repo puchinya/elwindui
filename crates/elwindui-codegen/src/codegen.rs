@@ -7695,6 +7695,7 @@ fn generate_view(
                     .collect()
             })
             .unwrap_or_default();
+
         let child_value = |binding: &syn::Ident, child_ty: &str| {
             if child_ty == PASSTHROUGH_NODE {
                 quote! { self.#binding() }

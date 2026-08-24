@@ -19,9 +19,11 @@ pub struct CustomTabViewItem { /* ... */ }
 pub struct CustomSplitter { /* ... */ }
 ```
 
-They use the existing `#[component]` and `view!` composition mechanisms. They do
-not introduce new `#[class]` controls, native TabView/SplitView wrappers, or
-backend-native public types.
+They use the existing `#[component]` and `view!` composition mechanisms. Their
+appearance is authored as a default template subtree made from ordinary visual
+primitives. They do not introduce new `#[class]` controls, native
+TabView/SplitView wrappers, or backend-native public types, and these controls
+do not emit chrome directly from a `render()` override.
 
 ## CustomTabView
 
@@ -63,6 +65,11 @@ unselected items remain Visual children, are arranged to `0 x 0`, and are clippe
 Header widths reserve the same close slot for `Always` and `OnPointerOver`, so
 hover does not resize a tab.
 
+The default template is a `Grid` containing a private non-rendering tab-strip
+presenter and a private non-rendering content presenter. The strip uses the
+existing `HorizontalLayout` semantics. Top places the strip in row 0 and
+Bottom places it in row 1; the other row is the selected-content presenter.
+
 ## CustomTabViewItem
 
 `CustomTabViewItem` inherits `ContentControl` and exposes:
@@ -71,6 +78,18 @@ hover does not resize a tab.
 - `icon: Option<elwindui::core::graphics::IconSource>`, default `None`;
 - `closable: bool`, default `true`;
 - inherited `content` as the single logical content element.
+
+The item’s authored visual subtree is the tab header: it contains a
+`TextBlock`, an optional `IconSourceElement`, a fixed close slot, and a
+`Rectangle` selected-indicator slot. The inherited `content` is not rendered by
+the header. A private content presenter owns the visual presentation of all
+current item contents while preserving each item as the logical owner;
+selection only changes arrangement and never reparents content.
+
+The default close affordance is a private composed component using a 20-pixel
+slot and a `TextBlock` `×` glyph. `Always` and `OnPointerOver` reserve the same
+slot width; `Never` removes the slot. Close press/release is handled by that
+private visual through Core routed input and implicit capture.
 
 Equal `header` and `closable` assignments are no-ops. Metadata updates refresh
 the owning tab through a private weak callback. `IconSource` values are realized
@@ -87,6 +106,10 @@ axis and a 6-pixel width; vertical panes use the Y axis and a 6-pixel height.
 cumulative logical-pixel movement, and a cancellation flag on completion.
 Orientation is frozen at press time, zero deltas are suppressed, and Core
 cancellation completes an active gesture with `canceled = true`.
+
+The default splitter template is an orientation-dependent `Rectangle` with
+the six-pixel natural thickness. It does not draw its line through a
+`RenderContext` override.
 
 ## Ownership and input
 

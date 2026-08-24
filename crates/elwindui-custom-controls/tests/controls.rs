@@ -1,12 +1,13 @@
 use elwindui_custom_controls::core::base::{Point, Size};
-use elwindui_custom_controls::core::graphics::{IconSource, RenderCommand, RenderTree, SystemIcon};
+use elwindui_custom_controls::core::graphics::{
+    IconSource, RenderCommand, RenderGroup, RenderTree, SystemIcon,
+};
 use elwindui_custom_controls::core::input::{
     KeyModifiers, MouseButton, PointerEventArgs, RawPointerEvent, RawPointerEventKind,
-    RoutedEventArgs, TappedEventArgs,
+    RoutedEventArgs,
 };
 use elwindui_custom_controls::core::ui::{
-    ContentControlExt, InvalidationKind, ListExt, RelayoutHost, UIElementExt, dispatch_routed,
-    layout_root,
+    ContentControlExt, ListExt, UIElementExt, dispatch_routed, hit_test, layout_root,
 };
 use elwindui_custom_controls::{
     CloseButtonPresentation, CustomSplitter, CustomSplitterExt, CustomTabView, CustomTabViewExt,
@@ -35,6 +36,49 @@ fn raw_pointer(kind: RawPointerEventKind, position: Point, timestamp_ms: f64) ->
     }
 }
 
+fn render_commands<'a>(group: &'a RenderGroup, out: &mut Vec<&'a RenderCommand>) {
+    out.extend(group.commands.iter());
+    for child in &group.children {
+        render_commands(child, out);
+    }
+}
+
+fn rendered_texts(tree: &RenderTree) -> Vec<String> {
+    let mut commands = Vec::new();
+    render_commands(&tree.root, &mut commands);
+    commands
+        .into_iter()
+        .filter_map(|command| match command {
+            RenderCommand::Text { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn find_visual(node: &Rc<dyn UIElementExt>, name: &str) -> Option<Rc<dyn UIElementExt>> {
+    if node.type_name().contains(name) {
+        return Some(node.clone());
+    }
+    for child in node.visual_children() {
+        if let Some(found) = find_visual(&child, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn absolute_offset(node: &Rc<dyn UIElementExt>) -> Point {
+    let mut point = node.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+    let mut current = node.visual_parent();
+    while let Some(parent) = current {
+        let parent_offset = parent.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+        point.x += parent_offset.x;
+        point.y += parent_offset.y;
+        current = parent.visual_parent();
+    }
+    point
+}
+
 #[test]
 fn tab_view_owns_ordered_items_and_exposes_public_presentation_properties() {
     let first = CustomTabViewItem::new_item();
@@ -46,6 +90,14 @@ fn tab_view_owns_ordered_items_and_exposes_public_presentation_properties() {
     view.set_tab_position(TabStripPosition::Bottom);
     view.set_close_button_presentation(CloseButtonPresentation::Always);
     view.set_children(vec![first.clone(), second.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
 
     assert_eq!(view.children().len(), 2);
     assert_eq!(view.children().to_vec()[0].header(), "first");
@@ -55,14 +107,21 @@ fn tab_view_owns_ordered_items_and_exposes_public_presentation_properties() {
         CloseButtonPresentation::Always
     );
     assert!(second.visual_parent().is_some());
-    let view_node: Rc<dyn UIElementExt> = view.clone();
-    assert!(Rc::ptr_eq(
-        &second.visual_parent().expect("tab parent"),
-        &view_node
-    ));
+    assert!(
+        second
+            .visual_parent()
+            .is_some_and(|parent| parent.type_name().contains("CustomTabStripPresenter"))
+    );
 
     let replacement = CustomTabViewItem::new_item();
     view.set_children(vec![replacement.clone()]);
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
     assert!(first.visual_parent().is_none());
     assert!(second.visual_parent().is_none());
     assert!(replacement.visual_parent().is_some());
@@ -133,6 +192,14 @@ fn tab_pointer_sequence_emits_drag_payloads_and_cancel() {
     let item = CustomTabViewItem::new_item();
     let view = CustomTabView::new_view();
     view.set_children(vec![item.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
 
     let completed = Rc::new(RefCell::new(Vec::<TabDragCompleted>::new()));
     let completed_for_callback = completed.clone();
@@ -140,17 +207,12 @@ fn tab_pointer_sequence_emits_drag_payloads_and_cancel() {
         completed_for_callback.borrow_mut().push(payload);
     }));
 
-    let target: Rc<dyn UIElementExt> = item;
+    let target: Rc<dyn UIElementExt> = item.clone();
     assert!(
-        view.as_ui_element()
-            .routed_handlers
-            .borrow()
-            .contains_key("on_pointer_pressed")
+        target
+            .visual_parent()
+            .is_some_and(|parent| parent.type_name().contains("CustomTabStripPresenter"))
     );
-    assert!(Rc::ptr_eq(
-        &target.visual_parent().expect("tab parent"),
-        &(view.clone() as Rc<dyn UIElementExt>)
-    ));
     let args = RoutedEventArgs::default();
     let press = pointer(Point { x: 1.0, y: 2.0 }, Some(MouseButton::Left));
     dispatch_routed(&target, "on_pointer_pressed", &press, &args);
@@ -211,38 +273,38 @@ fn close_pointer_sequence_never_selects_the_tab() {
         close_requests_for_callback.borrow_mut().push(index);
     }));
 
-    // Empty labels make each tab's deterministic 46px header fit the 20px close slot. The
-    // second tab therefore has a close point at x=62, y=16 after host layout.
     let size = Size {
         width: 240.0,
         height: 120.0,
     };
     let root: Rc<dyn UIElementExt> = view.clone();
     layout_root(&root, size);
-    let target: Rc<dyn UIElementExt> = second;
-    let close_point = Point { x: 64.0, y: 16.0 };
-    dispatch_routed(
-        &target,
-        "on_pointer_pressed",
-        &pointer(close_point, Some(MouseButton::Left)),
-        &RoutedEventArgs::default(),
+    let close: Rc<dyn UIElementExt> = second.close_button();
+    let close_origin = absolute_offset(&close);
+    let close_point = Point {
+        x: close_origin.x + close.arranged_width().unwrap_or(20.0) / 2.0,
+        y: close_origin.y + close.arranged_height().unwrap_or(32.0) / 2.0,
+    };
+    assert!(hit_test(&root, close_point).is_some());
+    let dispatcher = elwindui_custom_controls::core::input::PointerDispatcher::new();
+    let focus = elwindui_custom_controls::core::focus::FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Pressed(MouseButton::Left),
+            close_point,
+            0.0,
+        ),
     );
-    dispatch_routed(
-        &target,
-        "on_pointer_released",
-        &pointer(close_point, Some(MouseButton::Left)),
-        &RoutedEventArgs::default(),
-    );
-    // A normal dispatcher may also produce a tap after release. It must not reintroduce a
-    // second selection interpretation for the close rectangle.
-    dispatch_routed(
-        &target,
-        "on_tapped",
-        &TappedEventArgs {
-            position: close_point,
-            modifiers: KeyModifiers::default(),
-        },
-        &RoutedEventArgs::default(),
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Released(MouseButton::Left),
+            close_point,
+            1.0,
+        ),
     );
 
     assert_eq!(&*close_requests.borrow(), &[1]);
@@ -253,27 +315,25 @@ fn close_pointer_sequence_never_selects_the_tab() {
 }
 
 #[test]
-fn pointer_over_hover_transitions_request_render_only() {
-    struct RecordingHost {
-        kinds: Rc<RefCell<Vec<InvalidationKind>>>,
-    }
-    impl RelayoutHost for RecordingHost {
-        fn request_relayout(&self, _dirty_group_id: u64, kind: InvalidationKind) {
-            self.kinds.borrow_mut().push(kind);
-        }
-    }
-
+fn pointer_over_hover_changes_close_template_without_width_jitter() {
     let item = CustomTabViewItem::new_item();
+    item.set_header("hover".to_string());
     let view = CustomTabView::new_view();
     view.set_close_button_presentation(CloseButtonPresentation::OnPointerOver);
     view.set_children(vec![item.clone()]);
-    let kinds = Rc::new(RefCell::new(Vec::new()));
-    view.as_ui_element()
-        .set_invalidate_host(Some(Rc::new(RecordingHost {
-            kinds: kinds.clone(),
-        })));
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    let width_before = item.arranged_width();
+    let texts_before = rendered_texts(&RenderTree::new::<()>(&root));
+    assert!(!texts_before.iter().any(|text| text == "×"));
 
-    let target: Rc<dyn UIElementExt> = item;
+    let target: Rc<dyn UIElementExt> = item.clone();
     let args = pointer(Point { x: 1.0, y: 1.0 }, None);
     dispatch_routed(
         &target,
@@ -287,17 +347,32 @@ fn pointer_over_hover_transitions_request_render_only() {
         &args,
         &RoutedEventArgs::default(),
     );
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    let texts_hovered = rendered_texts(&RenderTree::new::<()>(&root));
+    assert!(texts_hovered.iter().any(|text| text == "×"));
+    assert_eq!(item.arranged_width(), width_before);
     dispatch_routed(
         &target,
         "on_pointer_exited",
         &args,
         &RoutedEventArgs::default(),
     );
-
-    assert_eq!(
-        &*kinds.borrow(),
-        &[InvalidationKind::Render, InvalidationKind::Render]
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
     );
+    let texts_after = rendered_texts(&RenderTree::new::<()>(&root));
+    assert!(!texts_after.iter().any(|text| text == "×"));
+    assert_eq!(item.arranged_width(), width_before);
 }
 
 #[test]
@@ -305,6 +380,14 @@ fn drag_started_callback_removing_item_only_cancels() {
     let item = CustomTabViewItem::new_item();
     let view = CustomTabView::new_view();
     view.set_children(vec![item.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
     let events = Rc::new(RefCell::new(Vec::<&'static str>::new()));
     let events_for_completed = events.clone();
     view.set_on_tab_drag_completed(Box::new(move |payload| {
@@ -410,6 +493,14 @@ fn canceled_completion_reconciliation_restarts_from_reentrant_children() {
     let final_item = CustomTabViewItem::new_item();
     let view = CustomTabView::new_view();
     view.set_children(vec![first.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
     let completion_count = Rc::new(RefCell::new(0));
     let completion_count_for_callback = completion_count.clone();
     let weak_view = Rc::downgrade(&view);
@@ -447,11 +538,10 @@ fn canceled_completion_reconciliation_restarts_from_reentrant_children() {
     ));
     assert!(first.visual_parent().is_none());
     assert!(replacement.visual_parent().is_none());
-    let view_node: Rc<dyn UIElementExt> = view;
     assert!(
         final_item
             .visual_parent()
-            .is_some_and(|parent| Rc::ptr_eq(&parent, &view_node))
+            .is_some_and(|parent| parent.type_name().contains("CustomTabStripPresenter"))
     );
 }
 
@@ -460,6 +550,14 @@ fn removing_a_tab_during_drag_cancels_the_gesture() {
     let item = CustomTabViewItem::new_item();
     let view = CustomTabView::new_view();
     view.set_children(vec![item.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
     let completed = Rc::new(RefCell::new(Vec::<TabDragCompleted>::new()));
     let completed_for_callback = completed.clone();
     view.set_on_tab_drag_completed(Box::new(move |payload| {
@@ -493,16 +591,222 @@ fn tab_icon_realization_uses_core_icon_source_element() {
 }
 
 #[test]
+fn tab_header_render_tree_is_composed_from_standard_visuals() {
+    let item = CustomTabViewItem::new_item();
+    item.set_header("document".to_string());
+    item.set_icon(Some(IconSource::System(SystemIcon::Add)));
+    let view = CustomTabView::new_view();
+    view.set_children(vec![item]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+
+    assert!(find_visual(&root, "CustomTabStripPresenter").is_some());
+    assert!(find_visual(&root, "IconSourceElement").is_some());
+    assert!(find_visual(&root, "TextBlock").is_some());
+    assert!(find_visual(&root, "Rectangle").is_some());
+    let texts = rendered_texts(&RenderTree::new::<()>(&root));
+    assert!(texts.iter().any(|text| text == "document"));
+    assert!(texts.iter().any(|text| text == "×"));
+}
+
+#[test]
+fn header_and_icon_property_changes_resync_the_template_subtree() {
+    let item = CustomTabViewItem::new_item();
+    item.set_header("a".to_string());
+    let view = CustomTabView::new_view();
+    view.set_children(vec![item.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    let width_a = item.arranged_width().expect("initial tab width");
+
+    item.set_header("a much longer header".to_string());
+    item.set_icon(Some(IconSource::System(SystemIcon::Add)));
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    let width_b = item.arranged_width().expect("updated tab width");
+    assert!(width_b > width_a);
+    assert!(
+        rendered_texts(&RenderTree::new::<()>(&root))
+            .iter()
+            .any(|text| text == "a much longer header")
+    );
+    let icon = find_visual(&root, "IconSourceElement").expect("template icon");
+    assert_eq!(
+        icon.visibility(),
+        elwindui_custom_controls::core::layout::Visibility::Visible
+    );
+
+    item.set_icon(None);
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    assert_eq!(
+        icon.visibility(),
+        elwindui_custom_controls::core::layout::Visibility::Collapsed
+    );
+}
+
+#[test]
+fn selected_indicator_moves_without_recreating_header_items() {
+    let first = CustomTabViewItem::new_item();
+    let second = CustomTabViewItem::new_item();
+    let view = CustomTabView::new_view();
+    view.set_children(vec![first.clone(), second.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    let first_indicator = find_visual(&(first.clone() as Rc<dyn UIElementExt>), "Rectangle")
+        .expect("first indicator");
+    let second_indicator = find_visual(&(second.clone() as Rc<dyn UIElementExt>), "Rectangle")
+        .expect("second indicator");
+    assert_eq!(
+        first_indicator.visibility(),
+        elwindui_custom_controls::core::layout::Visibility::Visible
+    );
+    assert_eq!(
+        second_indicator.visibility(),
+        elwindui_custom_controls::core::layout::Visibility::Collapsed
+    );
+
+    view.select_index(1);
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    assert_eq!(
+        first_indicator.visibility(),
+        elwindui_custom_controls::core::layout::Visibility::Collapsed
+    );
+    assert_eq!(
+        second_indicator.visibility(),
+        elwindui_custom_controls::core::layout::Visibility::Visible
+    );
+    assert!(first.visual_parent().is_some());
+    assert!(second.visual_parent().is_some());
+}
+
+#[test]
 fn content_control_item_owns_one_logical_content_element() {
     let item = CustomTabViewItem::new_item();
     let content = elwindui_custom_controls::core::ui::TextBlock::new();
     item.set_content(content.clone());
-    let item_node: Rc<dyn UIElementExt> = item;
+    let view = CustomTabView::new_view();
+    view.set_children(vec![item.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
     assert!(
         content
             .visual_parent()
-            .is_some_and(|parent| Rc::ptr_eq(&parent, &item_node))
+            .is_some_and(|parent| parent.type_name().contains("CustomTabContentPresenter"))
     );
+}
+
+#[test]
+fn content_replacement_detaches_old_visual_before_attaching_new_visual() {
+    let item = CustomTabViewItem::new_item();
+    let old_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    let new_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    item.set_content(old_content.clone());
+    let view = CustomTabView::new_view();
+    view.set_children(vec![item.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    let presenter = old_content.visual_parent().expect("content presenter");
+    assert!(presenter.type_name().contains("CustomTabContentPresenter"));
+
+    item.set_content(new_content.clone());
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+
+    assert!(old_content.visual_parent().is_none());
+    assert!(
+        new_content
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &presenter))
+    );
+}
+
+#[test]
+fn removing_item_detaches_header_and_content_without_destroying_external_content() {
+    let first = CustomTabViewItem::new_item();
+    let second = CustomTabViewItem::new_item();
+    let first_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    let second_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    first.set_content(first_content.clone());
+    second.set_content(second_content.clone());
+    let view = CustomTabView::new_view();
+    view.set_children(vec![first.clone(), second.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    assert!(first.visual_parent().is_some());
+    assert!(first_content.visual_parent().is_some());
+
+    let removed = view.remove_child(0).expect("removed item");
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+
+    assert!(Rc::ptr_eq(&removed, &first));
+    assert!(first.visual_parent().is_none());
+    assert!(first_content.visual_parent().is_none());
+    assert!(second.visual_parent().is_some());
+    assert!(second_content.visual_parent().is_some());
 }
 
 #[test]
@@ -558,6 +862,10 @@ fn splitter_reports_logical_axis_delta_and_canceled_completion() {
 fn source_selection_is_not_echoed_and_invalid_selection_has_no_content() {
     let first = CustomTabViewItem::new_item();
     let second = CustomTabViewItem::new_item();
+    let first_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    let second_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    first.set_content(first_content.clone());
+    second.set_content(second_content.clone());
     let view = CustomTabView::new_view();
     view.set_children(vec![first.clone(), second.clone()]);
     let changes = Rc::new(RefCell::new(Vec::new()));
@@ -575,11 +883,14 @@ fn source_selection_is_not_echoed_and_invalid_selection_has_no_content() {
     };
     let root: Rc<dyn UIElementExt> = view.clone();
     layout_root(&root, size);
-    assert_eq!(first.arranged_width(), Some(0.0));
-    assert_eq!(second.arranged_width(), Some(0.0));
+    assert_eq!(first_content.arranged_width(), Some(0.0));
+    assert_eq!(second_content.arranged_width(), Some(0.0));
 
     assert!(view.select_index(1));
     assert_eq!(&*changes.borrow(), &[1]);
+    layout_root(&root, size);
+    assert_eq!(first_content.arranged_width(), Some(0.0));
+    assert_eq!(second_content.arranged_width(), Some(240.0));
 }
 
 #[test]
@@ -597,25 +908,40 @@ fn selected_content_is_arranged_below_top_strip_and_unselected_is_zero_clipped()
     let root: Rc<dyn UIElementExt> = view.clone();
     layout_root(&root, size);
 
-    assert_eq!(first.arranged_offset(), Some(Point { x: 0.0, y: 32.0 }));
-    assert_eq!(first.arranged_width(), Some(240.0));
-    assert_eq!(first.arranged_height(), Some(88.0));
-    assert_eq!(second.arranged_width(), Some(0.0));
-    assert_eq!(second.arranged_height(), Some(0.0));
-    assert!(second.clip_to_bounds());
+    let first_content = first.content();
+    let second_content = second.content();
+    let content_presenter = first_content
+        .visual_parent()
+        .expect("selected content presenter");
+    assert_eq!(
+        content_presenter.arranged_offset(),
+        Some(Point { x: 0.0, y: 32.0 })
+    );
+    assert_eq!(
+        first_content.arranged_offset(),
+        Some(Point { x: 0.0, y: 0.0 })
+    );
+    assert_eq!(first_content.arranged_width(), Some(240.0));
+    assert_eq!(first_content.arranged_height(), Some(88.0));
+    assert_eq!(second_content.arranged_width(), Some(0.0));
+    assert_eq!(second_content.arranged_height(), Some(0.0));
+    assert!(second_content.clip_to_bounds());
 
     view.set_tab_strip_position(TabStripPosition::Bottom);
     layout_root(&root, size);
-    assert_eq!(first.arranged_offset(), Some(Point { x: 0.0, y: 0.0 }));
-    assert_eq!(first.arranged_height(), Some(88.0));
+    assert_eq!(
+        content_presenter.arranged_offset(),
+        Some(Point { x: 0.0, y: 0.0 })
+    );
+    assert_eq!(first_content.arranged_height(), Some(88.0));
 }
 
 #[test]
-fn close_affordance_is_custom_geometry_and_respects_presentation() {
+fn close_affordance_is_composed_and_respects_presentation() {
     let item = CustomTabViewItem::new_item();
     item.set_header("document".to_string());
     let view = CustomTabView::new_view();
-    view.set_children(vec![item]);
+    view.set_children(vec![item.clone()]);
     let root: Rc<dyn UIElementExt> = view.clone();
     layout_root(
         &root,
@@ -625,14 +951,9 @@ fn close_affordance_is_custom_geometry_and_respects_presentation() {
         },
     );
 
+    let always_width = item.arranged_width().expect("tab width");
     let always = RenderTree::new::<()>(&root);
-    let always_lines = always
-        .root
-        .commands
-        .iter()
-        .filter(|command| matches!(command, RenderCommand::DrawLine { .. }))
-        .count();
-    assert_eq!(always_lines, 2);
+    assert!(rendered_texts(&always).iter().any(|text| text == "×"));
 
     view.set_close_button_presentation(CloseButtonPresentation::Never);
     layout_root(
@@ -642,14 +963,20 @@ fn close_affordance_is_custom_geometry_and_respects_presentation() {
             height: 120.0,
         },
     );
+    let never_width = item.arranged_width().expect("tab width");
     let never = RenderTree::new::<()>(&root);
-    let never_lines = never
-        .root
-        .commands
-        .iter()
-        .filter(|command| matches!(command, RenderCommand::DrawLine { .. }))
-        .count();
-    assert_eq!(never_lines, 0);
+    assert!(!rendered_texts(&never).iter().any(|text| text == "×"));
+    assert_eq!(always_width, never_width + 20.0);
+
+    view.set_close_button_presentation(CloseButtonPresentation::OnPointerOver);
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    assert_eq!(item.arranged_width(), Some(never_width + 20.0));
 }
 
 #[test]

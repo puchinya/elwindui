@@ -10,43 +10,37 @@ Snapshot: 2026-08-24. The public contract is
 - `CustomTabView`, `CustomTabViewItem`, and `CustomSplitter` use
   `#[elwindui::component]` with the required Control/ContentControl
   inheritance; no new custom `#[class]` declaration was introduced.
-- `CustomTabView.children()` exposes the established
-  `ListExt<dyn CustomTabViewItemExt>` surface, with `set_children` as the
-  concrete replacement convenience path.
-- Typed item ownership, source-vs-user selection paths, close capability and
-  presentation state, 4-pixel tab drag cancellation, splitter axis/delta
-  semantics, weak callbacks, and Core `IconSourceElement` realization are
-  implemented.
-- Close presses are resolved before header selection, hover transitions use
-  equality-guarded paint invalidation, drag-start callbacks re-resolve item
-  identity/index, and cancellation reconciliation restarts after reentrant
-  child replacement.
-- Core-only tests cover ownership, metadata/icon realization, selection and
-  callback behavior, tab gestures, cancellation, reentrant drag mutations,
-  splitter gestures, host layout/render dispatch, and PointerDispatcher
-  implicit capture outside the original control bounds.
+- The controls are templated: authored `body: view!` subtrees use Grid,
+  HorizontalLayout, Rectangle, TextBlock, and IconSourceElement. CustomTabView
+  and CustomSplitter do not draw chrome through `render()`.
+- CustomTabView owns the typed ordered item list and TwoWay selection. Private
+  strip/content presenters preserve item identity and keep all current logical
+  contents visually attached while selection changes.
+- Header text, optional icons, selected indicator, and close affordance are
+  ordinary template visuals. The close helper uses a fixed 20-pixel slot and
+  Core implicit pointer capture; no SystemIcon geometry or direct X drawing is
+  duplicated here.
+- Close capability/presentation, tab drag cancellation/reentrancy, splitter
+  axis/delta semantics, weak callbacks, content replacement/removal, and Core
+  IconSourceElement realization are implemented.
 - The generic component override bridge from [#185](https://github.com/puchinya/elwindui/issues/185)
-  is merged. Custom control layout, render, and hit-test behavior is now
-  exercised through the normal `layout_root`/`RenderTree`/`UIElementExt` paths;
-  no ignored C-class render test remains.
+  is merged. Host-path tests exercise `layout_root`, `RenderTree`, routed input,
+  and PointerDispatcher implicit capture; no ignored test remains for the old
+  override or direct-render architectures.
 
 ## Verification
 
-The focused crate test command passes with 21 tests and no ignored tests. Core,
-codegen, AppKit-enabled facade check, inheritance-demo check, workspace
-check/build, and `git diff --check` also pass. Workspace-wide
-`cargo fmt --all -- --check` still reports pre-existing formatting differences
-outside this crate; the changed Rust test file passes a direct rustfmt check.
-The full AppKit facade suite, `control_template` integration test, and
-workspace test suite start successfully but may time out in the current GUI
-test environment; any timeout is reported against the exact command rather
-than treated as a pass. `rust-analyzer diagnostics .` remains a baseline-wide
-nonzero command (the clean master archive has the same class of
-macro/import diagnostics). AppKit interactive, WinUI3, and GTK4 runtime
-interaction have not been run; Windows verification remains outside #173 in
-#178/#180.
+The focused custom-controls suite passes with 26 tests and no ignored tests.
+Core, codegen, AppKit-enabled facade, inheritance-demo, workspace build/check,
+and workspace test results are recorded in the PR completion report against
+the final head. Workspace-wide formatter or rust-analyzer diagnostics are
+reported separately when their baseline macro/environment diagnostics remain.
+Windows and GTK4 runtime interaction have not been run. Interactive AppKit
+verification remains unverified unless explicitly listed in the final report.
 
 ## Follow-up
 
-- Docking integration remains Issue #172 and must stay a downstream crate.
-- This crate does not add or own common pointer-cancellation infrastructure.
+- Docking integration remains Issue #172 and stays a downstream crate.
+- Common pointer cancellation/capture-loss semantics remain owned by Issue
+  #179/PR #181; this crate consumes the Core cancellation events but does not
+  add a capture API.

@@ -327,9 +327,12 @@ content containerとして使うためのControlではない。
 
 ### `elwindui_custom_controls::CustomTabView`
 
-Docking が共有する backend-neutral な self-drawn tab surface。通常の
-application control と同じ `#[component]` authoring で提供され、native
-`TabView` の wrapper ではない。
+Docking が共有する backend-neutral な templated tab control。通常の
+application control と同じ `#[component]` authoring で提供され、標準の
+`Grid`/`HorizontalLayout`/`TextBlock`/`IconSourceElement`/`Rectangle` を
+使う authored `body: view!` が既定の visual subtree になる。native
+`TabView` の wrapper でも、`RenderContext` で chrome を直接描く control
+でもない。
 
 | Name | Type | Binding | Description |
 |---|---|---|---|
@@ -342,6 +345,9 @@ application control と同じ `#[component]` authoring で提供され、native
 `icon: Option<IconSource>`、`closable: bool`（既定値 `true`）を持つ。
 `content` は inherited single-content slot のままである。icon は
 `IconSourceElement` で realization し、user image を recolor しない。
+item の authored visual subtree は tab header（header `TextBlock`、optional
+icon、fixed close slot、selected indicator）であり、logical `content` は
+private `CustomTabContentPresenter` が安定した visual owner として表示する。
 
 `CustomTabView` の close request は通知だけであり、item を自動削除しない。
 `closable == false` または `Never` の close target は request を発生させない。
@@ -351,8 +357,10 @@ Core cancellation は active drag を `canceled = true` で一度だけ完了さ
 
 ### `elwindui_custom_controls::CustomSplitter`
 
-`Control` を継承する self-drawn splitter。`orientation` は既定値
-`Horizontal` で、水平時は X 軸/幅 6、垂直時は Y 軸/高さ 6 を使う。
+`Control` を継承する templated splitter。`body: view!` の
+orientation-dependent `Rectangle` が hit-test surface と six-pixel natural
+thickness を提供する。`orientation` は既定値 `Horizontal` で、水平時は
+X 軸/幅 6、垂直時は Y 軸/高さ 6 を使う。
 drag delta は incremental/cumulative logical pixels を持ち、press 中に
 orientation を変更しても axis は変わらない。release と cancellation は
 `SplitterDragCompletedEventArgs` を一度だけ発行し、後者は `canceled = true`

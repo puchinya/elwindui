@@ -8,6 +8,11 @@ The macro parses the class declaration and paired implementation, validates the 
 
 Ordinary and root classes generate their own extension trait surface. `trait_only` declares an interface without concrete storage. `struct_only` implements an existing trait for concrete storage and therefore cannot add the same per-class forwarding surface as an ordinary class.
 
+View components that are lowered into a generated `#[class]` implementation pass their companion
+`#[overridable]`/`#[overrides]` method metadata through this same expansion boundary. The class macro
+remains the single owner of ancestor forwarding and runtime virtual dispatch; component codegen does
+not create a parallel vtable, forwarding table, or method-name-specific route.
+
 ## Ancestor forwarding
 
 Generated `__elwindui_inherit_*!` macros carry the ancestor chain across module and crate boundaries. `#[overridable]` emits dynamic accessors used by forwarding; `#[overrides]` routes through the subclass implementation. Sealed members omit the override route.

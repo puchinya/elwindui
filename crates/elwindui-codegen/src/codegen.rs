@@ -3537,6 +3537,58 @@ fn emit_methods(methods: &[MethodDef]) -> TokenStream {
     out
 }
 
+/// Emits component companion methods inside the generated `#[class]` impl. The effective method
+/// list contains inherited methods and private `__base_` shadows as well as this component's own
+/// declarations, so only the latter may retain the source method classification. This keeps the
+/// component-to-class bridge generic: the `#[class]` macro remains the sole owner of virtual method
+/// routing and receives the same metadata it would receive from a hand-written class impl. The
+/// matching `#[inherent]` copy for an own virtual/override method preserves the pre-bridge concrete
+/// component API; it executes the authored body directly and is not part of host trait dispatch.
+fn emit_class_methods(methods: &[MethodDef], own_methods: &[MethodDef]) -> TokenStream {
+    let own_names: HashSet<&str> = own_methods
+        .iter()
+        .map(|method| method.name.as_str())
+        .collect();
+    let mut out = TokenStream::new();
+    for method in methods {
+        let name = format_ident!("{}", method.name);
+        let (attr, vis) = if method.name.starts_with("__base_") {
+            (quote! { #[inherent] }, quote! {})
+        } else if own_names.contains(method.name.as_str()) && method.is_virtual {
+            (quote! { #[overridable] }, quote! {})
+        } else if own_names.contains(method.name.as_str()) && method.is_override {
+            (quote! { #[overrides] }, quote! {})
+        } else {
+            (quote! { #[inherent] }, quote! { pub })
+        };
+        let params: Vec<_> = method
+            .params
+            .iter()
+            .map(|(param_name, ty)| {
+                let ident = format_ident!("{}", param_name);
+                quote! { #ident: #ty }
+            })
+            .collect();
+        let ret = match &method.return_ty {
+            Some(ty) => quote! { -> #ty },
+            None => quote! {},
+        };
+        let body = &method.body;
+        out.extend(quote! {
+            #attr #vis fn #name(&self, #(#params),*) #ret #body
+        });
+        if own_names.contains(method.name.as_str()) && (method.is_virtual || method.is_override) {
+            out.extend(quote! {
+                #[inherent]
+                pub fn #name(&self, #(#params),*) #ret {
+                    #body
+                }
+            });
+        }
+    }
+    out
+}
+
 /// Where a path/method-call expression is being emitted: during initial widget construction
 /// (before `Rc<Self>` exists — the injected param, e.g. `vm`, is only reachable as a bare local
 /// variable) or afterwards, inside a stored closure or `resync()`, where it hangs off a
@@ -5805,7 +5857,11 @@ fn generate_view(
     };
 
     let methods = emit_methods(&component.methods);
-
+    // A composed component's companion impl is lowered into an existing `#[class]` impl. Keep
+    // the method metadata on that boundary so the class macro can route virtual/override methods
+    // through the same ancestor dispatch chain as hand-written classes. Inherited effective
+    // methods remain generic compatibility helpers; only methods declared by this component carry
+    // their source `#[overridable]`/`#[overrides]` classification.
     // A shape-composition root receives authored children only after the outer `Rc` exists. The
     // destination and its scalar/collection lowering are derived from the effective content
     // metadata. External builtins use their exported shape macro, which applies the same rule
@@ -6035,6 +6091,7 @@ fn generate_view(
         Some(name) => base_trait_path(name),
         None => TokenStream::new(),
     };
+    let class_methods = emit_class_methods(&component.methods, &source_component.methods);
     // PR #165 post-final rereview remediation, A9 (§10.2): the implicit-bind-owner counterpart to
     // `property_resync_methods` — `property_resync_methods_for` itself needs no changes at all,
     // since `collect_view_expr_owner_properties`/`view_expr_depends_on`/`emit_resync` only ever
@@ -6465,7 +6522,7 @@ fn generate_view(
                 #window_show_hide_close_overrides
                 #composed_unmount_method
                 #named_accessors
-                #methods
+                #class_methods
                 #shadow_hooks
                 #on_unmount_method
             }
@@ -13444,6 +13501,38 @@ mod tests {
         assert!(
             rendered.contains("CustomTabView :: new (vec !"),
             "nested children must lower through the derived collection: {rendered}"
+        );
+    }
+
+    #[test]
+    fn composed_component_methods_keep_generic_override_metadata() {
+        let module = crate::test_module(&[(
+            Some("VerticalLayout"),
+            r#"
+                struct MetadataBridgeProbe {
+                    body: view! {
+                        Rectangle { }
+                    },
+                }
+            "#,
+            Some(
+                r#"
+                    impl MetadataBridgeProbe {
+                        #[overridable]
+                        fn marker(&self) -> bool { true }
+                    }
+                "#,
+            ),
+        )])
+        .expect("component with an overridable method should parse");
+        let table = build_symbol_table_with_builtins(std::slice::from_ref(&module));
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("composed_component_override_metadata", &generated);
+        let rendered = generated.to_string();
+        assert!(
+            rendered.contains("# [overridable] fn marker")
+                || rendered.contains("#[overridable] fn marker"),
+            "component metadata must reach the generated class impl: {rendered}"
         );
     }
 

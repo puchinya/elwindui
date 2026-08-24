@@ -28,6 +28,12 @@ Rustの構文・慣習に寄せることで学習コストを下げつつ、機�
 
 ElwindUILは通常のRustファイル中で属性マクロ`#[elwindui::component]`を使って書く。**これが唯一サポートされる記法であり、Rustのソースファイル以外の独自テキスト形式は存在しない。** 要素はRustの構造体リテラルに似た記法で記述し、ネストがそのまま親子関係になる。
 
+`ContentControl`を継承するcomponentでは、component自身の`body: view!`は既定のVisual template
+subtreeとして扱われる。一方、そのcomponentを別の`view!`で使用して書くbare childは、継承された
+`ContentControl.content`へlowerされる。own bodyのtemplate rootとuse-siteのlogical contentは
+別の書き込み先であり、`#[content]`の追加再宣言や型名依存のcodegen分岐で切り替えない。Presenterを
+bodyへ明示しない限りlogical contentは自動表示されない。
+
 ```rust
 #[elwindui::component]
 struct Greeting {
@@ -221,9 +227,9 @@ struct ContentControl {
 
     body: view! {
         // `Control { .. }` というラッパーは書かない — `view!`の中身が Control の属性と
-        // private template-root 用の単一 visual root になる
+        // component自身のdefault template rootになる
         padding: padding
-        content
+        VerticalLayout { TextBlock { text: "header" } }
     }
 }
 

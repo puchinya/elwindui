@@ -79,6 +79,10 @@ Every class also emits a `__elwindui_props_{Name}!` declarative macro carrying i
 - `@content_shape` — selects one of caller-supplied scalar/collection lowering blocks from the
   effective content property's declared shape. Codegen uses this only when an external class has no
   local field table; the decision still comes from `#[content(..)]` metadata and field type.
+- `@component_body_presentation` — selects a component's own authored-body presentation block. An
+  internal class opt-in selects the template-root block; the default/fallback selects the ordinary
+  content block. Ancestor forwarding keeps this query usable for descendants in another crate, and
+  caller bare-child lowering remains on `@children` rather than this query.
 - `@content_slot_type` — the type-position companion to `@content_shape`, selecting `()` for an
   external scalar content destination and `DynamicChildSlot<T>` for a collection destination. It
   keeps generated storage metadata-driven when the declaring class is outside the codegen crate.

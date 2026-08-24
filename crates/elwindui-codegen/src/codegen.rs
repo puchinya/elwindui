@@ -4085,17 +4085,14 @@ fn generate_view(
     // reports that case as a real diagnostic; this is a second, codegen-level guarantee that holds
     // even if this function is ever called on unvalidated input (mirrors `is_abstract`'s own
     // `continue` in `generate_module` just above).
-    let resolved_root = resolve_view_root_element(
-        &view.root,
-        component.base.as_deref(),
-        is_composed,
-    )
-    .unwrap_or_else(|| {
-        panic!(
+    let resolved_root =
+        resolve_view_root_element(&view.root, component.base.as_deref(), is_composed)
+            .unwrap_or_else(|| {
+                panic!(
             "{}: view root must be exactly one element unless it inherits a composable base",
             component.name
         )
-    });
+            });
 
     plan_element(
         &resolved_root,
@@ -5300,6 +5297,50 @@ fn generate_view(
                     }
                 }
             }
+        } else if is_shape_composition && table.resolve(from, &resolved_root.type_path).is_none() {
+            // An implicit ContentControl body uses the same ContentPresenter binding contract as
+            // an explicit ControlTemplate. The external base's shape macro selects this block for
+            // template-root-capable classes and expands to nothing for ordinary controls, keeping
+            // the decision metadata-driven and cross-crate.
+            let props_macro = format_ident!("__elwindui_props_{}", resolved_root.type_path);
+            for node in &plan {
+                if node.dynamic.is_some()
+                    || !node
+                        .type_path
+                        .rsplit("::")
+                        .next()
+                        .is_some_and(|name| name == "ContentPresenter")
+                {
+                    continue;
+                }
+                let presenter = &node.binding;
+                let bind = if ctx.weak_bindable_owners.contains("templated_parent") {
+                    quote! {
+                        {
+                            let templated_parent = this.templated_parent.upgrade().expect(
+                                "implicit template templated_parent was dropped before ContentPresenter wiring"
+                            );
+                            elwindui::core::ui::ContentPresenter::__bind_templated_parent(
+                                &#presenter,
+                                &templated_parent,
+                            );
+                        }
+                    }
+                } else {
+                    quote! {
+                        elwindui::core::ui::ContentPresenter::__bind_templated_parent(
+                            &#presenter,
+                            &this,
+                        );
+                    }
+                };
+                wiring_stmts.extend(quote! {
+                    elwindui::core::#props_macro!(@component_body_presentation
+                        { #bind },
+                        {}
+                    );
+                });
+            }
         }
     }
 
@@ -5508,6 +5549,9 @@ fn generate_view(
                 let setter = parent_info
                     .and_then(|i| i.content_field.as_deref())
                     .map(|field| format_ident!("set_{field}"));
+                let template_presentation = parent_is_self
+                    && is_shape_composition
+                    && parent_info.is_none();
                 emit_scalar_dynamic_node_refresh(
                     &plan,
                     node,
@@ -5519,6 +5563,7 @@ fn generate_view(
                     &ctx,
                     from,
                     table,
+                    template_presentation,
                 )
             };
             let body = if let Some(info) = parent_info {
@@ -5910,8 +5955,9 @@ fn generate_view(
     // destination and its scalar/collection lowering are derived from the effective content
     // metadata. External builtins use their exported shape macro, which applies the same rule
     // without requiring a local type table.
-    let (content_capture_stmt, content_attach_stmt) = if is_shape_composition {
+    let (body_prepare_stmt, content_capture_stmt, content_attach_stmt) = if is_shape_composition {
         let root = plan.last();
+        let has_root_children = root.is_some_and(|root| !root.child_bindings.is_empty());
         let children: Vec<(syn::Ident, String)> = root
             .map(|root| {
                 root.child_bindings
@@ -6024,7 +6070,7 @@ fn generate_view(
             let erased = children
                 .iter()
                 .any(|(_, child_ty)| child_ty == PASSTHROUGH_NODE);
-            if erased {
+            let content_attach = if erased {
                 quote! {
                     elwindui::core::#props_macro!(@children_erased self, [#(#values),*]);
                 }
@@ -6032,9 +6078,48 @@ fn generate_view(
                 quote! {
                     elwindui::core::#props_macro!(@children self, [#(#values),*]);
                 }
+            };
+            let template_value = children
+                .first()
+                .map(|(binding, child_ty)| {
+                    into_node_if_needed(child_value(binding, child_ty), child_ty, from, table)
+                })
+                .unwrap_or_else(|| quote! { compile_error!("missing scalar template root") });
+            let template_attach = quote! {
+                {
+                    use elwindui::core::ui::ControlExt as _;
+                    self.__set_template_root(#template_value);
+                }
+            };
+            // The defining class's exported shape macro selects template-root or ordinary
+            // content lowering. This is the only place the component's own body is allowed to
+            // choose presentation mode; caller bare-child construction continues to use
+            // `@children` independently.
+            quote! {
+                elwindui::core::#props_macro!(@component_body_presentation
+                    { #template_attach },
+                    { #content_attach }
+                );
             }
         };
-        (TokenStream::new(), attach)
+        // A known local shape can still use the explicit ControlTemplate key path above. The
+        // implicit default-body protocol is exported by external/core classes, so only generate
+        // its preparation query when the root is not present in the local symbol table.
+        if table.resolve(from, &resolved_root.type_path).is_none()
+            && !is_control_template_enabled
+            && has_root_children
+        {
+            let props_macro = format_ident!("__elwindui_props_{}", resolved_root.type_path);
+            let prepare = quote! {
+                elwindui::core::#props_macro!(@component_body_presentation
+                    { use elwindui::core::ui::ControlExt as _; self.__prepare_template_presentation(); },
+                    {}
+                );
+            };
+            (prepare, TokenStream::new(), attach)
+        } else {
+            (TokenStream::new(), TokenStream::new(), attach)
+        }
     } else if is_inherited_view_composition && component.base.as_deref() == Some("ContentControl") {
         // Unlike the shape-composition case above, `content`/`padding` are `construct`'s own
         // parameters, not stored fields — `on_constructed` has no parameters of its own to read
@@ -6048,6 +6133,7 @@ fn generate_view(
         });
         (
             TokenStream::new(),
+            TokenStream::new(),
             quote! {
                 if let Some((padding, content)) = self.__deferred_content_attach.borrow_mut().take() {
                     use elwindui::core::ui::ContentControlExt as _;
@@ -6057,7 +6143,7 @@ fn generate_view(
             },
         )
     } else {
-        (TokenStream::new(), TokenStream::new())
+        (TokenStream::new(), TokenStream::new(), TokenStream::new())
     };
 
     // `#target`'s own class-hierarchy declaration (docs/design/runtime/ui_tree_design.md). A composed
@@ -6521,6 +6607,7 @@ fn generate_view(
                 fn __build_view(&self) {
                     #own_environment_resolve_stmts
                     #custom_template_branch
+                    #body_prepare_stmt
                     #child_construct_stmts
                     #content_attach_stmt
                     let __most_derived: Option<std::rc::Rc<#target>> = self
@@ -6628,6 +6715,7 @@ fn generate_view(
                 #[doc(hidden)]
                 fn __build_view(self: &std::rc::Rc<Self>) {
                     #own_environment_resolve_stmts
+                    #body_prepare_stmt
                     #child_construct_stmts
                     #content_attach_stmt
                     let weak_begin = std::rc::Rc::downgrade(self);
@@ -8554,6 +8642,7 @@ fn emit_scalar_dynamic_node_refresh(
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
+    template_presentation: bool,
 ) -> TokenStream {
     match node
         .dynamic
@@ -8595,6 +8684,7 @@ fn emit_scalar_dynamic_node_refresh(
                 ctx,
                 from,
                 table,
+                template_presentation,
             );
             let else_value = emit_scalar_branch_value(
                 plan,
@@ -8608,6 +8698,7 @@ fn emit_scalar_dynamic_node_refresh(
                 ctx,
                 from,
                 table,
+                template_presentation,
             );
             quote! {
                 if #condition { #then_value } else { #else_value }
@@ -8634,6 +8725,7 @@ fn emit_scalar_dynamic_node_refresh(
                             ctx,
                             from,
                             table,
+                            template_presentation,
                         )
                     },
                 );
@@ -8664,6 +8756,7 @@ fn emit_scalar_branch_value(
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
+    template_presentation: bool,
 ) -> TokenStream {
     let (binding, ty) = entry;
     if ty == DYNAMIC_CHILD_SLOT_MARKER {
@@ -8682,6 +8775,7 @@ fn emit_scalar_branch_value(
             ctx,
             from,
             table,
+            template_presentation,
         );
     }
     let value = lazy_leaf_or_field_value(lazy, binding, ctx, from, table);
@@ -8699,8 +8793,21 @@ fn emit_scalar_branch_value(
         quote! { #receiver.#setter(#value); }
     } else {
         let props_macro = format_ident!("__elwindui_props_{owner_type}");
-        quote! {
+        let content = quote! {
             elwindui::core::#props_macro!(@children_erased #receiver, [#value]);
+        };
+        if template_presentation {
+            quote! {
+                elwindui::core::#props_macro!(@component_body_presentation
+                    {
+                        use elwindui::core::ui::ControlExt as _;
+                        #receiver.__set_template_root(#value);
+                    },
+                    { #content }
+                );
+            }
+        } else {
+            content
         }
     }
 }
@@ -10117,6 +10224,42 @@ fn emit_construction(
                 let #binding = #type_ident::new(#(#args),*);
             },
         };
+        // A component that composes over a base with an inherited content destination may not
+        // expose that base field in its generated constructor (the base is external to this
+        // codegen table). Keep caller bare-child lowering separate from the component's own body
+        // lowering by attaching those children after construction through the composed base's
+        // exported metadata protocol. An own `#[content(..)]` declaration wins and is handled by
+        // the ordinary constructor/setter machinery above.
+        let composed_content_attach = if info.content_field.is_none()
+            && info.composed_shape.is_some()
+            && node
+                .child_bindings
+                .iter()
+                .any(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
+        {
+            let base_name = info
+                .composed_shape
+                .as_deref()
+                .expect("composed shape name")
+                .to_string();
+            let props_macro = format_ident!("__elwindui_props_{base_name}");
+            let values = node
+                .child_bindings
+                .iter()
+                .filter(|(_, child_ty)| *child_ty != DYNAMIC_CHILD_SLOT_MARKER)
+                .map(|(child, _)| quote! { #child.clone() });
+            let base_info = table.resolve(from, &base_name);
+            let macro_path = if base_info.is_none() || base_info.is_some_and(|i| i.is_builtin) {
+                quote! { elwindui::core::#props_macro }
+            } else {
+                quote! { crate::#props_macro }
+            };
+            quote! {
+                #macro_path!(@children #binding, [#(#values),*]);
+            }
+        } else {
+            TokenStream::new()
+        };
         out.extend(quote! {
             // A deferred field inherited from `UIElement` itself (`margin`/`width`/`height`/... —
             // `resolve_effective_fields`'s own doc comment) is set through `UIElementExt`, a shared
@@ -10128,6 +10271,7 @@ fn emit_construction(
             use elwindui::core::ui::UIElementExt as _;
             #construct_call
             #(#optional_setters)*
+            #composed_content_attach
         });
         // A non-native component exposes its view root through `into_node()`, allowing attached
         // property setters to target that root. Native non-`NativeControl` roots are unsupported.
@@ -13485,12 +13629,10 @@ mod tests {
             .resolve(module, "ContentControl")
             .expect("ContentControl metadata");
         assert_eq!(content_control.content_field.as_deref(), Some("content"));
-        assert!(
-            content_control
-                .field_types
-                .get("content")
-                .is_some_and(|ty| ty.contains("dyn UIElement"))
-        );
+        assert!(content_control
+            .field_types
+            .get("content")
+            .is_some_and(|ty| ty.contains("dyn UIElement")));
         let layout = table.resolve(module, "Layout").expect("Layout metadata");
         assert_eq!(layout.content_field.as_deref(), Some("children"));
         assert_eq!(
@@ -13533,11 +13675,10 @@ mod tests {
             .resolve(&module, "CustomTabView")
             .expect("derived component metadata");
         assert_eq!(info.content_field.as_deref(), Some("children"));
-        assert!(
-            info.field_types
-                .get("children")
-                .is_some_and(|ty| ty.trim_start().starts_with("Vec<"))
-        );
+        assert!(info
+            .field_types
+            .get("children")
+            .is_some_and(|ty| ty.trim_start().starts_with("Vec<")));
         let generated = generate_module(&module, &table);
         assert_valid_rust("derived_content_override", &generated);
         let rendered = generated.to_string();
@@ -16106,10 +16247,8 @@ struct NotepadWindow {
         // `content`/`padding` are `#[class]`-managed own (untagged) methods now (docs/
         // docs/design/runtime/ui_tree_design.md) — the macro derives the matching trait declaration/impl from
         // these at expansion time, invisible in these pre-expansion generated tokens.
-        assert!(
-            content_control_str
-                .contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >")
-        );
+        assert!(content_control_str
+            .contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >"));
         assert!(content_control_str.contains("fn padding (& self) -> Option < f32 >"));
         // Real struct is always the bare `ContentControl` name itself — the *source* `#[class]` is
         // written against that same bare name (docs/design/runtime/ui_tree_design.md); the macro derives

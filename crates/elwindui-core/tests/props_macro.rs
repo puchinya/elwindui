@@ -6,7 +6,7 @@
 
 use elwindui_core::graphics::{Brush, Color};
 use elwindui_core::ui::ButtonRole;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// Stands in for a backend's real `Button`: the props macro emits plain method syntax
@@ -579,6 +579,22 @@ fn content_slot_type_dispatch_selects_scalar_or_collection_storage() {
     let _collection: elwindui_core::__elwindui_props_VerticalLayout!(@content_slot_type
         dyn elwindui_core::ui::UIElementExt
     ) = elwindui_core::ui::DynamicChildSlot::default();
+}
+
+#[test]
+fn component_body_presentation_forwards_and_selects_template_root_mode() {
+    let selected = Cell::new("");
+    elwindui_core::__elwindui_props_ContentControl!(@component_body_presentation
+        { selected.set("template-root"); },
+        { selected.set("content"); }
+    );
+    assert_eq!(selected.get(), "template-root");
+
+    elwindui_core::__elwindui_props_VerticalLayout!(@component_body_presentation
+        { selected.set("unexpected"); },
+        { selected.set("content"); }
+    );
+    assert_eq!(selected.get(), "content");
 }
 
 // --- `@routed`: registering a #[routed] callback instead of assigning it ------------------------

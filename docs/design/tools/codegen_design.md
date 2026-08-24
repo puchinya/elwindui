@@ -173,6 +173,14 @@ setter が private `template_root` replacement path へ委譲するが、この 
 lowering からは見えない。`Layout` の `children`、`ContentControl` の `content`、将来の
 specialized control の typed `children` はすべて同じ metadata-driven rule を通る。
 
+component自身のauthored bodyと、componentを使用する側のbare childは別のlowering siteである。
+ContentControl系のdefault bodyでは、class shape macroの内部
+`@component_body_presentation { template_block }, { content_block }` queryがtemplate-root
+blockを選び、mount前に`__prepare_template_presentation()`を実行してからbody rootを接続する。
+使用側のbare childはこのqueryを経由せず、継承された`content`の`@children`/scalar loweringへ
+送られる。queryはclass metadataのancestor forwardingでcross-crate descendantsにも伝播し、
+generatorはControl/ContentControlなどの型名を検査しない。
+
 #### Component override bridge
 
 `#[elwindui::component]` の companion `impl` にある `#[overridable]` / `#[overrides]` は

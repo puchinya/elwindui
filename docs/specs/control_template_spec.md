@@ -57,6 +57,11 @@ struct RoundedPanel {
 KeyのValue型は`Option<ControlTemplate<Component>>`でなければならない。
 `None`はComponentの`body: view!`をdefault templateとして使うことを意味する。
 
+`ContentControl`を継承するcomponentは`template = key`を宣言しなくても、`body: view!`を
+default visual templateとして扱う。component自身のbodyはtemplate rootへ接続され、componentの
+使用側で書かれたbare childは、別経路で継承された`ContentControl.content`へlowerされる。
+この二つを`#[content]`の再宣言や公開追加プロパティで兼用してはならない。
+
 ## 4. Selection and lifecycle
 
 template selectionはlogical constructionでは行わず、次の順序で一度だけ行う。
@@ -75,7 +80,7 @@ logical construction
 初期版の優先順位は次の通りである。
 
 1. Environment Keyの`Some(ControlTemplate<Component>)`
-2. Componentの`body: view!` default template
+2. Componentの`body: view!` default template（`ContentControl`派生のimplicit default bodyを含む）
 
 custom templateを選択した場合、default bodyのVisual node、binding、subscriptionを構築してはならない。
 template subtreeはtargetと同じeffective `EnvironmentContext`を継承する。
@@ -121,6 +126,11 @@ templateは静的な`ContentPresenter`を0個または1個持てる。0個の場
 保持されるが表示されない。複数配置またはdynamic region内の配置は初期版ではcompile-time errorである。
 
 replaceable templateを使用しないraw `ContentControl`のdirect presentationは互換性のため維持する。
+
+`ContentControl`派生componentのdefault bodyに`ContentPresenter {}`が無い場合、logical contentは
+targetをlogical parentとして保持されるが、そのtemplateからVisual表示されない。Presenterがある場合だけ、
+そのPresenterがlogical contentのVisual ownerになる。bodyのpresentation選択は内部metadataで行われ、
+新しい公開DSL構文は導入しない。
 
 ## 7. Validation
 

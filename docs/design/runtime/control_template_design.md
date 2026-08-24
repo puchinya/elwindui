@@ -50,9 +50,20 @@ run target wiring and on_mount
 default body用node storageは既存通り`OnceCell`等でstructに確保してよいが、custom branchではsetせず、
 default node construction・event wiring・subscriptionを実行しない。
 shape-composed `Control` の default body では、構築済みの単一 authored visual root を
-private template-root pathへ接続する。collection compositionは `Layout` のみが担当し、
-`ContentControl` は従来どおり `set_content`/`ContentPresenter` pathを使用する。
+private template-root pathへ接続する。`ContentControl`は内部のbody-presentation metadataで
+同じtemplate-root modeへopt-inし、body rootを`__prepare_template_presentation()`後に
+`__set_template_root()`へ接続する。componentのuse-site bare childはこのown-body処理とは別に、
+継承された`content` setterへlowerされる。collection compositionは `Layout` のみが担当する。
 Keyへはsubscribeしないためtemplate choiceはmount lifetime中固定される。
+
+### 3.1 Body-presentation metadata
+
+`#[class]`は内部のbody-presentation capabilityを`__elwindui_props_{Name}!`へ出力する。
+`@component_body_presentation { template_block }, { content_block }` queryは、opt-inした
+`ContentControl`とそのcross-crate descendantsだけtemplate blockを選び、それ以外はcontent
+blockを選ぶ。class/type名を検査するcodegen分岐や公開DSL構文は追加しない。これはcomponent自身の
+authored bodyにだけ使い、caller側のbare childは既存の`@children`/scalar・collection loweringを
+使い続ける。
 
 ## 4. control_template authoring
 

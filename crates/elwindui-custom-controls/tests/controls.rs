@@ -1,7 +1,8 @@
 use elwindui_custom_controls::core::base::{Point, Size};
 use elwindui_custom_controls::core::graphics::{IconSource, RenderCommand, RenderTree, SystemIcon};
 use elwindui_custom_controls::core::input::{
-    KeyModifiers, MouseButton, PointerEventArgs, RoutedEventArgs, TappedEventArgs,
+    KeyModifiers, MouseButton, PointerEventArgs, RawPointerEvent, RawPointerEventKind,
+    RoutedEventArgs, TappedEventArgs,
 };
 use elwindui_custom_controls::core::ui::{
     ContentControlExt, InvalidationKind, ListExt, RelayoutHost, UIElementExt, dispatch_routed,
@@ -21,6 +22,16 @@ fn pointer(position: Point, button: Option<MouseButton>) -> PointerEventArgs {
         screen_position: Some(position),
         button,
         modifiers: KeyModifiers::default(),
+    }
+}
+
+fn raw_pointer(kind: RawPointerEventKind, position: Point, timestamp_ms: f64) -> RawPointerEvent {
+    RawPointerEvent {
+        kind,
+        position,
+        screen_position: Some(position),
+        modifiers: KeyModifiers::default(),
+        timestamp_ms,
     }
 }
 
@@ -201,13 +212,13 @@ fn close_pointer_sequence_never_selects_the_tab() {
     }));
 
     // Empty labels make each tab's deterministic 46px header fit the 20px close slot. The
-    // second tab therefore has a close point at x=62, y=16 after its direct arrange pass.
+    // second tab therefore has a close point at x=62, y=16 after host layout.
     let size = Size {
         width: 240.0,
         height: 120.0,
     };
-    view.measure_override(size);
-    view.arrange_override(size);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(&root, size);
     let target: Rc<dyn UIElementExt> = second;
     let close_point = Point { x: 64.0, y: 16.0 };
     dispatch_routed(
@@ -351,8 +362,8 @@ fn drag_started_callback_reorder_refreshes_moved_index() {
         width: 240.0,
         height: 120.0,
     };
-    view.measure_override(size);
-    view.arrange_override(size);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(&root, size);
     let started = Rc::new(RefCell::new(Vec::new()));
     let moved = Rc::new(RefCell::new(Vec::new()));
     let started_for_callback = started.clone();
@@ -562,11 +573,8 @@ fn source_selection_is_not_echoed_and_invalid_selection_has_no_content() {
         width: 240.0,
         height: 120.0,
     };
-    // `#[component]` currently emits these hooks as inherent helpers rather than wiring them
-    // into the inherited UIElement vtable. Exercise the approved hook logic directly here; the
-    // host-level dispatch remains a C-class prerequisite tracked in the status document.
-    view.measure_override(size);
-    view.arrange_override(size);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(&root, size);
     assert_eq!(first.arranged_width(), Some(0.0));
     assert_eq!(second.arranged_width(), Some(0.0));
 
@@ -586,23 +594,23 @@ fn selected_content_is_arranged_below_top_strip_and_unselected_is_zero_clipped()
         width: 240.0,
         height: 120.0,
     };
-    view.measure_override(size);
-    view.arrange_override(size);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(&root, size);
 
     assert_eq!(first.arranged_offset(), Some(Point { x: 0.0, y: 32.0 }));
     assert_eq!(first.arranged_width(), Some(240.0));
+    assert_eq!(first.arranged_height(), Some(88.0));
     assert_eq!(second.arranged_width(), Some(0.0));
     assert_eq!(second.arranged_height(), Some(0.0));
     assert!(second.clip_to_bounds());
 
     view.set_tab_strip_position(TabStripPosition::Bottom);
-    view.measure_override(size);
-    view.arrange_override(size);
+    layout_root(&root, size);
     assert_eq!(first.arranged_offset(), Some(Point { x: 0.0, y: 0.0 }));
+    assert_eq!(first.arranged_height(), Some(88.0));
 }
 
 #[test]
-#[ignore = "C prerequisite: composed #[component] render overrides are not in the UIElement vtable"]
 fn close_affordance_is_custom_geometry_and_respects_presentation() {
     let item = CustomTabViewItem::new_item();
     item.set_header("document".to_string());
@@ -642,6 +650,165 @@ fn close_affordance_is_custom_geometry_and_respects_presentation() {
         .filter(|command| matches!(command, RenderCommand::DrawLine { .. }))
         .count();
     assert_eq!(never_lines, 0);
+}
+
+#[test]
+fn splitter_host_layout_uses_orientation_axis() {
+    let splitter = CustomSplitter::new_splitter();
+    let root: Rc<dyn UIElementExt> = splitter.clone();
+    let available = Size {
+        width: 240.0,
+        height: 120.0,
+    };
+
+    splitter.set_orientation(Orientation::Horizontal);
+    layout_root(&root, available);
+    assert_eq!(
+        splitter.measured_size(),
+        Some(Size {
+            width: 6.0,
+            height: 0.0
+        })
+    );
+
+    splitter.set_orientation(Orientation::Vertical);
+    layout_root(&root, available);
+    assert_eq!(
+        splitter.measured_size(),
+        Some(Size {
+            width: 0.0,
+            height: 6.0
+        })
+    );
+}
+
+#[test]
+fn pointer_dispatcher_implicit_capture_completes_tab_outside_and_cancels() {
+    let item = CustomTabViewItem::new_item();
+    let view = CustomTabView::new_view();
+    view.set_children(vec![item]);
+    let completed = Rc::new(RefCell::new(Vec::<TabDragCompleted>::new()));
+    let completed_for_callback = completed.clone();
+    view.set_on_tab_drag_completed(Box::new(move |payload| {
+        completed_for_callback.borrow_mut().push(payload);
+    }));
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    let dispatcher = elwindui_custom_controls::core::input::PointerDispatcher::new();
+    let focus = elwindui_custom_controls::core::focus::FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Pressed(MouseButton::Left),
+            Point { x: 4.0, y: 16.0 },
+            0.0,
+        ),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(RawPointerEventKind::Moved, Point { x: 9.0, y: 16.0 }, 1.0),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Moved,
+            Point { x: 500.0, y: 500.0 },
+            2.0,
+        ),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Released(MouseButton::Left),
+            Point { x: 500.0, y: 500.0 },
+            3.0,
+        ),
+    );
+    assert_eq!(completed.borrow().len(), 1);
+    assert!(!completed.borrow()[0].canceled);
+
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Pressed(MouseButton::Left),
+            Point { x: 4.0, y: 16.0 },
+            4.0,
+        ),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(RawPointerEventKind::Moved, Point { x: 9.0, y: 16.0 }, 5.0),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Canceled,
+            Point { x: 500.0, y: 500.0 },
+            6.0,
+        ),
+    );
+    assert_eq!(completed.borrow().len(), 2);
+    assert!(completed.borrow()[1].canceled);
+}
+
+#[test]
+fn pointer_dispatcher_implicit_capture_completes_splitter_outside() {
+    let splitter = CustomSplitter::new_splitter();
+    splitter.set_orientation(Orientation::Horizontal);
+    let root: Rc<dyn UIElementExt> = splitter.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 20.0,
+            height: 20.0,
+        },
+    );
+    let completed = Rc::new(RefCell::new(Vec::<SplitterDragCompleted>::new()));
+    let completed_for_callback = completed.clone();
+    splitter.set_on_drag_completed(Box::new(move |payload| {
+        completed_for_callback.borrow_mut().push(payload);
+    }));
+    let dispatcher = elwindui_custom_controls::core::input::PointerDispatcher::new();
+    let focus = elwindui_custom_controls::core::focus::FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Pressed(MouseButton::Left),
+            Point { x: 3.0, y: 3.0 },
+            0.0,
+        ),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(RawPointerEventKind::Moved, Point { x: 500.0, y: 3.0 }, 1.0),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Released(MouseButton::Left),
+            Point { x: 500.0, y: 3.0 },
+            2.0,
+        ),
+    );
+    assert_eq!(completed.borrow().len(), 1);
+    assert!(!completed.borrow()[0].canceled);
+    assert_eq!(completed.borrow()[0].cumulative_delta, 497.0);
 }
 
 #[test]

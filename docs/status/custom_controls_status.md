@@ -22,41 +22,31 @@ Snapshot: 2026-08-24. The public contract is
   identity/index, and cancellation reconciliation restarts after reentrant
   child replacement.
 - Core-only tests cover ownership, metadata/icon realization, selection and
-  callback behavior, tab gestures, cancellation, reentrant drag mutations, and
-  splitter gestures.
-
-## Known implementation gap (C — newly discovered requirement)
-
-The current `#[component]` composed-target generator marks companion
-`#[overrides]` methods as inherent helpers. It does not route those methods into
-the inherited `UIElementExt` virtual layout/render/hit-test dispatch table.
-Consequently the custom `measure_override`, `arrange_override`, `render`, and
-`hit_test_content` implementations can be exercised directly, but the normal
-host `layout_root`/`RenderTree` path still uses the inherited Control behavior.
-The close-geometry render regression is therefore kept as an ignored test with
-an explicit C-class reason. Fixing the component override bridge is tracked by
-the separate prerequisite [#185](https://github.com/puchinya/elwindui/issues/185);
-this PR does not silently refactor codegen or fall back to new `#[class]`
-controls.
+  callback behavior, tab gestures, cancellation, reentrant drag mutations,
+  splitter gestures, host layout/render dispatch, and PointerDispatcher
+  implicit capture outside the original control bounds.
+- The generic component override bridge from [#185](https://github.com/puchinya/elwindui/issues/185)
+  is merged. Custom control layout, render, and hit-test behavior is now
+  exercised through the normal `layout_root`/`RenderTree`/`UIElementExt` paths;
+  no ignored C-class render test remains.
 
 ## Verification
 
-The focused crate test command passes with 17 tests and one ignored C-class
-render test. Core, codegen, AppKit-enabled facade check, inheritance-demo
-check, workspace check/build, and `git diff --check` also pass. Workspace-wide
+The focused crate test command passes with 21 tests and no ignored tests. Core,
+codegen, AppKit-enabled facade check, inheritance-demo check, workspace
+check/build, and `git diff --check` also pass. Workspace-wide
 `cargo fmt --all -- --check` still reports pre-existing formatting differences
-outside this crate; the new crate passes a direct rustfmt check. The full
-AppKit facade suite, `control_template` integration test, and workspace test
-suite start successfully but time out in the current GUI test environment;
-they produced no test failure before the timeout. `rust-analyzer diagnostics .`
-remains a baseline-wide nonzero command (the clean master archive has the same
-class of macro/import diagnostics). AppKit/WinUI3 GUI interaction has not been
-run; Windows runtime verification remains outside #173 in #178/#180.
+outside this crate; the changed Rust test file passes a direct rustfmt check.
+The full AppKit facade suite, `control_template` integration test, and
+workspace test suite start successfully but may time out in the current GUI
+test environment; any timeout is reported against the exact command rather
+than treated as a pass. `rust-analyzer diagnostics .` remains a baseline-wide
+nonzero command (the clean master archive has the same class of
+macro/import diagnostics). AppKit interactive, WinUI3, and GTK4 runtime
+interaction have not been run; Windows verification remains outside #173 in
+#178/#180.
 
 ## Follow-up
 
-- Complete the C-class component override-vtable prerequisite in
-  [#185](https://github.com/puchinya/elwindui/issues/185) before claiming
-  host-level custom layout/render parity.
 - Docking integration remains Issue #172 and must stay a downstream crate.
 - This crate does not add or own common pointer-cancellation infrastructure.

@@ -271,6 +271,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "elwindui-custom-controls"
+version = "0.1.0"
+dependencies = [
+ "elwindui-core",
+ "elwindui-macros",
+]
+
+[[package]]
 name = "elwindui-environment-key-fixture"
 version = "0.1.0"
 dependencies = [

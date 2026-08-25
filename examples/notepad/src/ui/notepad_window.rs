@@ -15,7 +15,7 @@ struct CustomCheckBox {
     #[prop(default = String::new())]
     label: String,
 
-    body: view! {
+    template: template_view! {
         tab_stop: true
         #[shortcut("Ctrl+D")]
         on_tapped: |e| { is_checked = !is_checked }

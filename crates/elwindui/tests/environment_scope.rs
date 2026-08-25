@@ -29,7 +29,7 @@ struct EnvironmentScopeInsideChild {
     #[environment(environment_scope_locale)]
     locale: String,
 
-    body: view! {
+    template: template_view! {
         on_mount {
             INSIDE_LOCALE.with(|c| *c.borrow_mut() = self.locale());
         }
@@ -45,7 +45,7 @@ struct EnvironmentScopeOutsideChild {
     #[environment(environment_scope_locale)]
     locale: String,
 
-    body: view! {
+    template: template_view! {
         on_mount {
             OUTSIDE_LOCALE.with(|c| *c.borrow_mut() = self.locale());
         }
@@ -104,7 +104,7 @@ thread_local! {
 
 #[elwindui::component(inherits ContentControl)]
 struct EnvironmentScopeCountingLeaf {
-    body: view! {
+    template: template_view! {
         on_mount {
             NO_EXTRA_NODE_MOUNT_COUNT.with(|c| c.set(c.get() + 1));
         }
@@ -168,7 +168,7 @@ struct EnvironmentScopeNestedInnerChild {
     #[environment(environment_scope_nested_locale)]
     locale: String,
 
-    body: view! {
+    template: template_view! {
         on_mount {
             NESTED_INNER_TINT.with(|c| *c.borrow_mut() = self.tint());
             NESTED_INNER_LOCALE.with(|c| *c.borrow_mut() = self.locale());
@@ -229,7 +229,7 @@ struct EnvironmentScopeIfChild {
     #[environment(environment_scope_locale)]
     locale: String,
 
-    body: view! {
+    template: template_view! {
         on_mount {
             IF_IN_SCOPE_LOCALE.with(|c| *c.borrow_mut() = self.locale());
         }
@@ -245,7 +245,7 @@ struct EnvironmentScopeIfParent {
     #[param]
     show_child: bool,
 
-    body: view! {
+    template: template_view! {
         VerticalLayout {
             EnvironmentScope {
                 environment_scope_locale: "fr-FR",

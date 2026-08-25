@@ -3416,6 +3416,8 @@ mod tests {
             crate::parser::parse_view_body("VerticalLayout { }").expect("view body should parse");
         let view = crate::ast::ViewDef {
             target: "Foo".to_string(),
+            is_template: false,
+            template_instance: false,
             on_mount,
             on_unmount,
             on_update,

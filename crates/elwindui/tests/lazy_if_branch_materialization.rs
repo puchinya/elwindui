@@ -40,7 +40,7 @@ thread_local! {
 
 #[elwindui::component(inherits ContentControl)]
 struct ThenLeaf {
-    body: view! {
+    template: template_view! {
         on_mount {
             THEN_MOUNTS.with(|c| c.set(c.get() + 1));
         }
@@ -53,7 +53,7 @@ impl ThenLeaf {}
 
 #[elwindui::component(inherits ContentControl)]
 struct ElseLeaf {
-    body: view! {
+    template: template_view! {
         on_mount {
             ELSE_MOUNTS.with(|c| c.set(c.get() + 1));
         }
@@ -69,7 +69,7 @@ struct ToggleHost {
     #[prop(default = true)]
     show_then: bool,
 
-    body: view! {
+    template: template_view! {
         VerticalLayout {
             if show_then {
                 ThenLeaf {}

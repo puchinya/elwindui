@@ -7,14 +7,14 @@ use elwindui::core::ui::{
 use std::cell::Cell;
 use std::rc::Rc;
 
-#[path = "control_template/local_body_template_base.rs"]
-mod local_body_template_base;
+#[path = "control_template/local_template_base.rs"]
+mod local_template_base;
 
-#[path = "control_template/local_body_template_descendant.rs"]
-mod local_body_template_descendant;
+#[path = "control_template/local_template_descendant.rs"]
+mod local_template_descendant;
 
-pub use local_body_template_base::*;
-use local_body_template_descendant::LocalBodyTemplateDescendantProbe;
+pub use local_template_base::*;
+use local_template_descendant::LocalTemplateDescendantProbe;
 
 thread_local! {
     static DEFAULT_TEMPLATE_MOUNTS: Cell<u32> = const { Cell::new(0) };
@@ -30,9 +30,9 @@ struct DefaultBodyContentProbe {
     #[prop(default = "header".to_string())]
     label: String,
 
-    body: view! {
+    template: template_view! {
         VerticalLayout {
-            TextBlock { text: label }
+            TextBlock { text: templated_parent.label }
         }
     },
 }
@@ -56,10 +56,10 @@ struct DefaultBodyContentUseProbe {
 impl DefaultBodyContentUseProbe {}
 
 #[elwindui::component(inherits VerticalLayout)]
-struct LocalBodyTemplateUseProbe {
+struct LocalTemplateUseProbe {
     body: view! {
         #[id("probe")]
-        let probe = LocalBodyTemplateDescendantProbe {
+        let probe = LocalTemplateDescendantProbe {
             TextBlock { text: "logical page" }
         };
 
@@ -68,11 +68,11 @@ struct LocalBodyTemplateUseProbe {
 }
 
 #[elwindui::component]
-impl LocalBodyTemplateUseProbe {}
+impl LocalTemplateUseProbe {}
 
 #[elwindui::component(inherits ContentControl)]
 struct DefaultBodyPresenterProbe {
-    body: view! {
+    template: template_view! {
         VerticalLayout {
             TextBlock { text: "header" }
             ContentPresenter {}
@@ -103,7 +103,7 @@ struct DynamicDefaultBodyProbe {
     #[prop(default = false)]
     alternate: bool,
 
-    body: view! {
+    template: template_view! {
         if alternate {
             TextBlock { text: "alternate" }
         } else {
@@ -117,7 +117,7 @@ impl DynamicDefaultBodyProbe {}
 
 #[elwindui::component(inherits Control)]
 struct DefaultTemplateProbe {
-    body: view! {
+    template: template_view! {
         on_mount {
             record_default_template_mount();
         }
@@ -128,22 +128,12 @@ struct DefaultTemplateProbe {
 #[elwindui::component]
 impl DefaultTemplateProbe {}
 
-#[elwindui::environment_key(
-    name = control_template_test_template,
-    value = Option<ControlTemplate<ControlTemplateTestPanel>>,
-    default = None
-)]
-pub struct ControlTemplateTestTemplate;
-
-#[elwindui::component(
-    inherits ContentControl,
-    template = control_template_test_template
-)]
+#[elwindui::component(inherits ContentControl)]
 struct ControlTemplateTestPanel {
     #[prop]
     label: String,
 
-    body: view! {
+    template: template_view! {
         on_mount {
             TARGET_MOUNTS.with(|count| count.set(count.get() + 1));
         }
@@ -160,7 +150,7 @@ impl ControlTemplateTestPanel {}
 
 #[elwindui::control_template(target = ControlTemplateTestPanel)]
 struct CompactControlTemplateTestPanel {
-    body: view! {
+    template: template_view! {
         VerticalLayout {
             TextBlock { text: templated_parent.label }
             ContentPresenter { }
@@ -196,7 +186,7 @@ fn environment_template_is_built_once_resyncs_and_presents_logical_content() {
             authored.__build(context)
         },
     );
-    environment.set::<ControlTemplateTestTemplate>(Some(capturing));
+    environment.set_control_template::<ControlTemplateTestPanel>(Some(capturing));
 
     let panel = ControlTemplateTestPanel::new("custom".to_string());
     assert_eq!(executions.get(), 1);
@@ -225,9 +215,11 @@ fn environment_template_is_built_once_resyncs_and_presents_logical_content() {
         .and_then(std::rc::Weak::upgrade)
         .expect("content retains its logical ContentControl parent");
     assert!(Rc::ptr_eq(&logical_parent, &panel_node));
-    assert!(content
-        .visual_parent()
-        .is_some_and(|parent| !Rc::ptr_eq(&parent, &panel_node)));
+    assert!(
+        content
+            .visual_parent()
+            .is_some_and(|parent| !Rc::ptr_eq(&parent, &panel_node))
+    );
 
     let replacement = TextBlock::new();
     replacement.set_text("replacement");
@@ -235,7 +227,13 @@ fn environment_template_is_built_once_resyncs_and_presents_logical_content() {
     assert!(content.visual_parent().is_none());
     assert!(replacement.visual_parent().is_some());
 
-    environment.set::<ControlTemplateTestTemplate>(None);
+    let mounted_values_before_environment_change = text_values(panel.as_ref());
+    environment.set_control_template::<ControlTemplateTestPanel>(None);
+    assert_eq!(
+        text_values(panel.as_ref()),
+        mounted_values_before_environment_change,
+        "changing the Environment slot must not re-template an already-mounted panel"
+    );
     let default_panel = ControlTemplateTestPanel::new("default".to_string());
     assert_eq!(DEFAULT_TEMPLATE_MOUNTS.with(Cell::get), 1);
     assert_eq!(TARGET_MOUNTS.with(Cell::get), 2);
@@ -243,7 +241,7 @@ fn environment_template_is_built_once_resyncs_and_presents_logical_content() {
 }
 
 #[test]
-fn implicit_content_control_body_is_template_and_bare_child_is_logical_content() {
+fn default_template_is_separate_from_bare_logical_content() {
     let parent = DefaultBodyContentUseProbe::new();
     let probe = parent.probe();
     let logical = probe.content();
@@ -273,7 +271,7 @@ fn implicit_content_control_body_is_template_and_bare_child_is_logical_content()
 }
 
 #[test]
-fn implicit_content_control_body_presenter_owns_logical_content_visual() {
+fn default_template_content_presenter_owns_logical_content_visual() {
     let parent = DefaultBodyPresenterUseProbe::new();
     let probe = parent.probe();
     let logical = probe.content();
@@ -284,29 +282,35 @@ fn implicit_content_control_body_presenter_owns_logical_content_visual() {
         .next()
         .expect("default body ContentPresenter");
     let presenter_node: Rc<dyn elwindui::core::ui::UIElementExt> = presenter.clone();
-    assert!(logical
-        .as_ui_element()
-        .parent
-        .borrow()
-        .as_ref()
-        .and_then(std::rc::Weak::upgrade)
-        .is_some_and(|parent| Rc::ptr_eq(&parent, &probe_node)));
-    assert!(logical
-        .visual_parent()
-        .is_some_and(|parent| Rc::ptr_eq(&parent, &presenter_node)));
+    assert!(
+        logical
+            .as_ui_element()
+            .parent
+            .borrow()
+            .as_ref()
+            .and_then(std::rc::Weak::upgrade)
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &probe_node))
+    );
+    assert!(
+        logical
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &presenter_node))
+    );
 
     let replacement = TextBlock::new();
     replacement.set_text("replacement");
     probe.set_content(replacement.clone());
     assert!(logical.visual_parent().is_none());
-    assert!(replacement
-        .visual_parent()
-        .is_some_and(|parent| Rc::ptr_eq(&parent, &presenter_node)));
+    assert!(
+        replacement
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &presenter_node))
+    );
 }
 
 #[test]
-fn local_multi_hop_content_control_body_uses_template_root_metadata() {
-    let parent = LocalBodyTemplateUseProbe::new();
+fn local_multi_hop_content_control_uses_explicit_template_root() {
+    let parent = LocalTemplateUseProbe::new();
     let probe = parent.probe();
     let logical = probe.content();
 
@@ -325,30 +329,34 @@ fn local_multi_hop_content_control_body_uses_template_root_metadata() {
 }
 
 #[test]
-fn implicit_content_control_moves_pre_mount_content_to_logical_only_storage() {
+fn template_mount_moves_pre_mount_content_to_logical_only_storage() {
     let probe = DefaultBodyContentProbe::__new_unmounted();
     let logical = TextBlock::new();
     logical.set_text("logical page");
     probe.set_content(logical.clone());
     let probe_node: Rc<dyn elwindui::core::ui::UIElementExt> = probe.clone();
-    assert!(logical
-        .visual_parent()
-        .is_some_and(|parent| Rc::ptr_eq(&parent, &probe_node)));
+    assert!(
+        logical
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &probe_node))
+    );
 
     probe.mount(elwindui::core::environment::application_environment());
     assert!(logical.visual_parent().is_none());
     assert_eq!(text_values(probe.as_ref()), vec!["header"]);
-    assert!(logical
-        .as_ui_element()
-        .parent
-        .borrow()
-        .as_ref()
-        .and_then(std::rc::Weak::upgrade)
-        .is_some_and(|parent| Rc::ptr_eq(&parent, &probe_node)));
+    assert!(
+        logical
+            .as_ui_element()
+            .parent
+            .borrow()
+            .as_ref()
+            .and_then(std::rc::Weak::upgrade)
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &probe_node))
+    );
 }
 
 #[test]
-fn implicit_content_control_dynamic_body_replaces_template_root() {
+fn dynamic_template_replaces_template_root() {
     let probe = DynamicDefaultBodyProbe::__new_unmounted();
     let logical = TextBlock::new();
     logical.set_text("logical page");

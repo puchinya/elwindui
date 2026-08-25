@@ -425,6 +425,8 @@ mod tests {
     fn empty_view(target: &str) -> ast::ViewDef {
         ast::ViewDef {
             target: target.to_string(),
+            is_template: false,
+            template_instance: false,
             on_mount: None,
             on_unmount: None,
             on_update: None,

@@ -11,7 +11,6 @@ pub type ContentChangedHandler = Rc<dyn Fn(Option<Rc<dyn UIElementExt>>)>;
 /// `Control`の薄いラッパー。二重管理を避けるため、バックエンド非依存な合成 builtin としてここに直接手書きする。
 /// Content is a single Visual child managed directly by this type.
 #[elwindui_macros::class(inherits = crate::ui::Control)]
-#[component_body_presentation(template_root)]
 #[content(content)]
 #[prop(content: std::rc::Rc<dyn crate::ui::UIElementExt>)]
 pub struct ContentControl {
@@ -155,23 +154,29 @@ mod tests {
 
         let owner: Rc<dyn UIElementExt> = content_control.clone();
         let presenter_node: Rc<dyn UIElementExt> = presenter.clone();
-        assert!(first
-            .as_ui_element()
-            .parent
-            .borrow()
-            .as_ref()
-            .and_then(Weak::upgrade)
-            .is_some_and(|parent| Rc::ptr_eq(&parent, &owner)));
-        assert!(first
-            .visual_parent()
-            .is_some_and(|parent| Rc::ptr_eq(&parent, &presenter_node)));
+        assert!(
+            first
+                .as_ui_element()
+                .parent
+                .borrow()
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .is_some_and(|parent| Rc::ptr_eq(&parent, &owner))
+        );
+        assert!(
+            first
+                .visual_parent()
+                .is_some_and(|parent| Rc::ptr_eq(&parent, &presenter_node))
+        );
 
         let second = TextBlock::new();
         content_control.set_content(second.clone());
         assert!(first.visual_parent().is_none());
-        assert!(second
-            .visual_parent()
-            .is_some_and(|parent| Rc::ptr_eq(&parent, &presenter_node)));
+        assert!(
+            second
+                .visual_parent()
+                .is_some_and(|parent| Rc::ptr_eq(&parent, &presenter_node))
+        );
     }
 
     #[test]

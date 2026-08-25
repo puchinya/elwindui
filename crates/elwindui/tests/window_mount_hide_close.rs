@@ -29,7 +29,7 @@ fn get_unmount_events() -> Vec<&'static str> {
 
 #[elwindui::component(inherits ContentControl)]
 struct WindowChildComponent {
-    body: view! {
+    template: template_view! {
         on_unmount {
             record_unmount("WindowChild");
         }

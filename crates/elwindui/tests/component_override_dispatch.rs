@@ -9,7 +9,7 @@ use std::rc::Rc;
 struct OverrideProbe {
     #[prop(default = false)]
     arranged_marker: bool,
-    body: view! {
+    template: template_view! {
         Rectangle { fill: "#00000000" }
     },
 }

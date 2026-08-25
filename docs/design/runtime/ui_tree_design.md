@@ -20,8 +20,9 @@ UI nodes are shared handles because a node is referenced by its owner, parent tr
 
 Logical and visual child enumeration remains centralized on the element abstraction. Containers must not maintain a second unsynchronized public child list.
 
-`Control` は公開 logical children collection を持たず、template-enabled presentationまたは
-component bodyの単一 authored rootを単一のVisual template rootとしてstrong保持する。
+`Control` は公開 logical children collection を持たない。template-enabled presentationでは
+componentの型レベル`template: template_view! { ... }`が生成した単一のVisual template rootを
+private storageでstrong保持する。
 template rootのlogical parentは設定しない。`ContentControl`のlogical contentは常にtargetをlogical parentとし、
 `ContentPresenter`が同じcontentを自身のVisual childとして配置する。targetからtemplate rootへのedgeはstrong、
 template instanceからtemplated parentへのedgeはWeakでありcycleを作らない。詳細は

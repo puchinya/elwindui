@@ -1,7 +1,23 @@
 //! Typed control-template values selected from an effective Environment during mount.
 
 use super::*;
-use crate::environment::EnvironmentContext;
+use crate::environment::{EnvironmentContext, EnvironmentKey};
+use std::marker::PhantomData;
+
+/// TypeId-scoped Environment slot for the default/override template of `C`.
+///
+/// The key is intentionally generic: templates for two distinct control types occupy distinct
+/// Environment slots without requiring one public `EnvironmentKey` declaration per control.
+#[doc(hidden)]
+pub struct ControlTemplateEnvironment<C: ControlExt + 'static>(PhantomData<fn() -> C>);
+
+impl<C: ControlExt + 'static> EnvironmentKey for ControlTemplateEnvironment<C> {
+    type Value = Option<ControlTemplate<C>>;
+
+    fn default_value() -> Self::Value {
+        None
+    }
+}
 
 /// The context supplied to a [`ControlTemplate`] factory.
 ///
@@ -62,6 +78,26 @@ impl<C: ControlExt + 'static> ControlTemplate<C> {
     }
 }
 
+impl EnvironmentContext {
+    /// Installs a mount-time template override for the exact control type `C` at this context.
+    ///
+    /// `Some(template)` overrides the component default for subsequently mounted instances.
+    /// `None` deliberately shadows an inherited value and selects the component default; it does
+    /// not remove this context's Environment cell.
+    pub fn set_control_template<C: ControlExt + 'static>(
+        &self,
+        template: Option<ControlTemplate<C>>,
+    ) {
+        self.set::<ControlTemplateEnvironment<C>>(template);
+    }
+
+    /// Reads the exact-type template override visible from this context.
+    #[doc(hidden)]
+    pub fn __control_template<C: ControlExt + 'static>(&self) -> Option<ControlTemplate<C>> {
+        self.get::<ControlTemplateEnvironment<C>>()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +123,29 @@ mod tests {
         });
 
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn environment_template_slots_are_typed_and_shadowable() {
+        let root = EnvironmentContext::root();
+        let child = root.derive();
+        let sibling = root.derive();
+
+        let control_template = ControlTemplate::<Control>::new(|_context| TextBlock::new());
+        root.set_control_template::<Control>(Some(control_template));
+
+        assert!(child.__control_template::<Control>().is_some());
+        assert!(sibling.__control_template::<Control>().is_some());
+
+        child.set_control_template::<Control>(None);
+        assert!(child.__control_template::<Control>().is_none());
+        assert!(root.__control_template::<Control>().is_some());
+        assert!(sibling.__control_template::<Control>().is_some());
+
+        let content_template = ControlTemplate::<ContentControl>::new(|_context| TextBlock::new());
+        root.set_control_template::<ContentControl>(Some(content_template));
+        assert!(root.__control_template::<ContentControl>().is_some());
+        assert!(root.__control_template::<Control>().is_some());
     }
 
     struct ProbeKey;

@@ -22,7 +22,7 @@ struct EnvironmentScopeCrossCrateChild {
     #[environment(elwindui_environment_key_fixture::fixture_locale)]
     locale: String,
 
-    body: view! {
+    template: template_view! {
         on_mount {
             LOCALE.with(|c| *c.borrow_mut() = self.locale());
         }

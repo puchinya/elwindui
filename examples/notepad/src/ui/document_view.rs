@@ -16,7 +16,7 @@ struct DocumentView {
     // ever get its own small natural height, never the remaining window space. `Grid`'s
     // `GridLength::Star` row does actually fill whatever's left after the status bar's `Auto` row
     // takes its own height.
-    body: view! {
+    template: template_view! {
         Grid {
             rows: [elwindui::core::layout::GridLength::Star(1.0), elwindui::core::layout::GridLength::Auto]
             columns: [elwindui::core::layout::GridLength::Star(1.0)]

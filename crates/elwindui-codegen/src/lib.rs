@@ -70,7 +70,7 @@ pub(crate) fn test_module(
 
 /// Issue #146 test helper: a registry-dependent generation failure (a same-crate sibling registry
 /// miss, a cross-item `validate::validate` rejection, ...) no longer returns `Err` from
-/// `generate_component_from_item_struct`/`_with_template`/`generate_component_from_item_impl` — it
+/// `generate_component_from_item_struct`/`generate_component_from_item_impl` — it
 /// returns `Ok` carrying a `#[cfg(not(rust_analyzer))]`-gated `compile_error!` alongside the
 /// rust-analyzer shadow (`docs/design/tools/codegen_design.md` §3.2a), so a spurious same-crate
 /// registry-ordering miss under rust-analyzer never blanks out that shadow. Every pre-existing test
@@ -184,14 +184,121 @@ pub fn generate_dsl_enum_from_item_enum(
 /// declaration-order requirement). A `view!` body routinely references
 /// `Window`/`VerticalLayout`/etc. too, but those resolve with no `Module` chained in for them at all —
 /// see `testdata`'s own doc comment on why, and `codegen::emit_external_construction`.
-pub fn generate_component_from_item_struct(
-    base: Option<String>,
-    item_struct: &syn::ItemStruct,
-) -> Result<proc_macro2::TokenStream, String> {
-    generate_component_from_item_struct_with_template(base, None, item_struct)
+/// Low-level expansion used by the public `template_view!` proc macro.
+///
+/// The template expression is intentionally compiled to the existing typed `ControlTemplate`
+/// value rather than introducing a second runtime representation.  Static element construction
+/// and ordinary property/content assignments use the same exported class-property macros as
+/// generated component views; the expected Rust type supplies `C` for the factory.
+pub fn generate_template_view_expression(body: &str) -> Result<proc_macro2::TokenStream, String> {
+    let (on_mount, on_unmount, on_update, lets, parsed_root) = parser::parse_view_body(body)
+        .map_err(|error| format!("invalid `template_view! {{ ... }}` body: {error}"))?;
+    let [ast::ChildEntry::Literal(root)] = parsed_root.children.as_slice() else {
+        return Err("`template_view!` requires exactly one static root element".to_string());
+    };
+    let validation_view = ast::ViewDef {
+        target: "__standalone_template_view".to_string(),
+        is_template: true,
+        template_instance: false,
+        on_mount,
+        on_unmount,
+        on_update,
+        lets,
+        root: parsed_root.clone(),
+        implicit_owner: None,
+    };
+    validate_replaceable_template_view(&validation_view)
+        .map_err(|error| format!("invalid `template_view!` body: {error}"))?;
+    let root_tokens = emit_template_element(root)?;
+    let parent_binding = body.contains("templated_parent").then(|| {
+        quote::quote! { let templated_parent = context.control.clone(); }
+    });
+    Ok(quote::quote! {
+        elwindui::core::ui::ControlTemplate::new(move |context: elwindui::core::ui::ControlTemplateContext<_>| {
+            use elwindui::ui::*;
+            #parent_binding
+            #root_tokens
+        })
+    })
 }
 
-/// Generates a component whose `body: view!` is replaceable by a typed Environment template.
+fn emit_template_element(element: &ast::ElementNode) -> Result<proc_macro2::TokenStream, String> {
+    let type_path: syn::Path = syn::parse_str(&element.type_path)
+        .map_err(|error| format!("invalid template element `{}`: {error}", element.type_path))?;
+    let ident = element
+        .type_path
+        .rsplit("::")
+        .next()
+        .ok_or_else(|| "template element has no type name".to_string())?;
+    let props_macro = syn::Ident::new(
+        &format!("__elwindui_props_{ident}"),
+        proc_macro2::Span::call_site(),
+    );
+    let assignments = element
+        .attributes
+        .iter()
+        .map(|attribute| {
+            let name = syn::Ident::new(&attribute.name, proc_macro2::Span::call_site());
+            let value = emit_template_expr(&attribute.value)?;
+            Ok::<_, String>(quote::quote! {
+                elwindui::core::#props_macro!(@set node, #name, #value);
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let children = element
+        .children
+        .iter()
+        .map(|child| match child {
+            ast::ChildEntry::Literal(child) => emit_template_element(child),
+            _ => Err(
+                "dynamic child regions are not supported by this template expression".to_string(),
+            ),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let child_attach = if children.is_empty() {
+        proc_macro2::TokenStream::new()
+    } else {
+        quote::quote! {
+            elwindui::core::#props_macro!(@children node, [#(#children),*]);
+        }
+    };
+    Ok(quote::quote! {
+        {
+            let node = #type_path::new();
+            #(#assignments)*
+            #child_attach
+            node
+        }
+    })
+}
+
+fn emit_template_expr(expr: &ast::ViewExpr) -> Result<proc_macro2::TokenStream, String> {
+    match expr {
+        ast::ViewExpr::Path(path) => {
+            if path
+                .first()
+                .is_some_and(|segment| segment == "templated_parent")
+            {
+                let mut value = quote::quote! { templated_parent };
+                for segment in path.iter().skip(1) {
+                    let ident = syn::Ident::new(segment, proc_macro2::Span::call_site());
+                    value = quote::quote! { #value.#ident() };
+                }
+                Ok(value)
+            } else {
+                let raw = path.join("::");
+                let path: syn::Path = syn::parse_str(&raw)
+                    .map_err(|error| format!("invalid template expression `{raw}`: {error}"))?;
+                Ok(quote::quote! { #path })
+            }
+        }
+        ast::ViewExpr::Expr(expr) => Ok(quote::quote! { #expr }),
+        _ => Err("this `template_view!` expression form is not supported yet".to_string()),
+    }
+}
+
+/// Generates a component whose `template: template_view!` field declares a typed default
+/// Environment-selectable ControlTemplate.
 ///
 /// Issue #146: splits into an item-local phase (`component_frontend::component_and_view_from_item_struct`
 /// — a malformed `view!`/field attribute is a genuine mistake, reported unconditionally on both
@@ -202,9 +309,8 @@ pub fn generate_component_from_item_struct(
 /// (`rust_analyzer_shadow::build_component_struct_shadow`) is built once the item-local phase
 /// succeeds, entirely independent of the registry-dependent phase's own outcome — see
 /// `docs/design/tools/codegen_design.md` §3.2a.
-pub fn generate_component_from_item_struct_with_template(
+pub fn generate_component_from_item_struct(
     base: Option<String>,
-    template: Option<String>,
     item_struct: &syn::ItemStruct,
 ) -> Result<proc_macro2::TokenStream, String> {
     // Shape errors (a malformed `view!`, a bad field attribute, ...) are reported here, against the
@@ -220,7 +326,7 @@ pub fn generate_component_from_item_struct_with_template(
         view_def.as_ref(),
     )?;
 
-    match register_component_struct_real(base, template, item_struct, component_def, view_def) {
+    match register_component_struct_real(base, item_struct, component_def, view_def) {
         Ok(()) => Ok(shadow),
         Err(ComponentGenerationFailure::ItemLocal(error)) => Err(error),
         Err(ComponentGenerationFailure::RegistryDependent(error)) => {
@@ -309,28 +415,27 @@ fn validation_diagnostic_tokens(
         .collect()
 }
 
-/// The registry-dependent half of `generate_component_from_item_struct_with_template` (Issue #146):
-/// template Environment Key resolution, cross-item `validate::validate` (chains in every same-crate
+/// The registry-dependent half of component generation (Issue #146):
+/// typed template-target validation, cross-item `validate::validate` (chains in every same-crate
 /// sibling registry), and — only on success — registration into the same-crate Component registry.
 /// Emits no tokens of its own: the struct half always emits nothing (see this function's own tail
 /// doc comment on why the `impl` half emits the whole type) — the caller's own `shadow` is the only
 /// token output for a `struct` half either way.
 ///
 /// PR #169 review remediation (A1): despite this function's own name, not every failure inside it
-/// is actually registry-dependent — `view_def.is_none()` (a `template = ..` with no `body: view! {
-/// .. }` at all) and `validate_replaceable_template_view`'s own structural checks are decidable
+/// is actually registry-dependent — `view_def.is_none()` and `validate_replaceable_template_view`'s
+/// own structural checks are decidable
 /// from the struct alone, so those stay `ComponentGenerationFailure::ItemLocal`. Only a same-crate
 /// registry lookup (`same_crate_control_target`, `lookup_same_crate_environment_key`, or
 /// `validate::validate`'s own registry-dependent diagnostics) is `RegistryDependent`.
 fn register_component_struct_real(
     base: Option<String>,
-    template: Option<String>,
     item_struct: &syn::ItemStruct,
     component_def: ast::ComponentDef,
     view_def: Option<ast::ViewDef>,
 ) -> Result<(), ComponentGenerationFailure> {
     let name = component_def.name.clone();
-    if let Some(template_name) = &template {
+    if view_def.as_ref().is_some_and(|view| view.is_template) {
         // PR #169 review remediation, round 2 (AD-R2-2): whether this is a Control-target mistake
         // is only genuinely registry-dependent when the base is a same-crate *user* Component
         // (`ControlTargetKnowledge::NeedsSameCrateRegistry`) — `same_crate_control_target` itself
@@ -360,25 +465,25 @@ fn register_component_struct_real(
                 }
             }
         }
-        if view_def.is_none() {
-            return Err(ComponentGenerationFailure::ItemLocal(format!(
-                "`{name}`: `template = {template_name}` requires a `body: view! {{ .. }}` default template"
-            )));
-        }
         validate_replaceable_template_view(view_def.as_ref().unwrap())
             .map_err(ComponentGenerationFailure::ItemLocal)?;
-        match component_frontend::lookup_same_crate_environment_key(template_name) {
-            None => {
-                return Err(ComponentGenerationFailure::RegistryDependent(format!(
-                    "`{name}`: template Environment Key `{template_name}` is not registered; declare it with #[elwindui::environment_key] before the component"
-                )));
-            }
-            Some((_, value_type)) if !is_control_template_key_value(&value_type, &name) => {
-                return Err(ComponentGenerationFailure::RegistryDependent(format!(
-                    "`{name}`: template Environment Key `{template_name}` must have Value = Option<ControlTemplate<{name}>>, found `{value_type}`"
-                )));
-            }
-            Some(_) => {}
+    } else if view_def
+        .as_ref()
+        .is_some_and(|view| !view.template_instance)
+        && view_def.is_some()
+    {
+        let is_control = match control_target_knowledge(component_def.base.as_deref()) {
+            ControlTargetKnowledge::KnownControl => Some(true),
+            ControlTargetKnowledge::KnownNonControl => Some(false),
+            ControlTargetKnowledge::NeedsSameCrateRegistry => component_def
+                .base
+                .as_deref()
+                .and_then(same_crate_control_target),
+        };
+        if is_control == Some(true) {
+            return Err(ComponentGenerationFailure::ItemLocal(format!(
+                "`{name}`: Control-derived components must declare visual chrome with `template: template_view! {{ ... }}`; `body: view! {{ ... }}` is ordinary component composition"
+            )));
         }
     }
     // Validate here as well as in the `impl` half. Everything except `#[overrides]`-vs-base method
@@ -399,12 +504,7 @@ fn register_component_struct_real(
         .chain(component_frontend::sibling_enum_modules())
         .collect();
     classify_validate_result(&all_modules)?;
-    component_frontend::register_same_crate_component_with_template(
-        &name,
-        base.as_deref(),
-        template.as_deref(),
-        item_struct,
-    );
+    component_frontend::register_same_crate_component(&name, base.as_deref(), item_struct);
     // The struct half emits nothing on purpose: the paired `#[elwindui::component] impl Name { .. }`
     // generates the whole type. This mirrors `#[elwindui_macros::class]` exactly — there too the
     // `struct` half only stashes what the `impl` half needs (`store_class_args`/`load_class_args`),
@@ -901,7 +1001,7 @@ fn lower_deferred_views_in_element_lets_and_body(
 }
 
 /// Generates the private component instance and typed factory for
-/// `#[elwindui::control_template(target = Target)] struct Name { body: view! { .. } }`.
+/// `#[elwindui::control_template(target = Target)] struct Name { template: template_view! { .. } }`.
 pub fn generate_control_template_from_item_struct(
     target: &syn::Path,
     item_struct: &syn::ItemStruct,
@@ -921,21 +1021,21 @@ pub fn generate_control_template_from_item_struct(
         return Err("ControlTemplate declarations cannot be generic".to_string());
     }
     let syn::Fields::Named(fields) = &item_struct.fields else {
-        return Err("expected a struct with exactly `body: view! { .. }`".to_string());
+        return Err("expected a struct with exactly `template: template_view! { .. }`".to_string());
     };
     let mut fields_iter = fields.named.iter();
     let Some(body) = fields_iter.next() else {
-        return Err("expected `body: view! { .. }`".to_string());
+        return Err("expected `template: template_view! { .. }`".to_string());
     };
     if fields_iter.next().is_some()
-        || body.ident.as_ref().is_none_or(|ident| ident != "body")
+        || body.ident.as_ref().is_none_or(|ident| ident != "template")
         || !matches!(
             &body.ty,
             syn::Type::Macro(mac)
-                if mac.mac.path.segments.last().is_some_and(|segment| segment.ident == "view")
+                if mac.mac.path.segments.last().is_some_and(|segment| segment.ident == "template_view")
         )
     {
-        return Err("expected exactly one field: `body: view! { .. }`".to_string());
+        return Err("expected exactly one field: `template: template_view! { .. }`".to_string());
     }
 
     let (_, authored_view) = component_frontend::component_and_view_from_item_struct(
@@ -945,7 +1045,7 @@ pub fn generate_control_template_from_item_struct(
     validate_replaceable_template_view(
         authored_view
             .as_ref()
-            .ok_or_else(|| "expected `body: view! { .. }`".to_string())?,
+            .ok_or_else(|| "expected `template: template_view! { .. }`".to_string())?,
     )?;
 
     let name = &item_struct.ident;
@@ -955,7 +1055,8 @@ pub fn generate_control_template_from_item_struct(
         struct #hidden_name {
             #[param]
             templated_parent: std::rc::Weak<#target>,
-            body: #body_ty,
+            #[template_instance]
+            template: #body_ty,
         }
     };
     // `ContentControl` gives the private instance a single, ordinary content slot for the authored
@@ -1079,7 +1180,8 @@ fn same_crate_control_target(name: &str) -> Option<bool> {
     fn visit(name: &str, visited: &mut std::collections::HashSet<String>) -> Option<bool> {
         match name {
             "Control" | "ContentControl" => return Some(true),
-            "UIElement" | "Layout" | "Shape" | "NativeControl" | "Window" => {
+            "UIElement" | "Layout" | "Shape" | "NativeControl" | "Window" | "VerticalLayout"
+            | "HorizontalLayout" | "Grid" | "TextBlock" | "Rectangle" | "Ellipse" => {
                 return Some(false);
             }
             _ => {}
@@ -1093,48 +1195,6 @@ fn same_crate_control_target(name: &str) -> Option<bool> {
     }
 
     visit(name, &mut std::collections::HashSet::new())
-}
-
-fn is_control_template_key_value(value_type: &str, target_name: &str) -> bool {
-    fn last_path_ident(ty: &syn::Type) -> Option<&syn::PathSegment> {
-        let syn::Type::Path(path) = ty else {
-            return None;
-        };
-        path.path.segments.last()
-    }
-
-    let Ok(value_type) = syn::parse_str::<syn::Type>(value_type) else {
-        return false;
-    };
-    let Some(option) = last_path_ident(&value_type) else {
-        return false;
-    };
-    if option.ident != "Option" {
-        return false;
-    }
-    let syn::PathArguments::AngleBracketed(option_args) = &option.arguments else {
-        return false;
-    };
-    let [syn::GenericArgument::Type(template_type)] =
-        option_args.args.iter().collect::<Vec<_>>().as_slice()
-    else {
-        return false;
-    };
-    let Some(template) = last_path_ident(template_type) else {
-        return false;
-    };
-    if template.ident != "ControlTemplate" {
-        return false;
-    }
-    let syn::PathArguments::AngleBracketed(template_args) = &template.arguments else {
-        return false;
-    };
-    let [syn::GenericArgument::Type(target_type)] =
-        template_args.args.iter().collect::<Vec<_>>().as_slice()
-    else {
-        return false;
-    };
-    last_path_ident(target_type).is_some_and(|target| target.ident == target_name)
 }
 
 fn validate_replaceable_template_view(view: &ast::ViewDef) -> Result<(), String> {
@@ -1252,6 +1312,43 @@ fn validate_replaceable_template_view(view: &ast::ViewDef) -> Result<(), String>
 }
 
 #[cfg(test)]
+mod template_view_expression_tests {
+    use super::*;
+
+    #[test]
+    fn standalone_expression_reuses_control_template_presenter_validation() {
+        let error = generate_template_view_expression(
+            r#"
+                VerticalLayout {
+                    ContentPresenter {}
+                    ContentPresenter {}
+                }
+            "#,
+        )
+        .expect_err("a template cannot contain multiple ContentPresenter nodes");
+        assert!(
+            error.contains("multiple") || error.contains("ContentPresenter"),
+            "{error}"
+        );
+
+        let error = generate_template_view_expression(
+            r#"
+                VerticalLayout {
+                    if show_content {
+                        ContentPresenter {}
+                    }
+                }
+            "#,
+        )
+        .expect_err("a dynamic ContentPresenter is not supported");
+        assert!(
+            error.contains("dynamic") || error.contains("ContentPresenter"),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod control_template_tests {
     use super::*;
 
@@ -1270,7 +1367,7 @@ mod control_template_tests {
         let generated = author(
             r#"
             struct CodegenControlTemplateValidA {
-                body: view! { TextBlock { text: "ok" } },
+                template: template_view! { TextBlock { text: "ok" } },
             }
             "#,
         )
@@ -1293,7 +1390,7 @@ mod control_template_tests {
         let generated = author(
             r#"
             struct CodegenControlTemplateT12 {
-                body: view! { TextBlock { text: "ok" } },
+                template: template_view! { TextBlock { text: "ok" } },
             }
             "#,
         )
@@ -1340,7 +1437,7 @@ mod control_template_tests {
         let id = author(
             r#"
             struct CodegenControlTemplateIdB {
-                body: view! {
+                template: template_view! {
                     #[id("part")]
                     let part = TextBlock { text: "x" };
                     part
@@ -1354,7 +1451,7 @@ mod control_template_tests {
         let multiple = author(
             r#"
             struct CodegenControlTemplateMultipleB {
-                body: view! {
+                template: template_view! {
                     VerticalLayout { ContentPresenter {} ContentPresenter {} }
                 },
             }
@@ -1369,7 +1466,7 @@ mod control_template_tests {
         let dynamic = author(
             r#"
             struct CodegenControlTemplateDynamicB {
-                body: view! {
+                template: template_view! {
                     VerticalLayout { if true { ContentPresenter {} } }
                 },
             }
@@ -1383,98 +1480,19 @@ mod control_template_tests {
     }
 
     #[test]
-    fn template_enabled_default_body_rejects_id() {
-        component_frontend::register_same_crate_environment_key(
-            "codegen_control_template_key_c",
-            "CodegenControlTemplateKeyC",
-            "Option<ControlTemplate<CodegenControlTemplatePanelC>>",
-        )
-        .unwrap();
-        let item: syn::ItemStruct = syn::parse_str(
-            r#"
-            struct CodegenControlTemplatePanelC {
-                body: view! {
-                    #[id("part")]
-                    let part = TextBlock { text: "x" };
-                    part
-                },
-            }
-            "#,
-        )
-        .unwrap();
-        let error = expect_generation_error(generate_component_from_item_struct_with_template(
-            Some("ContentControl".to_string()),
-            Some("codegen_control_template_key_c".to_string()),
-            &item,
-        ));
-        assert!(error.contains("#[id"), "error: {error}");
-    }
-
-    #[test]
-    fn template_environment_key_value_must_match_the_component() {
-        component_frontend::register_same_crate_environment_key(
-            "codegen_control_template_key_mismatch_e",
-            "CodegenControlTemplateKeyMismatchE",
-            "Option<ControlTemplate<AnotherPanel>>",
-        )
-        .unwrap();
-        let item: syn::ItemStruct = syn::parse_str(
-            r#"
-            struct CodegenControlTemplatePanelE {
-                body: view! { TextBlock { text: "x" } },
-            }
-            "#,
-        )
-        .unwrap();
-        let error = expect_generation_error(generate_component_from_item_struct_with_template(
-            Some("ContentControl".to_string()),
-            Some("codegen_control_template_key_mismatch_e".to_string()),
-            &item,
-        ));
-        assert!(
-            error.contains("Option<ControlTemplate<CodegenControlTemplatePanelE>>"),
-            "error: {error}"
-        );
-    }
-
-    #[test]
     fn same_crate_non_control_and_native_control_targets_are_rejected_early() {
-        let target: syn::ItemStruct = syn::parse_str(
-            r#"
-            struct CodegenControlTemplateNotControlD {
-                body: view! { VerticalLayout {} },
-            }
-            "#,
-        )
-        .unwrap();
-        generate_component_from_item_struct(Some("VerticalLayout".to_string()), &target).unwrap();
-
         let template = r#"
             struct CodegenControlTemplateInvalidTargetD {
-                body: view! { TextBlock { text: "x" } },
+                template: template_view! { TextBlock { text: "x" } },
             }
         "#;
-        let non_control = author_for("CodegenControlTemplateNotControlD", template)
+        let non_control = author_for("VerticalLayout", template)
             .expect_err("same-crate non-Control target must be rejected");
         assert!(non_control.contains("not a Control-derived"));
 
         let native = author_for("NativeControl", template)
             .expect_err("NativeControl target must be rejected");
         assert!(native.contains("NativeControl"));
-
-        component_frontend::register_same_crate_environment_key(
-            "codegen_control_template_key_d",
-            "CodegenControlTemplateKeyD",
-            "Option<ControlTemplate<CodegenControlTemplateNotControlD>>",
-        )
-        .unwrap();
-        let component_error =
-            expect_generation_error(generate_component_from_item_struct_with_template(
-                Some("VerticalLayout".to_string()),
-                Some("codegen_control_template_key_d".to_string()),
-                &target,
-            ));
-        assert!(component_error.contains("must inherit Control"));
     }
 }
 
@@ -3020,13 +3038,13 @@ mod user_base_inherits_tests {
     fn derived_from_a_user_component_builds_with_a_qualified_path() {
         declare(
             Some("ContentControl"),
-            r#"struct UbBase { body: view! { TextBlock { text: "x" } }, }"#,
+            r#"struct UbBase { template: template_view! { TextBlock { text: "x" } }, }"#,
         )
         .expect("base struct");
         build(r#"impl UbBase { }"#).expect("base impl");
         declare(
             Some("crate::UbBase"),
-            r#"struct UbDerived { body: view! { UbBase { } }, }"#,
+            r#"struct UbDerived { template: template_view! { UbBase { } }, }"#,
         )
         .expect("derived struct");
         let out = build(r#"impl UbDerived { }"#)
@@ -3047,13 +3065,13 @@ mod user_base_inherits_tests {
     fn derived_from_a_user_component_with_a_bare_base_name_is_rejected() {
         declare(
             Some("ContentControl"),
-            r#"struct UbBareBase { body: view! { TextBlock { text: "x" } }, }"#,
+            r#"struct UbBareBase { template: template_view! { TextBlock { text: "x" } }, }"#,
         )
         .expect("base struct");
         build(r#"impl UbBareBase { }"#).expect("base impl");
         declare(
             Some("UbBareBase"),
-            r#"struct UbBareDerived { body: view! { UbBareBase { } }, }"#,
+            r#"struct UbBareDerived { template: template_view! { UbBareBase { } }, }"#,
         )
         .expect("derived struct");
         let err = expect_generation_error(build(r#"impl UbBareDerived { }"#));
@@ -3069,7 +3087,7 @@ mod user_base_inherits_tests {
     fn derived_from_a_builtin_base_still_emits_the_builtin_path() {
         declare(
             Some("ContentControl"),
-            r#"struct UbBuiltinDerived { body: view! { TextBlock { text: "x" } }, }"#,
+            r#"struct UbBuiltinDerived { template: template_view! { TextBlock { text: "x" } }, }"#,
         )
         .expect("derived struct");
         let out = build(r#"impl UbBuiltinDerived { }"#)

@@ -32,7 +32,7 @@ struct MountTimeResolutionNestedChild {
     #[param]
     label: String,
 
-    body: view! {
+    template: template_view! {
         TextBlock { text: label }
     },
 }

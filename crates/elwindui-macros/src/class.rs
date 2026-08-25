@@ -156,9 +156,9 @@ use quote::{format_ident, quote};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use syn::{
+    Field, Fields, FnArg, Ident, ImplItem, ImplItemFn, Item, Pat, Path, Token, Type, Visibility,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
-    Field, Fields, FnArg, Ident, ImplItem, ImplItemFn, Item, Pat, Path, Token, Type, Visibility,
 };
 
 /// Parsed `#[class(inherits = .., struct_only = .., abstract_class, sealed, no_ancestor_forward)]`
@@ -1446,18 +1446,11 @@ struct PropDecls {
     /// macro never sees.
     #[allow(dead_code)]
     text_style: bool,
-    /// Internal component-body presentation capability. `template_root` opts a class into the
-    /// generic authored-body template path; descendants discover it through the exported shape
-    /// macro rather than by naming the class in codegen.
-    component_body_template_root: bool,
 }
 
 impl PropDecls {
     fn is_declared(&self) -> bool {
-        !self.props.is_empty()
-            || self.content_field.is_some()
-            || self.text_style
-            || self.component_body_template_root
+        !self.props.is_empty() || self.content_field.is_some() || self.text_style
     }
 
     fn content_field(&self) -> Option<&Ident> {
@@ -1466,7 +1459,7 @@ impl PropDecls {
 }
 
 /// Splits the DSL declaration attributes — `#[prop(..)]`, `#[content(..)]`, `#[text_style]`, and the
-/// hidden `#[component_body_presentation(..)]` capability marker — out of an item's attribute list.
+/// class surface markers — out of an item's attribute list.
 /// All are inert markers consumed entirely here; none may survive into the generated item, since
 /// none is a real registered attribute anywhere.
 fn take_prop_decls(attrs: &[syn::Attribute]) -> syn::Result<(PropDecls, Vec<syn::Attribute>)> {
@@ -1486,21 +1479,6 @@ fn take_prop_decls(attrs: &[syn::Attribute]) -> syn::Result<(PropDecls, Vec<syn:
             shape.content_field = Some(attr.parse_args::<Ident>()?);
         } else if attr.path().is_ident("text_style") {
             shape.text_style = true;
-        } else if attr.path().is_ident("component_body_presentation") {
-            let mode = attr.parse_args::<Ident>()?;
-            if mode != "template_root" {
-                return Err(syn::Error::new_spanned(
-                    mode,
-                    "#[component_body_presentation] currently supports only `template_root`",
-                ));
-            }
-            if shape.component_body_template_root {
-                return Err(syn::Error::new_spanned(
-                    attr,
-                    "#[component_body_presentation]: declared more than once",
-                ));
-            }
-            shape.component_body_template_root = true;
         } else {
             rest.push(attr.clone());
         }
@@ -2208,19 +2186,6 @@ fn build_props_macro(
         }
     });
 
-    // `@component_body_presentation` is the generic authored-body protocol. A class that opts
-    // into the template-root mode selects the first block; all other classes (and ancestors that
-    // do not opt in) select the ordinary content-property block. The forwarding arm is deliberately
-    // metadata-only so a component in another crate can inherit the capability without any
-    // type-name dispatch in codegen.
-    let component_body_presentation_entry = shape.component_body_template_root.then(|| {
-        quote! {
-            (@component_body_presentation $template:block, $content:block) => {
-                $template
-            };
-        }
-    });
-
     // `@content_item_dyn` expands to `dyn TraitExt` for the content-collection's element type
     // (`TabView`'s `children: Vec<Rc<dyn TabViewItemExt>>` -> `dyn TabViewItemExt`, `Layout`'s
     // `children: UIElementCollection` -> `dyn UIElementExt`) — used in *type* position
@@ -2297,7 +2262,6 @@ fn build_props_macro(
         children_erased_fallback,
         content_shape_fallback,
         content_slot_type_fallback,
-        component_body_presentation_fallback,
     ) = match parent {
         Some((parent_bare, parent_ty)) => {
             let parent_macro =
@@ -2373,11 +2337,6 @@ fn build_props_macro(
                     };
                     (@content_slot_type_into $origin:ident, $name:ident, $item:ty) => {
                         #parent_macro!(@content_slot_type_into $origin, $name, $item)
-                    };
-                },
-                quote! {
-                    (@component_body_presentation $template:block, $content:block) => {
-                        #parent_macro!(@component_body_presentation $template, $content);
                     };
                 },
             )
@@ -2530,11 +2489,6 @@ fn build_props_macro(
                     ));
                 };
             },
-            quote! {
-                (@component_body_presentation $template:block, $content:block) => {
-                    $content
-                };
-            },
         ),
     };
 
@@ -2678,8 +2632,6 @@ fn build_props_macro(
             #content_slot_type_entry
             #(#content_slot_type_into_arms)*
             #content_slot_type_fallback
-            #component_body_presentation_entry
-            #component_body_presentation_fallback
             #content_item_dyn_entry
             #(#content_item_dyn_into_arms)*
             #content_item_dyn_fallback
@@ -3460,7 +3412,7 @@ pub fn expand(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
 /// up depending on `elwindui-core`, directly or only transitively through the `elwindui` facade,
 /// resolves correctly with no changes to this function.
 fn core_path() -> TokenStream2 {
-    use proc_macro_crate::{crate_name, FoundCrate};
+    use proc_macro_crate::{FoundCrate, crate_name};
     match crate_name("elwindui-core") {
         Ok(FoundCrate::Itself) => quote! { crate },
         Ok(FoundCrate::Name(name)) => {
@@ -3520,7 +3472,7 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     // reliable.
     // Emit a forwarding shape macro for every derived class, even when it declares no own
     // properties. Generated `#[component]` classes rely on this surface to preserve inherited
-    // metadata (including `@component_body_presentation`) across same-crate component hops.
+    // property/content metadata across same-crate component hops.
     let shape_macro = (prop_decls.is_declared() || args.inherits.is_some()).then(|| {
         let parent = args
             .inherits
@@ -4029,8 +3981,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 return syn::Error::new_spanned(&f.sig, msg).to_compile_error();
             }
             ImplItem::Fn(f) if f.sig.ident == "__new_unmounted" => {
-                let msg =
-                    "#[class]: `__new_unmounted` is a reserved, auto-generated name (CI-7 of \
+                let msg = "#[class]: `__new_unmounted` is a reserved, auto-generated name (CI-7 of \
                            #80, docs/design/runtime/component_lifecycle_design.md §4f) — do not \
                            define it by hand.";
                 return syn::Error::new_spanned(&f.sig, msg).to_compile_error();

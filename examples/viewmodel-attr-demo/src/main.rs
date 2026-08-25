@@ -39,7 +39,7 @@ mod counter_vm {
 // declared as an `#[elwindui_macros::class]` at all, so it can't carry `#[overridable]` methods.
 #[elwindui::component(inherits ContentControl)]
 struct LabeledPanel {
-    body: view! {
+    template: template_view! {
         TextBlock { text: "panel" }
     },
 }

@@ -19,7 +19,7 @@ struct ContentWrapper {
     content: std::rc::Rc<dyn UIElementExt>,
     // `padding` is *not* redeclared here — it's auto-inherited from `Control` and forwarded below
     // by the bare same-name reference `padding: padding`, exactly as dsl_spec.md §3 documents.
-    body: view! {
+    template: template_view! {
     // No `Control { .. }` wrapper is written — `view!`'s own body supplies Control's attributes
     // and its single authored visual/template root (dsl_spec.md §3's shape-composition case).
         padding: padding

@@ -161,10 +161,12 @@ pub struct TypeInfo {
     /// This component's fully-flattened method list — see `resolve_effective_methods`. Empty for a
     /// `viewmodel`.
     pub effective_methods: Vec<MethodDef>,
-    /// This component's effective `view` — its own, if it wrote one, otherwise its base's
-    /// (recursively), retargeted to this component's name — see `resolve_view_for`. `None` for a
-    /// component with no view anywhere in its `inherits` chain (a plain data component, or one
-    /// inheriting a primitive shape family with no `view` of its own, e.g. `Control`/`Rectangle`).
+    /// This component's effective ordinary `view` — its own, if it wrote one, otherwise its base's
+    /// ordinary view (recursively), retargeted to this component's name — see `resolve_view_for`.
+    /// A base's typed `template: template_view!` is not copied into a derived target. `None` for a
+    /// component with no ordinary view anywhere in its `inherits` chain (a plain data component,
+    /// or one inheriting a primitive shape family with no `view` of its own, e.g. `Control`/
+    /// `Rectangle`).
     pub effective_view: Option<ViewDef>,
     /// This component's own literal `view`'s `on_mount`/`on_unmount` blocks (not inherited/cloned —
     /// see `find_view`), used by `generate_view` to emit `__base_on_mount`/`__base_on_unmount`
@@ -973,7 +975,14 @@ fn synthesize_external_base_fields(
     // relevant in a real (non-`elwindui-codegen`-internal-test) compilation, where every real
     // `#[elwindui::component(inherits ContentControl)]` composes over an external, `TypeInfo`-less
     // base (`resolve_composed_shape`'s own doc comment) and so always reaches this function.
-    if view.implicit_owner.is_some() {
+    // A named `#[control_template]` instance resolves `templated_parent.*` through its
+    // explicit weak owner field.  Those paths are not bare references to the external
+    // ContentControl base and must never be synthesized as ad-hoc base properties (for example,
+    // `templated_parent.label` must not create a `label: ()` constructor slot on the hidden
+    // ContentControl instance).  The generated template instance carries the same explicit
+    // owner contract as a deferred view, but without `implicit_owner` because its owner is typed
+    // and named in the synthesized struct itself.
+    if view.implicit_owner.is_some() || view.template_instance {
         return c.fields.clone();
     }
     let own_names: HashSet<&str> = c.fields.iter().map(|f| f.name.as_str()).collect();
@@ -1601,13 +1610,13 @@ pub(crate) fn resolve_effective_methods<'m>(
     result
 }
 
-/// Resolves `c`'s effective `view`: its own literal `view` if it wrote one (a full template
-/// override — no constraint on its root element beyond what `validate::validate_inherits` already
-/// checks), otherwise its base's effective `view` (recursively), retargeted to `c.name`. Returns
-/// `None` when there's no `view` anywhere in the chain — a plain data component, or one inheriting
-/// a primitive shape family with no `view` of its own (`Control`/`Rectangle`; those still require
-/// an explicit hand-written `view` — see
-/// `validate::validate_inherits`).
+/// Resolves `c`'s effective ordinary component view: its own literal `view` if it wrote one,
+/// otherwise its base's effective `view` (recursively), retargeted to `c.name`. A base component's
+/// typed `template: template_view!` declaration is deliberately not copied into a derived target:
+/// doing so would synthesize an unsound `ControlTemplate<Derived>` and violate exact-type lookup.
+/// Returns `None` when there's no ordinary view anywhere in the chain — a plain data component, or
+/// one inheriting a primitive shape family with no `view` of its own (`Control`/`Rectangle`; those
+/// still require an explicit hand-written `view` — see `validate::validate_inherits`).
 pub(crate) fn resolve_view_for<'m>(
     from: &'m Module,
     c: &ComponentDef,
@@ -1622,8 +1631,13 @@ pub(crate) fn resolve_view_for<'m>(
     }
     let (base_module, base_c) = find_component_and_module(from, base, modules)?;
     let base_view = resolve_view_for(base_module, base_c, modules)?;
+    if base_view.is_template {
+        return None;
+    }
     Some(ViewDef {
         target: c.name.clone(),
+        is_template: false,
+        template_instance: false,
         ..base_view
     })
 }
@@ -2978,11 +2992,8 @@ fn environment_key_type(f: &FieldDef) -> (TokenStream, syn::Type) {
 }
 
 /// Core resolution shared by `environment_key_type` (`#[environment(name)]` fields) and
-/// `#[component(template = key)]`'s own same-crate-only lookup (`environment_key_type_by_name(name,
-/// None, ..)`, `docs/specs/control_template_spec.md`) — the latter is out of scope for Issue #129's
-/// cross-crate resolution (`template = key` is always called with `prefix: None` today) and keeps
-/// its existing same-crate-only behavior unchanged (empty preamble). See `environment_key_type`'s
-/// own doc comment for `preamble`/`alias_seed`.
+/// ordinary `#[environment(name)]` fields' same-crate lookup. ControlTemplate selection uses the
+/// generic typed Environment slot and does not call this resolver.
 fn environment_key_type_by_name(
     name: &str,
     prefix: Option<&str>,
@@ -3669,15 +3680,12 @@ fn generate_view(
 ) -> TokenStream {
     let target_name = view.target.clone();
     let target = format_ident!("{}", target_name);
+    let target_ext = format_ident!("{}Ext", target_name);
     let has_own_view = find_view(from, &target_name).is_some();
-    let template_key_name =
-        crate::component_frontend::lookup_same_crate_component_template(&target_name);
-    // Always same-crate (`prefix: None`), so the returned preamble is always empty — see
-    // `environment_key_type_by_name`'s own doc comment.
-    let template_key_type = template_key_name
-        .as_deref()
-        .map(|name| environment_key_type_by_name(name, None, name).1);
-    let is_control_template_enabled = template_key_type.is_some();
+    // A component-level `template: template_view!` is an explicit typed template declaration.
+    // Environment selection is performed through the generic ControlTemplate<C> slot; no
+    // per-control Environment key or component-name lookup participates in this decision.
+    let is_control_template_enabled = view.is_template;
 
     // `component X inherits Y` where `Y` is a virtual-builtin shape primitive (`Control`/
     // `Rectangle`/`Ellipse`/`TextBlock`/`Grid`/`VerticalLayout`/`HorizontalLayout` —
@@ -3853,6 +3861,12 @@ fn generate_view(
         mutable_own_fields: HashSet::new(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
+        // A component-declared `template: template_view!` is compiled as the default
+        // `ControlTemplate<Self>` factory.  Its `templated_parent` is therefore the component
+        // instance itself at runtime, while named/external template factories keep an explicit
+        // weak `templated_parent` field.  Keep this distinction in the generic expression
+        // resolver rather than rewriting the AST or introducing a template-specific shortcut.
+        default_template_parent: view.is_template && !view.template_instance,
         implicit_owner: view.implicit_owner.as_ref().map(ImplicitOwnerCtx::from),
         target: target.clone(),
     };
@@ -4025,7 +4039,7 @@ fn generate_view(
     // prevents_popup_from_showing` failing without this. The `ContentPresenter`-binding branch
     // below (§ "content_capture_stmt/content_attach_stmt") stays independently gated on
     // `templated_parent` specifically, so enabling this for `__view_owner` too does not affect it.
-    let is_replaceable_template_body = is_control_template_enabled
+    let is_template_or_deferred_scope = is_control_template_enabled
         || ctx.weak_bindable_owners.contains("templated_parent")
         || view.implicit_owner.is_some();
 
@@ -4085,18 +4099,21 @@ fn generate_view(
     // reports that case as a real diagnostic; this is a second, codegen-level guarantee that holds
     // even if this function is ever called on unvalidated input (mirrors `is_abstract`'s own
     // `continue` in `generate_module` just above).
-    let resolved_root =
-        resolve_view_root_element(&view.root, component.base.as_deref(), is_composed)
-            .unwrap_or_else(|| {
-                panic!(
+    let resolved_root = resolve_view_root_element(
+        &view.root,
+        component.base.as_deref(),
+        is_composed,
+    )
+    .unwrap_or_else(|| {
+        panic!(
             "{}: view root must be exactly one element unless it inherits a composable base",
             component.name
         )
-            });
+    });
 
-    // Presentation mode is selected by the effective root/base props macro. Local-vs-external
-    // resolution only determines where that macro is exported; it must not decide whether an
-    // authored body is a template root or ordinary content.
+    // Property/content lowering is selected by the effective root/base props macro. Local-vs-
+    // external resolution only determines where that macro is exported; template presentation is
+    // selected solely by the explicit `template: template_view!` authoring slot above.
     let root_props_macro = format_ident!("__elwindui_props_{}", resolved_root.type_path);
     let root_props_macro_path = if table
         .resolve(from, &resolved_root.type_path)
@@ -4118,7 +4135,7 @@ fn generate_view(
     );
 
     let template_environment_ident = format_ident!("__control_template_environment");
-    if is_replaceable_template_body {
+    if is_template_or_deferred_scope {
         for node in &mut plan {
             if node.environment_scope.is_none()
                 && table
@@ -4560,7 +4577,7 @@ fn generate_view(
     // The shape/host-composition root's own `base` field is a distinct, always-required mechanism
     // (never a `stored` `PlannedNode`) and stays in `construct_stmts`, unmoved.
     let mut child_construct_stmts = TokenStream::new();
-    if is_replaceable_template_body {
+    if is_template_or_deferred_scope {
         child_construct_stmts.extend(quote! {
             let #template_environment_ident = self
                 .__mount_environment
@@ -5274,7 +5291,7 @@ fn generate_view(
             );
         }
 
-        if is_replaceable_template_body {
+        if is_template_or_deferred_scope {
             for node in &plan {
                 if node
                     .type_path
@@ -5304,50 +5321,6 @@ fn generate_view(
                         });
                     }
                 }
-            }
-        } else if is_shape_composition {
-            // An implicit ContentControl body uses the same ContentPresenter binding contract as
-            // an explicit ControlTemplate. Always ask the effective root/base props macro: a
-            // local composed descendant may forward through several component macros before the
-            // ContentControl opt-in selects this block. Local-vs-external resolution only chooses
-            // the macro path; it never chooses presentation mode.
-            for node in &plan {
-                if node.dynamic.is_some()
-                    || !node
-                        .type_path
-                        .rsplit("::")
-                        .next()
-                        .is_some_and(|name| name == "ContentPresenter")
-                {
-                    continue;
-                }
-                let presenter = &node.binding;
-                let bind = if ctx.weak_bindable_owners.contains("templated_parent") {
-                    quote! {
-                        {
-                            let templated_parent = this.templated_parent.upgrade().expect(
-                                "implicit template templated_parent was dropped before ContentPresenter wiring"
-                            );
-                            elwindui::core::ui::ContentPresenter::__bind_templated_parent(
-                                &#presenter,
-                                &templated_parent,
-                            );
-                        }
-                    }
-                } else {
-                    quote! {
-                        elwindui::core::ui::ContentPresenter::__bind_templated_parent(
-                            &#presenter,
-                            &this,
-                        );
-                    }
-                };
-                wiring_stmts.extend(quote! {
-                    #root_props_macro_path!(@component_body_presentation
-                        { #bind },
-                        {}
-                    );
-                });
             }
         }
     }
@@ -6017,24 +5990,14 @@ fn generate_view(
                     self.__set_template_root(#template_value);
                 }
             };
-            // The defining class's exported shape macro selects template-root or ordinary
-            // content lowering. This is the only place the component's own body is allowed to
-            // choose presentation mode; caller bare-child construction continues to use
-            // `@children` independently.
-            quote! {
-                #root_props_macro_path!(@component_body_presentation
-                    { #template_attach },
-                    { #content_attach }
-                );
+            if is_control_template_enabled {
+                template_attach
+            } else {
+                content_attach
             }
         };
         if !is_control_template_enabled && has_root_children {
-            let prepare = quote! {
-                #root_props_macro_path!(@component_body_presentation
-                    { use elwindui::core::ui::ControlExt as _; self.__prepare_template_presentation(); },
-                    {}
-                );
-            };
+            let prepare = TokenStream::new();
             (prepare, TokenStream::new(), attach)
         } else {
             (TokenStream::new(), TokenStream::new(), attach)
@@ -6287,16 +6250,16 @@ fn generate_view(
         }
     });
 
-    let custom_template_branch = template_key_type.as_ref().map(|key_type| {
+    let custom_template_branch = view.is_template.then(|| {
         quote! {
             {
                 use elwindui::core::ui::ControlExt as _;
                 self.__prepare_template_presentation();
-                let __selected_template: Option<elwindui::core::ui::ControlTemplate<#target>> = self
+                let __selected_template = self
                     .__mount_environment
                     .get()
                     .expect("template selection: component is not yet mounted")
-                    .get::<#key_type>();
+                    .__control_template::<#target>();
                 if let Some(__selected_template) = __selected_template {
                     let this: std::rc::Rc<#target> = self
                         .__self_weak
@@ -6413,6 +6376,15 @@ fn generate_view(
         let shadow_hooks = mark_inherent(shadow_hooks);
         let on_unmount_method = on_unmount_method.map(mark_inherent);
         let composed_unmount_method = composed_unmount_method.map(mark_inherent);
+        let mount_helper = mark_inherent(quote! {
+            #[doc(hidden)]
+            pub fn __mount(
+                &self,
+                environment: elwindui::core::environment::EnvironmentContext,
+            ) {
+                <Self as #target_ext>::mount(self, environment);
+            }
+        });
         quote! {
             #[allow(non_camel_case_types)]
             #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6574,11 +6546,21 @@ fn generate_view(
                 #class_methods
                 #shadow_hooks
                 #on_unmount_method
+                #mount_helper
             }
 
             #component_observable_impl
         }
     } else {
+        let mount_helper = quote! {
+            #[doc(hidden)]
+            pub fn __mount(
+                self: &std::rc::Rc<Self>,
+                environment: elwindui::core::environment::EnvironmentContext,
+            ) {
+                <Self as #target_ext>::mount(self, environment);
+            }
+        };
         quote! {
             #[allow(non_camel_case_types)]
             #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6587,6 +6569,7 @@ fn generate_view(
             }
 
             impl #struct_ident {
+                #mount_helper
                 pub fn new(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                     let this = Self::__new_unmounted(#(#ctor_param_names),*);
                     // See the composed shape's own `on_constructed` doc comment above — same
@@ -6777,6 +6760,10 @@ struct ViewCtx {
     /// instance cannot keep its templated parent alive. Expression and subscription emission
     /// upgrades these owners only for the duration of each read/resync.
     weak_bindable_owners: HashSet<String>,
+    /// The component's own default `template: template_view!` factory is compiled in the
+    /// component's `&self` context.  In that one context `templated_parent` resolves to `self`;
+    /// standalone/external/named templates retain their typed weak parent field instead.
+    default_template_parent: bool,
     /// Issue #162 §3.10-§3.11: the generated field (`ViewDef::implicit_owner`, always
     /// `"__view_owner"` when set) an otherwise-unresolved bare name falls back to, for a hidden
     /// Component lowered from a `ViewExpr::DeferredView` — together with the exact schema of
@@ -6804,6 +6791,7 @@ impl ViewCtx {
             mutable_own_fields: self.mutable_own_fields.clone(),
             bindable_owners: self.bindable_owners.clone(),
             weak_bindable_owners: self.weak_bindable_owners.clone(),
+            default_template_parent: self.default_template_parent,
             implicit_owner: self.implicit_owner.clone(),
             target: self.target.clone(),
         }
@@ -8717,13 +8705,10 @@ fn emit_scalar_branch_value(
         };
         if template_presentation {
             quote! {
-                elwindui::core::#props_macro!(@component_body_presentation
-                    {
-                        use elwindui::core::ui::ControlExt as _;
-                        #receiver.__set_template_root(#value);
-                    },
-                    { #content }
-                );
+                {
+                    use elwindui::core::ui::ControlExt as _;
+                    #receiver.__set_template_root(#value);
+                }
             }
         } else {
             content
@@ -10137,7 +10122,7 @@ fn emit_construction(
         let construct_call = match &node.environment_scope {
             Some(scope_var) => quote! {
                 let #binding = #type_ident::__new_unmounted(#(#args),*);
-                #binding.mount(#scope_var.clone());
+                #type_ident::__mount(&#binding, #scope_var.clone());
             },
             None => quote! {
                 let #binding = #type_ident::new(#(#args),*);
@@ -12625,7 +12610,9 @@ fn view_expr_has_reactive_dependency(expr: &ViewExpr, ctx: &ViewCtx) -> bool {
                 ctx.mutable_own_fields.contains(field) || is_implicit_reactive_field(ctx, field)
             }
             [owner, ..] => {
-                ctx.bindable_owners.contains(owner) || is_implicit_bindable_owner(ctx, owner)
+                (ctx.default_template_parent && owner == "templated_parent")
+                    || ctx.bindable_owners.contains(owner)
+                    || is_implicit_bindable_owner(ctx, owner)
             }
             [] => false,
         },
@@ -12649,7 +12636,8 @@ fn view_expr_has_reactive_dependency(expr: &ViewExpr, ctx: &ViewCtx) -> bool {
                         }
                     } else if segments.len() >= 2 {
                         let owner = segments[0].ident.to_string();
-                        if self.ctx.bindable_owners.contains(&owner)
+                        if (self.ctx.default_template_parent && owner == "templated_parent")
+                            || self.ctx.bindable_owners.contains(&owner)
                             || is_implicit_bindable_owner(self.ctx, &owner)
                         {
                             self.found = true;
@@ -12836,6 +12824,9 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
         ViewExpr::Path(path) => {
             if owner.is_empty() {
                 matches!(path.as_slice(), [path_property] if path_property == property)
+                    || (ctx.default_template_parent
+                        && matches!(path.as_slice(), [path_owner, path_property, ..]
+                            if path_owner == "templated_parent" && path_property == property))
             } else {
                 matches!(path.as_slice(), [path_owner, path_property, ..] if path_owner == owner && path_property == property)
                     || matches!(path.as_slice(), [field] if implicit_direct_field_matches(field))
@@ -12860,6 +12851,11 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
                         && segments[0].ident == self.property)
                         || (segments.len() >= 2
                             && segments[0].ident == self.owner
+                            && segments[1].ident == self.property)
+                        || (self.owner.is_empty()
+                            && self.ctx.default_template_parent
+                            && segments.len() >= 2
+                            && segments[0].ident == "templated_parent"
                             && segments[1].ident == self.property)
                         || (segments.len() == 1
                             && segments[0].ident == self.property
@@ -13411,6 +13407,12 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
 /// `self.vm.content()` (with self). A viewmodel action (`vm.save`) resolves through this exact
 /// same 2-segment shape — there is no separate `Command`-wrapper indirection to fold in.
 fn owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> TokenStream {
+    if ctx.default_template_parent && owner == "templated_parent" {
+        return match mode {
+            EmitMode::Construction => quote! { self },
+            EmitMode::WithSelf(self_tok) => self_tok.clone(),
+        };
+    }
     let base = mode.owner_tokens(owner);
     if ctx.weak_bindable_owners.contains(owner) {
         let upgrade_panic_message =
@@ -13548,10 +13550,12 @@ mod tests {
             .resolve(module, "ContentControl")
             .expect("ContentControl metadata");
         assert_eq!(content_control.content_field.as_deref(), Some("content"));
-        assert!(content_control
-            .field_types
-            .get("content")
-            .is_some_and(|ty| ty.contains("dyn UIElement")));
+        assert!(
+            content_control
+                .field_types
+                .get("content")
+                .is_some_and(|ty| ty.contains("dyn UIElement"))
+        );
         let layout = table.resolve(module, "Layout").expect("Layout metadata");
         assert_eq!(layout.content_field.as_deref(), Some("children"));
         assert_eq!(
@@ -13594,10 +13598,11 @@ mod tests {
             .resolve(&module, "CustomTabView")
             .expect("derived component metadata");
         assert_eq!(info.content_field.as_deref(), Some("children"));
-        assert!(info
-            .field_types
-            .get("children")
-            .is_some_and(|ty| ty.trim_start().starts_with("Vec<")));
+        assert!(
+            info.field_types
+                .get("children")
+                .is_some_and(|ty| ty.trim_start().starts_with("Vec<"))
+        );
         let generated = generate_module(&module, &table);
         assert_valid_rust("derived_content_override", &generated);
         let rendered = generated.to_string();
@@ -16166,8 +16171,10 @@ struct NotepadWindow {
         // `content`/`padding` are `#[class]`-managed own (untagged) methods now (docs/
         // docs/design/runtime/ui_tree_design.md) — the macro derives the matching trait declaration/impl from
         // these at expansion time, invisible in these pre-expansion generated tokens.
-        assert!(content_control_str
-            .contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >"));
+        assert!(
+            content_control_str
+                .contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >")
+        );
         assert!(content_control_str.contains("fn padding (& self) -> Option < f32 >"));
         // Real struct is always the bare `ContentControl` name itself — the *source* `#[class]` is
         // written against that same bare name (docs/design/runtime/ui_tree_design.md); the macro derives
@@ -16231,12 +16238,12 @@ struct NotepadWindow {
         generate_module(&module, &table);
     }
 
-    /// A component inheriting a logical, `has_view`-having base (`ContentControl`) with *no* `view`
-    /// of its own — WinUI3-style template inheritance (`resolve_view_for`): the generated code is a
-    /// full `generate_view`-style struct+impl (not `generate_component`'s plain struct), targeting
-    /// the derived component's own name, with `ContentControl`'s inherited template underneath.
+    /// A component inheriting a logical base (`ContentControl`) with no own ordinary view still
+    /// receives the inherited ordinary composition view used by this synthetic builtin fixture.
+    /// Typed `template: template_view!` declarations are intentionally not copied across the
+    /// component boundary (`resolve_view_for` returns no inherited typed template).
     #[test]
-    fn generates_valid_rust_for_template_inheritance_with_no_own_view() {
+    fn generates_valid_rust_for_inherited_ordinary_view_with_no_own_view() {
         let src = r#"
             struct LabeledPanel {
             }
@@ -16245,7 +16252,7 @@ struct NotepadWindow {
             crate::test_module(&[(Some("ContentControl"), src, None)]).expect("should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
-        assert_valid_rust("labeled_panel_template_inheritance", &generated);
+        assert_valid_rust("labeled_panel_ordinary_view_inheritance", &generated);
 
         let generated_str = generated.to_string();
         // The compiled struct is always the bare `LabeledPanel` name itself — the *source* `#[class]`

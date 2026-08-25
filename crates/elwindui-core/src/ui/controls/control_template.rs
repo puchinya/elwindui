@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::environment::{EnvironmentContext, EnvironmentKey};
+use crate::reactive::Subscription;
 use std::marker::PhantomData;
 
 /// TypeId-scoped Environment slot for the default/override template of `C`.
@@ -17,6 +18,22 @@ impl<C: ControlExt + 'static> EnvironmentKey for ControlTemplateEnvironment<C> {
     fn default_value() -> Self::Value {
         None
     }
+}
+
+/// Compile-time property bridge used by the `template_view!` expression frontend.
+///
+/// The bridge is deliberately keyed by a compile-time property token rather than a runtime
+/// string.  Component code generation implements it by delegating to the component's existing
+/// typed getter and `PropertyChanged` subscription surface; standalone template code can then be
+/// generic over the expected `ControlTemplate<C>` target without introducing reflection or an
+/// erased property map.
+#[doc(hidden)]
+pub trait TemplateProperty<const KEY: u64> {
+    type Value: Clone + 'static;
+
+    fn __template_get(&self) -> Self::Value;
+
+    fn __template_subscribe(&self, listener: impl Fn() + 'static) -> Subscription;
 }
 
 /// The context supplied to a [`ControlTemplate`] factory.
@@ -67,6 +84,16 @@ impl<C: ControlExt + 'static> ControlTemplate<C> {
         Self {
             factory: DeferredViewFactory::new(move |context| Some(factory(context))),
         }
+    }
+
+    /// Creates a template whose visual tree does not read the typed templated parent.  Keeping
+    /// the factory parameter independent of `C` lets Rust infer the target from an expected
+    /// `ControlTemplate<C>` expression even when the template contains no parent property path.
+    #[doc(hidden)]
+    pub fn from_environment(
+        factory: impl Fn(EnvironmentContext) -> Rc<dyn UIElementExt> + 'static,
+    ) -> Self {
+        Self::new(move |context| factory(context.environment))
     }
 
     /// Builds the template root once for generated mount code.

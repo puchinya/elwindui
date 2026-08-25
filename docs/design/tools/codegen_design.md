@@ -43,11 +43,15 @@ backend-independent Rust token generation
 
 `component_frontend` と `attr_frontend` は `struct`、`mod`、`enum` を共通ASTへ変換する。`view!` fieldの内側だけは `parser` がDSL grammarとして解析する。この境界より後のvalidationとgenerationは、どの属性macroから入力されたかに依存しない。
 
-`template_view!` と `#[control_template(target = T)]` は同じView ASTへlowerし、reserved
-`templated_parent: Weak<T>`を持つprivate template-instanceと`ControlTemplate<T>` factoryを生成する。
-`template_view!`は期待される`ControlTemplate<C>`型からtargetを推論できる式macroであり、componentの
-`template:` pseudo-fieldはそのfactoryをtype-level defaultとして登録する。`#[control_template]`は
-同じcompiler/validatorを利用するnamed wrapperで、public declarationは`Name::template()`を提供する。
+`template_view!`、componentの`template:` pseudo-field、`#[control_template(target = T)]`は同じView ASTと
+template compilation contextへlowerする。contextはtyped `templated_parent`、selected
+`ControlTemplateContext.environment`、template-root ownershipを保持し、同じvalidator、property
+resync、dynamic-region reconciliation、ContentPresenter wiringを使って`ControlTemplate<T>` factoryを
+生成する。standalone `template_view!`は期待される`ControlTemplate<C>`型からtargetを推論でき、property
+参照は消去されないcompile-time `TemplateProperty` boundへlowerされる。componentの`template:`はその
+factoryをtype-level defaultとして登録し、`#[control_template]`は同じcompilerを使うnamed wrapperとして
+`Name::template()`を提供する。生成されたtemplate subtreeのcomponent descendantsはfactoryへ渡された
+Environmentを明示的にmountへ伝播する。
 
 ### 3.2 Registry resolution
 

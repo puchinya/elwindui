@@ -9,12 +9,14 @@ use std::rc::Rc;
 
 #[path = "control_template/local_template_base.rs"]
 mod local_template_base;
+pub use local_template_base::*;
 
 #[path = "control_template/local_template_descendant.rs"]
 mod local_template_descendant;
 
-pub use local_template_base::*;
-use local_template_descendant::LocalTemplateDescendantProbe;
+use local_template_descendant::{
+    LocalTemplateDescendantProbe, LocalTemplateDescendantProbeExt as _,
+};
 
 thread_local! {
     static DEFAULT_TEMPLATE_MOUNTS: Cell<u32> = const { Cell::new(0) };
@@ -69,6 +71,21 @@ struct LocalTemplateUseProbe {
 
 #[elwindui::component]
 impl LocalTemplateUseProbe {}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct LocalDynamicTemplateUseProbe {
+    body: view! {
+        #[id("probe")]
+        let probe = LocalTemplateDescendantProbe {
+            TextBlock { text: "logical page" }
+        };
+
+        probe
+    },
+}
+
+#[elwindui::component]
+impl LocalDynamicTemplateUseProbe {}
 
 #[elwindui::component(inherits ContentControl)]
 struct DefaultBodyPresenterProbe {
@@ -271,6 +288,69 @@ fn default_template_is_separate_from_bare_logical_content() {
 }
 
 #[test]
+fn same_crate_multi_hop_dynamic_template_replaces_only_the_template_root() {
+    let parent = LocalDynamicTemplateUseProbe::new();
+    let probe = parent.probe();
+    let logical = probe.content();
+    let logical_node: Rc<dyn elwindui::core::ui::UIElementExt> = logical.clone();
+    let probe_node: Rc<dyn elwindui::core::ui::UIElementExt> = probe.clone();
+    let logical_parent = logical
+        .as_ui_element()
+        .parent
+        .borrow()
+        .as_ref()
+        .and_then(std::rc::Weak::upgrade)
+        .expect("logical content keeps its derived ContentControl parent");
+    assert!(Rc::ptr_eq(&logical_parent, &probe_node));
+    assert!(logical_node.visual_parent().is_none());
+
+    let initial_root = probe.visual_children()[0].clone();
+    assert_eq!(
+        initial_root
+            .as_any()
+            .downcast_ref::<TextBlock>()
+            .expect("initial derived template root is TextBlock")
+            .text
+            .borrow()
+            .as_str(),
+        "derived initial"
+    );
+
+    probe.set_show_alternate(true);
+
+    let visual_children = probe.visual_children();
+    assert_eq!(visual_children.len(), 1);
+    let replacement_root = visual_children[0].clone();
+    assert!(!Rc::ptr_eq(&initial_root, &replacement_root));
+    assert!(initial_root.visual_parent().is_none());
+    assert!(
+        replacement_root
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &probe_node))
+    );
+    assert_eq!(
+        replacement_root
+            .as_any()
+            .downcast_ref::<TextBlock>()
+            .expect("replacement derived template root is TextBlock")
+            .text
+            .borrow()
+            .as_str(),
+        "derived alternate"
+    );
+    assert!(logical_node.visual_parent().is_none());
+    assert!(
+        logical
+            .as_ui_element()
+            .parent
+            .borrow()
+            .as_ref()
+            .and_then(std::rc::Weak::upgrade)
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &probe_node))
+    );
+}
+
+#[test]
 fn default_template_content_presenter_owns_logical_content_visual() {
     let parent = DefaultBodyPresenterUseProbe::new();
     let probe = parent.probe();
@@ -314,7 +394,7 @@ fn local_multi_hop_content_control_uses_explicit_template_root() {
     let probe = parent.probe();
     let logical = probe.content();
 
-    assert_eq!(text_values(probe.as_ref()), vec!["descendant header"]);
+    assert_eq!(text_values(probe.as_ref()), vec!["derived initial"]);
     assert_eq!(
         logical
             .as_any()

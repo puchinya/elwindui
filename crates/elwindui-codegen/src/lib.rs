@@ -13,6 +13,30 @@ pub use text_style::TEXT_STYLE_FIELDS;
 pub mod theme_frontend;
 pub mod validate;
 
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use syn::parse::Parser;
+use syn::visit::Visit;
+use syn::visit_mut::VisitMut;
+
+/// Stable compile-time token used by the generic `template_view!` property bridge.  This is a
+/// code-generation key, not a runtime property lookup: the generated component implements the
+/// corresponding `TemplateProperty<KEY>` instance and the standalone factory carries the same
+/// literal key in its trait bound.
+pub(crate) const fn template_property_key(name: &str) -> u64 {
+    let bytes = name.as_bytes();
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut index = 0;
+    while index < bytes.len() {
+        hash ^= bytes[index] as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+        index += 1;
+    }
+    hash
+}
+
 /// Test-only counterpart to the removed `builtin_modules()` — see `testdata`'s own doc comment.
 /// `pub(crate)` (not `pub`): only `codegen.rs`/`validate.rs`/`component_frontend.rs`'s own
 /// `#[cfg(test)] mod tests` blocks call this, never production code.
@@ -186,16 +210,13 @@ pub fn generate_dsl_enum_from_item_enum(
 /// see `testdata`'s own doc comment on why, and `codegen::emit_external_construction`.
 /// Low-level expansion used by the public `template_view!` proc macro.
 ///
-/// The template expression is intentionally compiled to the existing typed `ControlTemplate`
-/// value rather than introducing a second runtime representation.  Static element construction
-/// and ordinary property/content assignments use the same exported class-property macros as
-/// generated component views; the expected Rust type supplies `C` for the factory.
-pub fn generate_template_view_expression(body: &str) -> Result<proc_macro2::TokenStream, String> {
+/// The standalone frontend deliberately only acquires the expected target type here.  Once that
+/// type is known, the generated factory uses the same ControlTemplate lifecycle and the same
+/// compile-time property/notification protocol as component and named templates; there is no
+/// second runtime template representation or textual `templated_parent` detection.
+pub fn generate_template_view_expression(body: &str) -> Result<TokenStream, String> {
     let (on_mount, on_unmount, on_update, lets, parsed_root) = parser::parse_view_body(body)
         .map_err(|error| format!("invalid `template_view! {{ ... }}` body: {error}"))?;
-    let [ast::ChildEntry::Literal(root)] = parsed_root.children.as_slice() else {
-        return Err("`template_view!` requires exactly one static root element".to_string());
-    };
     let validation_view = ast::ViewDef {
         target: "__standalone_template_view".to_string(),
         is_template: true,
@@ -209,91 +230,946 @@ pub fn generate_template_view_expression(body: &str) -> Result<proc_macro2::Toke
     };
     validate_replaceable_template_view(&validation_view)
         .map_err(|error| format!("invalid `template_view!` body: {error}"))?;
-    let root_tokens = emit_template_element(root)?;
-    let parent_binding = body.contains("templated_parent").then(|| {
-        quote::quote! { let templated_parent = context.control.clone(); }
-    });
-    Ok(quote::quote! {
-        elwindui::core::ui::ControlTemplate::new(move |context: elwindui::core::ui::ControlTemplateContext<_>| {
-            use elwindui::ui::*;
-            #parent_binding
-            #root_tokens
-        })
-    })
-}
 
-fn emit_template_element(element: &ast::ElementNode) -> Result<proc_macro2::TokenStream, String> {
-    let type_path: syn::Path = syn::parse_str(&element.type_path)
-        .map_err(|error| format!("invalid template element `{}`: {error}", element.type_path))?;
-    let ident = element
-        .type_path
-        .rsplit("::")
-        .next()
-        .ok_or_else(|| "template element has no type name".to_string())?;
-    let props_macro = syn::Ident::new(
-        &format!("__elwindui_props_{ident}"),
-        proc_macro2::Span::call_site(),
+    let mut compiler = ControlTemplateCompiler::default();
+    let root = compiler.compile_root(&parsed_root)?;
+    let bounds: Vec<_> = compiler
+        .property_bounds
+        .iter()
+        .map(|(key, expected)| match expected {
+            Some(expected) => quote! {
+                elwindui::core::ui::TemplateProperty<#key, Value = #expected>
+            },
+            None => quote! { elwindui::core::ui::TemplateProperty<#key> },
+        })
+        .collect();
+    let iterable_bounds: Vec<_> = compiler
+        .iterable_properties
+        .iter()
+        .map(|key| {
+            quote! {
+                <C as elwindui::core::ui::TemplateProperty<#key>>::Value: IntoIterator,
+                <<C as elwindui::core::ui::TemplateProperty<#key>>::Value as IntoIterator>::Item:
+                    std::fmt::Display
+            }
+        })
+        .collect();
+    let factory_ident = format_ident!(
+        "__elwindui_template_factory_{}",
+        TEMPLATE_VIEW_FACTORY_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
-    let assignments = element
-        .attributes
-        .iter()
-        .map(|attribute| {
-            let name = syn::Ident::new(&attribute.name, proc_macro2::Span::call_site());
-            let value = emit_template_expr(&attribute.value)?;
-            Ok::<_, String>(quote::quote! {
-                elwindui::core::#props_macro!(@set node, #name, #value);
+    let factory = if bounds.is_empty() {
+        quote! {
+            elwindui::core::ui::ControlTemplate::from_environment(move |__environment| {
+                use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
+                use elwindui::ui::*;
+                let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(Vec::<elwindui::core::reactive::Subscription>::new()));
+                let __root = #root;
+                __root
             })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let children = element
-        .children
-        .iter()
-        .map(|child| match child {
-            ast::ChildEntry::Literal(child) => emit_template_element(child),
-            _ => Err(
-                "dynamic child regions are not supported by this template expression".to_string(),
-            ),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let child_attach = if children.is_empty() {
-        proc_macro2::TokenStream::new()
+        }
     } else {
-        quote::quote! {
-            elwindui::core::#props_macro!(@children node, [#(#children),*]);
+        quote! {
+            fn #factory_ident<C>(
+                context: elwindui::core::ui::ControlTemplateContext<C>,
+            ) -> std::rc::Rc<dyn elwindui::core::ui::UIElementExt>
+            where
+                C: elwindui::core::ui::ControlExt + 'static + #(#bounds)+*,
+                #(#iterable_bounds,)*
+            {
+                use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
+                use elwindui::ui::*;
+                let __elwindui_template_parent = context.control.clone();
+                let __environment = context.environment.clone();
+                let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(Vec::<elwindui::core::reactive::Subscription>::new()));
+                let __root = #root;
+                let __template_subscriptions_for_cleanup = __subscriptions.clone();
+                let __template_target_for_cleanup = __elwindui_template_parent.clone();
+                __template_target_for_cleanup.add_unmount_hook(Box::new(move || {
+                    __template_subscriptions_for_cleanup.borrow_mut().clear();
+                }));
+                __root
+            }
+
+            elwindui::core::ui::ControlTemplate::new(#factory_ident::<_>)
         }
     };
-    Ok(quote::quote! {
-        {
-            let node = #type_path::new();
-            #(#assignments)*
-            #child_attach
-            node
-        }
-    })
+
+    Ok(quote! {{ #factory }})
 }
 
-fn emit_template_expr(expr: &ast::ViewExpr) -> Result<proc_macro2::TokenStream, String> {
-    match expr {
-        ast::ViewExpr::Path(path) => {
-            if path
-                .first()
-                .is_some_and(|segment| segment == "templated_parent")
-            {
-                let mut value = quote::quote! { templated_parent };
-                for segment in path.iter().skip(1) {
-                    let ident = syn::Ident::new(segment, proc_macro2::Span::call_site());
-                    value = quote::quote! { #value.#ident() };
-                }
-                Ok(value)
-            } else {
-                let raw = path.join("::");
-                let path: syn::Path = syn::parse_str(&raw)
-                    .map_err(|error| format!("invalid template expression `{raw}`: {error}"))?;
-                Ok(quote::quote! { #path })
+static TEMPLATE_VIEW_FACTORY_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Shared backend for the `template_view!` ControlTemplate expression frontend.
+///
+/// Component defaults and named templates enter the same parser/validator and the generated
+/// component path uses the same typed parent, dynamic-region, ContentPresenter, and Environment
+/// contracts. This backend owns the expression-form factory lowering used when the target type is
+/// acquired from an expected `ControlTemplate<C>` value.
+struct ControlTemplateCompiler {
+    property_bounds: BTreeMap<u64, Option<TokenStream>>,
+    iterable_properties: BTreeSet<u64>,
+    next_binding: usize,
+    parent_ident: String,
+}
+
+impl Default for ControlTemplateCompiler {
+    fn default() -> Self {
+        Self {
+            property_bounds: BTreeMap::new(),
+            iterable_properties: BTreeSet::new(),
+            next_binding: 0,
+            parent_ident: "__elwindui_template_parent".to_string(),
+        }
+    }
+}
+
+enum TemplateSubscriptionSink {
+    Shared(TokenStream),
+    Local(syn::Ident),
+}
+
+impl TemplateSubscriptionSink {
+    fn push(&self, subscription: TokenStream) -> TokenStream {
+        match self {
+            Self::Shared(storage) => {
+                quote! { #storage.borrow_mut().push(#subscription); }
+            }
+            Self::Local(storage) => quote! { #storage.push(#subscription); },
+        }
+    }
+}
+
+impl ControlTemplateCompiler {
+    fn fresh(&mut self, prefix: &str) -> syn::Ident {
+        let ident = format_ident!("__elwindui_{prefix}_{}", self.next_binding);
+        self.next_binding += 1;
+        ident
+    }
+
+    fn compile_root(&mut self, body: &ast::ViewBody) -> Result<TokenStream, String> {
+        if !body.attributes.is_empty()
+            || !body.attached.is_empty()
+            || !body.attribute_shortcuts.is_empty()
+        {
+            return Err("standalone `template_view!` requires an element or dynamic root".into());
+        }
+        if body.children.len() != 1 {
+            return Err("`template_view!` requires exactly one effective root".into());
+        }
+        let root = match &body.children[0] {
+            ast::ChildEntry::Literal(element) => self.compile_element(
+                element,
+                &TemplateSubscriptionSink::Shared(quote! { __subscriptions }),
+            ),
+            ast::ChildEntry::If { .. } | ast::ChildEntry::Match { .. } => {
+                self.compile_dynamic_root(&body.children[0])
+            }
+            ast::ChildEntry::For { .. } => {
+                Err("a `for` region cannot be the sole ControlTemplate root".into())
+            }
+            ast::ChildEntry::Ref(name) => {
+                Err(format!("template root reference `{name}` is not supported"))
+            }
+        }?;
+        Ok(root)
+    }
+
+    fn compile_dynamic_root(&mut self, entry: &ast::ChildEntry) -> Result<TokenStream, String> {
+        let (selector, branches) = match entry {
+            ast::ChildEntry::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => (
+                Some(condition),
+                vec![then_branch.as_slice(), else_branch.as_slice()],
+            ),
+            ast::ChildEntry::Match { value, arms } => {
+                let branches = arms.iter().map(|arm| arm.body.as_slice()).collect();
+                (Some(value), branches)
+            }
+            _ => return Err("expected a dynamic template root".into()),
+        };
+        let selector = selector.expect("dynamic root always has a selector");
+        let initial_parent_ident = self.fresh("initial_parent");
+        let initial_previous_parent_ident =
+            std::mem::replace(&mut self.parent_ident, initial_parent_ident.to_string());
+        let selector_tokens = self.expression(selector)?;
+        let selector_keys = self.expression_property_keys(selector);
+        let boolean_match = matches!(
+            entry,
+            ast::ChildEntry::Match { arms, .. }
+                if arms.iter().all(|arm| matches!(arm.pattern.trim(), "true" | "false"))
+        );
+        if matches!(entry, ast::ChildEntry::If { .. }) || boolean_match {
+            for key in &selector_keys {
+                self.constrain_property(*key, quote! { bool });
             }
         }
-        ast::ViewExpr::Expr(expr) => Ok(quote::quote! { #expr }),
-        _ => Err("this `template_view!` expression form is not supported yet".to_string()),
+        let branch_vec = self.fresh("branch_subscriptions");
+        let branch_exprs: Vec<_> = branches
+            .iter()
+            .map(|branch| {
+                if branch.len() != 1 {
+                    return Err(
+                        "every dynamic ControlTemplate root branch must contain exactly one element"
+                            .to_string(),
+                    );
+                }
+                self.compile_dynamic_branch(
+                    &branch[0],
+                    &TemplateSubscriptionSink::Local(branch_vec.clone()),
+                )
+            })
+            .collect::<Result<_, _>>()?;
+        self.parent_ident = initial_previous_parent_ident;
+        let callback_parent_ident = self.fresh("callback_parent");
+        let callback_branch_vec = self.fresh("next_branch_subscriptions");
+        let previous_parent_ident =
+            std::mem::replace(&mut self.parent_ident, callback_parent_ident.to_string());
+        let callback_selector_tokens = self.expression(selector)?;
+        let callback_branch_exprs: Vec<_> = branches
+            .iter()
+            .map(|branch| {
+                self.compile_dynamic_branch(
+                    &branch[0],
+                    &TemplateSubscriptionSink::Local(callback_branch_vec.clone()),
+                )
+            })
+            .collect::<Result<_, _>>()?;
+        self.parent_ident = previous_parent_ident;
+        let initial_root = self.fresh("initial_root");
+        let branch_state = self.fresh("branch_state");
+        let callback_branch_state = self.fresh("callback_branch_state");
+        let control_weak = self.fresh("control_weak");
+        let subscription_parent = self.fresh("subscription_parent");
+        let callback_root = self.fresh("next_root");
+        let root_parent_ident = format_ident!("{}", self.parent_ident);
+        let condition = match entry {
+            ast::ChildEntry::If { .. } => {
+                let then_expr = &branch_exprs[0];
+                let else_expr = &branch_exprs[1];
+                quote! { if #selector_tokens { #then_expr } else { #else_expr } }
+            }
+            ast::ChildEntry::Match { arms, .. } => {
+                let arms = arms
+                    .iter()
+                    .zip(branch_exprs.iter())
+                    .map(|(arm, expr)| {
+                        let pattern = syn::Pat::parse_single
+                            .parse_str(&arm.pattern)
+                            .map_err(|error| format!("invalid template match pattern: {error}"))?;
+                        Ok::<_, String>(quote! { #pattern => #expr })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                quote! { match #selector_tokens { #(#arms),* } }
+            }
+            _ => unreachable!(),
+        };
+        let callback_condition = match entry {
+            ast::ChildEntry::If { .. } => {
+                let then_expr = &callback_branch_exprs[0];
+                let else_expr = &callback_branch_exprs[1];
+                quote! { if #callback_selector_tokens { #then_expr } else { #else_expr } }
+            }
+            ast::ChildEntry::Match { arms, .. } => {
+                let arms = arms
+                    .iter()
+                    .zip(callback_branch_exprs.iter())
+                    .map(|(arm, expr)| {
+                        let pattern = syn::Pat::parse_single
+                            .parse_str(&arm.pattern)
+                            .map_err(|error| format!("invalid template match pattern: {error}"))?;
+                        Ok::<_, String>(quote! { #pattern => #expr })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                quote! { match #callback_selector_tokens { #(#arms),* } }
+            }
+            _ => unreachable!(),
+        };
+        let subscription = if selector_keys.is_empty() {
+            quote! { vec![elwindui::core::reactive::Subscription::new(|| {})] }
+        } else {
+            let subscriptions = selector_keys.iter().map(|key| {
+                let selector_subscription = quote! {
+                    <C as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
+                        &*#subscription_parent,
+                        move || {
+                            if let Some(control) = #control_weak.upgrade() {
+                                #callback_branch_state.borrow_mut().clear();
+                                let mut #callback_branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
+                                let #callback_parent_ident = control.clone();
+                                let #callback_root = #callback_condition;
+                                *#callback_branch_state.borrow_mut() = #callback_branch_vec;
+                                control.__set_template_root(#callback_root);
+                            }
+                        },
+                    )
+                };
+                quote! {{
+                    let #subscription_parent = #root_parent_ident.clone();
+                    let #control_weak = std::rc::Rc::downgrade(&#subscription_parent);
+                    let #callback_branch_state = #branch_state.clone();
+                    #selector_subscription
+                }}
+            });
+            quote! { vec![#(#subscriptions),*] }
+        };
+        let selector_block = quote! {
+            let __selector_subscriptions = #subscription;
+            __subscriptions.borrow_mut().extend(__selector_subscriptions);
+        };
+        let initial = quote! {
+            let #initial_parent_ident = #root_parent_ident.clone();
+            let mut #branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
+            let #initial_root = #condition;
+            let #branch_state = std::rc::Rc::new(std::cell::RefCell::new(#branch_vec));
+            #selector_block
+            let __branch_state_for_cleanup = #branch_state.clone();
+            __subscriptions.borrow_mut().push(
+                elwindui::core::reactive::Subscription::new(move || {
+                    __branch_state_for_cleanup.borrow_mut().clear();
+                }),
+            );
+            #initial_root
+        };
+        Ok(quote! {{
+            use elwindui::core::ui::ControlExt as _;
+            #initial
+        }})
+    }
+
+    fn compile_dynamic_branch(
+        &mut self,
+        entry: &ast::ChildEntry,
+        sink: &TemplateSubscriptionSink,
+    ) -> Result<TokenStream, String> {
+        match entry {
+            ast::ChildEntry::Literal(element) => self.compile_element(element, sink),
+            ast::ChildEntry::If { .. } | ast::ChildEntry::Match { .. } => {
+                Err("nested dynamic roots require a static visual parent".into())
+            }
+            ast::ChildEntry::For { .. } => {
+                Err("a `for` region cannot be a scalar template root branch".into())
+            }
+            ast::ChildEntry::Ref(name) => Err(format!(
+                "template branch reference `{name}` is not supported"
+            )),
+        }
+    }
+
+    fn compile_element(
+        &mut self,
+        element: &ast::ElementNode,
+        sink: &TemplateSubscriptionSink,
+    ) -> Result<TokenStream, String> {
+        let type_path: syn::Path = syn::parse_str(&element.type_path).map_err(|error| {
+            format!("invalid template element `{}`: {error}", element.type_path)
+        })?;
+        let ident = element
+            .type_path
+            .rsplit("::")
+            .next()
+            .ok_or_else(|| "template element has no type name".to_string())?;
+        let props_macro = format_ident!("__elwindui_props_{ident}");
+        let node = self.fresh("node");
+        let construction = if standalone_builtin_type(ident) {
+            quote! { #type_path::new() }
+        } else {
+            quote! {{
+                let __node = #type_path::__new_unmounted();
+                __node.mount(__environment.clone());
+                __node
+            }}
+        };
+        let mut statements = TokenStream::new();
+        for attribute in &element.attributes {
+            let name = format_ident!("{}", attribute.name);
+            let value = self.expression(&attribute.value)?;
+            statements.extend(quote! {
+                elwindui::core::#props_macro!(@set #node, #name, #value);
+            });
+            let keys = self.expression_property_keys(&attribute.value);
+            for key in keys {
+                let node_weak = self.fresh("node_weak");
+                let control_weak = self.fresh("control_weak");
+                let subscription_parent = self.fresh("subscription_parent");
+                let parent_ident = format_ident!("{}", self.parent_ident);
+                let callback_parent_ident = parent_ident.clone();
+                self.constrain_property(
+                    key,
+                    quote! { elwindui::core::#props_macro!(@field_type #name) },
+                );
+                let resync_value = self.expression(&attribute.value)?;
+                let subscription = quote! {
+                    {
+                        let #node_weak = std::rc::Rc::downgrade(&#node);
+                        let #subscription_parent = #parent_ident.clone();
+                        let #control_weak = std::rc::Rc::downgrade(&#subscription_parent);
+                        <C as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
+                            &*#subscription_parent,
+                            move || {
+                                if let (Some(node), Some(control)) = (#node_weak.upgrade(), #control_weak.upgrade()) {
+                                    let #callback_parent_ident = control;
+                                    elwindui::core::#props_macro!(@set node, #name, #resync_value);
+                                }
+                            },
+                        )
+                    }
+                };
+                statements.extend(sink.push(subscription));
+            }
+        }
+
+        if element.children.is_empty() {
+            return Ok(quote! {{
+                let #node = #construction;
+                #statements
+                #node
+            }});
+        }
+        if element
+            .children
+            .iter()
+            .all(|child| matches!(child, ast::ChildEntry::Literal(_)))
+        {
+            let children = element
+                .children
+                .iter()
+                .map(|child| match child {
+                    ast::ChildEntry::Literal(child) => self.compile_element(child, sink),
+                    _ => unreachable!(),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let attach = quote! {
+                elwindui::core::#props_macro!(@children #node, [#(#children),*]);
+            };
+            return Ok(quote! {{
+                let #node = #construction;
+                #statements
+                #attach
+                #node
+            }});
+        }
+
+        // Dynamic nested regions use the same collection operation as generated view code.  The
+        // first implementation intentionally keeps the scalar-branch invariant (one child per
+        // branch); `for` remains rejected by the shared template validator when it cannot reduce
+        // to one root, while layout-hosted `if`/`match` regions are reconciled in-place below.
+        if !standalone_layout_type(ident) {
+            return Err(format!(
+                "dynamic template children require a Layout host, found `{ident}`"
+            ));
+        }
+        let host = self.fresh("host");
+        let mut child_statements = TokenStream::new();
+        for (index, child) in element.children.iter().enumerate() {
+            match child {
+                ast::ChildEntry::Literal(child) => {
+                    let value = self.compile_element(child, sink)?;
+                    child_statements.extend(quote! { #host.insert(#index, #value); });
+                }
+                ast::ChildEntry::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    if then_branch.len() != 1 || else_branch.len() != 1 {
+                        return Err("dynamic layout branches must contain exactly one child".into());
+                    }
+                    let slot = self.fresh("slot");
+                    let branch_state = self.fresh("branch_state");
+                    let branch_vec = self.fresh("branch_subscriptions");
+                    let initial_parent_ident = format_ident!("{}", self.parent_ident);
+                    let then_value = self.compile_dynamic_branch(
+                        &then_branch[0],
+                        &TemplateSubscriptionSink::Local(branch_vec.clone()),
+                    )?;
+                    let else_value = self.compile_dynamic_branch(
+                        &else_branch[0],
+                        &TemplateSubscriptionSink::Local(branch_vec.clone()),
+                    )?;
+                    let condition_value = self.expression(condition)?;
+                    let keys = self.expression_property_keys(condition);
+                    for key in &keys {
+                        self.constrain_property(*key, quote! { bool });
+                    }
+                    let callback_parent_ident = self.fresh("callback_parent");
+                    let callback_branch_vec = self.fresh("next_branch_subscriptions");
+                    let previous_parent_ident = std::mem::replace(
+                        &mut self.parent_ident,
+                        callback_parent_ident.to_string(),
+                    );
+                    let callback_condition_value = self.expression(condition)?;
+                    let callback_then_value = self.compile_dynamic_branch(
+                        &then_branch[0],
+                        &TemplateSubscriptionSink::Local(callback_branch_vec.clone()),
+                    )?;
+                    let callback_else_value = self.compile_dynamic_branch(
+                        &else_branch[0],
+                        &TemplateSubscriptionSink::Local(callback_branch_vec.clone()),
+                    )?;
+                    self.parent_ident = previous_parent_ident;
+                    let host_owner = self.fresh("host_owner");
+                    let replacement: TokenStream = keys
+                        .iter()
+                        .map(|key| {
+                            let weak_control = self.fresh("control_weak");
+                            let callback_state = self.fresh("callback_branch_state");
+                            let callback_slot = self.fresh("callback_slot");
+                            let callback_host_owner = self.fresh("callback_host_owner");
+                            let next_value = self.fresh("next_value");
+                            let sub = quote! {
+                                {
+                                    let #weak_control = std::rc::Rc::downgrade(&#initial_parent_ident);
+                                    let #callback_state = #branch_state.clone();
+                                    let #callback_slot = #slot.clone();
+                                    let #callback_host_owner = #host_owner.clone();
+                                    <C as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
+                                        &*#initial_parent_ident,
+                                        move || {
+                                            if let Some(control) = #weak_control.upgrade() {
+                                                #callback_state.borrow_mut().clear();
+                                                let mut #callback_branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
+                                                let #callback_parent_ident = control;
+                                                let #next_value = if #callback_condition_value {
+                                                    #callback_then_value
+                                                } else {
+                                                    #callback_else_value
+                                                };
+                                                *#callback_state.borrow_mut() = #callback_branch_vec;
+                                                #callback_slot.replace_children(
+                                                    elwindui::core::ui::LayoutExt::children(&*#callback_host_owner),
+                                                    #index,
+                                                    vec![#next_value],
+                                                );
+                                            }
+                                        },
+                                    )
+                                }
+                            };
+                            sink.push(sub)
+                        })
+                        .collect();
+                    let initial = self.fresh("initial_value");
+                    child_statements.extend(quote! {
+                        let #host_owner = #node.clone();
+                        let #slot = std::rc::Rc::new(elwindui::core::ui::DynamicChildSlot::<dyn elwindui::core::ui::UIElementExt>::default());
+                        let mut #branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
+                        let #initial = if #condition_value { #then_value } else { #else_value };
+                        #slot.replace_children(#host, #index, vec![#initial]);
+                        let #branch_state = std::rc::Rc::new(std::cell::RefCell::new(#branch_vec));
+                        #replacement
+                    });
+                }
+                ast::ChildEntry::Match { value, arms } => {
+                    if arms.iter().any(|arm| arm.body.len() != 1) {
+                        return Err(
+                            "dynamic layout match arms must contain exactly one child".into()
+                        );
+                    }
+                    let slot = self.fresh("slot");
+                    let branch_state = self.fresh("branch_state");
+                    let branch_vec = self.fresh("branch_subscriptions");
+                    let initial_parent_ident = format_ident!("{}", self.parent_ident);
+                    let initial_branches: Vec<_> = arms
+                        .iter()
+                        .map(|arm| {
+                            self.compile_dynamic_branch(
+                                &arm.body[0],
+                                &TemplateSubscriptionSink::Local(branch_vec.clone()),
+                            )
+                        })
+                        .collect::<Result<_, _>>()?;
+                    let selector_value = self.expression(value)?;
+                    let keys = self.expression_property_keys(value);
+                    if arms
+                        .iter()
+                        .all(|arm| matches!(arm.pattern.trim(), "true" | "false"))
+                    {
+                        for key in &keys {
+                            self.constrain_property(*key, quote! { bool });
+                        }
+                    }
+                    let callback_parent_ident = self.fresh("callback_parent");
+                    let callback_branch_vec = self.fresh("next_branch_subscriptions");
+                    let previous_parent_ident = std::mem::replace(
+                        &mut self.parent_ident,
+                        callback_parent_ident.to_string(),
+                    );
+                    let callback_branches: Vec<_> = arms
+                        .iter()
+                        .map(|arm| {
+                            self.compile_dynamic_branch(
+                                &arm.body[0],
+                                &TemplateSubscriptionSink::Local(callback_branch_vec.clone()),
+                            )
+                        })
+                        .collect::<Result<_, _>>()?;
+                    self.parent_ident = previous_parent_ident;
+                    let initial_arms = arms
+                        .iter()
+                        .zip(initial_branches.iter())
+                        .map(|(arm, branch)| {
+                            let pattern = syn::Pat::parse_single.parse_str(&arm.pattern).map_err(
+                                |error| format!("invalid template match pattern: {error}"),
+                            )?;
+                            Ok::<_, String>(quote! { #pattern => #branch })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let callback_selector_value = {
+                        let previous = std::mem::replace(
+                            &mut self.parent_ident,
+                            callback_parent_ident.to_string(),
+                        );
+                        let value = self.expression(value)?;
+                        self.parent_ident = previous;
+                        value
+                    };
+                    let callback_arms = arms
+                        .iter()
+                        .zip(callback_branches.iter())
+                        .map(|(arm, branch)| {
+                            let pattern = syn::Pat::parse_single.parse_str(&arm.pattern).map_err(
+                                |error| format!("invalid template match pattern: {error}"),
+                            )?;
+                            Ok::<_, String>(quote! { #pattern => #branch })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let initial_value = quote! { match #selector_value { #(#initial_arms),* } };
+                    let callback_value =
+                        quote! { match #callback_selector_value { #(#callback_arms),* } };
+                    let host_owner = self.fresh("host_owner");
+                    let subscriptions: TokenStream = keys
+                        .iter()
+                        .map(|key| {
+                            let weak_control = self.fresh("control_weak");
+                            let callback_state = self.fresh("callback_branch_state");
+                            let callback_slot = self.fresh("callback_slot");
+                            let callback_host_owner = self.fresh("callback_host_owner");
+                            let next_value = self.fresh("next_value");
+                            let sub = quote! {
+                                {
+                                    let #weak_control = std::rc::Rc::downgrade(&#initial_parent_ident);
+                                    let #callback_state = #branch_state.clone();
+                                    let #callback_slot = #slot.clone();
+                                    let #callback_host_owner = #host_owner.clone();
+                                    <C as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
+                                        &*#initial_parent_ident,
+                                        move || {
+                                            if let Some(control) = #weak_control.upgrade() {
+                                                #callback_state.borrow_mut().clear();
+                                                let mut #callback_branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
+                                                let #callback_parent_ident = control;
+                                                let #next_value = #callback_value;
+                                                *#callback_state.borrow_mut() = #callback_branch_vec;
+                                                #callback_slot.replace_children(
+                                                    elwindui::core::ui::LayoutExt::children(&*#callback_host_owner),
+                                                    #index,
+                                                    vec![#next_value],
+                                                );
+                                            }
+                                        },
+                                    )
+                                }
+                            };
+                            sink.push(sub)
+                        })
+                        .collect();
+                    child_statements.extend(quote! {
+                        let #host_owner = #node.clone();
+                        let #slot = std::rc::Rc::new(elwindui::core::ui::DynamicChildSlot::<dyn elwindui::core::ui::UIElementExt>::default());
+                        let mut #branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
+                        let __initial_value = #initial_value;
+                        #slot.replace_children(#host, #index, vec![__initial_value]);
+                        let #branch_state = std::rc::Rc::new(std::cell::RefCell::new(#branch_vec));
+                        #subscriptions
+                    });
+                }
+                ast::ChildEntry::For { .. } => {
+                    let ast::ChildEntry::For {
+                        binding,
+                        collection,
+                        body,
+                    } = child
+                    else {
+                        unreachable!();
+                    };
+                    if body.is_empty()
+                        || body
+                            .iter()
+                            .any(|entry| !matches!(entry, ast::ChildEntry::Literal(_)))
+                    {
+                        return Err(
+                            "standalone template for bodies must contain one or more literal elements"
+                                .into(),
+                        );
+                    }
+                    let collection_value = self.expression(collection)?;
+                    let collection_keys = self.expression_property_keys(collection);
+                    self.iterable_properties
+                        .extend(collection_keys.iter().copied());
+                    let item_ident = format_ident!("{binding}");
+                    let item_subscriptions = self.fresh("item_subscriptions");
+                    let item_children = body
+                        .iter()
+                        .map(|entry| {
+                            self.compile_dynamic_branch(
+                                entry,
+                                &TemplateSubscriptionSink::Local(item_subscriptions.clone()),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let host_owner = self.fresh("host_owner");
+                    let slot = self.fresh("slot");
+                    let render = quote! {
+                        |#item_ident| {
+                            let mut #item_subscriptions =
+                                Vec::<elwindui::core::reactive::Subscription>::new();
+                            elwindui::core::ui::DynamicChild::with_children(
+                                vec![#(#item_children),*],
+                                #item_subscriptions,
+                            )
+                        }
+                    };
+                    let initial_parent_ident = format_ident!("{}", self.parent_ident);
+                    let callback_parent_ident = self.fresh("callback_parent");
+                    let previous_parent_ident = std::mem::replace(
+                        &mut self.parent_ident,
+                        callback_parent_ident.to_string(),
+                    );
+                    let callback_collection_value = self.expression(collection)?;
+                    self.parent_ident = previous_parent_ident;
+                    let refresh_subscriptions: TokenStream = collection_keys
+                        .iter()
+                        .map(|key| {
+                            let weak_control = self.fresh("control_weak");
+                            let callback_slot = self.fresh("callback_slot");
+                            let callback_host_owner = self.fresh("callback_host_owner");
+                            let callback_collection = self.fresh("callback_collection");
+                            let subscription = quote! {
+                                {
+                                    let #weak_control = std::rc::Rc::downgrade(&#initial_parent_ident);
+                                    let #callback_slot = #slot.clone();
+                                    let #callback_host_owner = #host_owner.clone();
+                                    <C as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
+                                        &*#initial_parent_ident,
+                                        move || {
+                                            if let Some(control) = #weak_control.upgrade() {
+                                                let #callback_parent_ident = control;
+                                                let #callback_collection = #callback_collection_value;
+                                                #callback_slot.replace_items(
+                                                    elwindui::core::ui::LayoutExt::children(&*#callback_host_owner),
+                                                    #index,
+                                                    #callback_collection,
+                                                    #render,
+                                                );
+                                            }
+                                        },
+                                    )
+                                }
+                            };
+                            sink.push(subscription)
+                        })
+                        .collect();
+                    child_statements.extend(quote! {
+                        let #host_owner = #node.clone();
+                        let #slot = std::rc::Rc::new(
+                            elwindui::core::ui::DynamicChildSlot::<dyn elwindui::core::ui::UIElementExt>::default()
+                        );
+                        let __initial_collection = #collection_value;
+                        #slot.replace_items(
+                            #host,
+                            #index,
+                            __initial_collection,
+                            #render,
+                        );
+                        #refresh_subscriptions
+                    });
+                }
+                ast::ChildEntry::Ref(_) => {
+                    return Err(
+                        "bare references are not supported in standalone template children".into(),
+                    );
+                }
+            }
+        }
+        Ok(quote! {{
+            let #node = #construction;
+            #statements
+            let #host = elwindui::core::ui::LayoutExt::children(&*#node);
+            #child_statements
+            #node
+        }})
+    }
+
+    fn expression(&mut self, expr: &ast::ViewExpr) -> Result<TokenStream, String> {
+        match expr {
+            ast::ViewExpr::Path(path) => Ok(standalone_path_tokens(
+                path,
+                &mut self.property_bounds,
+                &self.parent_ident,
+            )),
+            ast::ViewExpr::Expr(expr) => {
+                let mut expr = expr.clone();
+                let mut rewriter = StandaloneExprRewriter {
+                    property_bounds: &mut self.property_bounds,
+                    parent_ident: self.parent_ident.clone(),
+                };
+                rewriter.visit_expr_mut(&mut expr);
+                Ok(quote! { #expr })
+            }
+            ast::ViewExpr::Element(element) => self.compile_element(
+                element,
+                &TemplateSubscriptionSink::Shared(quote! {
+                    __subscriptions
+                }),
+            ),
+            ast::ViewExpr::TFluent(_, _) => {
+                Err("t! expressions are not yet supported in standalone template_view!".into())
+            }
+            ast::ViewExpr::Closure { .. } => {
+                Err("closure expressions are not supported in standalone template_view!".into())
+            }
+            ast::ViewExpr::DeferredView(_) => Err(
+                "deferred view expressions are not supported in standalone template_view!".into(),
+            ),
+        }
+    }
+
+    fn expression_property_keys(&mut self, expr: &ast::ViewExpr) -> BTreeSet<u64> {
+        let mut keys = BTreeSet::new();
+        match expr {
+            ast::ViewExpr::Path(path) => {
+                if let Some(field) = path
+                    .get(1)
+                    .filter(|_| path.first().is_some_and(|name| name == "templated_parent"))
+                {
+                    keys.insert(crate::template_property_key(field));
+                }
+            }
+            ast::ViewExpr::Expr(expr) => {
+                let mut visitor = StandalonePropertyKeyVisitor { keys: &mut keys };
+                visitor.visit_expr(expr);
+            }
+            _ => {}
+        }
+        keys
+    }
+
+    fn constrain_property(&mut self, key: u64, expected: TokenStream) {
+        self.property_bounds
+            .entry(key)
+            .and_modify(|current| {
+                if current.is_none() {
+                    *current = Some(expected.clone());
+                }
+            })
+            .or_insert(Some(expected));
+    }
+}
+
+fn standalone_builtin_type(name: &str) -> bool {
+    matches!(
+        name,
+        "Control"
+            | "ContentControl"
+            | "ContentPresenter"
+            | "VerticalLayout"
+            | "HorizontalLayout"
+            | "Grid"
+            | "TextBlock"
+            | "Rectangle"
+            | "Ellipse"
+            | "Shape"
+            | "UIElement"
+            | "IconElement"
+            | "IconSourceElement"
+            | "Image"
+    )
+}
+
+fn standalone_layout_type(name: &str) -> bool {
+    matches!(name, "VerticalLayout" | "HorizontalLayout" | "Grid")
+}
+
+fn standalone_path_tokens(
+    path: &[String],
+    property_bounds: &mut BTreeMap<u64, Option<TokenStream>>,
+    parent_ident: &str,
+) -> TokenStream {
+    let parent = format_ident!("{parent_ident}");
+    if path.first().is_some_and(|name| name == "templated_parent") {
+        if path.len() == 1 {
+            return quote! { #parent.clone() };
+        }
+        let key = crate::template_property_key(&path[1]);
+        property_bounds.entry(key).or_insert(None);
+        let mut value = quote! {
+            <C as elwindui::core::ui::TemplateProperty<#key>>::__template_get(&*#parent)
+        };
+        for segment in path.iter().skip(2) {
+            let ident = format_ident!("{segment}");
+            value = quote! { #value.#ident() };
+        }
+        value
+    } else {
+        let path = syn::parse_str::<syn::Path>(&path.join("::"))
+            .expect("parser emitted a valid Rust path");
+        quote! { #path }
+    }
+}
+
+struct StandaloneExprRewriter<'a> {
+    property_bounds: &'a mut BTreeMap<u64, Option<TokenStream>>,
+    parent_ident: String,
+}
+
+impl VisitMut for StandaloneExprRewriter<'_> {
+    fn visit_expr_mut(&mut self, node: &mut syn::Expr) {
+        if let syn::Expr::Path(path) = node {
+            let segments: Vec<String> = path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect();
+            if segments
+                .first()
+                .is_some_and(|name| name == "templated_parent")
+                && segments.len() >= 2
+            {
+                let tokens =
+                    standalone_path_tokens(&segments, self.property_bounds, &self.parent_ident);
+                *node = syn::parse2(tokens).expect("generated template property expression parses");
+                return;
+            }
+        }
+        syn::visit_mut::visit_expr_mut(self, node);
+    }
+}
+
+struct StandalonePropertyKeyVisitor<'a> {
+    keys: &'a mut std::collections::BTreeSet<u64>,
+}
+
+impl<'ast> Visit<'ast> for StandalonePropertyKeyVisitor<'_> {
+    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+        let segments: Vec<String> = path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect();
+        if segments
+            .first()
+            .is_some_and(|name| name == "templated_parent")
+            && segments.len() >= 2
+        {
+            self.keys.insert(crate::template_property_key(&segments[1]));
+        }
+        syn::visit::visit_expr_path(self, path);
     }
 }
 

@@ -35,6 +35,14 @@ its result is a deferred factory rather than an immediately mounted node. The
 same compiler is used by `#[control_template(target = T)]`, which remains a
 thin named-template frontend.
 
+The standalone expression frontend acquires its `ControlTemplate<C>` target
+from Rust's expected type and then enters the same template compilation
+context. Its property reads are statically keyed `TemplateProperty` bounds on
+`C`; updates use the same subscription/resync contract as component and named
+templates. Dynamic `if`/`match`/supported `for` regions, root replacement,
+ContentPresenter validation, and nested component mounting are not separate
+runtime features of the standalone form.
+
 The generated flow is:
 
 ```text
@@ -99,7 +107,9 @@ separate issue if an independent generic use is proven.
 
 Template instances use the existing weak-owner dependency and property
 resynchronization machinery. `templated_parent.foo` is a typed getter with the
-same notification wiring as ordinary view bindings. Dynamic `if`/`match`
-subtrees use the established ControlTemplate reconciliation; ContentPresenter
-remains forbidden in dynamic regions. There is one active template root and no
-runtime re-template operation.
+same notification wiring as ordinary view bindings. Dynamic `if`/`match` and
+supported `for` subtrees use the established ControlTemplate reconciliation;
+ContentPresenter remains forbidden in dynamic regions. There is one active
+template root and no runtime re-template operation. Every generated descendant
+is mounted with the `ControlTemplateContext.environment` passed to the
+selected factory rather than an ambient application context.

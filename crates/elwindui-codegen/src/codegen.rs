@@ -3855,6 +3855,20 @@ fn generate_view(
     // `required_own_names`/`deferred_own_names`, computed further down using `ctx.own_fields`
     // itself) — every `emit_expr`/`plan_element`/`emit_construction`/`emit_resync` call that could
     // actually observe it happens later still, so setting it after the fact here is sound.
+    let template_base_fields = if view.is_template {
+        table
+            .resolve(from, &target_name)
+            .map(|info| {
+                info.declaring_types
+                    .iter()
+                    .filter(|(_, owner)| owner.as_str() != target_name.as_str())
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        HashSet::new()
+    };
     let mut ctx = ViewCtx {
         closure_param: None,
         own_fields,
@@ -3867,6 +3881,7 @@ fn generate_view(
         // weak `templated_parent` field.  Keep this distinction in the generic expression
         // resolver rather than rewriting the AST or introducing a template-specific shortcut.
         default_template_parent: view.is_template && !view.template_instance,
+        template_base_fields,
         implicit_owner: view.implicit_owner.as_ref().map(ImplicitOwnerCtx::from),
         target: target.clone(),
     };
@@ -4526,6 +4541,105 @@ fn generate_view(
         .extend(own_computed_names.iter().map(|n| n.to_string()));
     ctx.mutable_own_fields
         .extend(own_environment_names.iter().map(|n| n.to_string()));
+
+    // A standalone `template_view!` factory is generic over the expected
+    // `ControlTemplate<C>` target.  Its `templated_parent.foo` expressions therefore cannot call
+    // an inherent getter on an as-yet-uninferred `C`; expose the existing generated getter and
+    // property-notification surface through a compile-time, hashed property bridge instead.  The
+    // bridge is emitted for explicit template declarations and structurally-resolved Control-family
+    // components, so a named or standalone template may target a Control-derived component whose
+    // default is supplied elsewhere.  It remains entirely static: no strings, maps, or erased
+    // target values participate at runtime.
+    let template_property_impls: TokenStream = if is_control_template_enabled
+        || table
+            .resolve(from, &target_name)
+            // `composed_shape` is the symbol-table's structural class-family result.  Only the
+            // Control-family components can be targets of a typed ControlTemplate; host/window
+            // and ordinary layout components must not receive a public associated-type bridge
+            // for their private fields.  This is a capability check, not a template/codegen
+            // dispatch path.
+            .is_some_and(|info| info.composed_shape.as_deref() == Some("Control"))
+    {
+        let mutable_property_names: HashSet<String> = component_property_variants
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let mut readable: HashMap<String, syn::Type> = HashMap::new();
+        for field in &component.fields {
+            if field.name.starts_with("on_") {
+                continue;
+            }
+            if matches!(
+                field.kind,
+                FieldKind::Attached
+                    | FieldKind::Action
+                    | FieldKind::Observable
+                    | FieldKind::AsyncComputed
+            ) {
+                continue;
+            }
+            let ty = syn::parse_str::<syn::Type>(&field.ty)
+                .expect("template property field type must parse");
+            readable.entry(field.name.clone()).or_insert(ty);
+        }
+        readable
+            .into_iter()
+            .map(|(name, ty)| {
+                let ident = format_ident!("{name}");
+                let key = crate::template_property_key(&name);
+                let getter = &ident;
+                let inherited_owner = table
+                    .resolve(from, &target_name)
+                    .and_then(|info| info.declaring_types.get(&name))
+                    .filter(|owner| *owner != &target_name)
+                    .cloned();
+                let inherited = inherited_owner.is_some();
+                let getter_body = if inherited {
+                    quote! { self.base.#getter() }
+                } else {
+                    quote! { self.#getter() }
+                };
+                let subscription = if inherited_owner
+                    .as_deref()
+                    .and_then(|owner| table.resolve(from, owner))
+                    .is_some_and(|info| !info.is_builtin)
+                {
+                    // A component-derived template reads inherited values through its composed
+                    // base.  The base's typed stream is sufficient here; the property bridge is
+                    // intentionally static and does not introduce a second runtime lookup table.
+                    quote! { self.base.subscribe_property_changed(move |_| listener()) }
+                } else if mutable_property_names.contains(&name) {
+                    quote! {
+                        self.subscribe_property_changed(move |property| {
+                            if matches!(property, #component_property_enum::#ident) {
+                                listener();
+                            }
+                        })
+                    }
+                } else {
+                    quote! { elwindui::core::reactive::Subscription::new(|| {}) }
+                };
+                quote! {
+                    impl elwindui::core::ui::TemplateProperty<#key> for #target {
+                        type Value = #ty;
+
+                        fn __template_get(&self) -> Self::Value {
+                            #getter_body
+                        }
+
+                        fn __template_subscribe(
+                            &self,
+                            listener: impl Fn() + 'static,
+                        ) -> elwindui::core::reactive::Subscription {
+                            #subscription
+                        }
+                    }
+                }
+            })
+            .collect()
+    } else {
+        TokenStream::new()
+    };
     let mutable_required_types: Vec<syn::Type> = required_own_names
         .iter()
         .zip(required_own_types.iter())
@@ -5508,8 +5622,17 @@ fn generate_view(
             })?;
             let parent_binding = &parent.binding;
             let parent_ext = format_ident!("{}Ext", parent.type_path);
-            let item_ext = dynamic_collection_item_trait_ty(parent, from, table);
             let parent_info = table.resolve(from, &parent.type_path);
+            let parent_ext_path = if let Some(qualified) =
+                immediate_base_qualified_ext_path(component, &parent.type_path)
+            {
+                quote! { #qualified }
+            } else if parent_info.is_none() || parent_info.is_some_and(|i| i.is_builtin) {
+                quote! { elwindui::core::ui::#parent_ext }
+            } else {
+                quote! { #parent_ext }
+            };
+            let scalar_item_ext = ItemTraitTokens::KnownIdent(format_ident!("UIElementExt"));
             let parent_is_self = (is_shape_composition || is_host_composition)
                 && parent.binding == plan[root_index].binding;
             let parent_receiver = if parent_is_self {
@@ -5530,9 +5653,7 @@ fn generate_view(
                 let setter = parent_info
                     .and_then(|i| i.content_field.as_deref())
                     .map(|field| format_ident!("set_{field}"));
-                let template_presentation = parent_is_self
-                    && is_shape_composition
-                    && parent_info.is_none();
+                let template_presentation = is_control_template_enabled && parent_is_self;
                 emit_scalar_dynamic_node_refresh(
                     &plan,
                     node,
@@ -5540,7 +5661,7 @@ fn generate_view(
                     setter.as_ref(),
                     parent_is_self,
                     &parent.type_path,
-                    &item_ext,
+                    &scalar_item_ext,
                     &ctx,
                     from,
                     table,
@@ -5549,6 +5670,7 @@ fn generate_view(
             };
             let body = if let Some(info) = parent_info {
                 if content_field_is_list(info) {
+                    let item_ext = dynamic_collection_item_trait_ty(parent, from, table);
                     // The getter `#[content(..)]` names, not always literally `children` (`Dropdown`'s
                     // is `items`, `Menu`'s is `items`) — a local `TypeInfo` names it directly.
                     let field = info
@@ -5567,6 +5689,7 @@ fn generate_view(
                 // or collection branch from effective `#[content]` metadata, so external Control
                 // remains scalar without a codegen type-name special case.
                 let props_macro = format_ident!("__elwindui_props_{}", parent.type_path);
+                let item_ext = dynamic_collection_item_trait_ty(parent, from, table);
                 let host = quote! {
                     elwindui::core::#props_macro!(@content_field_get #parent_receiver)
                 };
@@ -5597,7 +5720,7 @@ fn generate_view(
             };
             Some(quote! {
                 {
-                    use elwindui::core::ui::#parent_ext as _;
+                    use #parent_ext_path as _;
                     #layout_children_use
                     #body
                 }
@@ -6550,6 +6673,7 @@ fn generate_view(
             }
 
             #component_observable_impl
+            #template_property_impls
         }
     } else {
         let mount_helper = quote! {
@@ -6697,6 +6821,7 @@ fn generate_view(
             }
 
             #component_observable_impl
+            #template_property_impls
         }
     }
 }
@@ -6764,6 +6889,9 @@ struct ViewCtx {
     /// component's `&self` context.  In that one context `templated_parent` resolves to `self`;
     /// standalone/external/named templates retain their typed weak parent field instead.
     default_template_parent: bool,
+    /// In an explicitly declared default template, inherited fields are accessed through the
+    /// composed `base` value rather than relying on a trait import for the most-derived type.
+    template_base_fields: HashSet<String>,
     /// Issue #162 §3.10-§3.11: the generated field (`ViewDef::implicit_owner`, always
     /// `"__view_owner"` when set) an otherwise-unresolved bare name falls back to, for a hidden
     /// Component lowered from a `ViewExpr::DeferredView` — together with the exact schema of
@@ -6792,6 +6920,7 @@ impl ViewCtx {
             bindable_owners: self.bindable_owners.clone(),
             weak_bindable_owners: self.weak_bindable_owners.clone(),
             default_template_parent: self.default_template_parent,
+            template_base_fields: self.template_base_fields.clone(),
             implicit_owner: self.implicit_owner.clone(),
             target: self.target.clone(),
         }
@@ -11491,6 +11620,26 @@ pub(crate) fn immediate_base_qualified_path(
     Some(quote! { #parsed })
 }
 
+/// The trait path corresponding to an immediate qualified component base.  The `Ext` suffix is
+/// attached to the final path segment (`crate::BaseExt`), not appended as a module segment
+/// (`crate::Base::BaseExt`), because consumer components are emitted at the crate/module scope
+/// alongside their generated traits.
+fn immediate_base_qualified_ext_path(component: &ComponentDef, name: &str) -> Option<TokenStream> {
+    if component.base.as_deref() != Some(name) {
+        return None;
+    }
+    let raw = component.base_path.as_ref()?;
+    let mut parsed: syn::Path = syn::parse_str(raw).unwrap_or_else(|e| {
+        panic!("`{name}`'s own `inherits` path `{raw}` should already be valid Rust syntax: {e}")
+    });
+    let last = parsed
+        .segments
+        .last_mut()
+        .expect("a qualified base path must have a final segment");
+    last.ident = format_ident!("{}Ext", last.ident);
+    Some(quote! { #parsed })
+}
+
 /// `immediate_base_qualified_path`, with the base's own `::construct` factory function appended —
 /// the qualified counterpart to `composed_construct_path`'s bare-name fallback. `None` under the
 /// same conditions `immediate_base_qualified_path` returns `None` under.
@@ -13464,6 +13613,12 @@ fn emit_path_get(path: &[String], ctx: &ViewCtx, mode: &EmitMode) -> TokenStream
         [owner, field] => {
             let base = path_owner_value_tokens(ctx, mode, owner);
             let getter = format_ident!("{}", field);
+            if ctx.default_template_parent
+                && owner == "templated_parent"
+                && ctx.template_base_fields.contains(field)
+            {
+                return quote! { (#base).base.#getter() };
+            }
             quote! { #base.#getter() }
         }
         other => panic!(

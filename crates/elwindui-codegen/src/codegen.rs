@@ -9,7 +9,7 @@ use crate::ast::{
     ViewAttribute, ViewBody, ViewDef, ViewExpr, ViewModelDef,
 };
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::{ToTokens, format_ident, quote};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -936,6 +936,11 @@ pub(crate) fn resolve_effective_fields<'m>(
                 find_component_and_module(from, "UIElement", modules)
                     .map(|(_, ui)| ui.fields.iter().map(|f| f.name.as_str()).collect())
                     .unwrap_or_default();
+            let template_parent_fields = if view.is_template {
+                collect_template_parent_field_names(view)
+            } else {
+                HashSet::new()
+            };
             base_fields
                 .into_iter()
                 .filter(|f| {
@@ -944,6 +949,7 @@ pub(crate) fn resolve_effective_fields<'m>(
                         .any(|a| matches!(a, Attr::Routed | Attr::TextStyle))
                         || common_fields.contains(f.name.as_str())
                         || view_references_bare_name(view, &f.name)
+                        || template_parent_fields.contains(&f.name)
                 })
                 .collect()
         }
@@ -1262,6 +1268,11 @@ fn resolve_field_declaring_types(
                             .into_iter()
                             .filter(|field| field.kind != FieldKind::State)
                             .collect();
+                    let template_parent_fields = if view.is_template {
+                        collect_template_parent_field_names(view)
+                    } else {
+                        HashSet::new()
+                    };
                     let kept_names: HashSet<&str> = base_fields
                         .iter()
                         .filter(|f| {
@@ -1270,6 +1281,7 @@ fn resolve_field_declaring_types(
                                 .any(|a| matches!(a, Attr::Routed | Attr::TextStyle))
                                 || common_fields.contains(f.name.as_str())
                                 || view_references_bare_name(view, &f.name)
+                                || template_parent_fields.contains(&f.name)
                         })
                         .map(|f| f.name.as_str())
                         .collect();
@@ -1395,6 +1407,177 @@ fn view_expr_references_bare_name(expr: &ViewExpr, name: &str) -> bool {
             ..
         } => false,
     }
+}
+
+/// Collects property names explicitly read or written through a template's typed parent.  These
+/// references are different from ordinary bare forwards (`padding: padding`): they address the
+/// inherited component surface through `templated_parent`, so an inherited field must remain in
+/// the effective metadata even when a component's own `template_view!` never forwards it into the
+/// composed base constructor.  The same traversal covers DSL paths and raw Rust expressions so
+/// the generated `TemplateProperty` bridge has one complete set of inherited fields.
+fn collect_template_parent_field_names(view: &ViewDef) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for binding in &view.lets {
+        collect_template_parent_field_names_in_element(&binding.element, &mut names);
+    }
+    for attribute in &view.root.attributes {
+        collect_template_parent_field_names_in_expr(&attribute.value, &mut names);
+    }
+    for (_, _, value) in &view.root.attached {
+        collect_template_parent_field_names_in_expr(value, &mut names);
+    }
+    for child in &view.root.children {
+        collect_template_parent_field_names_in_child(child, &mut names);
+    }
+    names
+}
+
+fn collect_template_parent_field_names_in_element(
+    element: &ElementNode,
+    names: &mut HashSet<String>,
+) {
+    for attribute in &element.attributes {
+        collect_template_parent_field_names_in_expr(&attribute.value, names);
+    }
+    for (_, _, value) in &element.attached {
+        collect_template_parent_field_names_in_expr(value, names);
+    }
+    for child in &element.children {
+        collect_template_parent_field_names_in_child(child, names);
+    }
+}
+
+fn collect_template_parent_field_names_in_child(child: &ChildEntry, names: &mut HashSet<String>) {
+    match child {
+        ChildEntry::Literal(element) => {
+            collect_template_parent_field_names_in_element(element, names)
+        }
+        ChildEntry::Ref(_) => {}
+        ChildEntry::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_template_parent_field_names_in_expr(condition, names);
+            for child in then_branch.iter().chain(else_branch) {
+                collect_template_parent_field_names_in_child(child, names);
+            }
+        }
+        ChildEntry::Match { value, arms } => {
+            collect_template_parent_field_names_in_expr(value, names);
+            for arm in arms {
+                for child in &arm.body {
+                    collect_template_parent_field_names_in_child(child, names);
+                }
+            }
+        }
+        ChildEntry::For {
+            collection, body, ..
+        } => {
+            collect_template_parent_field_names_in_expr(collection, names);
+            for child in body {
+                collect_template_parent_field_names_in_child(child, names);
+            }
+        }
+    }
+}
+
+fn collect_template_parent_field_names_in_expr(expr: &ViewExpr, names: &mut HashSet<String>) {
+    match expr {
+        ViewExpr::Path(path) if path.len() >= 2 && path[0] == "templated_parent" => {
+            names.insert(path[1].clone());
+        }
+        ViewExpr::Path(_) => {}
+        ViewExpr::TFluent(_, args) => {
+            for (_, value) in args {
+                collect_template_parent_field_names_in_expr(value, names);
+            }
+        }
+        ViewExpr::Expr(expression) => {
+            collect_template_parent_field_names_in_rust_expr(expression, names);
+        }
+        ViewExpr::Closure { body, .. } => match body {
+            ClosureBody::Expr(expr) => collect_template_parent_field_names_in_expr(expr, names),
+            ClosureBody::Element(element) => {
+                collect_template_parent_field_names_in_element(element, names)
+            }
+            ClosureBody::Block(block) => {
+                collect_template_parent_field_names_in_rust_block(block, names)
+            }
+        },
+        ViewExpr::Element(element) => {
+            collect_template_parent_field_names_in_element(element, names)
+        }
+        // A deferred view is lowered with its own lexical owner and property bridge.  Its
+        // `templated_parent` (if any) is not this template's parent and must not be attributed to
+        // the enclosing component's effective field list.
+        ViewExpr::DeferredView(_) => {}
+    }
+}
+
+fn collect_template_parent_field_names_in_rust_expr(expr: &syn::Expr, names: &mut HashSet<String>) {
+    struct Collector<'a> {
+        names: &'a mut HashSet<String>,
+    }
+    impl<'ast> Visit<'ast> for Collector<'_> {
+        fn visit_expr_field(&mut self, node: &'ast syn::ExprField) {
+            if let syn::Expr::Path(base) = node.base.as_ref()
+                && base.path.segments.len() == 1
+                && base.path.segments[0].ident == "templated_parent"
+                && let syn::Member::Named(field) = &node.member
+            {
+                self.names.insert(field.to_string());
+            }
+            syn::visit::visit_expr_field(self, node);
+        }
+
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if let syn::Expr::Path(receiver) = node.receiver.as_ref()
+                && receiver.path.segments.len() == 1
+                && receiver.path.segments[0].ident == "templated_parent"
+            {
+                let method = node.method.to_string();
+                let field = method.strip_prefix("set_").unwrap_or(&method);
+                self.names.insert(field.to_string());
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+    Collector { names }.visit_expr(expr);
+}
+
+fn collect_template_parent_field_names_in_rust_block(
+    block: &syn::Block,
+    names: &mut HashSet<String>,
+) {
+    struct Collector<'a> {
+        names: &'a mut HashSet<String>,
+    }
+    impl<'ast> Visit<'ast> for Collector<'_> {
+        fn visit_expr_field(&mut self, node: &'ast syn::ExprField) {
+            if let syn::Expr::Path(base) = node.base.as_ref()
+                && base.path.segments.len() == 1
+                && base.path.segments[0].ident == "templated_parent"
+                && let syn::Member::Named(field) = &node.member
+            {
+                self.names.insert(field.to_string());
+            }
+            syn::visit::visit_expr_field(self, node);
+        }
+
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if let syn::Expr::Path(receiver) = node.receiver.as_ref()
+                && receiver.path.segments.len() == 1
+                && receiver.path.segments[0].ident == "templated_parent"
+            {
+                let method = node.method.to_string();
+                let field = method.strip_prefix("set_").unwrap_or(&method);
+                self.names.insert(field.to_string());
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+    Collector { names }.visit_block(block);
 }
 
 /// Whether `view`'s element tree references `name` *anywhere at all* — broader than
@@ -3765,18 +3948,27 @@ fn generate_view(
     // for a component's own *required* mutable `prop` fields) and `generate_viewmodel`'s own
     // `dependents_of`-driven Computed-field cascade (this function's sibling above).
     let field_names: HashSet<&str> = component.fields.iter().map(|f| f.name.as_str()).collect();
+    let source_field_names: HashSet<&str> = source_component
+        .fields
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect();
     let own_default_fields: Vec<&FieldDef> = component
         .fields
         .iter()
         .filter(|f| {
-            f.kind == FieldKind::Prop && matches!(f.initializer, Some(Initializer::Expr(_)))
+            (!is_shape_composition || source_field_names.contains(f.name.as_str()))
+                && f.kind == FieldKind::Prop
+                && matches!(f.initializer, Some(Initializer::Expr(_)))
         })
         .collect();
     let own_state_fields: Vec<&FieldDef> = component
         .fields
         .iter()
         .filter(|f| {
-            f.kind == FieldKind::State && matches!(f.initializer, Some(Initializer::Expr(_)))
+            (!is_shape_composition || source_field_names.contains(f.name.as_str()))
+                && f.kind == FieldKind::State
+                && matches!(f.initializer, Some(Initializer::Expr(_)))
         })
         .collect();
     let own_stored_fields: Vec<&FieldDef> = own_default_fields
@@ -3788,7 +3980,9 @@ fn generate_view(
         .fields
         .iter()
         .filter(|f| {
-            f.kind == FieldKind::Computed && matches!(f.initializer, Some(Initializer::Expr(_)))
+            (!is_shape_composition || source_field_names.contains(f.name.as_str()))
+                && f.kind == FieldKind::Computed
+                && matches!(f.initializer, Some(Initializer::Expr(_)))
         })
         .collect();
     // `#[environment(name)]` fields — see `own_computed_fields`'s own construction-time/storage
@@ -3797,7 +3991,10 @@ fn generate_view(
     let own_environment_fields: Vec<&FieldDef> = component
         .fields
         .iter()
-        .filter(|f| f.kind == FieldKind::Environment)
+        .filter(|f| {
+            (!is_shape_composition || source_field_names.contains(f.name.as_str()))
+                && f.kind == FieldKind::Environment
+        })
         .collect();
     own_fields.extend(
         own_stored_fields
@@ -3839,7 +4036,8 @@ fn generate_view(
     // for a `#[computed]` field to read sensibly top-to-bottom); this doesn't topologically sort.
     let mut own_default_construct_stmts = TokenStream::new();
     for f in component.fields.iter().filter(|f| {
-        matches!(f.initializer, Some(Initializer::Expr(_)))
+        (!is_shape_composition || source_field_names.contains(f.name.as_str()))
+            && matches!(f.initializer, Some(Initializer::Expr(_)))
             && matches!(
                 f.kind,
                 FieldKind::Prop | FieldKind::State | FieldKind::Computed
@@ -3908,6 +4106,7 @@ fn generate_view(
         template_property_bounds: None,
         template_target: None,
         template_bare_parent_fields: HashSet::new(),
+        storage: ViewStorage::Component,
     };
 
     // All explicit ControlTemplate bodies (component defaults and named template instances) are
@@ -3954,6 +4153,19 @@ fn generate_view(
         .iter()
         .map(|f| f.name.as_str())
         .collect();
+    // A shape-composed component delegates inherited fields to its concrete `base` value. They
+    // remain in the effective field map above so authored expressions can resolve them, but must
+    // not be re-stored or re-exposed as a second set of accessors on the derived type.
+    let inherited_shape_field_names: HashSet<String> = if is_shape_composition {
+        component
+            .fields
+            .iter()
+            .filter(|f| !declared_own_field_names.contains(f.name.as_str()))
+            .map(|f| f.name.clone())
+            .collect()
+    } else {
+        HashSet::new()
+    };
     // `on_*`-named fields are excluded because a `#[routed]` field (`UIElement`'s own
     // `on_tapped`/`on_pointer_pressed`/... — inherited by every component through
     // `resolve_effective_fields`, not just ones that declare it directly, e.g. `Button.on_click`) is
@@ -4302,7 +4514,10 @@ fn generate_view(
     } else {
         HashSet::new()
     };
-    own_struct_param_names.retain(|n| !shape_forwarded_names.contains(&n.to_string()));
+    own_struct_param_names.retain(|n| {
+        !shape_forwarded_names.contains(&n.to_string())
+            && !inherited_shape_field_names.contains(&n.to_string())
+    });
     let own_struct_param_names_set: HashSet<String> = own_struct_param_names
         .iter()
         .map(|n| n.to_string())
@@ -4410,13 +4625,19 @@ fn generate_view(
     // deferred subset.
     let ctor_param_names: Vec<syn::Ident> = param_names
         .iter()
-        .filter(|n| !deferred_own_names_set.contains(&n.to_string()))
+        .filter(|n| {
+            !deferred_own_names_set.contains(&n.to_string())
+                && !inherited_shape_field_names.contains(&n.to_string())
+        })
         .cloned()
         .collect();
     let ctor_param_types: Vec<syn::Type> = param_names
         .iter()
         .zip(param_types.iter())
-        .filter(|(n, _)| !deferred_own_names_set.contains(&n.to_string()))
+        .filter(|(n, _)| {
+            !deferred_own_names_set.contains(&n.to_string())
+                && !inherited_shape_field_names.contains(&n.to_string())
+        })
         .map(|(_, t)| t.clone())
         .collect();
 
@@ -4612,10 +4833,44 @@ fn generate_view(
             // dispatch path.
             .is_some_and(|info| info.composed_shape.as_deref() == Some("Control"))
     {
-        let mutable_property_names: HashSet<String> = component_property_variants
+        // The bridge's writable capability follows effective field metadata, not the target's
+        // own property-notification enum.  Inherited properties are intentionally absent from
+        // the derived component's local storage/enum because the value lives in `base`, but their
+        // generated base setter is still a real writable template surface.
+        let writable_property_names: HashSet<String> = component
+            .fields
+            .iter()
+            .filter(|field| matches!(field.kind, FieldKind::Prop | FieldKind::State))
+            .map(|field| field.name.clone())
+            .collect();
+        let notified_property_names: HashSet<String> = component_property_variants
             .iter()
             .map(ToString::to_string)
             .collect();
+        // The bridge receiver is the concrete `base` field of a composed target.  Use that
+        // immediate base's trait for inherited accessors rather than a bare method call: a
+        // consumer-defined base may live in another module, and a multi-hop base still exposes
+        // its ancestor accessors through the immediate base trait's supertrait chain.  This keeps
+        // the bridge path-qualified without adding a runtime dispatch table.
+        let template_base_ext_path = if let Some(base_name) = if is_shape_composition {
+            Some(resolved_root.type_path.as_str())
+        } else {
+            component.base.as_deref()
+        } {
+            let ext_ident = format_ident!("{base_name}Ext");
+            if let Some(qualified) = immediate_base_qualified_ext_path(component, base_name) {
+                Some(qualified)
+            } else if table
+                .resolve(from, base_name)
+                .is_none_or(|info| info.is_builtin)
+            {
+                Some(quote! { elwindui::ui::#ext_ident })
+            } else {
+                Some(quote! { #ext_ident })
+            }
+        } else {
+            None
+        };
         let mut readable: HashMap<String, syn::Type> = HashMap::new();
         for field in &component.fields {
             if field.name.starts_with("on_") {
@@ -4647,18 +4902,26 @@ fn generate_view(
                     .cloned();
                 let inherited = inherited_owner.is_some();
                 let getter_body = if inherited {
-                    quote! { self.base.#getter() }
+                    if let Some(base_ext_path) = &template_base_ext_path {
+                        quote! { #base_ext_path::#getter(&self.base) }
+                    } else {
+                        quote! { self.base.#getter() }
+                    }
                 } else {
                     quote! { self.#getter() }
                 };
-                let setter_available = mutable_property_names.contains(&name)
-                    && component.fields.iter().any(|field| {
-                        field.name == name
-                            && matches!(field.kind, FieldKind::Prop | FieldKind::State)
-                    });
+                let setter_available = writable_property_names.contains(&name);
                 let setter_body = if setter_available {
                     let setter = format_ident!("set_{name}");
-                    quote! { self.#setter(value); }
+                    if inherited_owner.is_some() {
+                        if let Some(base_ext_path) = &template_base_ext_path {
+                            quote! { #base_ext_path::#setter(&self.base, value); }
+                        } else {
+                            quote! { self.base.#setter(value); }
+                        }
+                    } else {
+                        quote! { self.#setter(value); }
+                    }
                 } else {
                     TokenStream::new()
                 };
@@ -4696,7 +4959,7 @@ fn generate_view(
                     // base.  The base's typed stream is sufficient here; the property bridge is
                     // intentionally static and does not introduce a second runtime lookup table.
                     quote! { self.base.subscribe_property_changed(move |_| listener()) }
-                } else if mutable_property_names.contains(&name) {
+                } else if notified_property_names.contains(&name) {
                     quote! {
                         self.subscribe_property_changed(move |property| {
                             if matches!(property, #component_property_enum::#ident) {
@@ -4707,16 +4970,12 @@ fn generate_view(
                 } else {
                     quote! { elwindui::core::reactive::Subscription::new(|| {}) }
                 };
-                quote! {
+                let readable_impl = quote! {
                     impl elwindui::core::ui::TemplateProperty<#key> for #target {
                         type Value = #ty;
 
                         fn __template_get(&self) -> Self::Value {
                             #getter_body
-                        }
-
-                        fn __template_set(&self, value: Self::Value) {
-                            #setter_body
                         }
 
                         fn __template_subscribe(
@@ -4726,6 +4985,19 @@ fn generate_view(
                             #subscription
                         }
                     }
+                };
+                let writable_impl = setter_available.then(|| {
+                    quote! {
+                        impl elwindui::core::ui::WritableTemplateProperty<#key> for #target {
+                            fn __template_set(&self, value: Self::Value) {
+                                #setter_body
+                            }
+                        }
+                    }
+                });
+                quote! {
+                    #readable_impl
+                    #writable_impl
                 }
             })
             .collect()
@@ -4882,6 +5154,9 @@ fn generate_view(
     // §5.1's post-construction setter convention), so this reads `self.base.<name>.borrow()
     // .clone()`, not a plain `.clone()` (unlike a DSL-composed base's own accessor method).
     for (name, ty) in param_names.iter().zip(param_types.iter()) {
+        if inherited_shape_field_names.contains(&name.to_string()) {
+            continue;
+        }
         let is_forwarded = !own_struct_param_names.contains(name);
         // A deferred field and a mutable-required one (`mutable_required_names`) are both
         // Cell/RefCell-backed storage read the same way — `strip_option` is a harmless no-op for
@@ -5191,7 +5466,7 @@ fn generate_view(
                             if let Some(this) = weak.upgrade() {
                                 this.#recompute();
                                 this.on_property_changed(#component_property_enum::#name);
-                                this.__refresh_dynamic_regions();
+                                #target_ext::__refresh_dynamic_regions(&*this);
                             }
                         });
                     this.__property_changed_subscriptions.borrow_mut().push(subscription);
@@ -5227,7 +5502,7 @@ fn generate_view(
                 let listener: std::rc::Rc<dyn Fn()> = std::rc::Rc::new(move || {
                     if let Some(this) = weak.upgrade() {
                         this.resync();
-                        this.__refresh_dynamic_regions();
+                        #target_ext::__refresh_dynamic_regions(&*this);
                     }
                 });
                 let subscriptions = elwindui::core::theme::subscribe_semantic_brushes(
@@ -5509,36 +5784,7 @@ fn generate_view(
         }
 
         if is_template_or_deferred_scope {
-            for node in &plan {
-                if node
-                    .type_path
-                    .rsplit("::")
-                    .next()
-                    .is_some_and(|name| name == "ContentPresenter")
-                {
-                    let presenter = &node.binding;
-                    if ctx.weak_bindable_owners.contains("templated_parent") {
-                        wiring_stmts.extend(quote! {
-                            {
-                                let templated_parent = this.templated_parent.upgrade().expect(
-                                    "ControlTemplate templated_parent was dropped before ContentPresenter wiring"
-                                );
-                                elwindui::core::ui::ContentPresenter::__bind_templated_parent(
-                                    &#presenter,
-                                    &templated_parent,
-                                );
-                            }
-                        });
-                    } else {
-                        wiring_stmts.extend(quote! {
-                            elwindui::core::ui::ContentPresenter::__bind_templated_parent(
-                                &#presenter,
-                                &this,
-                            );
-                        });
-                    }
-                }
-            }
+            emit_content_presenter_wiring(&plan, &ctx, &mut wiring_stmts);
         }
     }
 
@@ -5920,7 +6166,12 @@ fn generate_view(
     // emits ordinary `#[overrides]` methods routed through the real ancestor-forwarding chain
     // (`self.base.show()`, not UFCS) — see that binding's own comment.
     let on_constructed_mount_call = (!is_host_composition).then(|| {
-        quote! { self.mount(elwindui::core::environment::application_environment()); }
+        quote! {
+            <Self as #target_ext>::mount(
+                self,
+                elwindui::core::environment::application_environment(),
+            );
+        }
     });
     let mount_set_env = (!is_host_composition).then(|| {
         quote! {
@@ -6415,7 +6666,12 @@ fn generate_view(
         .iter()
         .map(|property| {
             let method = format_ident!("__resync_{}", property);
-            quote! { #component_property_enum::#property => { this.#method(); this.__refresh_dynamic_regions(); }, }
+            quote! {
+                #component_property_enum::#property => {
+                    this.#method();
+                    #target_ext::__refresh_dynamic_regions(&*this);
+                },
+            }
         })
         .collect();
     let component_self_subscription = if component_property_variants.is_empty() {
@@ -6778,7 +7034,7 @@ fn generate_view(
                     self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Mounted);
                     #mount_set_env
                     #mount_override_call
-                    self.__build_view();
+                    <Self as #target_ext>::__build_view(self);
                 }
 
                 // View-construction statements, split out of `on_constructed` so this component's
@@ -6803,7 +7059,7 @@ fn generate_view(
                         #wiring_stmts
                         #unmount_hook_attach
                     }
-                    self.__refresh_dynamic_regions();
+                    <Self as #target_ext>::__refresh_dynamic_regions(self);
                     // Most widgets already read live model state at construction time, so this is a
                     // no-op for them. A widget whose own state only ever appears in `resync()` (e.g.
                     // a dynamic list, like `TabView`'s tabs) needs this call so state populated
@@ -7026,6 +7282,19 @@ impl From<&crate::ast::ImplicitOwnerDef> for ImplicitOwnerCtx {
     }
 }
 
+#[derive(Clone)]
+enum ViewStorage {
+    /// The normal component lowerer stores nodes, dynamic slots, and environment scopes on `self`.
+    Component,
+    /// A template lowerer stores the same semantic values in the factory's lexical scope.  The
+    /// semantic planner/emitter is deliberately shared; only this storage/receiver adapter differs
+    /// between an ordinary `view!` and a `template_view!` factory.
+    Template {
+        environment: syn::Ident,
+        refresh_cell: syn::Ident,
+    },
+}
+
 struct ViewCtx {
     /// Set while evaluating a `ViewExpr::Closure` body (`key`/`render_label`/`render_content`) to
     /// the closure's own declared parameter name (e.g. `"doc"`), so a bare reference to it emits
@@ -7095,6 +7364,10 @@ struct ViewCtx {
     /// normalized to the same typed `templated_parent.<name>` bridge used by explicit template
     /// expressions.  Standalone and named templates leave this empty.
     template_bare_parent_fields: HashSet<String>,
+    /// Storage/receiver policy for the shared semantic lowerer.  Ordinary component views use
+    /// generated fields and methods; ControlTemplate bodies use factory-local bindings and a
+    /// refresh cell while retaining the exact same planning and value/event emitters.
+    storage: ViewStorage,
 }
 
 impl ViewCtx {
@@ -7113,7 +7386,793 @@ impl ViewCtx {
             template_property_bounds: self.template_property_bounds.clone(),
             template_target: self.template_target.clone(),
             template_bare_parent_fields: self.template_bare_parent_fields.clone(),
+            storage: self.storage.clone(),
         }
+    }
+
+    fn is_template_storage(&self) -> bool {
+        matches!(self.storage, ViewStorage::Template { .. })
+    }
+
+    fn semantic_receiver(&self) -> TokenStream {
+        if self.is_template_storage() {
+            quote! { this }
+        } else {
+            quote! { self }
+        }
+    }
+
+    fn template_environment(&self) -> Option<syn::Ident> {
+        match &self.storage {
+            ViewStorage::Template { environment, .. } => Some(environment.clone()),
+            ViewStorage::Component => None,
+        }
+    }
+
+    fn template_refresh_cell(&self) -> Option<syn::Ident> {
+        match &self.storage {
+            ViewStorage::Template { refresh_cell, .. } => Some(refresh_cell.clone()),
+            ViewStorage::Component => None,
+        }
+    }
+
+    /// Returns an owned node handle in the scope where a shared emitter is running.  In an
+    /// ordinary component the handle is an `OnceCell` field; in a template it is the local `Rc`
+    /// binding emitted by the same construction pass.
+    fn node_receiver(
+        &self,
+        binding: &syn::Ident,
+        self_is_node: bool,
+        receiver_override: Option<TokenStream>,
+    ) -> TokenStream {
+        if let Some(receiver) = receiver_override {
+            return receiver;
+        }
+        if self_is_node {
+            return self.semantic_receiver();
+        }
+        if self.is_template_storage() {
+            quote! { #binding.clone() }
+        } else {
+            quote! {
+                self.#binding
+                    .get()
+                    .expect("shared view lowerer: component is not yet mounted")
+                    .clone()
+            }
+        }
+    }
+
+    fn dynamic_slot(&self, binding: &syn::Ident) -> TokenStream {
+        let slot = dynamic_slot_ident(binding);
+        if self.is_template_storage() {
+            quote! { #slot }
+        } else {
+            quote! { self.#slot }
+        }
+    }
+
+    fn refresh_statement(&self) -> TokenStream {
+        if let Some(cell) = self.template_refresh_cell() {
+            quote! {
+                if let Some(__elwindui_template_refresh_callback) =
+                    #cell.borrow().as_ref().cloned()
+                {
+                    __elwindui_template_refresh_callback();
+                }
+            }
+        } else {
+            quote! { this.__refresh_dynamic_regions(); }
+        }
+    }
+
+    /// A `move` callback that uses the template refresh cell must own a clone, otherwise the first
+    /// emitted event would move the factory's single `Rc` out of scope.  Each shared callback
+    /// emitter places this shadowing statement immediately before its closure.
+    fn refresh_capture(&self) -> TokenStream {
+        let Some(cell) = self.template_refresh_cell() else {
+            return TokenStream::new();
+        };
+        quote! { let #cell = std::rc::Rc::clone(&#cell); }
+    }
+}
+
+/// Resolves a type for a shared emitter.  Ordinary `view!` lowering must respect the source
+/// module's lexical visibility, while an expression-form `template_view!` is expanded at a call
+/// site that has no `Module::path`/`use` context.  The latter may still refer to one unique
+/// same-crate component registered in the symbol table, so the template adapter allows the
+/// explicit context-free fallback without changing ordinary name resolution.
+fn resolve_context_info<'a>(
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &'a SymbolTable,
+    type_path: &str,
+) -> Option<&'a TypeInfo> {
+    table.resolve(from, type_path).or_else(|| {
+        (ctx.is_template_storage() && !type_path.contains("::"))
+            .then(|| table.resolve_unqualified(type_path))
+            .flatten()
+    })
+}
+
+/// The context-free counterpart used by template-only planning helpers that do not otherwise
+/// carry a `ViewCtx` (dynamic content shape and attribute type constraints).
+fn resolve_template_info<'a>(
+    from: &Module,
+    table: &'a SymbolTable,
+    type_path: &str,
+) -> Option<&'a TypeInfo> {
+    table.resolve(from, type_path).or_else(|| {
+        (!type_path.contains("::"))
+            .then(|| table.resolve_unqualified(type_path))
+            .flatten()
+    })
+}
+
+/// The semantic result shared by every `template_view!` frontend.  The factory shells in
+/// `lib.rs` only add the typed-parent/lifecycle wrapper around this value; all construction,
+/// binding, dynamic-region, and environment statements come from the same planner/emitter used by
+/// an ordinary `view!`.
+pub(crate) struct LoweredTemplateBody {
+    pub(crate) root: TokenStream,
+    pub(crate) let_statements: TokenStream,
+    pub(crate) refresh: TokenStream,
+    pub(crate) property_bounds: Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
+    pub(crate) writable_properties: BTreeSet<u64>,
+    pub(crate) iterable_properties: BTreeSet<u64>,
+    pub(crate) has_deferred_views: bool,
+    /// Some shared emitters need the typed parent receiver even when no property subscription was
+    /// collected (for example an event closure or a root dynamic replacement).  The standalone
+    /// shell must therefore select its generic `C` form for those bodies as well.
+    pub(crate) requires_parent: bool,
+}
+
+/// Lowers a parsed template body through the ordinary view planner and emitters.  Template-specific
+/// behavior is limited to `ViewCtx`'s storage/receiver adapter and the returned refresh closure;
+/// there is intentionally no recursive template compiler here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lower_template_body(
+    body: &ViewBody,
+    lets: &[crate::ast::LetBinding],
+    on_mount: Option<&syn::Block>,
+    on_unmount: Option<&syn::Block>,
+    on_update: Option<&crate::ast::OnUpdateHook>,
+    from: &Module,
+    table: &SymbolTable,
+    target_type: TokenStream,
+    bare_parent_fields: HashSet<String>,
+) -> Result<LoweredTemplateBody, String> {
+    let property_bounds = Rc::new(RefCell::new(BTreeMap::new()));
+    let parent_ident = format_ident!("__elwindui_template_parent");
+    let environment_ident = format_ident!("__environment");
+    let refresh_cell_ident = format_ident!("__elwindui_template_refresh_cell");
+    let ctx = ViewCtx {
+        closure_param: None,
+        own_fields: HashMap::new(),
+        mutable_own_fields: HashSet::new(),
+        bindable_owners: HashSet::new(),
+        weak_bindable_owners: HashSet::new(),
+        default_template_parent: false,
+        template_base_fields: HashSet::new(),
+        implicit_owner: None,
+        target: format_ident!("__ElwinduiTemplateTarget"),
+        template_parent: Some(parent_ident.clone()),
+        template_property_bounds: Some(property_bounds.clone()),
+        template_target: Some(target_type.clone()),
+        template_bare_parent_fields: bare_parent_fields.clone(),
+        storage: ViewStorage::Template {
+            environment: environment_ident.clone(),
+            refresh_cell: refresh_cell_ident.clone(),
+        },
+    };
+
+    let mut plan = Vec::new();
+    let mut lets_map: HashMap<String, (syn::Ident, String)> = HashMap::new();
+    let mut prelude = TokenStream::new();
+    let mut statements = TokenStream::new();
+
+    // Keep `let` construction in source order.  The aliases are lexical values used by later
+    // `ChildEntry::Ref` nodes, while the planned nodes themselves remain in the shared flat plan
+    // so their attributes, dynamic children, and environment scopes use the ordinary emitters.
+    for binding in lets {
+        let start = plan.len();
+        let resolved = plan_element(
+            &binding.element,
+            &ctx,
+            from,
+            table,
+            &mut plan,
+            true,
+            &lets_map,
+        );
+        for planned in &plan[start..] {
+            if planned.dynamic.is_none() {
+                emit_construction(planned, &ctx, from, table, &mut prelude, &plan);
+            }
+        }
+        let alias = format_ident!("__elwindui_let_{}", binding.name);
+        let root_binding = &resolved.0;
+        prelude.extend(quote! {
+            let #alias = #root_binding.clone();
+        });
+        lets_map.insert(binding.name.clone(), (alias, resolved.1));
+    }
+
+    let root_start = plan.len();
+    let root = match body.children.as_slice() {
+        [ChildEntry::Literal(element)] if element.type_path == "EnvironmentScope" => {
+            let scope = plan_environment_scope(element, &mut plan, None);
+            let roots = plan_children_in_scope(
+                &element.children,
+                &element.type_path,
+                &ctx,
+                from,
+                table,
+                &mut plan,
+                &lets_map,
+                Some(&scope),
+            );
+            if roots.len() != 1 {
+                return Err(
+                    "an EnvironmentScope used as a template root must contain exactly one child"
+                        .into(),
+                );
+            }
+            roots[0].clone()
+        }
+        [ChildEntry::Literal(element)] => {
+            // Body-level attributes are the same shorthand accepted by ordinary `view!`; fold
+            // them into the sole root before invoking the shared planner.
+            let mut root = element.clone();
+            root.attributes.extend(body.attributes.iter().cloned());
+            root.attached.extend(body.attached.iter().cloned());
+            root.attribute_shortcuts
+                .extend(body.attribute_shortcuts.iter().cloned());
+            plan_element(&root, &ctx, from, table, &mut plan, true, &lets_map)
+        }
+        [ChildEntry::If { .. } | ChildEntry::Match { .. }] => {
+            if !body.attributes.is_empty()
+                || !body.attached.is_empty()
+                || !body.attribute_shortcuts.is_empty()
+            {
+                return Err(
+                    "root properties require a static element; dynamic roots cannot receive body attributes"
+                        .into(),
+                );
+            }
+            validate_template_dynamic_root_shape(&body.children[0])?;
+            plan_dynamic_entry(
+                &body.children[0],
+                "Control",
+                &ctx,
+                from,
+                table,
+                &mut plan,
+                &lets_map,
+                None,
+            )
+        }
+        [ChildEntry::For { .. }] => {
+            if !body.attributes.is_empty()
+                || !body.attached.is_empty()
+                || !body.attribute_shortcuts.is_empty()
+            {
+                return Err(
+                    "root properties require a static element; a `for` region cannot be the sole ControlTemplate root"
+                        .into(),
+                );
+            }
+            return Err("a `for` region cannot be the sole ControlTemplate root".into());
+        }
+        [ChildEntry::Ref(name)] => {
+            if !body.attributes.is_empty()
+                || !body.attached.is_empty()
+                || !body.attribute_shortcuts.is_empty()
+            {
+                return Err(
+                    "root properties require a static element; a reference cannot be the sole ControlTemplate root"
+                        .into(),
+                );
+            }
+            lets_map
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("template root reference `{name}` is not defined"))?
+        }
+        _ => return Err("`template_view!` requires exactly one effective root".into()),
+    };
+
+    // Template-local branch caches must be declared before any construction that can reference a
+    // lazy branch.  Keep the let-binding construction in a separate prelude until the complete
+    // plan is known, then emit caches, lets, and the ordinary post-order construction in that
+    // source order.
+    for (cache_field, leaf) in collect_lazy_leaves(&plan) {
+        let type_ident = concrete_type_ident(
+            &leaf.type_path,
+            resolve_template_info(from, table, &leaf.type_path),
+        );
+        statements.extend(quote! {
+            let #cache_field: std::rc::Rc<std::cell::RefCell<Option<std::rc::Rc<#type_ident>>>> =
+                std::rc::Rc::new(std::cell::RefCell::new(None));
+        });
+    }
+    statements.extend(prelude);
+
+    // Construction is post-order in the plan, so every child/attribute element exists before its
+    // parent constructor consumes it.  Dynamic markers are transparent planning nodes and never
+    // receive a constructor of their own.
+    for planned in &plan[root_start..] {
+        if planned.dynamic.is_none() {
+            emit_construction(planned, &ctx, from, table, &mut statements, &plan);
+        }
+    }
+
+    // Template-local dynamic slots replace the ordinary component fields.  Scalar content has no
+    // slot; its branch value is swapped through the content setter instead.
+    for node in &plan {
+        if node.dynamic.is_none() || !has_real_dynamic_anchor(&plan, &node.binding) {
+            continue;
+        }
+        let parent = find_dynamic_region_anchor(&plan, &node.binding);
+        let parent_info = resolve_template_info(from, table, &parent.type_path);
+        let Some(shape) = parent_info.map(effective_content_shape) else {
+            // An unresolved/external host still has a collection/scalar decision in its exported
+            // props macro.  Its slot type is selected by that macro, exactly as ordinary views do.
+            let props_macro = template_dynamic_props_macro_path(&parent.type_path, parent_info);
+            let item_ext = dynamic_collection_item_trait_for_type_with_props_macro_template(
+                &parent.type_path,
+                from,
+                table,
+                props_macro.clone(),
+            );
+            let slot = dynamic_slot_ident(&node.binding);
+            statements.extend(quote! {
+                let #slot: #props_macro!(@content_slot_type #item_ext) =
+                    ::std::default::Default::default();
+            });
+            continue;
+        };
+        if shape == EffectiveContentShape::Scalar {
+            continue;
+        }
+        let props_macro = template_dynamic_props_macro_path(&parent.type_path, parent_info);
+        let item_ext = dynamic_collection_item_trait_for_type_with_props_macro_template(
+            &parent.type_path,
+            from,
+            table,
+            props_macro.clone(),
+        );
+        let slot = dynamic_slot_ident(&node.binding);
+        let slot_type = if shape == EffectiveContentShape::Collection {
+            quote! { elwindui::core::ui::DynamicChildSlot<#item_ext> }
+        } else {
+            quote! { #props_macro!(@content_slot_type #item_ext) }
+        };
+        statements.extend(quote! {
+            let #slot: #slot_type = ::std::default::Default::default();
+        });
+    }
+
+    // Property writes are capability-checked by the generated setter calls; all read dependencies
+    // are collected by `emit_path_get`.  The expected value type is filled from the receiving
+    // element's declaration where available, preserving the generic factory's useful diagnostics.
+    constrain_template_dynamic_selectors(&plan, &property_bounds);
+    constrain_template_attribute_values(&plan, from, table, &property_bounds);
+
+    let mut wiring = TokenStream::new();
+    let mut resync = TokenStream::new();
+    for node in &plan {
+        if node.dynamic.is_some() {
+            continue;
+        }
+        emit_wiring(node, &ctx, from, table, &mut wiring, false);
+        emit_resync(
+            node,
+            &ctx,
+            from,
+            table,
+            ResyncFilter::All,
+            &mut resync,
+            false,
+        );
+    }
+    for (cache_field, leaf) in collect_lazy_leaves(&plan) {
+        emit_lazy_branch_resync(
+            &cache_field,
+            leaf,
+            &ctx,
+            from,
+            table,
+            ResyncFilter::All,
+            &mut resync,
+        );
+    }
+    emit_content_presenter_wiring(&plan, &ctx, &mut wiring);
+
+    let dynamic_regions = emit_template_dynamic_regions(&plan, &ctx, from, table);
+    statements.extend(wiring.clone());
+    statements.extend(resync.clone());
+    statements.extend(dynamic_regions.clone());
+
+    let (root_binding, root_type) = root;
+    let root_is_dynamic = root_type == DYNAMIC_CHILD_SLOT_MARKER;
+    let root_value = if root_is_dynamic {
+        dynamic_content_value(
+            &plan,
+            &root_binding,
+            "dyn UIElementExt",
+            &ctx,
+            from,
+            table,
+            &EmitMode::Construction,
+        )
+    } else {
+        into_node_if_needed(quote! { #root_binding }, &root_type, from, table)
+    };
+
+    let root_refresh = if root_is_dynamic {
+        let value = dynamic_content_value(
+            &plan,
+            &root_binding,
+            "dyn UIElementExt",
+            &ctx,
+            from,
+            table,
+            &EmitMode::WithSelf(quote! { this }),
+        );
+        quote! {
+            this.__set_template_root(#value);
+        }
+    } else {
+        TokenStream::new()
+    };
+    let refresh = quote! {
+        #resync
+        #dynamic_regions
+        #root_refresh
+    };
+
+    let mut writable_properties = BTreeSet::new();
+    collect_template_writable_property_keys(
+        body,
+        lets,
+        on_mount,
+        on_unmount,
+        on_update,
+        &bare_parent_fields,
+        &mut writable_properties,
+    );
+    let has_deferred_views = template_body_has_deferred_views(body, lets);
+    let requires_parent = !wiring.is_empty() || root_is_dynamic;
+    Ok(LoweredTemplateBody {
+        root: root_value,
+        let_statements: statements,
+        refresh,
+        property_bounds,
+        writable_properties,
+        iterable_properties: collect_template_iterable_properties(&plan),
+        has_deferred_views,
+        requires_parent,
+    })
+}
+
+fn validate_template_dynamic_root_shape(entry: &ChildEntry) -> Result<(), String> {
+    let valid = match entry {
+        ChildEntry::If {
+            then_branch,
+            else_branch,
+            ..
+        } => then_branch.len() == 1 && else_branch.len() == 1,
+        ChildEntry::Match { arms, .. } => arms.iter().all(|arm| arm.body.len() == 1),
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err("every dynamic ControlTemplate root branch must contain exactly one element".into())
+    }
+}
+
+fn has_real_dynamic_anchor(plan: &[PlannedNode], target: &syn::Ident) -> bool {
+    if plan.iter().any(|candidate| {
+        candidate
+            .child_bindings
+            .iter()
+            .any(|(binding, _)| binding == target)
+    }) {
+        return true;
+    }
+    plan.iter().any(|candidate| {
+        candidate
+            .dynamic
+            .as_ref()
+            .is_some_and(|dynamic| dynamic_plan_contains_binding(dynamic, target))
+            && has_real_dynamic_anchor(plan, &candidate.binding)
+    })
+}
+
+fn template_dynamic_props_macro_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
+    let ident = dynamic_content_props_macro_ident(type_path);
+    if info.is_some_and(|i| i.is_builtin) || type_path.starts_with("elwindui::") {
+        quote! { elwindui::core::#ident }
+    } else if info.is_some() || type_path.starts_with("crate::") {
+        quote! { crate::#ident }
+    } else if !type_path.contains("::") {
+        quote! { elwindui::core::#ident }
+    } else if let Some(prefix) = type_path.split("::").next() {
+        let prefix = format_ident!("{prefix}");
+        quote! { #prefix::#ident }
+    } else {
+        quote! { crate::#ident }
+    }
+}
+
+fn template_dynamic_ext_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
+    let name = type_path.rsplit("::").next().unwrap_or(type_path);
+    let ident = format_ident!("{name}Ext");
+    if info.is_some_and(|i| i.is_builtin) || type_path.starts_with("elwindui::") {
+        quote! { elwindui::core::ui::#ident }
+    } else if let Ok(mut path) = syn::parse_str::<syn::Path>(type_path) {
+        if let Some(last) = path.segments.last_mut() {
+            last.ident = ident;
+            quote! { #path }
+        } else {
+            quote! { #ident }
+        }
+    } else {
+        quote! { #ident }
+    }
+}
+
+fn emit_template_dynamic_regions(
+    plan: &[PlannedNode],
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    plan.iter()
+        .filter_map(|node| {
+            node.dynamic.as_ref()?;
+            let parent = plan.iter().find(|candidate| {
+                candidate
+                    .child_bindings
+                    .iter()
+                    .any(|(child, _)| child == &node.binding)
+            })?;
+            let parent_binding = &parent.binding;
+            let parent_info = resolve_template_info(from, table, &parent.type_path);
+            let parent_receiver = ctx.node_receiver(parent_binding, false, None);
+            let parent_ext_path = template_dynamic_ext_path(&parent.type_path, parent_info);
+            let scalar_item_ext = ItemTraitTokens::KnownIdent(format_ident!("UIElementExt"));
+            let scalar_body = {
+                let setter = parent_info
+                    .and_then(|info| info.content_field.as_deref())
+                    .map(|field| format_ident!("set_{field}"));
+                emit_scalar_dynamic_node_refresh(
+                    plan,
+                    node,
+                    parent_binding,
+                    setter.as_ref(),
+                    false,
+                    &parent.type_path,
+                    &scalar_item_ext,
+                    ctx,
+                    from,
+                    table,
+                    false,
+                )
+            };
+            let body = match parent_info.map(effective_content_shape) {
+                Some(EffectiveContentShape::Collection) => {
+                    let info = parent_info.expect("collection shape must have type info");
+                    let props = template_dynamic_props_macro_path(&parent.type_path, parent_info);
+                    let item_ext = dynamic_collection_item_trait_for_type_with_props_macro_template(
+                        &parent.type_path,
+                        from,
+                        table,
+                        props,
+                    );
+                    let field = info
+                        .content_field
+                        .as_deref()
+                        .expect("collection content must name a field");
+                    let field_ident = format_ident!("{field}");
+                    let host = quote! { #parent_receiver.#field_ident() };
+                    emit_dynamic_node_refresh(plan, node, &host, &item_ext, ctx, from, table)
+                }
+                Some(EffectiveContentShape::Scalar) => scalar_body,
+                Some(EffectiveContentShape::External) | None => {
+                    let props = template_dynamic_props_macro_path(&parent.type_path, parent_info);
+                    let item_ext = dynamic_collection_item_trait_for_type_with_props_macro_template(
+                        &parent.type_path,
+                        from,
+                        table,
+                        props.clone(),
+                    );
+                    let host = quote! { #props!(@content_field_get #parent_receiver) };
+                    let collection =
+                        emit_dynamic_node_refresh(plan, node, &host, &item_ext, ctx, from, table);
+                    quote! { #props!(@content_shape { #scalar_body }, { #collection }); }
+                }
+            };
+            let layout_children_use = if parent_info.is_some_and(|i| i.is_virtual_builtin) {
+                quote! { use elwindui::core::ui::LayoutExt as _; }
+            } else if parent_info.is_none() {
+                quote! { #[allow(unused_imports)] use elwindui::core::ui::LayoutExt as _; }
+            } else {
+                TokenStream::new()
+            };
+            Some(quote! {
+                {
+                    use #parent_ext_path as _;
+                    #layout_children_use
+                    #body
+                }
+            })
+        })
+        .collect()
+}
+
+fn collect_template_iterable_properties(plan: &[PlannedNode]) -> BTreeSet<u64> {
+    let mut keys = BTreeSet::new();
+    for node in plan {
+        if let Some(DynamicPlan::For { collection, .. }) = &node.dynamic {
+            collect_template_property_keys(collection, &mut keys);
+        }
+    }
+    keys
+}
+
+fn constrain_template_dynamic_selectors(
+    plan: &[PlannedNode],
+    bounds: &Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
+) {
+    for node in plan {
+        let Some(dynamic) = &node.dynamic else {
+            continue;
+        };
+        let (selector, boolean_match) = match dynamic {
+            DynamicPlan::If { condition, .. } => (Some(condition), true),
+            DynamicPlan::Match { value, arms } => (
+                Some(value),
+                arms.iter().all(|(pattern, _, _)| {
+                    matches!(
+                        pattern.to_token_stream().to_string().as_str(),
+                        "true" | "false"
+                    )
+                }),
+            ),
+            DynamicPlan::For { .. } => (None, false),
+        };
+        if boolean_match {
+            if let Some(selector) = selector {
+                let mut keys = BTreeSet::new();
+                collect_template_property_keys(selector, &mut keys);
+                for key in keys {
+                    bounds
+                        .borrow_mut()
+                        .entry(key)
+                        .and_modify(|current| {
+                            if current.is_none() {
+                                *current = Some(quote! { bool });
+                            }
+                        })
+                        .or_insert(Some(quote! { bool }));
+                }
+            }
+        }
+    }
+}
+
+fn constrain_template_attribute_values(
+    plan: &[PlannedNode],
+    from: &Module,
+    table: &SymbolTable,
+    bounds: &Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
+) {
+    for node in plan {
+        let info = resolve_template_info(from, table, &node.type_path);
+        for attribute in &node.attributes {
+            let mut keys = BTreeSet::new();
+            collect_template_property_keys(&attribute.value, &mut keys);
+            if keys.is_empty() {
+                continue;
+            }
+            let expected = info
+                .and_then(|info| {
+                    info.field_types
+                        .get(&attribute.name)
+                        .or_else(|| info.value_field_types.get(&attribute.name))
+                })
+                .map(|ty| {
+                    syn::parse_str::<syn::Type>(ty)
+                        .map(|ty| quote! { #ty })
+                        .unwrap_or_else(|_| quote! { #ty })
+                })
+                .or_else(|| {
+                    (!info.is_some_and(|info| info.is_builtin)).then(|| {
+                        let props = template_dynamic_props_macro_path(&node.type_path, info);
+                        let name = format_ident!("{}", attribute.name);
+                        quote! { #props!(@field_type #name) }
+                    })
+                });
+            for key in keys {
+                let expected = expected.clone();
+                bounds
+                    .borrow_mut()
+                    .entry(key)
+                    .and_modify(|current| {
+                        if current.is_none() {
+                            *current = expected.clone();
+                        }
+                    })
+                    .or_insert(expected);
+            }
+        }
+    }
+}
+
+fn template_body_has_deferred_views(body: &ViewBody, lets: &[crate::ast::LetBinding]) -> bool {
+    lets.iter()
+        .any(|binding| template_element_has_deferred_views(&binding.element))
+        || body
+            .attributes
+            .iter()
+            .any(|attribute| template_expr_has_deferred_views(&attribute.value))
+        || body.children.iter().any(template_child_has_deferred_views)
+}
+
+fn template_element_has_deferred_views(element: &ElementNode) -> bool {
+    element
+        .attributes
+        .iter()
+        .any(|attribute| template_expr_has_deferred_views(&attribute.value))
+        || element
+            .children
+            .iter()
+            .any(template_child_has_deferred_views)
+}
+
+fn template_child_has_deferred_views(child: &ChildEntry) -> bool {
+    match child {
+        ChildEntry::Literal(element) => template_element_has_deferred_views(element),
+        ChildEntry::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            template_expr_has_deferred_views(condition)
+                || then_branch.iter().any(template_child_has_deferred_views)
+                || else_branch.iter().any(template_child_has_deferred_views)
+        }
+        ChildEntry::Match { value, arms } => {
+            template_expr_has_deferred_views(value)
+                || arms
+                    .iter()
+                    .any(|arm| arm.body.iter().any(template_child_has_deferred_views))
+        }
+        ChildEntry::For {
+            collection, body, ..
+        } => {
+            template_expr_has_deferred_views(collection)
+                || body.iter().any(template_child_has_deferred_views)
+        }
+        ChildEntry::Ref(_) => false,
+    }
+}
+
+fn template_expr_has_deferred_views(expr: &ViewExpr) -> bool {
+    match expr {
+        ViewExpr::DeferredView(_) => true,
+        ViewExpr::Element(element) => template_element_has_deferred_views(element),
+        ViewExpr::Closure { body, .. } => match body {
+            ClosureBody::Element(element) => template_element_has_deferred_views(element),
+            ClosureBody::Expr(_) | ClosureBody::Block(_) => false,
+        },
+        ViewExpr::TFluent(_, args) => args
+            .iter()
+            .any(|(_, value)| template_expr_has_deferred_views(value)),
+        ViewExpr::Path(_) | ViewExpr::Expr(_) => false,
     }
 }
 
@@ -7266,6 +8325,9 @@ fn lazy_branch_plan(
     unique_prefix: &str,
     environment_scope: Option<&syn::Ident>,
 ) -> Option<(Vec<(syn::Ident, String)>, Vec<PlannedNode>)> {
+    // Ordinary generated views store lazy branch caches as component fields; template factories
+    // store the same caches as lexical `Rc<RefCell<Option<Rc<_>>>>` bindings.  The branch planner
+    // is therefore shared by both storage adapters instead of making template bodies eager.
     if branch.is_empty() {
         return None;
     }
@@ -7322,8 +8384,8 @@ fn lazy_branch_cache_ident(binding: &syn::Ident) -> syn::Ident {
 /// own, so `emit_construction` needs nothing from a wider `plan` beyond `leaf` itself — passed a
 /// single-element slice of just `leaf` accordingly. Read together with `emit_lazy_branch_resync`
 /// (keeps a *materialized* leaf's cached instance in sync with whatever bindable/observable
-/// properties it depends on) and the struct field `generate_view`'s own struct-field loop declares
-/// for it via `lazy_branch_cache_ident`.
+/// properties it depends on): ordinary components address a generated cache field, while template
+/// factories address the corresponding lexical cache binding.
 fn emit_lazy_leaf_value(
     leaf: &PlannedNode,
     ctx: &ViewCtx,
@@ -7332,6 +8394,11 @@ fn emit_lazy_leaf_value(
 ) -> TokenStream {
     let cache_field = lazy_branch_cache_ident(&leaf.binding);
     let binding = &leaf.binding;
+    let cache = if ctx.is_template_storage() {
+        quote! { #cache_field }
+    } else {
+        quote! { self.#cache_field }
+    };
     let mut construct = TokenStream::new();
     emit_construction(
         leaf,
@@ -7343,7 +8410,7 @@ fn emit_lazy_leaf_value(
     );
     quote! {
         {
-            let mut __elwindui_lazy_cache = self.#cache_field.borrow_mut();
+            let mut __elwindui_lazy_cache = #cache.borrow_mut();
             if __elwindui_lazy_cache.is_none() {
                 #construct
                 *__elwindui_lazy_cache = Some(#binding);
@@ -7388,8 +8455,13 @@ fn emit_lazy_branch_resync(
     if inner.is_empty() {
         return;
     }
+    let cache = if ctx.is_template_storage() {
+        quote! { #cache_field }
+    } else {
+        quote! { self.#cache_field }
+    };
     out.extend(quote! {
-        if let Some(__elwindui_lazy_receiver) = self.#cache_field.borrow().as_ref() {
+        if let Some(__elwindui_lazy_receiver) = #cache.borrow().as_ref() {
             let __elwindui_lazy_receiver = std::rc::Rc::clone(__elwindui_lazy_receiver);
             #inner
         }
@@ -7402,7 +8474,7 @@ fn emit_lazy_branch_resync(
 /// here, and `For` has no lazy leaves of its own kind at all), paired with the cache field backing
 /// each one. Struct-field emission and resync-method generation both need "every lazy leaf in this
 /// component, regardless of which region/branch/arm it belongs to" — walking `plan` once here
-/// keeps that one flat list the single source of truth for both, rather than each re-deriving it.
+/// keeps that one flat list the single source of truth for all storage adapters.
 fn collect_lazy_leaves(plan: &[PlannedNode]) -> Vec<(syn::Ident, &PlannedNode)> {
     let mut out = Vec::new();
     for node in plan {
@@ -7450,6 +8522,7 @@ fn lazy_leaf_or_field_value(
 ) -> TokenStream {
     match lazy.and_then(|leaves| leaves.iter().find(|n| &n.binding == child)) {
         Some(leaf) => emit_lazy_leaf_value(leaf, ctx, from, table),
+        None if ctx.is_template_storage() => quote! { #child.clone() },
         None => quote! {
             self.#child
                 .get()
@@ -7828,7 +8901,7 @@ fn emit_for_item_wiring(
             continue;
         }
         let binding = &node.binding;
-        let info = table.resolve(from, &node.type_path);
+        let info = resolve_context_info(ctx, from, table, &node.type_path);
         let widget_binding = quote! { #binding.clone() };
         for attribute in &node.attributes {
             let name = &attribute.name;
@@ -8229,6 +9302,26 @@ pub(crate) fn dynamic_collection_item_trait_for_type_with_props_macro(
     }
 }
 
+/// Template-only variant of [`dynamic_collection_item_trait_for_type_with_props_macro`].  The
+/// expression-form frontend has no lexical module, so it uses the same unique unqualified
+/// component fallback as the rest of the shared template lowerer before deciding whether the
+/// content item trait is known locally.
+fn dynamic_collection_item_trait_for_type_with_props_macro_template(
+    type_path: &str,
+    from: &Module,
+    table: &SymbolTable,
+    external_props_macro: TokenStream,
+) -> ItemTraitTokens {
+    let Some(info) = resolve_template_info(from, table, type_path) else {
+        return ItemTraitTokens::External(quote! { #external_props_macro!(@content_item_dyn) });
+    };
+    if effective_content_shape(info) == EffectiveContentShape::Collection {
+        ItemTraitTokens::KnownIdent(dynamic_collection_item_trait_for_info(info))
+    } else {
+        ItemTraitTokens::External(quote! { #external_props_macro!(@content_item_dyn) })
+    }
+}
+
 fn dynamic_content_props_macro_ident(type_path: &str) -> syn::Ident {
     let type_name = type_path.rsplit("::").next().unwrap_or(type_path);
     format_ident!("__elwindui_props_{type_name}")
@@ -8452,6 +9545,29 @@ fn initial_dynamic_content_value(
     from: &Module,
     table: &SymbolTable,
 ) -> TokenStream {
+    dynamic_content_value(
+        plan,
+        marker_binding,
+        inner_ty,
+        ctx,
+        from,
+        table,
+        &EmitMode::Construction,
+    )
+}
+
+/// Lowers a scalar dynamic region to a value expression for either construction or a later
+/// template refresh.  The branch plan itself is shared with ordinary `view!`; only the receiver
+/// mode changes when a template factory evaluates its parent-dependent selector.
+fn dynamic_content_value(
+    plan: &[PlannedNode],
+    marker_binding: &syn::Ident,
+    inner_ty: &str,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    mode: &EmitMode,
+) -> TokenStream {
     let node = plan
         .iter()
         .find(|n| &n.binding == marker_binding)
@@ -8468,7 +9584,7 @@ fn initial_dynamic_content_value(
             then_lazy,
             else_lazy,
         } => {
-            let condition = emit_expr(condition, ctx, &EmitMode::Construction);
+            let condition = emit_expr(condition, ctx, mode);
             let Some(then_entry) = then_bindings.first() else {
                 return quote! {
                     compile_error!("a dynamic branch cannot be empty for scalar content");
@@ -8481,7 +9597,7 @@ fn initial_dynamic_content_value(
                     unreachable!()
                 };
             };
-            let then_value = initial_dynamic_branch_value(
+            let then_value = dynamic_branch_value(
                 plan,
                 then_entry,
                 then_lazy.as_deref(),
@@ -8489,8 +9605,9 @@ fn initial_dynamic_content_value(
                 ctx,
                 from,
                 table,
+                mode,
             );
-            let else_value = initial_dynamic_branch_value(
+            let else_value = dynamic_branch_value(
                 plan,
                 else_entry,
                 else_lazy.as_deref(),
@@ -8498,11 +9615,12 @@ fn initial_dynamic_content_value(
                 ctx,
                 from,
                 table,
+                mode,
             );
             quote! { if #condition { #then_value } else { #else_value } }
         }
         DynamicPlan::Match { value, arms } => {
-            let value = emit_expr(value, ctx, &EmitMode::Construction);
+            let value = emit_expr(value, ctx, mode);
             let arm_stmts = arms.iter().map(|(pattern, children, lazy)| {
                 let arm_value = children.first().map_or_else(
                     || {
@@ -8512,7 +9630,7 @@ fn initial_dynamic_content_value(
                         }
                     },
                     |entry| {
-                        initial_dynamic_branch_value(
+                        dynamic_branch_value(
                             plan,
                             entry,
                             lazy.as_deref(),
@@ -8520,6 +9638,7 @@ fn initial_dynamic_content_value(
                             ctx,
                             from,
                             table,
+                            mode,
                         )
                     },
                 );
@@ -8536,11 +9655,7 @@ fn initial_dynamic_content_value(
     }
 }
 
-/// A single branch's contribution to `initial_dynamic_content_value` — the value-expression analog
-/// of `emit_scalar_branch_value` (which emits a *statement*, a setter call against `self`; this
-/// emits a bare *value*, since it runs before `self` exists). Recurses through a nested dynamic
-/// marker (Phase 1 — always still eager) the same way.
-fn initial_dynamic_branch_value(
+fn dynamic_branch_value(
     plan: &[PlannedNode],
     entry: &(syn::Ident, String),
     lazy: Option<&[PlannedNode]>,
@@ -8548,10 +9663,11 @@ fn initial_dynamic_branch_value(
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
+    mode: &EmitMode,
 ) -> TokenStream {
     let (binding, ty) = entry;
     if ty == DYNAMIC_CHILD_SLOT_MARKER {
-        return initial_dynamic_content_value(plan, binding, inner_ty, ctx, from, table);
+        return dynamic_content_value(plan, binding, inner_ty, ctx, from, table, mode);
     }
     let value = lazy_leaf_or_field_value(lazy, binding, ctx, from, table);
     // Synthesized/qualified trait types stringify with the path between `dyn` and the
@@ -8647,20 +9763,20 @@ fn dynamic_plan_branch_containing<'a>(
 /// every branch not currently selected is kept cleared to an empty `DynamicChildSlot` (see
 /// `emit_clear_dynamic_node`), so its nested markers' own `slot_span` is always 0 when inactive —
 /// no need to know which branch is active just to compute a later sibling's start position.
-fn slot_span(plan: &[PlannedNode], node_binding: &syn::Ident) -> TokenStream {
+fn slot_span(plan: &[PlannedNode], node_binding: &syn::Ident, ctx: &ViewCtx) -> TokenStream {
     let node = plan
         .iter()
         .find(|n| &n.binding == node_binding)
         .expect("dynamic node must be in plan");
-    let slot = dynamic_slot_ident(node_binding);
-    let own = quote! { self.#slot.len() };
+    let slot_value = ctx.dynamic_slot(node_binding);
+    let own = quote! { #slot_value.len() };
     let nested: Vec<TokenStream> = node
         .dynamic
         .as_ref()
         .map(|d| {
             direct_nested_marker_bindings(d)
                 .into_iter()
-                .map(|b| slot_span(plan, b))
+                .map(|b| slot_span(plan, b, ctx))
                 .collect()
         })
         .unwrap_or_default();
@@ -8675,13 +9791,14 @@ fn preceding_span(
     plan: &[PlannedNode],
     siblings: &[(syn::Ident, String)],
     target: &syn::Ident,
+    ctx: &ViewCtx,
 ) -> TokenStream {
     let preceding = siblings
         .iter()
         .take_while(|(binding, _)| binding != target)
         .map(|(binding, ty)| {
             if ty == DYNAMIC_CHILD_SLOT_MARKER {
-                slot_span(plan, binding)
+                slot_span(plan, binding, ctx)
             } else {
                 quote! { 1usize }
             }
@@ -8721,14 +9838,14 @@ fn find_dynamic_region_anchor<'a>(plan: &'a [PlannedNode], target: &syn::Ident) 
 /// `preceding_span` over that element's own `child_bindings`. For a nested region, it's the
 /// enclosing dynamic node's own absolute start (recursively) plus `target`'s local offset within
 /// whichever specific branch of the enclosing node it lives in.
-fn dynamic_region_start(plan: &[PlannedNode], target: &syn::Ident) -> TokenStream {
+fn dynamic_region_start(plan: &[PlannedNode], target: &syn::Ident, ctx: &ViewCtx) -> TokenStream {
     if let Some(parent) = plan.iter().find(|candidate| {
         candidate
             .child_bindings
             .iter()
             .any(|(child, _)| child == target)
     }) {
-        return preceding_span(plan, &parent.child_bindings, target);
+        return preceding_span(plan, &parent.child_bindings, target, ctx);
     }
     let enclosing = plan
         .iter()
@@ -8743,8 +9860,8 @@ fn dynamic_region_start(plan: &[PlannedNode], target: &syn::Ident) -> TokenStrea
         enclosing.dynamic.as_ref().expect("just matched Some above"),
         target,
     );
-    let local = preceding_span(plan, branch, target);
-    let outer_start = dynamic_region_start(plan, &enclosing.binding);
+    let local = preceding_span(plan, branch, target, ctx);
+    let outer_start = dynamic_region_start(plan, &enclosing.binding, ctx);
     quote! { (#outer_start) + (#local) }
 }
 
@@ -8776,11 +9893,17 @@ fn emit_clear_dynamic_node(
     plan: &[PlannedNode],
     node: &PlannedNode,
     host: &TokenStream,
+    ctx: &ViewCtx,
 ) -> TokenStream {
-    let slot = dynamic_slot_ident(&node.binding);
-    let start = dynamic_region_start(plan, &node.binding);
+    let slot = ctx.dynamic_slot(&node.binding);
+    let start = dynamic_region_start(plan, &node.binding, ctx);
+    // Content getters commonly return an owning `Rc<ListExt>` (user-defined hosts), while some
+    // builtins expose a borrowed collection directly.  `DynamicChildSlot` intentionally accepts
+    // the erased borrowed shape in both cases; reborrow the dereferenced getter result at this
+    // shared boundary so ordinary and template lowering agree on the same call contract.
+    let host_ref = quote! { &*#host };
     let mut out = quote! {
-        self.#slot.replace_children(#host, #start, Vec::new());
+        #slot.replace_children(#host_ref, #start, Vec::new());
     };
     if let Some(dynamic) = &node.dynamic {
         for nested_binding in direct_nested_marker_bindings(dynamic) {
@@ -8788,7 +9911,7 @@ fn emit_clear_dynamic_node(
                 .iter()
                 .find(|n| &n.binding == nested_binding)
                 .expect("nested marker must be in plan");
-            out.extend(emit_clear_dynamic_node(plan, nested_node, host));
+            out.extend(emit_clear_dynamic_node(plan, nested_node, host, ctx));
         }
     }
     out
@@ -8810,8 +9933,9 @@ fn emit_dynamic_node_refresh(
     from: &Module,
     table: &SymbolTable,
 ) -> TokenStream {
-    let slot = dynamic_slot_ident(&node.binding);
-    let start = dynamic_region_start(plan, &node.binding);
+    let slot = ctx.dynamic_slot(&node.binding);
+    let start = dynamic_region_start(plan, &node.binding, ctx);
+    let host_ref = quote! { &*#host };
     match node
         .dynamic
         .as_ref()
@@ -8823,14 +9947,15 @@ fn emit_dynamic_node_refresh(
             rc_identity,
             ..
         } => {
-            let collection = emit_expr(collection, ctx, &EmitMode::WithSelf(quote! { self }));
+            let receiver = ctx.semantic_receiver();
+            let collection = emit_expr(collection, ctx, &EmitMode::WithSelf(receiver.clone()));
             if *rc_identity {
                 quote! {
-                    self.#slot.replace_rc_items(#host, #start, &(#collection), #renderer);
+                    #slot.replace_rc_items(#host_ref, #start, &(#collection), #renderer);
                 }
             } else {
                 quote! {
-                    self.#slot.replace_items(#host, #start, #collection, #renderer);
+                    #slot.replace_items(#host_ref, #start, #collection, #renderer);
                 }
             }
         }
@@ -8841,7 +9966,8 @@ fn emit_dynamic_node_refresh(
             then_lazy,
             else_lazy,
         } => {
-            let condition = emit_expr(condition, ctx, &EmitMode::WithSelf(quote! { self }));
+            let receiver = ctx.semantic_receiver();
+            let condition = emit_expr(condition, ctx, &EmitMode::WithSelf(receiver));
             let (then_leaves, then_nested) = partition_branch_bindings(then_bindings);
             let (else_leaves, else_nested) = partition_branch_bindings(else_bindings);
             let then_children = then_leaves.iter().map(|(child, ty)| {
@@ -8866,7 +9992,7 @@ fn emit_dynamic_node_refresh(
                     .iter()
                     .map(|b| {
                         let n = plan.iter().find(|n| &n.binding == *b).expect("in plan");
-                        emit_clear_dynamic_node(plan, n, host)
+                        emit_clear_dynamic_node(plan, n, host, ctx)
                     })
                     .collect()
             };
@@ -8877,17 +10003,18 @@ fn emit_dynamic_node_refresh(
             quote! {
                 if #condition {
                     #clear_else
-                    self.#slot.replace_children(#host, #start, vec![#(#then_children),*]);
+                    #slot.replace_children(#host_ref, #start, vec![#(#then_children),*]);
                     #refresh_then
                 } else {
                     #clear_then
-                    self.#slot.replace_children(#host, #start, vec![#(#else_children),*]);
+                    #slot.replace_children(#host_ref, #start, vec![#(#else_children),*]);
                     #refresh_else
                 }
             }
         }
         DynamicPlan::Match { value, arms } => {
-            let value = emit_expr(value, ctx, &EmitMode::WithSelf(quote! { self }));
+            let receiver = ctx.semantic_receiver();
+            let value = emit_expr(value, ctx, &EmitMode::WithSelf(receiver));
             // Each arm clears every *other* arm's own nested markers before repopulating its own —
             // never its own (unlike `If`'s fixed two-way "clear the other side" split, a `match`
             // has no single "other" side, so which markers count as "other" depends on which arm
@@ -8914,7 +10041,7 @@ fn emit_dynamic_node_refresh(
                         })
                         .map(|b| {
                             let n = plan.iter().find(|n| &n.binding == b).expect("in plan");
-                            emit_clear_dynamic_node(plan, n, host)
+                            emit_clear_dynamic_node(plan, n, host, ctx)
                         })
                         .collect();
                     let refresh_nested: TokenStream = nested
@@ -8927,7 +10054,7 @@ fn emit_dynamic_node_refresh(
                     quote! {
                         #pattern => {
                             #clear_other_arms
-                            self.#slot.replace_children(#host, #start, vec![#(#leaf_children),*]);
+                            #slot.replace_children(#host_ref, #start, vec![#(#leaf_children),*]);
                             #refresh_nested
                         }
                     }
@@ -8976,7 +10103,8 @@ fn emit_scalar_dynamic_node_refresh(
             then_lazy,
             else_lazy,
         } => {
-            let condition = emit_expr(condition, ctx, &EmitMode::WithSelf(quote! { self }));
+            let receiver = ctx.semantic_receiver();
+            let condition = emit_expr(condition, ctx, &EmitMode::WithSelf(receiver));
             let Some(then_entry) = then_bindings.first() else {
                 return quote! {
                     compile_error!("a dynamic branch cannot be empty for scalar content");
@@ -9020,7 +10148,8 @@ fn emit_scalar_dynamic_node_refresh(
             }
         }
         DynamicPlan::Match { value, arms } => {
-            let value = emit_expr(value, ctx, &EmitMode::WithSelf(quote! { self }));
+            let receiver = ctx.semantic_receiver();
+            let value = emit_expr(value, ctx, &EmitMode::WithSelf(receiver));
             let arm_stmts =
                 arms.iter().map(|(pattern, children, lazy)| {
                     let arm_value = children.first().map_or_else(
@@ -9095,21 +10224,21 @@ fn emit_scalar_branch_value(
     }
     let value = lazy_leaf_or_field_value(lazy, binding, ctx, from, table);
     let value = dynamic_child_binding(value, ty, item_ext, from, table);
-    let receiver = if owner_is_self {
-        quote! { self }
-    } else {
-        quote! {
-            self.#owner_binding
-                .get()
-                .expect("__refresh_dynamic_regions: component is not yet mounted")
-        }
-    };
+    let receiver = ctx.node_receiver(owner_binding, owner_is_self, None);
     if let Some(setter) = setter {
         quote! { #receiver.#setter(#value); }
     } else {
-        let props_macro = format_ident!("__elwindui_props_{owner_type}");
+        let props_macro = if ctx.is_template_storage() {
+            template_dynamic_props_macro_path(
+                owner_type,
+                resolve_template_info(from, table, owner_type),
+            )
+        } else {
+            let ident = format_ident!("__elwindui_props_{owner_type}");
+            quote! { elwindui::core::#ident }
+        };
         let content = quote! {
-            elwindui::core::#props_macro!(@children_erased #receiver, [#value]);
+            #props_macro!(@children_erased #receiver, [#value]);
         };
         if template_presentation {
             quote! {
@@ -9800,7 +10929,39 @@ fn emit_closure_value(
 /// The factory is an `Fn`, not `FnOnce` (`ViewTemplate::new`'s own bound) — cloning the captured
 /// weak owner on every call (Issue #162 §3.8) is required, not merely an optimization choice: the
 /// same `ViewTemplate` value is built once and may be `.build()` many times (once per popup-open).
-fn emit_deferred_view_value(deferred: &DeferredViewExpr, ctx: &ViewCtx) -> TokenStream {
+fn emit_deferred_view_value(
+    deferred: &DeferredViewExpr,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    // An expression-form `template_view!` has no surrounding component item from which the
+    // deferred-view preprocessing pass can synthesize a hidden component.  Lower its nested body
+    // directly through the same shared template compiler instead; component-owned deferred views
+    // still take the preprocessed hidden-component path below.
+    if ctx.is_template_storage() && deferred.hidden_component.is_none() {
+        let target = ctx
+            .template_target
+            .clone()
+            .expect("template storage must carry a typed target");
+        let parent = ctx
+            .template_parent
+            .clone()
+            .expect("template storage must carry a typed parent");
+        let compiled = crate::compile_template_body(
+            &deferred.body.root,
+            &deferred.body.lets,
+            deferred.body.on_mount.as_ref(),
+            deferred.body.on_unmount.as_ref(),
+            deferred.body.on_update.as_ref(),
+            from.clone(),
+            table.clone(),
+            target.clone(),
+            ctx.template_bare_parent_fields.clone(),
+        )
+        .unwrap_or_else(|error| panic!("invalid nested template_view body: {error}"));
+        return crate::emit_view_template_factory(&compiled, target, &parent);
+    }
     let hidden_name = deferred.hidden_component.as_deref().unwrap_or_else(|| {
         panic!(
             "a `ViewExpr::DeferredView` reached codegen without being lowered first (Issue #162 \
@@ -10056,9 +11217,15 @@ fn is_semantic_brush_property(info: &TypeInfo, name: &str) -> bool {
     info.semantic_brush_fields.contains(name)
 }
 
-fn semantic_brush_construction_environment(node: &PlannedNode) -> TokenStream {
+fn semantic_brush_construction_environment(node: &PlannedNode, ctx: &ViewCtx) -> TokenStream {
     match &node.environment_scope {
         Some(scope) => quote! { &#scope },
+        None if ctx.is_template_storage() => {
+            let environment = ctx
+                .template_environment()
+                .expect("template storage must carry an environment binding");
+            quote! { &#environment }
+        }
         None => quote! {
             self.__mount_environment
                 .get()
@@ -10067,13 +11234,20 @@ fn semantic_brush_construction_environment(node: &PlannedNode) -> TokenStream {
     }
 }
 
-fn semantic_brush_resync_environment(node: &PlannedNode) -> TokenStream {
+fn semantic_brush_resync_environment(node: &PlannedNode, ctx: &ViewCtx) -> TokenStream {
     match &node.environment_scope {
+        Some(scope) if ctx.is_template_storage() => quote! { &#scope },
         Some(scope) => quote! {
             self.#scope
                 .get()
                 .expect("semantic brush resolution: EnvironmentScope is not yet mounted")
         },
+        None if ctx.is_template_storage() => {
+            let environment = ctx
+                .template_environment()
+                .expect("template storage must carry an environment binding");
+            quote! { &#environment }
+        }
         None => quote! {
             self.__mount_environment
                 .get()
@@ -10238,7 +11412,7 @@ fn emit_external_attribute_sets(
                 .element_attr_bindings
                 .get(name.as_str())
                 .unwrap_or_else(|| panic!("planned element binding for `{name}` must exist"));
-            let info = table.resolve(from, nested_ty);
+            let info = resolve_context_info(ctx, from, table, nested_ty);
             let needs_into_node = info.is_some_and(|i| !i.is_native && !i.is_virtual_builtin);
             let value = if needs_into_node {
                 quote! { #nested_binding.clone().into_node() }
@@ -10267,7 +11441,7 @@ fn emit_external_attribute_sets(
             // §3.13) is `Option<ViewTemplate>` in practice — `context_popup` is still the only
             // production consumer.
             ViewExpr::DeferredView(deferred) => {
-                let factory = emit_deferred_view_value(deferred, ctx);
+                let factory = emit_deferred_view_value(deferred, ctx, from, table);
                 // PR #165 review remediation, A4 (round 2): `validate::check_deferred_view_
                 // assignment` only catches a mismatched target when the target component has a
                 // local `TypeInfo` — a no-op for this real-builtin path (no `TypeInfo` exists
@@ -10313,7 +11487,7 @@ fn emit_external_attribute_sets(
         // identical `Option<T>`-vs-bare-`T` normalization for the exact same reason, since this is
         // the *other* place a bare-forwarded own field's value reaches `@set`.
         if bare_own_field_type(expr, ctx).is_some_and(|ty| ty.contains('!')) {
-            let environment = semantic_brush_construction_environment(node);
+            let environment = semantic_brush_construction_environment(node, ctx);
             sets.extend(quote! {
                 if let ::std::option::Option::Some(__v) = ::std::option::Option::from(#value) {
                     elwindui::core::#props_macro!(
@@ -10322,7 +11496,7 @@ fn emit_external_attribute_sets(
                 }
             });
         } else {
-            let environment = semantic_brush_construction_environment(node);
+            let environment = semantic_brush_construction_environment(node, ctx);
             sets.extend(quote! {
                 elwindui::core::#props_macro!(
                     @set_with_environment #binding, #name_ident, #value, #environment
@@ -10359,6 +11533,12 @@ fn emit_environment_scope_construction(node: &PlannedNode, ctx: &ViewCtx, out: &
     let binding = &node.binding;
     let outer = match &node.environment_scope {
         Some(outer_var) => quote! { #outer_var },
+        None if ctx.is_template_storage() => {
+            let environment = ctx
+                .template_environment()
+                .expect("template storage must carry an environment binding");
+            quote! { #environment }
+        }
         None => quote! {
             self.__mount_environment
                 .get()
@@ -10423,12 +11603,20 @@ fn emit_environment_scope_construction(node: &PlannedNode, ctx: &ViewCtx, out: &
 
 fn emit_environment_scope_resync(node: &PlannedNode, ctx: &ViewCtx, out: &mut TokenStream) {
     let binding = &node.binding;
-    let environment = quote! {
-        self.#binding
-            .get()
-            .expect("EnvironmentScope resync: scope is not yet mounted")
+    let environment = if ctx.is_template_storage() {
+        quote! { #binding }
+    } else {
+        quote! {
+            self.#binding
+                .get()
+                .expect("EnvironmentScope resync: scope is not yet mounted")
+        }
     };
-    let self_mode = EmitMode::WithSelf(quote! { self });
+    let self_mode = if ctx.is_template_storage() {
+        EmitMode::WithSelf(quote! { this })
+    } else {
+        EmitMode::WithSelf(quote! { self })
+    };
     for attribute in &node.attributes {
         // Writable resolver — see `emit_environment_scope_construction`'s matching call for why
         // (this is the same `EnvironmentScope` write path, just re-run on resync).
@@ -10468,7 +11656,8 @@ fn emit_construction(
         emit_environment_scope_construction(node, ctx, out);
         return;
     }
-    if table.resolve(from, &node.type_path).is_none() {
+    let resolved_info = resolve_context_info(ctx, from, table, &node.type_path);
+    if resolved_info.is_none() {
         emit_external_construction(node, ctx, from, table, out);
         // `DYNAMIC_CHILD_SLOT_MARKER` bindings are never actually constructed (`build_component_setters`'s
         // own identically-filtered `children` loop doc comment: a list-based dynamic region starts
@@ -10501,7 +11690,7 @@ fn emit_construction(
     }
 
     let binding = &node.binding;
-    let info = table.resolve(from, &node.type_path).unwrap_or_else(|| {
+    let info = resolved_info.unwrap_or_else(|| {
         panic!(
             "unknown or out-of-scope element `{}` — is a `use` for it missing?",
             node.type_path
@@ -10536,14 +11725,28 @@ fn emit_construction(
         // `EnvironmentContext` local variable — instead of `new()`'s ordinary path, which would
         // otherwise auto-mount it against `application_environment()` before this statement even
         // gets a chance to override anything.
-        let construct_call = match &node.environment_scope {
-            Some(scope_var) => quote! {
+        let construct_call = if ctx.is_template_storage() {
+            let environment = node.environment_scope.as_ref().map_or_else(
+                || {
+                    ctx.template_environment()
+                        .expect("template storage must carry an environment binding")
+                },
+                Clone::clone,
+            );
+            quote! {
                 let #binding = #type_ident::__new_unmounted(#(#args),*);
-                #type_ident::__mount(&#binding, #scope_var.clone());
-            },
-            None => quote! {
-                let #binding = #type_ident::new(#(#args),*);
-            },
+                #type_ident::__mount(&#binding, #environment.clone());
+            }
+        } else {
+            match &node.environment_scope {
+                Some(scope_var) => quote! {
+                    let #binding = #type_ident::__new_unmounted(#(#args),*);
+                    #type_ident::__mount(&#binding, #scope_var.clone());
+                },
+                None => quote! {
+                    let #binding = #type_ident::new(#(#args),*);
+                },
+            }
         };
         // A component that composes over a base with an inherited content destination may not
         // expose that base field in its generated constructor (the base is external to this
@@ -10569,7 +11772,7 @@ fn emit_construction(
                 .iter()
                 .filter(|(_, child_ty)| *child_ty != DYNAMIC_CHILD_SLOT_MARKER)
                 .map(|(child, _)| quote! { #child.clone() });
-            let base_info = table.resolve(from, &base_name);
+            let base_info = resolve_context_info(ctx, from, table, &base_name);
             let macro_path = if base_info.is_none() || base_info.is_some_and(|i| i.is_builtin) {
                 quote! { elwindui::core::#props_macro }
             } else {
@@ -10577,6 +11780,95 @@ fn emit_construction(
             };
             quote! {
                 #macro_path!(@children #binding, [#(#values),*]);
+            }
+        } else {
+            TokenStream::new()
+        };
+        // A generated component may declare an initialized `#[content(...)]` property (for
+        // example a user `Rc<ListExt<_>>` collection). Such a field is intentionally absent from
+        // `param_fields`, so `build_component_args` cannot consume bare children positionally. For
+        // a locally resolved generated component, attach through its own typed extension trait so
+        // the component's content destination wins over an inherited `Control::visual_root` slot.
+        // Unresolved/external hosts retain the exported shape-macro protocol.
+        let content_children_attach = if info.content_field.is_some()
+            && !info
+                .param_fields
+                .iter()
+                .any(|(name, _)| info.content_field.as_deref() == Some(name.as_str()))
+        {
+            let children: Vec<_> = node
+                .child_bindings
+                .iter()
+                .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
+                .map(|(child, _)| quote! { #child.clone() })
+                .collect();
+            if children.is_empty() {
+                TokenStream::new()
+            } else if !info.is_builtin
+                && effective_content_shape(info) != EffectiveContentShape::External
+            {
+                let field = info
+                    .content_field
+                    .as_deref()
+                    .expect("content shape requires a content field");
+                let field_ident = format_ident!("{field}");
+                let ext_path = template_dynamic_ext_path(&node.type_path, Some(info));
+                let field_ty = info
+                    .field_types
+                    .get(field)
+                    .or_else(|| info.value_field_types.get(field));
+                let is_vec = field_ty.is_some_and(|ty| {
+                    ty.chars()
+                        .filter(|ch| !ch.is_whitespace())
+                        .collect::<String>()
+                        .starts_with("Vec<")
+                });
+                match effective_content_shape(info) {
+                    EffectiveContentShape::Collection if is_vec => {
+                        let setter = format_ident!("set_{field}");
+                        quote! {
+                            {
+                                use #ext_path as _;
+                                #binding.#setter(::std::vec![#(#children),*]);
+                            }
+                        }
+                    }
+                    EffectiveContentShape::Collection => {
+                        quote! {
+                            {
+                                use #ext_path as _;
+                                #( #binding.#field_ident().add(#children); )*
+                            }
+                        }
+                    }
+                    EffectiveContentShape::Scalar => {
+                        let (child, child_ty) = node
+                            .child_bindings
+                            .iter()
+                            .find(|(_, child_ty)| *child_ty != DYNAMIC_CHILD_SLOT_MARKER)
+                            .expect("scalar content must have one static child");
+                        let child =
+                            into_node_if_needed(quote! { #child.clone() }, child_ty, from, table);
+                        let setter = format_ident!("set_{field}");
+                        quote! {
+                            {
+                                use #ext_path as _;
+                                #binding.#setter(#child);
+                            }
+                        }
+                    }
+                    EffectiveContentShape::External => unreachable!(),
+                }
+            } else {
+                let props_macro = dynamic_content_props_macro_ident(&node.type_path);
+                let macro_path = if info.is_builtin {
+                    quote! { elwindui::core::#props_macro }
+                } else {
+                    quote! { crate::#props_macro }
+                };
+                quote! {
+                    #macro_path!(@children #binding, [#(#children),*]);
+                }
             }
         } else {
             TokenStream::new()
@@ -10593,6 +11885,7 @@ fn emit_construction(
             #construct_call
             #(#optional_setters)*
             #composed_content_attach
+            #content_children_attach
         });
         // A non-native component exposes its view root through `into_node()`, allowing attached
         // property setters to target that root. Native non-`NativeControl` roots are unsupported.
@@ -10829,7 +12122,9 @@ fn build_component_args(
             // that guard doesn't apply; kept for defense-in-depth/exhaustiveness, not a normally-
             // reached path for `context_popup` itself. `emit_deferred_view_value`'s own `Some(..)`-
             // wrap is applied uniformly below with every other value.
-            Some(ViewExpr::DeferredView(deferred)) => emit_deferred_view_value(deferred, ctx),
+            Some(ViewExpr::DeferredView(deferred)) => {
+                emit_deferred_view_value(deferred, ctx, from, table)
+            }
             Some(other) => {
                 if let Some(coerced) = coerce_color_literal(inner_ty, other) {
                     if is_option && is_brush_type(inner_ty) {
@@ -11023,7 +12318,7 @@ fn build_component_setters(
         let attr = find_attr(node, name);
         if let Some(expr) = attr.filter(|_| is_semantic_brush_property(info, name)) {
             let raw = emit_expr(expr, ctx, &EmitMode::Construction);
-            let environment = semantic_brush_construction_environment(node);
+            let environment = semantic_brush_construction_environment(node, ctx);
             let receiver = quote! { #binding };
             let set = emit_field_setter_call(
                 name,
@@ -11053,7 +12348,9 @@ fn build_component_setters(
             Some(ViewExpr::Closure { params, body }) => {
                 emit_closure_value(params, body, ctx, from, table)
             }
-            Some(ViewExpr::DeferredView(deferred)) => emit_deferred_view_value(deferred, ctx),
+            Some(ViewExpr::DeferredView(deferred)) => {
+                emit_deferred_view_value(deferred, ctx, from, table)
+            }
             Some(other) => {
                 let value = if let Some(coerced) = coerce_color_literal(inner_ty, other) {
                     coerced
@@ -11145,7 +12442,7 @@ fn build_component_optional_setters(
         if let Some(expr) = find_attr(node, name).filter(|_| is_semantic_brush_property(info, name))
         {
             let raw = emit_expr(expr, ctx, &EmitMode::Construction);
-            let environment = semantic_brush_construction_environment(node);
+            let environment = semantic_brush_construction_environment(node, ctx);
             let receiver = quote! { #binding };
             let set = emit_field_setter_call(
                 name,
@@ -11175,7 +12472,9 @@ fn build_component_optional_setters(
             Some(ViewExpr::Closure { params, body }) => {
                 emit_closure_value(params, body, ctx, from, table)
             }
-            Some(ViewExpr::DeferredView(deferred)) => emit_deferred_view_value(deferred, ctx),
+            Some(ViewExpr::DeferredView(deferred)) => {
+                emit_deferred_view_value(deferred, ctx, from, table)
+            }
             Some(other) => {
                 if let Some(coerced) = coerce_color_literal(inner_ty, other) {
                     coerced
@@ -11595,7 +12894,7 @@ fn emit_virtual_construction(
 ) {
     let binding = &node.binding;
     let value = build_virtual_value(node, ctx, from, table, false);
-    let info = table.resolve(from, &node.type_path);
+    let info = resolve_context_info(ctx, from, table, &node.type_path);
     let concrete_ty = concrete_type_ident(&node.type_path, info);
     out.extend(quote! {
         let #binding: std::rc::Rc<#concrete_ty> = #value;
@@ -11626,8 +12925,7 @@ fn build_virtual_value(
     table: &SymbolTable,
     defer_content: bool,
 ) -> TokenStream {
-    let info = table
-        .resolve(from, &node.type_path)
+    let info = resolve_context_info(ctx, from, table, &node.type_path)
         .unwrap_or_else(|| panic!("unknown virtual builtin `{}`", node.type_path));
     debug_assert!(info.is_virtual_builtin);
     let type_ident = format_ident!("{}", node.type_path);
@@ -11729,7 +13027,7 @@ fn build_virtual_value(
                 needs_type_trait = true;
             }
             let raw = emit_expr(expr, ctx, &EmitMode::Construction);
-            let environment = semantic_brush_construction_environment(node);
+            let environment = semantic_brush_construction_environment(node, ctx);
             let receiver = quote! { __v };
             let set = emit_field_setter_call(
                 name,
@@ -11749,7 +13047,7 @@ fn build_virtual_value(
             // `ViewExpr::Closure` special-casing elsewhere in this function (none of its own
             // fields take one) — `context_popup`/any other `ViewTemplate`-typed field is the
             // first one that needs a non-`emit_expr` value here.
-            let factory = emit_deferred_view_value(deferred, ctx);
+            let factory = emit_deferred_view_value(deferred, ctx, from, table);
             if is_option {
                 quote! { Some(#factory) }
             } else {
@@ -11936,6 +13234,49 @@ fn qualified_construct_path(component: &ComponentDef, name: &str) -> Option<Toke
     Some(quote! { #path::construct })
 }
 
+fn emit_content_presenter_wiring(plan: &[PlannedNode], ctx: &ViewCtx, out: &mut TokenStream) {
+    for node in plan {
+        if node.dynamic.is_some()
+            || !node
+                .type_path
+                .rsplit("::")
+                .next()
+                .is_some_and(|name| name == "ContentPresenter")
+        {
+            continue;
+        }
+
+        let presenter = &node.binding;
+        if let Some(parent) = &ctx.template_parent {
+            out.extend(quote! {
+                elwindui::core::ui::ContentPresenter::__bind_templated_parent(
+                    &#presenter,
+                    &#parent,
+                );
+            });
+        } else if ctx.weak_bindable_owners.contains("templated_parent") {
+            out.extend(quote! {
+                {
+                    let templated_parent = this.templated_parent.upgrade().expect(
+                        "ControlTemplate templated_parent was dropped before ContentPresenter wiring"
+                    );
+                    elwindui::core::ui::ContentPresenter::__bind_templated_parent(
+                        &#presenter,
+                        &templated_parent,
+                    );
+                }
+            });
+        } else {
+            out.extend(quote! {
+                elwindui::core::ui::ContentPresenter::__bind_templated_parent(
+                    &#presenter,
+                    &this,
+                );
+            });
+        }
+    }
+}
+
 /// Attaches callbacks (`on_*`) and two-way change-back wiring to widgets that were stored on
 /// `self`, each capturing a fresh `Rc::clone`. State-changing callbacks rely on their setter's
 /// typed PropertyChanged notification; they must not force a blanket `resync()` afterward. No
@@ -11956,7 +13297,7 @@ fn emit_wiring(
     }
     let binding = &node.binding;
     let self_mode = EmitMode::WithSelf(quote! { this });
-    let info = table.resolve(from, &node.type_path);
+    let info = resolve_context_info(ctx, from, table, &node.type_path);
     // A shape/host-composition root (`generate_view`'s `is_shape_composition`/`is_host_composition`
     // — `node.binding == root_binding`) has no separately-stored `self.#binding` field of its own:
     // it's moved into `self.base` at construction, and `self`/`this` itself *is* the tree node (see
@@ -11964,6 +13305,8 @@ fn emit_wiring(
     // itself in that case instead.
     let widget_binding = if self_is_node {
         quote! { this.clone() }
+    } else if ctx.is_template_storage() {
+        quote! { #binding.clone() }
     } else {
         quote! {
             this.#binding
@@ -11989,6 +13332,8 @@ fn emit_wiring(
     if !needs_wiring {
         return;
     }
+    let refresh_capture = ctx.refresh_capture();
+    let refresh_statement = ctx.refresh_statement();
     // `emit_wiring`'s own output lands in `NotepadWindowImpl::new()`, a *different* function from
     // wherever `emit_construction` ran (for a composed/host-composed target, that's the separate
     // `create_<snake case>(..)` free function — see `generate_view`'s `create_fn`/
@@ -12053,10 +13398,11 @@ fn emit_wiring(
                         #[allow(unused_imports)]
                         use elwindui::ui::*;
                         let widget = #widget_binding;
+                        #refresh_capture
                         let this = std::rc::Rc::clone(&this);
                         elwindui::core::#props_macro!(@set widget, #name_ident, move |#(#annotated_params),*| {
                             #call;
-                            this.__refresh_dynamic_regions();
+                            #refresh_statement
                         });
                     }
                 });
@@ -12113,6 +13459,7 @@ fn emit_wiring(
                     {
                         use elwindui::core::ui::UIElementExt as _;
                         let widget = #widget_binding;
+                        #refresh_capture
                         let this = std::rc::Rc::clone(&this);
                         #registration
                         #shortcut_registration
@@ -12141,6 +13488,7 @@ fn emit_wiring(
                 out.extend(quote! {
                     {
                         let widget = #widget_binding;
+                        #refresh_capture
                         let this = std::rc::Rc::clone(&this);
                         widget.#setter(Box::new(move || {
                             #call;
@@ -12151,7 +13499,7 @@ fn emit_wiring(
                             // Reconcile the owned child ranges here as well. `DynamicChildSlot`
                             // preserves unchanged Rc children, so this does not recreate an
                             // existing tab or reset its native editing state.
-                            this.__refresh_dynamic_regions();
+                            #refresh_statement
                         }));
                     }
                 });
@@ -12177,6 +13525,7 @@ fn emit_wiring(
                 out.extend(quote! {
                     {
                         let widget = #widget_binding;
+                        #refresh_capture
                         let this = std::rc::Rc::clone(&this);
                         widget.#setter(Box::new(move |#(#param_decls),*| {
                             #call;
@@ -12199,14 +13548,33 @@ fn emit_wiring(
         let setter = match path.as_slice() {
             [field] if ctx.mutable_own_fields.contains(field) => {
                 let setter = format_ident!("set_{}", field);
-                quote! { this.#setter }
+                quote! { this.#setter(new_value); }
             }
-            [_, _] => emit_setter(path, ctx, &self_mode),
+            [field]
+                if ctx.template_parent.is_some()
+                    && ctx.template_bare_parent_fields.contains(field) =>
+            {
+                emit_template_setter_call(
+                    &["templated_parent".to_string(), field.clone()],
+                    ctx,
+                    &self_mode,
+                    quote! { new_value },
+                )
+                .expect("bare template property must lower to a setter call")
+            }
+            [_, _] => {
+                let Some(setter) =
+                    emit_template_setter_call(path, ctx, &self_mode, quote! { new_value })
+                else {
+                    continue;
+                };
+                setter
+            }
             _ => continue,
         };
         let on_change = quote! {
             Box::new(move |new_value| {
-                #setter(new_value);
+                #setter
                 // The model setter synchronously emits PropertyChanged. Its owning view
                 // subscription applies the model→widget update; forcing a second blanket resync
                 // here resets native editing state on AppKit.
@@ -12694,14 +14062,16 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                         // setter call.  Keep this schema-driven; no component/type names are
                         // involved in the lowering decision.
                         self.visit_expr_mut(&mut assign.right);
-                        let setter = format_ident!("set_{}", name);
-                        let parent = self
-                            .ctx
-                            .template_parent
-                            .as_ref()
-                            .expect("template parent binding is available for bare assignment");
                         let rhs = &assign.right;
-                        *node = syn::parse_quote! { #parent.#setter(#rhs) };
+                        let setter = emit_template_setter_call(
+                            &["templated_parent".to_string(), name],
+                            self.ctx,
+                            self.mode,
+                            quote! { #rhs },
+                        )
+                        .expect("bare template parent assignment must lower to a setter call");
+                        *node = syn::parse2(setter)
+                            .expect("generated bare template parent setter parses");
                         return;
                     } else if let Some(setter) = self.resolved_implicit_owner_setter(&name) {
                         self.visit_expr_mut(&mut assign.right);
@@ -12783,13 +14153,17 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                             let parent = self.ctx.template_parent.as_ref().expect(
                                 "template parent binding is available for template expressions",
                             );
+                            let receiver = match self.mode {
+                                EmitMode::Construction => quote! { #parent },
+                                EmitMode::WithSelf(self_token) => self_token.clone(),
+                            };
                             let template_target = self
                                 .ctx
                                 .template_target
                                 .clone()
                                 .unwrap_or_else(|| quote! { C });
                             *node = syn::parse_quote! {
-                                <#template_target as elwindui::core::ui::TemplateProperty<#key>>::__template_set(&*#parent, #value)
+                                <#template_target as elwindui::core::ui::WritableTemplateProperty<#key>>::__template_set(&*#receiver, #value)
                             };
                         }
                         return;
@@ -13522,26 +14896,16 @@ fn emit_resync_with_receiver(
         return;
     }
     let binding = &node.binding;
-    let self_mode = EmitMode::WithSelf(quote! { self });
-    let info = table.resolve(from, &node.type_path);
+    let self_mode = if ctx.is_template_storage() {
+        EmitMode::WithSelf(quote! { this })
+    } else {
+        EmitMode::WithSelf(quote! { self })
+    };
+    let info = resolve_context_info(ctx, from, table, &node.type_path);
     // See `emit_wiring`'s matching `widget_binding`/`self_is_node` doc comment — a shape/host-
     // composition root has no separately-stored `self.#binding` field; `self` itself already *is*
     // the tree node.
-    let receiver = match receiver_override {
-        Some(receiver) => receiver,
-        None if self_is_node => quote! { self },
-        // `.clone()` (matching `emit_wiring`'s own receiver, just below) so this evaluates to an
-        // owned `Rc<ConcreteType>` place, not `&Rc<ConcreteType>` — some downstream call sites
-        // (`#[text_style]`'s `&*(#receiver)` wrapping, in particular) deref exactly one layer,
-        // assuming an `Rc<T>` input the way a plain (pre-`OnceCell`, CI-4 of #80) field access
-        // always was; an extra un-cloned reference layer here breaks that arithmetic.
-        None => quote! {
-            self.#binding
-                .get()
-                .expect("emit_resync: component is not yet mounted")
-                .clone()
-        },
-    };
+    let receiver = ctx.node_receiver(binding, self_is_node, receiver_override);
     // `resync()` is its own function, a separate lexical scope from `new()` — the `use` already
     // injected alongside construction (`emit_construction`'s `builtin_trait_use`, or
     // `build_virtual_value`'s own inline copy for a virtual builtin) doesn't carry over here, so
@@ -13654,7 +15018,7 @@ fn emit_resync_with_receiver(
             .map(String::as_str);
         if info.is_some_and(|info| is_semantic_brush_property(info, name)) {
             let raw = emit_expr(expr, ctx, &self_mode);
-            let environment = semantic_brush_resync_environment(node);
+            let environment = semantic_brush_resync_environment(node, ctx);
             let is_text_style = info.is_some_and(|info| info.text_style_fields.contains(name));
             let (set, clear) = if info.is_none() && !is_text_style {
                 let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
@@ -13755,7 +15119,7 @@ fn emit_resync_with_receiver(
             // for symmetry with nothing else needing it, and to fail loudly (a real type error) if
             // that invariant is ever violated instead of silently miscompiling.
             if bare_own_field_type(expr, ctx).is_some_and(|ty| ty.contains('!')) {
-                let environment = semantic_brush_resync_environment(node);
+                let environment = semantic_brush_resync_environment(node, ctx);
                 out.extend(quote! {
                     if let ::std::option::Option::Some(__v) = ::std::option::Option::from(#value) {
                         elwindui::core::#props_macro!(
@@ -13764,7 +15128,7 @@ fn emit_resync_with_receiver(
                     }
                 });
             } else {
-                let environment = semantic_brush_resync_environment(node);
+                let environment = semantic_brush_resync_environment(node, ctx);
                 out.extend(quote! {
                     elwindui::core::#props_macro!(
                         @set_with_environment #receiver, #name_ident, #value, #environment
@@ -13983,6 +15347,13 @@ fn owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> TokenStrea
         };
     }
     if owner == "templated_parent" {
+        if let EmitMode::WithSelf(self_tok) = mode {
+            // Callback/resync bodies are emitted inside a closure that owns a cloned parent.  Use
+            // that closure-local receiver instead of spelling the factory's outer binding again;
+            // otherwise the closure would move the factory's only parent `Rc` and later
+            // subscriptions/cleanup would fail with E0382.
+            return self_tok.clone();
+        }
         if let Some(parent) = &ctx.template_parent {
             return quote! { #parent };
         }
@@ -14056,6 +15427,12 @@ fn emit_path_get(path: &[String], ctx: &ViewCtx, mode: &EmitMode) -> TokenStream
             value
         }
         [owner, field] => {
+            if ctx.template_parent.is_some() && ctx.template_bare_parent_fields.contains(owner) {
+                let parent_value =
+                    emit_path_get(&["templated_parent".to_string(), owner.clone()], ctx, mode);
+                let getter = format_ident!("{}", field);
+                return quote! { (#parent_value).#getter() };
+            }
             let base = path_owner_value_tokens(ctx, mode, owner);
             let getter = format_ident!("{}", field);
             if ctx.default_template_parent
@@ -14073,83 +15450,29 @@ fn emit_path_get(path: &[String], ctx: &ViewCtx, mode: &EmitMode) -> TokenStream
     }
 }
 
-fn emit_setter(path: &[String], ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
+fn emit_template_setter_call(
+    path: &[String],
+    ctx: &ViewCtx,
+    mode: &EmitMode,
+    value: TokenStream,
+) -> Option<TokenStream> {
     let [owner, field] = path else {
-        panic!(
-            "expected a 2-segment path after bind resolution, got `{}`",
-            path.join(".")
-        );
+        return None;
     };
     let base = path_owner_value_tokens(ctx, mode, owner);
-    let setter = format_ident!("set_{}", field);
-    quote! { #base.#setter }
-}
-
-/// Target-aware template expression lowering with the optional bare-property schema used by a
-/// component's declared default template.  Explicit standalone/named templates pass an empty
-/// schema and therefore require `templated_parent.foo`; a component default may retain the
-/// ordinary authored shorthand `foo`, which is normalized through the same keyed bridge.
-pub(crate) fn emit_template_expression_for_target_with_fields(
-    expr: &ViewExpr,
-    parent: &syn::Ident,
-    property_bounds: &Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
-    template_target: TokenStream,
-    bare_parent_fields: HashSet<String>,
-) -> TokenStream {
-    let ctx = ViewCtx {
-        closure_param: None,
-        own_fields: HashMap::new(),
-        mutable_own_fields: HashSet::new(),
-        bindable_owners: HashSet::new(),
-        weak_bindable_owners: HashSet::new(),
-        default_template_parent: false,
-        template_base_fields: HashSet::new(),
-        implicit_owner: None,
-        target: format_ident!("__ElwinduiTemplateTarget"),
-        template_parent: Some(parent.clone()),
-        template_property_bounds: Some(property_bounds.clone()),
-        template_target: Some(template_target),
-        template_bare_parent_fields: bare_parent_fields,
-    };
-    emit_expr(expr, &ctx, &EmitMode::Construction)
-}
-
-/// Concrete-target closure lowering with the bare-property schema used by a component default
-/// template.  The closure rewriter remains the same implementation as standalone/named paths.
-pub(crate) fn emit_template_closure_value_for_target_with_fields(
-    params: &[String],
-    body: &ClosureBody,
-    parent: &syn::Ident,
-    property_bounds: &Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
-    from: &Module,
-    table: &SymbolTable,
-    template_target: TokenStream,
-    bare_parent_fields: HashSet<String>,
-) -> TokenStream {
-    // `emit_closure_value` emits a `move` closure.  Keep the factory's strong parent binding
-    // available for subsequent subscriptions/cleanup by giving the generated closure its own
-    // cloned capture rather than moving the shared local out of the factory scope.
-    let closure_parent = format_ident!("__elwindui_template_closure_parent");
-    let ctx = ViewCtx {
-        closure_param: None,
-        own_fields: HashMap::new(),
-        mutable_own_fields: HashSet::new(),
-        bindable_owners: HashSet::new(),
-        weak_bindable_owners: HashSet::new(),
-        default_template_parent: false,
-        template_base_fields: HashSet::new(),
-        implicit_owner: None,
-        target: format_ident!("__ElwinduiTemplateTarget"),
-        template_parent: Some(closure_parent.clone()),
-        template_property_bounds: Some(property_bounds.clone()),
-        template_target: Some(template_target),
-        template_bare_parent_fields: bare_parent_fields,
-    };
-    let value = emit_closure_value(params, body, &ctx, from, table);
-    quote! {{
-        let #closure_parent = #parent.clone();
-        #value
-    }}
+    if owner == "templated_parent" && ctx.template_property_bounds.is_some() {
+        let key = crate::template_property_key(field);
+        let template_target = ctx.template_target.clone().unwrap_or_else(|| quote! { C });
+        Some(quote! {
+            <#template_target as elwindui::core::ui::WritableTemplateProperty<#key>>::__template_set(
+                &*#base,
+                #value,
+            )
+        })
+    } else {
+        let setter = format_ident!("set_{}", field);
+        Some(quote! { #base.#setter(#value) })
+    }
 }
 
 /// Concrete-target lifecycle/event body lowering with a component-default bare-property schema.
@@ -14175,6 +15498,10 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
         template_property_bounds: Some(property_bounds.clone()),
         template_target: Some(template_target),
         template_bare_parent_fields: bare_parent_fields,
+        storage: ViewStorage::Template {
+            environment: format_ident!("__environment"),
+            refresh_cell: format_ident!("__elwindui_template_refresh_cell"),
+        },
     };
     emit_on_event_closure_body(body, closure_params, &ctx, &EmitMode::Construction)
 }
@@ -14376,6 +15703,188 @@ pub(crate) fn collect_template_rust_block_property_keys(
     Collector { out }.visit_block(block);
 }
 
+/// Collects the template-parent properties that are used as write endpoints.  Reads and writes
+/// intentionally have separate collections: a generic standalone factory needs only
+/// `TemplateProperty<KEY>` for a read, while `<=>` and `templated_parent.set_<name>(..)` must add
+/// the stronger `WritableTemplateProperty<KEY>` bound.  This visitor is metadata-only; it never
+/// creates a runtime property registry or changes the lowering emitted by the rewriter.
+pub(crate) fn collect_template_writable_property_keys(
+    body: &crate::ast::ViewBody,
+    lets: &[crate::ast::LetBinding],
+    on_mount: Option<&syn::Block>,
+    on_unmount: Option<&syn::Block>,
+    on_update: Option<&crate::ast::OnUpdateHook>,
+    bare_parent_fields: &HashSet<String>,
+    out: &mut BTreeSet<u64>,
+) {
+    struct Collector<'a> {
+        out: &'a mut BTreeSet<u64>,
+    }
+    impl<'ast> Visit<'ast> for Collector<'_> {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if let syn::Expr::Path(receiver) = node.receiver.as_ref()
+                && receiver.path.segments.len() == 1
+                && receiver.path.segments[0].ident == "templated_parent"
+            {
+                let method = node.method.to_string();
+                if let Some(property) = method.strip_prefix("set_") {
+                    self.out.insert(crate::template_property_key(property));
+                }
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+    fn collect_expr_writes(expr: &syn::Expr, out: &mut BTreeSet<u64>) {
+        Collector { out }.visit_expr(expr);
+    }
+    fn collect_block_writes(block: &syn::Block, out: &mut BTreeSet<u64>) {
+        Collector { out }.visit_block(block);
+    }
+
+    fn collect_body_writes(
+        body: &crate::ast::ViewBody,
+        bare_parent_fields: &HashSet<String>,
+        out: &mut BTreeSet<u64>,
+    ) {
+        for attribute in &body.attributes {
+            collect_attribute_writes(attribute, bare_parent_fields, out);
+        }
+        for (_, _, value) in &body.attached {
+            collect_view_expr_writes(value, bare_parent_fields, out);
+        }
+        for child in &body.children {
+            collect_child_writes(child, bare_parent_fields, out);
+        }
+    }
+
+    fn collect_attribute_writes(
+        attribute: &crate::ast::ViewAttribute,
+        bare_parent_fields: &HashSet<String>,
+        out: &mut BTreeSet<u64>,
+    ) {
+        if attribute.kind == crate::ast::AssignmentKind::TwoWay {
+            if let crate::ast::ViewExpr::Path(path) = &attribute.value {
+                let property = match path.as_slice() {
+                    [property] if bare_parent_fields.contains(property) => Some(property),
+                    [owner, property, ..] if owner == "templated_parent" => Some(property),
+                    _ => None,
+                };
+                if let Some(property) = property {
+                    out.insert(crate::template_property_key(property));
+                }
+            }
+        }
+        collect_view_expr_writes(&attribute.value, bare_parent_fields, out);
+    }
+
+    fn collect_view_expr_writes(
+        expr: &crate::ast::ViewExpr,
+        bare_parent_fields: &HashSet<String>,
+        out: &mut BTreeSet<u64>,
+    ) {
+        match expr {
+            crate::ast::ViewExpr::Expr(expression) => collect_expr_writes(expression, out),
+            crate::ast::ViewExpr::TFluent(_, args) => {
+                for (_, value) in args {
+                    collect_view_expr_writes(value, bare_parent_fields, out);
+                }
+            }
+            crate::ast::ViewExpr::Closure { body, .. } => {
+                collect_closure_writes(body, bare_parent_fields, out);
+            }
+            crate::ast::ViewExpr::Element(element) => {
+                collect_element_writes(element, bare_parent_fields, out);
+            }
+            crate::ast::ViewExpr::DeferredView(_) | crate::ast::ViewExpr::Path(_) => {}
+        }
+    }
+
+    fn collect_closure_writes(
+        body: &crate::ast::ClosureBody,
+        bare_parent_fields: &HashSet<String>,
+        out: &mut BTreeSet<u64>,
+    ) {
+        match body {
+            crate::ast::ClosureBody::Expr(expr) => {
+                collect_view_expr_writes(expr, bare_parent_fields, out)
+            }
+            crate::ast::ClosureBody::Element(element) => {
+                collect_element_writes(element, bare_parent_fields, out)
+            }
+            crate::ast::ClosureBody::Block(block) => collect_block_writes(block, out),
+        }
+    }
+
+    fn collect_element_writes(
+        element: &crate::ast::ElementNode,
+        bare_parent_fields: &HashSet<String>,
+        out: &mut BTreeSet<u64>,
+    ) {
+        for attribute in &element.attributes {
+            collect_attribute_writes(attribute, bare_parent_fields, out);
+        }
+        for (_, _, value) in &element.attached {
+            collect_view_expr_writes(value, bare_parent_fields, out);
+        }
+        for child in &element.children {
+            collect_child_writes(child, bare_parent_fields, out);
+        }
+    }
+
+    fn collect_child_writes(
+        child: &crate::ast::ChildEntry,
+        bare_parent_fields: &HashSet<String>,
+        out: &mut BTreeSet<u64>,
+    ) {
+        match child {
+            crate::ast::ChildEntry::Literal(element) => {
+                collect_element_writes(element, bare_parent_fields, out)
+            }
+            crate::ast::ChildEntry::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                collect_view_expr_writes(condition, bare_parent_fields, out);
+                for child in then_branch.iter().chain(else_branch) {
+                    collect_child_writes(child, bare_parent_fields, out);
+                }
+            }
+            crate::ast::ChildEntry::Match { value, arms } => {
+                collect_view_expr_writes(value, bare_parent_fields, out);
+                for arm in arms {
+                    for child in &arm.body {
+                        collect_child_writes(child, bare_parent_fields, out);
+                    }
+                }
+            }
+            crate::ast::ChildEntry::For {
+                collection, body, ..
+            } => {
+                collect_view_expr_writes(collection, bare_parent_fields, out);
+                for child in body {
+                    collect_child_writes(child, bare_parent_fields, out);
+                }
+            }
+            crate::ast::ChildEntry::Ref(_) => {}
+        }
+    }
+
+    collect_body_writes(body, bare_parent_fields, out);
+    for binding in lets {
+        collect_element_writes(&binding.element, bare_parent_fields, out);
+    }
+    if let Some(block) = on_mount {
+        collect_block_writes(block, out);
+    }
+    if let Some(block) = on_unmount {
+        collect_block_writes(block, out);
+    }
+    if let Some(hook) = on_update {
+        collect_block_writes(&hook.block, out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -14500,6 +16009,64 @@ mod tests {
         assert!(
             rendered.contains("CustomTabView :: new (vec !"),
             "nested children must lower through the derived collection: {rendered}"
+        );
+    }
+
+    #[test]
+    fn template_parent_path_keeps_inherited_writable_property_metadata() {
+        let module = multi_item_module(&[
+            TestItem::Component(
+                Some("Control"),
+                r#"
+                struct TemplateBase {
+                    #[prop]
+                    value: String,
+                    body: view! {
+                        TextBlock { text: value }
+                    },
+                }
+                "#,
+            ),
+            TestItem::Component(
+                Some("TemplateBase"),
+                r#"
+                struct TemplateDerived {
+                    template: template_view! {
+                        value: templated_parent.value
+                        TextBlock { text: templated_parent.value }
+                    },
+                }
+                "#,
+            ),
+        ]);
+        let table = build_symbol_table_with_builtins(std::slice::from_ref(&module));
+        let derived = table
+            .resolve(&module, "TemplateDerived")
+            .expect("derived template metadata");
+        assert_eq!(
+            derived.declaring_types.get("value").map(String::as_str),
+            Some("TemplateBase")
+        );
+        assert!(
+            derived
+                .effective_fields
+                .iter()
+                .any(|field| field.name == "value" && field.kind == FieldKind::Prop),
+            "an explicit templated_parent path must retain the inherited property: {:#?}",
+            derived.effective_fields
+        );
+
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("template_parent_inherited_writable_property", &generated);
+        let rendered = generated.to_string();
+        let key = crate::template_property_key("value");
+        assert!(
+            rendered.contains(&format!("WritableTemplateProperty < {key}u64 >")),
+            "the inherited property must expose the writable template capability: {rendered}"
+        );
+        assert!(
+            rendered.contains("TemplateBaseExt :: set_value"),
+            "the writable bridge must delegate to the declaring base setter: {rendered}"
         );
     }
 
@@ -17059,14 +18626,19 @@ struct NotepadWindow {
         assert_valid_rust("content_control_impl", &content_control_code);
         let content_control_str = content_control_code.to_string();
         assert!(content_control_str.contains("elwindui :: core :: ui :: Control :: new"));
-        // `content`/`padding` are `#[class]`-managed own (untagged) methods now (docs/
-        // docs/design/runtime/ui_tree_design.md) — the macro derives the matching trait declaration/impl from
-        // these at expansion time, invisible in these pre-expansion generated tokens.
+        // `content` is a `#[class]`-managed own (untagged) method, while `padding` is inherited from
+        // `Control`. The class macro derives the matching trait declaration/impl and inherited
+        // method surface at expansion time; it is intentionally not duplicated in these
+        // pre-expansion generated tokens.
         assert!(
             content_control_str
                 .contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >")
         );
-        assert!(content_control_str.contains("fn padding (& self) -> Option < f32 >"));
+        assert!(
+            content_control_str
+                .contains("elwindui :: class (inherits = elwindui :: core :: ui :: Control)"),
+            "ContentControl must inherit Control's padding surface through #[class]: {content_control_str}"
+        );
         // Real struct is always the bare `ContentControl` name itself — the *source* `#[class]` is
         // written against that same bare name (docs/design/runtime/ui_tree_design.md); the macro derives
         // its `ContentControlExt` trait alongside at expansion time — no `struct`/`trait` namespace
@@ -18160,7 +19732,7 @@ struct NotepadWindow {
             .find("WindowExt > :: mount_override")
             .expect("mount() should call mount_override");
         let build_pos = mount_body
-            .find("__build_view ()")
+            .find("__build_view (")
             .expect("mount() should call __build_view()");
         assert!(
             state_pos < override_pos && override_pos < build_pos,
@@ -18186,7 +19758,7 @@ struct NotepadWindow {
             .find("WindowExt > :: mount_override")
             .expect("mount() should call mount_override");
         let build_pos = mount_body
-            .find("__build_view ()")
+            .find("__build_view (")
             .expect("mount() should call __build_view()");
 
         assert!(

@@ -23,11 +23,35 @@ let template: ControlTemplate<MyButton> = template_view! {
 `ControlTemplate<C>`. `templated_parent` is the typed target from
 `ControlTemplateContext<C>` and uses the ordinary typed getter/event wiring
 system. Component defaults, named `#[control_template]` templates, and
-standalone expressions all enter one semantic template backend. That backend
-owns element construction, metadata/property and content lowering, event and
+standalone expressions all enter one shared semantic lowering path. Ordinary
+`view!` and all three template frontends use the same planner/emitter for
+element construction, metadata/property and content lowering, event and
 lifecycle wiring, dynamic-region reconciliation, ContentPresenter restrictions,
-ownership, and Environment propagation. A completely unconstrained expression
-may require a Rust type annotation.
+ownership, and Environment propagation. Only typed-parent acquisition,
+template-property capability bridging, factory wrapping, and template-root
+replacement are template-specific. A completely unconstrained expression may
+require a Rust type annotation.
+
+### 2.1 Read and write capabilities
+
+Template parent property access is split into two compile-time capabilities:
+
+- `TemplateProperty<KEY>` provides a cloned getter and change subscription;
+- `WritableTemplateProperty<KEY>` extends it with a typed setter.
+
+Generated code implements the writable capability only for effective `#[prop]`
+and `#[state]` fields that have a real setter. Computed, environment,
+read-only, derived, and otherwise non-settable fields remain readable but do
+not implement `WritableTemplateProperty<KEY>`. A template `<=>` binding or
+`templated_parent.set_<field>(...)` therefore fails during Rust trait
+resolution; it cannot become a runtime panic or silent no-op. Inherited
+writable fields delegate through the composed base's existing typed setter,
+without duplicating storage.
+
+`KEY` is a compile-time 64-bit FNV-1a-style token derived from the field-name
+literal. It is not a runtime registry or string lookup. A collision is an
+explicit compile-time duplicate-implementation/associated-type error and is
+never resolved silently.
 
 Inside a `#[component]` declaration, the reserved pseudo-field
 `template: template_view! { ... }` declares the component type's default

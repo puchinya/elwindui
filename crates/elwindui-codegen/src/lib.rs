@@ -19,12 +19,14 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use syn::parse::Parser;
-
 /// Stable compile-time token used by the generic `template_view!` property bridge.  This is a
-/// code-generation key, not a runtime property lookup: the generated component implements the
+/// 64-bit FNV-1a-style hash of the field-name literal, calculated during code generation; it is a
+/// code-generation key, not a runtime property lookup.  The generated component implements the
 /// corresponding `TemplateProperty<KEY>` instance and the standalone factory carries the same
-/// literal key in its trait bound.
+/// literal key in its trait bound.  There is no runtime registry or string lookup.  If two
+/// distinct properties in one target collide, Rust reports the duplicate `TemplateProperty<KEY>`
+/// implementation/associated-type conflict at compile time; the collision is never resolved
+/// silently.
 pub(crate) const fn template_property_key(name: &str) -> u64 {
     let bytes = name.as_bytes();
     let mut hash = 0xcbf29ce484222325u64;
@@ -262,2464 +264,7 @@ pub fn generate_template_view_expression(body: &str) -> Result<TokenStream, Stri
     Ok(quote! {{ #factory }})
 }
 
-/// Resolves the exported property-shape macro for one template element using the same module
-/// metadata boundary as normal View generation.  Builtins (and unresolved external framework
-/// types) are exported by `elwindui::core`; a user component in the current crate is exported at
-/// `crate::`, while a qualified external component keeps its crate prefix.  This is deliberately
-/// metadata/path based rather than a list of concrete widget names.
-fn template_props_macro_path(type_path: &str, info: Option<&codegen::TypeInfo>) -> TokenStream {
-    let ident = type_path
-        .rsplit("::")
-        .next()
-        .map(|name| format_ident!("__elwindui_props_{name}"))
-        .expect("template element path has a type name");
-    if info.is_some_and(|info| info.is_builtin) || type_path.starts_with("elwindui::") {
-        return quote! { elwindui::core::#ident };
-    }
-    if info.is_some() || type_path.starts_with("crate::") {
-        quote! { crate::#ident }
-    } else if !type_path.contains("::") {
-        // An unresolved bare name is the established spelling for a framework builtin imported
-        // through `elwindui::ui::*`; user components with metadata are resolved above, while
-        // qualified external components retain their crate prefix below.
-        quote! { elwindui::core::#ident }
-    } else if let Some(prefix) = type_path.split("::").next() {
-        let prefix = format_ident!("{prefix}");
-        quote! { #prefix::#ident }
-    } else {
-        quote! { crate::#ident }
-    }
-}
-
 static TEMPLATE_VIEW_FACTORY_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-/// Shared backend for the `template_view!` ControlTemplate expression frontend.
-///
-/// Component defaults and named templates enter the same parser/validator and the generated
-/// component path uses the same typed parent, dynamic-region, ContentPresenter, and Environment
-/// contracts. This backend owns the expression-form factory lowering used when the target type is
-/// acquired from an expected `ControlTemplate<C>` value.
-#[derive(Clone)]
-struct TemplateBackend {
-    property_bounds: Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
-    iterable_properties: BTreeSet<u64>,
-    next_binding: usize,
-    parent_ident: String,
-    from: ast::Module,
-    table: codegen::SymbolTable,
-    target_type: TokenStream,
-    /// Legacy/ordinary component-default templates may use a bare own-property reference (for
-    /// example `TextBlock { text: label }`).  The semantic backend normalizes those names to the
-    /// same typed `templated_parent.label` path used by explicit template expressions.  The set is
-    /// supplied by the frontend that knows the concrete target; standalone/named templates leave
-    /// it empty and therefore require the explicit typed parent spelling.
-    bare_parent_fields: HashSet<String>,
-    /// `let` bindings are constructed once in source order and then referenced by later
-    /// elements.  Keeping these bindings in the semantic backend makes template_view! follow the
-    /// same lexical reference rule as ordinary view! lowering instead of treating references as a
-    /// standalone-only error.
-    lets: std::collections::HashMap<String, (syn::Ident, String)>,
-    /// Lexical bindings introduced by a dynamic `for` region.  Keeping these in the shared
-    /// backend lets constructor/property expressions inside the loop use the same path lowering
-    /// as ordinary template expressions (for example `Child { vm: item }`).
-    loop_bindings: Vec<(String, syn::Ident)>,
-    /// Whether this body contains a deferred ViewTemplate expression.  Such a body must use the
-    /// typed-parent factory shell even when no ordinary property expression appears, because the
-    /// deferred factory captures the parent identity at the point it is authored.
-    has_deferred_views: bool,
-}
-
-fn is_environment_scope_type(type_path: &str) -> bool {
-    type_path.rsplit("::").next() == Some("EnvironmentScope")
-}
-
-impl Default for TemplateBackend {
-    fn default() -> Self {
-        Self {
-            property_bounds: Rc::new(RefCell::new(BTreeMap::new())),
-            iterable_properties: BTreeSet::new(),
-            next_binding: 0,
-            parent_ident: "__elwindui_template_parent".to_string(),
-            from: ast::Module::default(),
-            table: codegen::build_symbol_table(&[]),
-            target_type: quote! { C },
-            bare_parent_fields: HashSet::new(),
-            lets: std::collections::HashMap::new(),
-            loop_bindings: Vec::new(),
-            has_deferred_views: false,
-        }
-    }
-}
-
-impl TemplateBackend {
-    fn new(
-        from: ast::Module,
-        table: codegen::SymbolTable,
-        target_type: TokenStream,
-        bare_parent_fields: HashSet<String>,
-    ) -> Self {
-        Self {
-            property_bounds: Rc::new(RefCell::new(BTreeMap::new())),
-            iterable_properties: BTreeSet::new(),
-            next_binding: 0,
-            parent_ident: "__elwindui_template_parent".to_string(),
-            from,
-            table,
-            target_type,
-            bare_parent_fields,
-            lets: std::collections::HashMap::new(),
-            loop_bindings: Vec::new(),
-            has_deferred_views: false,
-        }
-    }
-
-    /// Resolve a template element through the ordinary lexical symbol table first.  The
-    /// expression-form `template_view!` frontend is parsed outside a user module, so its
-    /// unqualified same-crate component names have no `Module::path`/`use` context; in that one
-    /// frontend-only case, accept a unique user-defined metadata entry.  Builtins are deliberately
-    /// excluded by `resolve_unqualified`, so this remains metadata-driven rather than a list of
-    /// framework type names.
-    fn resolve_info(&self, type_path: &str) -> Option<&codegen::TypeInfo> {
-        self.table.resolve(&self.from, type_path).or_else(|| {
-            (!type_path.contains("::"))
-                .then(|| self.table.resolve_unqualified(type_path))
-                .flatten()
-        })
-    }
-
-    fn loop_binding(&self, name: &str) -> Option<&syn::Ident> {
-        self.loop_bindings
-            .iter()
-            .rev()
-            .find_map(|(binding, ident)| (binding == name).then_some(ident))
-    }
-
-    /// Returns the declaration-driven semantic-brush capability for one template property.
-    ///
-    /// Local metadata can answer this at compile time.  For a builtin or external class whose
-    /// declaration is represented only by its exported props macro, keep the query in the emitted
-    /// tokens so that the same declaration metadata remains authoritative across crates.
-    fn semantic_brush_query(&self, type_path: &str, name: &str) -> TokenStream {
-        if let Some(info) = self.resolve_info(type_path) {
-            let value = info.semantic_brush_fields.contains(name);
-            quote! { #value }
-        } else {
-            let props_macro = template_props_macro_path(type_path, None);
-            let name = format_ident!("{name}");
-            quote! { #props_macro!(@is_semantic_brush #name) }
-        }
-    }
-
-    /// Detects whether an expression needs the typed template parent while it is re-evaluated by
-    /// an Environment/theme subscription.  Parent-independent standalone factories intentionally
-    /// do not bind a parent variable, so this distinction keeps the shared semantic backend valid
-    /// for both factory shells without introducing a standalone-only compiler branch.
-    fn expression_uses_template_parent(&self, expr: &ast::ViewExpr) -> bool {
-        match expr {
-            ast::ViewExpr::Path(path) => path.first().is_some_and(|name| {
-                name == "templated_parent" || self.bare_parent_fields.contains(name)
-            }),
-            ast::ViewExpr::Expr(expression) => {
-                struct ParentPathVisitor<'a> {
-                    fields: &'a HashSet<String>,
-                    found: bool,
-                }
-                impl<'ast> syn::visit::Visit<'ast> for ParentPathVisitor<'_> {
-                    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-                        if let Some(first) = node.path.segments.first() {
-                            let name = first.ident.to_string();
-                            if name == "templated_parent" || self.fields.contains(&name) {
-                                self.found = true;
-                            }
-                        }
-                        syn::visit::visit_expr_path(self, node);
-                    }
-                }
-                let mut visitor = ParentPathVisitor {
-                    fields: &self.bare_parent_fields,
-                    found: false,
-                };
-                syn::visit::Visit::visit_expr(&mut visitor, expression);
-                visitor.found
-            }
-            ast::ViewExpr::TFluent(_, args) => args
-                .iter()
-                .any(|(_, value)| self.expression_uses_template_parent(value)),
-            ast::ViewExpr::Element(element) => {
-                element
-                    .attributes
-                    .iter()
-                    .any(|attribute| self.expression_uses_template_parent(&attribute.value))
-                    || element
-                        .attached
-                        .iter()
-                        .any(|(_, _, value)| self.expression_uses_template_parent(value))
-            }
-            ast::ViewExpr::Closure { .. } | ast::ViewExpr::DeferredView(_) => false,
-        }
-    }
-
-    /// Whether an unresolved/external property can safely be repeated from the semantic-brush
-    /// listener.  Builtin props metadata is available only through the exported props macro, so we
-    /// cannot decide its semantic-brush bit until the generated code is compiled.  Restrict that
-    /// deferred query to expressions whose repeated closure does not move an arbitrary caller
-    /// capture out of an enclosing `Fn` factory: typed parent paths and qualified constant paths.
-    /// Local metadata remains authoritative and does not need this conservative fallback.
-    fn expression_safe_for_semantic_subscription(&self, expr: &ast::ViewExpr) -> bool {
-        match expr {
-            ast::ViewExpr::Path(path) => path.first().is_some_and(|first| {
-                self.loop_binding(first).is_none()
-                    && (first == "templated_parent"
-                        || self.bare_parent_fields.contains(first)
-                        || path.len() > 1)
-            }),
-            ast::ViewExpr::TFluent(_, args) => args
-                .iter()
-                .all(|(_, value)| self.expression_safe_for_semantic_subscription(value)),
-            ast::ViewExpr::Element(_)
-            | ast::ViewExpr::Expr(_)
-            | ast::ViewExpr::Closure { .. }
-            | ast::ViewExpr::DeferredView(_) => false,
-        }
-    }
-
-    /// Emits the common Environment/theme subscription for a semantic-brush property.
-    ///
-    /// The assignment is kept inside one reusable closure rather than spelling the value
-    /// expression once for construction and once for the theme callback.  This is important for
-    /// arbitrary template expressions: a captured value such as `format!("{}", captured)` may be
-    /// borrowed repeatedly by an `Fn` closure, but duplicating the expression into two independent
-    /// `move` closures can make the compiler treat the capture as moved twice.  The reusable
-    /// closure also gives default, named, and standalone templates one identical semantic-brush
-    /// path.
-    fn semantic_brush_subscription(
-        &mut self,
-        node: &syn::Ident,
-        type_path: &str,
-        props_macro: &TokenStream,
-        name: &syn::Ident,
-        expr: &ast::ViewExpr,
-        value: &TokenStream,
-        sink: &SubscriptionSink,
-    ) -> TokenStream {
-        let query = self.semantic_brush_query(type_path, &name.to_string());
-        let parent_dependent = self.expression_uses_template_parent(expr);
-        let node_weak = self.fresh("semantic_brush_node");
-        let environment = self.fresh("semantic_brush_environment");
-        let apply_environment = self.fresh("semantic_brush_apply_environment");
-        let apply = self.fresh("semantic_brush_apply");
-        let listener = self.fresh("semantic_brush_listener");
-        let subscriptions = self.fresh("semantic_brush_subscriptions");
-        let parent = format_ident!("{}", self.parent_ident);
-        let (parent_capture, apply_body) = if parent_dependent {
-            let parent_weak = self.fresh("semantic_brush_parent");
-            let callback_node = self.fresh("semantic_brush_callback_node");
-            (
-                quote! { let #parent_weak = std::rc::Rc::downgrade(&#parent); },
-                quote! {
-                    if let (Some(#callback_node), Some(#parent)) =
-                        (#node_weak.upgrade(), #parent_weak.upgrade())
-                    {
-                        let __environment = #apply_environment.clone();
-                        #props_macro!(@set_with_environment #callback_node, #name, #value, &__environment);
-                    }
-                },
-            )
-        } else {
-            let callback_node = self.fresh("semantic_brush_callback_node");
-            (
-                TokenStream::new(),
-                quote! {
-                    if let Some(#callback_node) = #node_weak.upgrade() {
-                        let __environment = #apply_environment.clone();
-                        #props_macro!(@set_with_environment #callback_node, #name, #value, &__environment);
-                    }
-                },
-            )
-        };
-        let extend = match sink {
-            SubscriptionSink::Shared(storage) => {
-                quote! { #storage.borrow_mut().extend(#subscriptions); }
-            }
-            SubscriptionSink::Local(storage) => quote! { #storage.extend(#subscriptions); },
-        };
-        quote! {
-            {
-                let #node_weak = std::rc::Rc::downgrade(&#node);
-                let #environment = __environment.clone();
-                let #apply_environment = #environment.clone();
-                #parent_capture
-                let #apply: std::rc::Rc<dyn Fn()> = std::rc::Rc::new(move || {
-                    #apply_body
-                });
-                #apply();
-                if #query {
-                let #listener: std::rc::Rc<dyn Fn()> = {
-                    let #apply = #apply.clone();
-                    std::rc::Rc::new(move || #apply())
-                };
-                let #subscriptions = elwindui::core::theme::subscribe_semantic_brushes(
-                    &#environment,
-                    #listener,
-                );
-                #extend
-                }
-            }
-        }
-    }
-
-    fn user_component_args(
-        &mut self,
-        element: &ast::ElementNode,
-        param_fields: &[(String, String)],
-        content_field: Option<&str>,
-        children: &[(TokenStream, String)],
-    ) -> Result<Vec<TokenStream>, String> {
-        let mut args = Vec::new();
-        for (name, ty) in param_fields {
-            if name == "children" {
-                let values = children.iter().map(|(value, child_ty)| {
-                    if ty.contains("dyn UIElement") {
-                        if self
-                            .resolve_info(child_ty)
-                            .is_some_and(|info| !info.is_native && !info.is_virtual_builtin)
-                        {
-                            quote! { #value.clone().into_node() }
-                        } else {
-                            quote! { #value.clone() }
-                        }
-                    } else {
-                        quote! { #value.clone() }
-                    }
-                });
-                args.push(quote! { vec![#(#values),*] });
-                continue;
-            }
-
-            let attr = element.attributes.iter().find(|attr| attr.name == *name);
-            let value = if let Some(attr) = attr {
-                match &attr.value {
-                    ast::ViewExpr::Element(child) => {
-                        let value = self.compile_element(
-                            child,
-                            &SubscriptionSink::Shared(quote! { __subscriptions }),
-                        )?;
-                        quote! { #value }
-                    }
-                    ast::ViewExpr::Closure { params, body } => {
-                        let parent = format_ident!("{}", self.parent_ident);
-                        codegen::emit_template_closure_value_for_target_with_fields(
-                            params,
-                            body,
-                            &parent,
-                            &self.property_bounds,
-                            &self.from,
-                            &self.table,
-                            self.target_type.clone(),
-                            self.bare_parent_fields.clone(),
-                        )
-                    }
-                    expr => self.expression(expr)?,
-                }
-            } else if content_field == Some(name.as_str()) && children.len() == 1 {
-                let (value, child_ty) = &children[0];
-                if ty.contains("dyn UIElement")
-                    && self
-                        .resolve_info(child_ty)
-                        .is_some_and(|info| !info.is_native && !info.is_virtual_builtin)
-                {
-                    quote! { #value.clone().into_node() }
-                } else {
-                    quote! { #value.clone() }
-                }
-            } else if ty.trim_start().starts_with("Option<") {
-                quote! { None }
-            } else {
-                return Err(format!(
-                    "template element `{}` is missing required property `{name}`",
-                    element.type_path
-                ));
-            };
-            let value = if ty.trim() == "String" {
-                quote! { (#value).to_string() }
-            } else if ty.trim_start().starts_with("Option<")
-                && !matches!(attr.map(|a| &a.value), Some(ast::ViewExpr::Path(path)) if path.first().is_some_and(|p| p == name))
-                && !(content_field == Some(name.as_str()) && children.len() == 1)
-            {
-                // Most generated component fields retain their declared Option shape in the
-                // constructor.  A literal supplied to an optional slot is therefore wrapped at
-                // this boundary; an explicit path already carrying the option is left untouched.
-                quote! { Some(#value) }
-            } else {
-                value
-            };
-            args.push(value);
-        }
-        Ok(args)
-    }
-
-    /// Emits the write-back endpoint for a `<=>` source path.  The read side of a template
-    /// binding is lowered by [`Self::expression`]; keeping the setter construction here means
-    /// standalone, named, and component-default templates all use the same typed
-    /// `TemplateProperty` bridge (and the same ordinary getter/setter chain for captured values).
-    /// A path whose final owner is not writable is rejected by the generated property surface in
-    /// exactly the same way as an ordinary View binding; returning `None` here is reserved for a
-    /// malformed/non-path expression, which the shared validator reports before code generation.
-    fn two_way_setter(
-        &mut self,
-        expr: &ast::ViewExpr,
-        parent_ident: &syn::Ident,
-    ) -> Result<Option<TokenStream>, String> {
-        let ast::ViewExpr::Path(raw_path) = expr else {
-            return Ok(None);
-        };
-        let path = if raw_path
-            .first()
-            .is_some_and(|name| self.bare_parent_fields.contains(name))
-        {
-            std::iter::once("templated_parent".to_string())
-                .chain(raw_path.iter().cloned())
-                .collect::<Vec<_>>()
-        } else {
-            raw_path.clone()
-        };
-        if path.len() < 2 {
-            return Ok(None);
-        }
-        let setter_name = path.last().expect("two-way path has a final field");
-        let setter = format_ident!("set_{setter_name}");
-        if path[0] == "templated_parent" {
-            if path.len() == 2 {
-                let key = crate::template_property_key(&path[1]);
-                self.property_bounds.borrow_mut().entry(key).or_insert(None);
-                let target = &self.target_type;
-                return Ok(Some(quote! {
-                    <#target as elwindui::core::ui::TemplateProperty<#key>>::__template_set(
-                        &*#parent_ident,
-                        new_value,
-                    );
-                }));
-            }
-
-            let first = &path[1];
-            let key = crate::template_property_key(first);
-            self.property_bounds.borrow_mut().entry(key).or_insert(None);
-            let target = &self.target_type;
-            let mut receiver = quote! {
-                <#target as elwindui::core::ui::TemplateProperty<#key>>::__template_get(&*#parent_ident)
-            };
-            for segment in &path[2..path.len() - 1] {
-                let getter = format_ident!("{segment}");
-                receiver = quote! { #receiver.#getter() };
-            }
-            return Ok(Some(quote! { #receiver.#setter(new_value); }));
-        }
-
-        let owner = format_ident!("{}", path[0]);
-        let mut receiver = quote! { #owner };
-        for segment in &path[1..path.len() - 1] {
-            let getter = format_ident!("{segment}");
-            receiver = quote! { #receiver.#getter() };
-        }
-        Ok(Some(quote! { #receiver.#setter(new_value); }))
-    }
-}
-
-enum SubscriptionSink {
-    Shared(TokenStream),
-    Local(syn::Ident),
-}
-
-impl SubscriptionSink {
-    fn push(&self, subscription: TokenStream) -> TokenStream {
-        match self {
-            Self::Shared(storage) => {
-                quote! { #storage.borrow_mut().push(#subscription); }
-            }
-            Self::Local(storage) => quote! { #storage.push(#subscription); },
-        }
-    }
-}
-
-impl TemplateBackend {
-    fn fresh(&mut self, prefix: &str) -> syn::Ident {
-        let ident = format_ident!("__elwindui_{prefix}_{}", self.next_binding);
-        self.next_binding += 1;
-        ident
-    }
-
-    fn compile_root(&mut self, body: &ast::ViewBody) -> Result<TokenStream, String> {
-        if body.children.len() != 1 {
-            return Err("`template_view!` requires exactly one effective root".into());
-        }
-        let root = match &body.children[0] {
-            ast::ChildEntry::Literal(element) if is_environment_scope_type(&element.type_path) => {
-                let mut roots = self.compile_environment_scope_children(
-                    element,
-                    &SubscriptionSink::Shared(quote! { __subscriptions }),
-                )?;
-                if roots.len() != 1 {
-                    return Err(
-                        "an EnvironmentScope used as a template root must contain exactly one child"
-                            .into(),
-                    );
-                }
-                Ok(roots.remove(0))
-            }
-            ast::ChildEntry::Literal(element) => {
-                // The ordinary View grammar permits properties/attached properties/shortcuts on
-                // the body itself as shorthand for the sole root element.  Fold those entries
-                // into a cloned root before handing it to the common element backend; rejecting
-                // them here made the expression frontend a narrower, standalone-only dialect.
-                let mut root = element.clone();
-                root.attributes.extend(body.attributes.iter().cloned());
-                root.attached.extend(body.attached.iter().cloned());
-                root.attribute_shortcuts
-                    .extend(body.attribute_shortcuts.iter().cloned());
-                self.compile_element(&root, &SubscriptionSink::Shared(quote! { __subscriptions }))
-            }
-            ast::ChildEntry::If { .. } | ast::ChildEntry::Match { .. } => {
-                if !body.attributes.is_empty()
-                    || !body.attached.is_empty()
-                    || !body.attribute_shortcuts.is_empty()
-                {
-                    return Err(
-                        "root properties require a static element; dynamic roots cannot receive body attributes"
-                            .into(),
-                    );
-                }
-                self.compile_dynamic_root(&body.children[0])
-            }
-            ast::ChildEntry::For { .. } => {
-                if !body.attributes.is_empty()
-                    || !body.attached.is_empty()
-                    || !body.attribute_shortcuts.is_empty()
-                {
-                    return Err(
-                        "root properties require a static element; a `for` region cannot be the sole ControlTemplate root"
-                            .into(),
-                    );
-                }
-                Err("a `for` region cannot be the sole ControlTemplate root".into())
-            }
-            ast::ChildEntry::Ref(name) => {
-                if !body.attributes.is_empty()
-                    || !body.attached.is_empty()
-                    || !body.attribute_shortcuts.is_empty()
-                {
-                    return Err(
-                        "root properties require a static element; a reference cannot be the sole ControlTemplate root"
-                            .into(),
-                    );
-                }
-                let Some((binding, _)) = self.lets.get(name) else {
-                    return Err(format!("template root reference `{name}` is not defined"));
-                };
-                Ok(quote! { #binding.clone() })
-            }
-        }?;
-        Ok(root)
-    }
-
-    fn compile_dynamic_root(&mut self, entry: &ast::ChildEntry) -> Result<TokenStream, String> {
-        let (selector, branches) = match entry {
-            ast::ChildEntry::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => (
-                Some(condition),
-                vec![then_branch.as_slice(), else_branch.as_slice()],
-            ),
-            ast::ChildEntry::Match { value, arms } => {
-                let branches = arms.iter().map(|arm| arm.body.as_slice()).collect();
-                (Some(value), branches)
-            }
-            _ => return Err("expected a dynamic template root".into()),
-        };
-        let selector = selector.expect("dynamic root always has a selector");
-        let initial_parent_ident = self.fresh("initial_parent");
-        let initial_previous_parent_ident =
-            std::mem::replace(&mut self.parent_ident, initial_parent_ident.to_string());
-        let selector_tokens = self.expression(selector)?;
-        let selector_keys = self.expression_property_keys(selector);
-        let boolean_match = matches!(
-            entry,
-            ast::ChildEntry::Match { arms, .. }
-                if arms.iter().all(|arm| matches!(arm.pattern.trim(), "true" | "false"))
-        );
-        if matches!(entry, ast::ChildEntry::If { .. }) || boolean_match {
-            for key in &selector_keys {
-                self.constrain_property(*key, quote! { bool });
-            }
-        }
-        let branch_vec = self.fresh("branch_subscriptions");
-        let branch_exprs: Vec<_> = branches
-            .iter()
-            .map(|branch| {
-                if branch.len() != 1 {
-                    return Err(
-                        "every dynamic ControlTemplate root branch must contain exactly one element"
-                            .to_string(),
-                    );
-                }
-                self.compile_dynamic_branch(
-                    &branch[0],
-                    &SubscriptionSink::Local(branch_vec.clone()),
-                )
-            })
-            .collect::<Result<_, _>>()?;
-        self.parent_ident = initial_previous_parent_ident;
-        let callback_parent_ident = self.fresh("callback_parent");
-        let callback_branch_vec = self.fresh("next_branch_subscriptions");
-        let previous_parent_ident =
-            std::mem::replace(&mut self.parent_ident, callback_parent_ident.to_string());
-        let callback_selector_tokens = self.expression(selector)?;
-        let callback_branch_exprs: Vec<_> = branches
-            .iter()
-            .map(|branch| {
-                self.compile_dynamic_branch(
-                    &branch[0],
-                    &SubscriptionSink::Local(callback_branch_vec.clone()),
-                )
-            })
-            .collect::<Result<_, _>>()?;
-        self.parent_ident = previous_parent_ident;
-        let initial_root = self.fresh("initial_root");
-        let branch_state = self.fresh("branch_state");
-        let callback_branch_state = self.fresh("callback_branch_state");
-        let control_weak = self.fresh("control_weak");
-        let subscription_parent = self.fresh("subscription_parent");
-        let callback_root = self.fresh("next_root");
-        let root_parent_ident = format_ident!("{}", self.parent_ident);
-        let condition = match entry {
-            ast::ChildEntry::If { .. } => {
-                let then_expr = &branch_exprs[0];
-                let else_expr = &branch_exprs[1];
-                quote! { if #selector_tokens { #then_expr } else { #else_expr } }
-            }
-            ast::ChildEntry::Match { arms, .. } => {
-                let arms = arms
-                    .iter()
-                    .zip(branch_exprs.iter())
-                    .map(|(arm, expr)| {
-                        let pattern = syn::Pat::parse_single
-                            .parse_str(&arm.pattern)
-                            .map_err(|error| format!("invalid template match pattern: {error}"))?;
-                        Ok::<_, String>(quote! { #pattern => #expr })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                quote! { match #selector_tokens { #(#arms),* } }
-            }
-            _ => unreachable!(),
-        };
-        let callback_condition = match entry {
-            ast::ChildEntry::If { .. } => {
-                let then_expr = &callback_branch_exprs[0];
-                let else_expr = &callback_branch_exprs[1];
-                quote! { if #callback_selector_tokens { #then_expr } else { #else_expr } }
-            }
-            ast::ChildEntry::Match { arms, .. } => {
-                let arms = arms
-                    .iter()
-                    .zip(callback_branch_exprs.iter())
-                    .map(|(arm, expr)| {
-                        let pattern = syn::Pat::parse_single
-                            .parse_str(&arm.pattern)
-                            .map_err(|error| format!("invalid template match pattern: {error}"))?;
-                        Ok::<_, String>(quote! { #pattern => #expr })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                quote! { match #callback_selector_tokens { #(#arms),* } }
-            }
-            _ => unreachable!(),
-        };
-        let subscription = if selector_keys.is_empty() {
-            quote! { vec![elwindui::core::reactive::Subscription::new(|| {})] }
-        } else {
-            let subscriptions = selector_keys.iter().map(|key| {
-                let property_receiver = self.template_property_receiver(*key);
-                let callback_environment = self.fresh("callback_environment");
-                let selector_subscription = quote! {
-                    #property_receiver::__template_subscribe(
-                        &*#subscription_parent,
-                        move || {
-                            if let Some(control) = #control_weak.upgrade() {
-                                let __environment = #callback_environment.clone();
-                                #callback_branch_state.borrow_mut().clear();
-                                let mut #callback_branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
-                                let #callback_parent_ident = control.clone();
-                                let #callback_root = #callback_condition;
-                                *#callback_branch_state.borrow_mut() = #callback_branch_vec;
-                                control.__set_template_root(#callback_root);
-                            }
-                        },
-                    )
-                };
-                quote! {{
-                    let #subscription_parent = #root_parent_ident.clone();
-                    let #control_weak = std::rc::Rc::downgrade(&#subscription_parent);
-                    let #callback_branch_state = #branch_state.clone();
-                    let #callback_environment = __environment.clone();
-                    #selector_subscription
-                }}
-            });
-            quote! { vec![#(#subscriptions),*] }
-        };
-        let selector_block = quote! {
-            let __selector_subscriptions = #subscription;
-            __subscriptions.borrow_mut().extend(__selector_subscriptions);
-        };
-        let initial = quote! {
-            let #initial_parent_ident = #root_parent_ident.clone();
-            let mut #branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
-            let #initial_root = #condition;
-            let #branch_state = std::rc::Rc::new(std::cell::RefCell::new(#branch_vec));
-            #selector_block
-            let __branch_state_for_cleanup = #branch_state.clone();
-            __subscriptions.borrow_mut().push(
-                elwindui::core::reactive::Subscription::new(move || {
-                    __branch_state_for_cleanup.borrow_mut().clear();
-                }),
-            );
-            #initial_root
-        };
-        Ok(quote! {{
-            use elwindui::core::ui::ControlExt as _;
-            #initial
-        }})
-    }
-
-    fn compile_dynamic_branch(
-        &mut self,
-        entry: &ast::ChildEntry,
-        sink: &SubscriptionSink,
-    ) -> Result<TokenStream, String> {
-        match entry {
-            ast::ChildEntry::Literal(element) => {
-                let value = self.compile_element(element, sink)?;
-                // Dynamic regions are stored in a `DynamicChildSlot<dyn UIElementExt>`.  Coerce
-                // each branch at its own expression boundary so Rust never has to infer one
-                // concrete `Rc<T>` type for an `if`/`match` whose arms intentionally contain
-                // different generated components.
-                Ok(codegen::into_node_if_needed(
-                    value,
-                    &element.type_path,
-                    &self.from,
-                    &self.table,
-                ))
-            }
-            ast::ChildEntry::If { .. } | ast::ChildEntry::Match { .. } => {
-                Err("nested dynamic roots require a static visual parent".into())
-            }
-            ast::ChildEntry::For { .. } => {
-                Err("a `for` region cannot be a scalar template root branch".into())
-            }
-            ast::ChildEntry::Ref(name) => {
-                let Some((binding, type_path)) = self.lets.get(name) else {
-                    return Err(format!("template branch reference `{name}` is not defined"));
-                };
-                Ok(codegen::into_node_if_needed(
-                    quote! { #binding.clone() },
-                    type_path,
-                    &self.from,
-                    &self.table,
-                ))
-            }
-        }
-    }
-
-    /// Compiles one branch for a declared content collection.  Unlike the template-root helper
-    /// above, this keeps the collection's item trait from effective `#[content]` metadata all the
-    /// way through the branch boundary (for example `TabViewItemExt` rather than always coercing
-    /// to `UIElementExt`).
-    fn compile_dynamic_branch_for_content(
-        &mut self,
-        entry: &ast::ChildEntry,
-        sink: &SubscriptionSink,
-        item_trait: &codegen::ItemTraitTokens,
-    ) -> Result<TokenStream, String> {
-        match entry {
-            ast::ChildEntry::Literal(element) => {
-                let value = self.compile_element(element, sink)?;
-                Ok(codegen::dynamic_child_binding(
-                    value,
-                    &element.type_path,
-                    item_trait,
-                    &self.from,
-                    &self.table,
-                ))
-            }
-            ast::ChildEntry::If { .. } | ast::ChildEntry::Match { .. } => {
-                Err("nested dynamic roots require a static visual parent".into())
-            }
-            ast::ChildEntry::For { .. } => {
-                Err("a `for` region cannot be a scalar template root branch".into())
-            }
-            ast::ChildEntry::Ref(name) => {
-                let Some((binding, type_path)) = self.lets.get(name) else {
-                    return Err(format!("template branch reference `{name}` is not defined"));
-                };
-                Ok(codegen::dynamic_child_binding(
-                    quote! { #binding.clone() },
-                    type_path,
-                    item_trait,
-                    &self.from,
-                    &self.table,
-                ))
-            }
-        }
-    }
-
-    /// Compiles the ordered contents of one dynamic branch.  A branch may be empty (the common
-    /// `if condition { child }` form has no `else` arm) or contain several literal children; the
-    /// collection slot replaces the whole branch range atomically.  Each entry is still lowered
-    /// by the same element backend, so constructor parameters, bindings, and Environment mounting
-    /// remain identical to static siblings.
-    fn compile_dynamic_branch_children(
-        &mut self,
-        entries: &[ast::ChildEntry],
-        sink: &SubscriptionSink,
-        cache: Option<&syn::Ident>,
-    ) -> Result<TokenStream, String> {
-        let values = entries
-            .iter()
-            .map(|entry| self.compile_dynamic_branch(entry, sink))
-            .collect::<Result<Vec<_>, _>>()?;
-        let values = if cache.is_some() {
-            values
-                .into_iter()
-                .map(|value| Self::cache_dynamic_branch_value(value, cache))
-                .collect()
-        } else {
-            values
-        };
-        Ok(quote! { vec![#(#values),*] })
-    }
-
-    fn compile_dynamic_branch_children_for_content(
-        &mut self,
-        entries: &[ast::ChildEntry],
-        sink: &SubscriptionSink,
-        cache: Option<&syn::Ident>,
-        item_trait: &codegen::ItemTraitTokens,
-    ) -> Result<TokenStream, String> {
-        let values = entries
-            .iter()
-            .map(|entry| self.compile_dynamic_branch_for_content(entry, sink, item_trait))
-            .collect::<Result<Vec<_>, _>>()?;
-        let values = if cache.is_some() {
-            values
-                .into_iter()
-                .map(|value| Self::cache_dynamic_branch_value(value, cache))
-                .collect()
-        } else {
-            values
-        };
-        Ok(quote! { vec![#(#values),*] })
-    }
-
-    /// A childless literal branch has no nested dynamic/subscription state of its own.  Keep its
-    /// generated control alive when the surrounding selector changes so switching back reuses the
-    /// same `Rc` (the ordinary View backend's lazy-once branch behavior).  Branches with
-    /// attributes or children stay on the normal rebuild path because their subscription and
-    /// nested-region lifetimes are managed by the branch state below.
-    fn can_cache_dynamic_branch(entry: &ast::ChildEntry) -> bool {
-        matches!(
-            entry,
-            ast::ChildEntry::Literal(element)
-                if element.children.is_empty()
-                    && element.attributes.is_empty()
-                    && element.attached.is_empty()
-                    && element.attribute_shortcuts.is_empty()
-        )
-    }
-
-    fn cache_dynamic_branch_value(value: TokenStream, cache: Option<&syn::Ident>) -> TokenStream {
-        let Some(cache) = cache else {
-            return value;
-        };
-        quote! {{
-            let mut __elwindui_branch_cache = #cache.borrow_mut();
-            if __elwindui_branch_cache.is_none() {
-                *__elwindui_branch_cache = Some(#value);
-            }
-            __elwindui_branch_cache
-                .as_ref()
-                .expect("dynamic branch was just materialized")
-                .clone()
-        }}
-    }
-
-    /// Compiles an `EnvironmentScope` as a transparent sequence of visual children.  The scope
-    /// itself is not a UI element: each returned child derives the current template environment,
-    /// applies the scope's writable overrides, and evaluates its normal shared-backend lowering
-    /// under a lexical `__environment` alias.  Keeping this expansion at the parent collection
-    /// boundary preserves the existing no-extra-node semantics while still allowing a scope to
-    /// contain more than one child.
-    fn compile_environment_scope_children(
-        &mut self,
-        scope: &ast::ElementNode,
-        sink: &SubscriptionSink,
-    ) -> Result<Vec<TokenStream>, String> {
-        let scope_environment = self.fresh("scope_environment");
-        let mut sets = TokenStream::new();
-        for attribute in &scope.attributes {
-            let Some((key_type_name, _)) =
-                component_frontend::lookup_writable_environment_key(&attribute.name)
-            else {
-                return Err(format!(
-                    "EnvironmentScope: `{}` is not a writable environment key",
-                    attribute.name
-                ));
-            };
-            let key_type: syn::Type = syn::parse_str(&key_type_name)
-                .map_err(|error| format!("invalid EnvironmentScope key type: {error}"))?;
-            let value = self.expression(&attribute.value)?;
-            sets.extend(quote! {
-                #scope_environment.set::<#key_type>((#value).into());
-            });
-        }
-
-        let mut values = Vec::new();
-        for child in &scope.children {
-            let value = match child {
-                ast::ChildEntry::Literal(element)
-                    if is_environment_scope_type(&element.type_path) =>
-                {
-                    self.compile_environment_scope_children(element, sink)?
-                }
-                ast::ChildEntry::Literal(element) => {
-                    vec![self.compile_element(element, sink)?]
-                }
-                ast::ChildEntry::If {
-                    condition,
-                    then_branch,
-                    else_branch,
-                } => {
-                    if then_branch.len() != 1 || else_branch.len() != 1 {
-                        return Err(
-                            "dynamic EnvironmentScope branches must contain exactly one child"
-                                .into(),
-                        );
-                    }
-                    let condition = self.expression(condition)?;
-                    let then_value =
-                        self.compile_environment_scoped_entry(&then_branch[0], sink)?;
-                    let else_value =
-                        self.compile_environment_scoped_entry(&else_branch[0], sink)?;
-                    vec![quote! { if #condition { #then_value } else { #else_value } }]
-                }
-                ast::ChildEntry::Match { value, arms } => {
-                    let selector = self.expression(value)?;
-                    let mut arm_values = Vec::new();
-                    for arm in arms {
-                        if arm.body.len() != 1 {
-                            return Err(
-                                "dynamic EnvironmentScope match arms must contain exactly one child"
-                                    .into(),
-                            );
-                        }
-                        let pattern =
-                            syn::Pat::parse_single
-                                .parse_str(&arm.pattern)
-                                .map_err(|error| {
-                                    format!("invalid EnvironmentScope match pattern: {error}")
-                                })?;
-                        let branch = self.compile_environment_scoped_entry(&arm.body[0], sink)?;
-                        arm_values.push(quote! { #pattern => #branch });
-                    }
-                    vec![quote! { match #selector { #(#arm_values),* } }]
-                }
-                ast::ChildEntry::For { .. } => {
-                    return Err(
-                        "a `for` region cannot be directly nested in an EnvironmentScope".into(),
-                    );
-                }
-                ast::ChildEntry::Ref(name) => {
-                    let Some((binding, _)) = self.lets.get(name) else {
-                        return Err(format!(
-                            "EnvironmentScope reference `{name}` is not defined"
-                        ));
-                    };
-                    vec![quote! { #binding.clone() }]
-                }
-            };
-            values.extend(value);
-        }
-
-        Ok(values
-            .into_iter()
-            .map(|value| {
-                quote! {{
-                    let #scope_environment = __environment.derive();
-                    #sets
-                    let __environment = #scope_environment.clone();
-                    #value
-                }}
-            })
-            .collect())
-    }
-
-    fn compile_environment_scoped_entry(
-        &mut self,
-        entry: &ast::ChildEntry,
-        sink: &SubscriptionSink,
-    ) -> Result<TokenStream, String> {
-        match entry {
-            ast::ChildEntry::Literal(element) if is_environment_scope_type(&element.type_path) => {
-                let mut nested = self.compile_environment_scope_children(element, sink)?;
-                if nested.len() != 1 {
-                    return Err(
-                        "nested EnvironmentScope branch must resolve to exactly one child".into(),
-                    );
-                }
-                Ok(nested.remove(0))
-            }
-            ast::ChildEntry::Literal(element) => self.compile_element(element, sink),
-            ast::ChildEntry::Ref(name) => {
-                let Some((binding, _)) = self.lets.get(name) else {
-                    return Err(format!(
-                        "EnvironmentScope reference `{name}` is not defined"
-                    ));
-                };
-                Ok(quote! { #binding.clone() })
-            }
-            ast::ChildEntry::If { .. } | ast::ChildEntry::Match { .. } => {
-                Err("nested dynamic EnvironmentScope branch is not supported".into())
-            }
-            ast::ChildEntry::For { .. } => {
-                Err("a `for` region cannot be an EnvironmentScope branch".into())
-            }
-        }
-    }
-
-    fn compile_element(
-        &mut self,
-        element: &ast::ElementNode,
-        sink: &SubscriptionSink,
-    ) -> Result<TokenStream, String> {
-        let type_path: syn::Path = syn::parse_str(&element.type_path).map_err(|error| {
-            format!("invalid template element `{}`: {error}", element.type_path)
-        })?;
-        let (props_macro_path, known_user, user_fields) = {
-            let resolved_info = self.resolve_info(&element.type_path);
-            let props_macro_path = template_props_macro_path(&element.type_path, resolved_info);
-            let known_user = resolved_info
-                .filter(|info| !info.is_virtual_builtin && !info.is_native_control_leaf)
-                .map(|info| {
-                    (
-                        info.param_fields.clone(),
-                        info.content_field.clone(),
-                        info.effective_fields.clone(),
-                    )
-                });
-            let user_fields = resolved_info
-                .filter(|info| !info.is_virtual_builtin && !info.is_native_control_leaf)
-                .map(|info| info.effective_fields.clone());
-            (props_macro_path, known_user, user_fields)
-        };
-        let node = self.fresh("node");
-        let all_static_children = element.children.iter().all(|child| match child {
-            ast::ChildEntry::Literal(element) => !is_environment_scope_type(&element.type_path),
-            ast::ChildEntry::Ref(_) => true,
-            ast::ChildEntry::If { .. }
-            | ast::ChildEntry::Match { .. }
-            | ast::ChildEntry::For { .. } => false,
-        });
-        let user_element = known_user.is_some();
-        let user_param_names: std::collections::HashSet<String> = known_user
-            .as_ref()
-            .map(|(fields, _, _)| fields.iter().map(|(name, _)| name.clone()).collect())
-            .unwrap_or_default();
-        let user_constructor_only_names: std::collections::HashSet<String> = known_user
-            .as_ref()
-            .map(|(_, _, fields)| {
-                fields
-                    .iter()
-                    .filter(|field| field.kind == ast::FieldKind::Param)
-                    .map(|field| field.name.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let static_children = if all_static_children {
-            Some(
-                element
-                    .children
-                    .iter()
-                    .map(|child| match child {
-                        ast::ChildEntry::Literal(child) => self
-                            .compile_element(child, sink)
-                            .map(|value| (value, child.type_path.clone())),
-                        ast::ChildEntry::Ref(name) => {
-                            let Some((binding, type_path)) = self.lets.get(name) else {
-                                return Err(format!(
-                                    "template child reference `{name}` is not defined"
-                                ));
-                            };
-                            Ok((quote! { #binding.clone() }, type_path.clone()))
-                        }
-                        _ => unreachable!(),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
-        } else {
-            None
-        };
-        let construction = if let Some((param_fields, content_field, _)) = known_user.clone() {
-            let children = static_children.as_deref().unwrap_or(&[]);
-            let args = self.user_component_args(
-                element,
-                &param_fields,
-                content_field.as_deref(),
-                &children,
-            )?;
-            quote! {{
-                let __node = #type_path::__new_unmounted(#(#args),*);
-                // Every generated component exposes the same hidden mount helper, including
-                // composed components whose public `mount` lives on their class Ext trait.
-                // Calling the helper keeps construction independent of whether that trait is
-                // imported in the template's source module.
-                __node.__mount(__environment.clone());
-                __node
-            }}
-        } else {
-            quote! { #type_path::new() }
-        };
-        let template_presenter_bind = if element
-            .type_path
-            .rsplit("::")
-            .next()
-            .is_some_and(|name| name == "ContentPresenter")
-        {
-            let parent = format_ident!("{}", self.parent_ident);
-            quote! {
-                elwindui::core::ui::ContentPresenter::__bind_templated_parent(
-                    &#node,
-                    &#parent,
-                );
-            }
-        } else {
-            TokenStream::new()
-        };
-        let mut statements = TokenStream::new();
-        for attribute in &element.attributes {
-            let name = format_ident!("{}", attribute.name);
-            let direct_field_ty = user_fields
-                .as_ref()
-                .and_then(|fields| {
-                    fields.iter().find(|field| {
-                        field.name == attribute.name
-                            && matches!(field.kind, ast::FieldKind::Prop | ast::FieldKind::State)
-                            && !field.name.starts_with("on_")
-                    })
-                })
-                .map(|field| field.ty.clone());
-            let value = if attribute.name.starts_with("on_") {
-                match &attribute.value {
-                    ast::ViewExpr::Closure { params, body } => {
-                        let parent = format_ident!("{}", self.parent_ident);
-                        let closure_parent = self.fresh("event_parent");
-                        let body = codegen::emit_template_event_closure_body_for_target_with_fields(
-                            body,
-                            params,
-                            &closure_parent,
-                            &self.property_bounds,
-                            self.target_type.clone(),
-                            self.bare_parent_fields.clone(),
-                        );
-                        let params = params.iter().map(|param| format_ident!("{param}"));
-                        quote! {{
-                            let #closure_parent = #parent.clone();
-                            move |#(#params),*| { #body }
-                        }}
-                    }
-                    other => self.expression(other)?,
-                }
-            } else {
-                self.expression(&attribute.value)?
-            };
-            // Deferred `view!` attributes are assignment targets rather than a special
-            // standalone-only value shape.  Let the destination's exported property metadata
-            // perform the same `ViewTemplate`/`Option<ViewTemplate>` coercion used by ordinary
-            // generated views.  The shared backend intentionally does this at the property
-            // boundary because an expression itself has no field-type context.
-            let value = if matches!(&attribute.value, ast::ViewExpr::DeferredView(_)) {
-                quote! {
-                    elwindui::core::ui::__coerce_deferred_view_assignment_target::<
-                        #props_macro_path!(@field_type #name)
-                    >(#value)
-                }
-            } else {
-                value
-            };
-            let constructor_only =
-                user_element && user_constructor_only_names.contains(&attribute.name);
-            // Semantic-brush handling is a property concern, never an event-handler concern.  An
-            // `on_*` closure can legitimately capture arbitrary external values; duplicating it
-            // into a theme listener would create a second move closure and can make valid `Fn`
-            // handlers fail to compile.  Constructor-only inputs likewise have no mutable setter
-            // to resynchronize after construction.
-            let semantic_brush = !attribute.name.starts_with("on_")
-                && !constructor_only
-                && self
-                    .resolve_info(&element.type_path)
-                    .map(|info| info.semantic_brush_fields.contains(&attribute.name))
-                    .unwrap_or_else(|| {
-                        self.expression_safe_for_semantic_subscription(&attribute.value)
-                    });
-            if semantic_brush {
-                statements.extend(self.semantic_brush_subscription(
-                    &node,
-                    &element.type_path,
-                    &props_macro_path,
-                    &name,
-                    &attribute.value,
-                    &value,
-                    sink,
-                ));
-            } else if !user_element
-                || !user_param_names.contains(&attribute.name)
-                || !constructor_only
-            {
-                if let Some(field_ty) = direct_field_ty.as_deref() {
-                    let setter = format_ident!("set_{}", attribute.name);
-                    let value = if field_ty.trim() == "String" {
-                        quote! { (#value).to_string() }
-                    } else {
-                        value.clone()
-                    };
-                    statements.extend(quote! {
-                        #node.#setter(#value);
-                    });
-                } else {
-                    statements.extend(quote! {
-                        #props_macro_path!(@set_with_environment #node, #name, #value, &__environment);
-                    });
-                }
-            }
-            // Fixed `#[param]` constructor inputs are consumed only while the nested component is
-            // created.  They are not mutable property destinations, so a parent-dependent
-            // expression supplied for one must not produce a resync subscription (nor ask the
-            // props macro for a field type that intentionally has no setter).  Required mutable
-            // props/state fields are constructor inputs too, but remain on the shared
-            // setter/subscription path so a template binding can keep them synchronized after
-            // construction.
-            if user_element && user_constructor_only_names.contains(&attribute.name) {
-                continue;
-            }
-
-            // `<=>` has two halves.  The initial model-to-widget assignment above and the
-            // dependency subscription below are shared with ordinary one-way attributes; this
-            // callback is the generic widget-to-source half.  The target props macro owns the
-            // concrete `set_on_<field>_change` shape, while `two_way_setter` emits only the
-            // source-side endpoint (typed `TemplateProperty` for the template parent, ordinary
-            // getter/setter calls for an external capture).
-            if attribute.kind == ast::AssignmentKind::TwoWay {
-                let parent = format_ident!("{}", self.parent_ident);
-                let callback_parent = self.fresh("two_way_parent");
-                let Some(setter) = self.two_way_setter(&attribute.value, &callback_parent)? else {
-                    return Err(format!(
-                        "two-way template binding for `{}` requires a writable path",
-                        attribute.name
-                    ));
-                };
-                // A source owned by a loop binding (or another captured value) does not need the
-                // template parent at all.  Avoid emitting an otherwise-unused `parent.clone()`:
-                // the generated handler is nested inside the loop renderer, so that reference
-                // would force the renderer to capture the enclosing component Rc and make the
-                // callback non-`'static` when the renderer is reused by `DynamicChildSlot`.
-                let parent_binding = match &attribute.value {
-                    ast::ViewExpr::Path(path)
-                        if path.first().is_some_and(|name| {
-                            name == "templated_parent" || self.bare_parent_fields.contains(name)
-                        }) =>
-                    {
-                        quote! { let #callback_parent = #parent.clone(); }
-                    }
-                    _ => TokenStream::new(),
-                };
-                statements.extend(quote! {
-                    {
-                        #parent_binding
-                        #props_macro_path!(@set_on_change #name, #node, Box::new(move |new_value| {
-                            #setter
-                        }));
-                    }
-                });
-            }
-            let keys = self.expression_property_keys(&attribute.value);
-            for key in keys {
-                let node_weak = self.fresh("node_weak");
-                let control_weak = self.fresh("control_weak");
-                let subscription_parent = self.fresh("subscription_parent");
-                let parent_ident = format_ident!("{}", self.parent_ident);
-                let callback_parent_ident = parent_ident.clone();
-                let expected = user_fields
-                    .as_ref()
-                    .and_then(|fields| {
-                        fields
-                            .iter()
-                            .find(|field| field.name == attribute.name)
-                            .map(|field| {
-                                syn::parse_str::<syn::Type>(&field.ty)
-                                    .expect("template field type must parse")
-                            })
-                    })
-                    .map(|field_ty| quote! { #field_ty })
-                    .unwrap_or_else(|| quote! { #props_macro_path!(@field_type #name) });
-                self.constrain_property(key, expected);
-                let resync_value = self.expression(&attribute.value)?;
-                let resync_value = if direct_field_ty
-                    .as_deref()
-                    .is_some_and(|ty| ty.trim() == "String")
-                {
-                    quote! { (#resync_value).to_string() }
-                } else {
-                    resync_value
-                };
-                let normal_resync_set = if direct_field_ty.is_some() {
-                    let setter = format_ident!("set_{}", attribute.name);
-                    quote! { node.#setter(#resync_value); }
-                } else {
-                    quote! { #props_macro_path!(@set node, #name, #resync_value); }
-                };
-                let semantic_brush = self
-                    .resolve_info(&element.type_path)
-                    .map(|info| info.semantic_brush_fields.contains(&attribute.name))
-                    .unwrap_or(true);
-                let semantic_environment = self.fresh("semantic_resync_environment");
-                let semantic_query = self.semantic_brush_query(&element.type_path, &attribute.name);
-                let semantic_resync_set = quote! {
-                    let __environment = #semantic_environment.clone();
-                    #props_macro_path!(@set_with_environment
-                        node,
-                        #name,
-                        #resync_value,
-                        &__environment
-                    );
-                };
-                let resync_set = if !semantic_brush {
-                    normal_resync_set
-                } else if self
-                    .resolve_info(&element.type_path)
-                    .is_some_and(|info| info.semantic_brush_fields.contains(&attribute.name))
-                {
-                    semantic_resync_set
-                } else {
-                    quote! {
-                        if #semantic_query {
-                            #semantic_resync_set
-                        } else {
-                            #normal_resync_set
-                        }
-                    }
-                };
-                let property_receiver = self.template_property_receiver(key);
-                // Keep the environment binding available even when local metadata proves this
-                // property is non-semantic.  The emitted `if #semantic_query` branch is still
-                // type-checked by Rust (and by exported props macros), so its semantic setter
-                // tokens must not refer to a conditionally absent local.
-                let semantic_environment_binding =
-                    quote! { let #semantic_environment = __environment.clone(); };
-                let subscription = quote! {
-                    {
-                        let #node_weak = std::rc::Rc::downgrade(&#node);
-                        let #subscription_parent = #parent_ident.clone();
-                        let #control_weak = std::rc::Rc::downgrade(&#subscription_parent);
-                        #semantic_environment_binding
-                        #property_receiver::__template_subscribe(
-                            &*#subscription_parent,
-                            move || {
-                                if let (Some(node), Some(control)) = (#node_weak.upgrade(), #control_weak.upgrade()) {
-                                    let #callback_parent_ident = control;
-                                    if #semantic_brush {
-                                        let __environment = #semantic_environment.clone();
-                                        #resync_set
-                                    } else {
-                                        #resync_set
-                                    }
-                                }
-                            },
-                        )
-                    }
-                };
-                statements.extend(sink.push(subscription));
-            }
-        }
-
-        // Attached properties are part of the shared View grammar as well.  Their declared value
-        // type is owned by the attached-property owner's exported shape macro, so this path works
-        // for builtins and user-defined owners without a frontend-specific type list.
-        if !element.attached.is_empty() {
-            let mut attached = TokenStream::new();
-            for (owner, field, value) in &element.attached {
-                let owner_info = self.resolve_info(owner);
-                let props = template_props_macro_path(owner, owner_info);
-                let field_ident = format_ident!("{field}");
-                let value = self.expression(value)?;
-                attached.extend(quote! {
-                    #props!(@attached_set #field_ident, #node, #value);
-                });
-            }
-            statements.extend(quote! {
-                {
-                    use elwindui::core::ui::UIElementExt as _;
-                    #attached
-                }
-            });
-        }
-
-        // Keyboard shortcut attributes use the same backend registration helper as ordinary
-        // `view!` generation.  Keeping this at the shared element boundary makes shortcut
-        // declarations available in default, named, and standalone templates without a
-        // standalone-only parser or backend branch.
-        for (name, chords, scope) in &element.attribute_shortcuts {
-            let binding = quote! { #node };
-            let registration = codegen::emit_shortcut_registration(name, chords, *scope, &binding);
-            statements.extend(quote! {
-                {
-                    use elwindui::core::ui::UIElementExt as _;
-                    #registration
-                }
-            });
-        }
-
-        if element.children.is_empty() {
-            return Ok(quote! {{
-                let #node = #construction;
-                #statements
-                #template_presenter_bind
-                #node
-            }});
-        }
-        if all_static_children {
-            let children = if let Some(children) = static_children.as_ref() {
-                children
-                    .iter()
-                    .map(|(value, _)| value.clone())
-                    .collect::<Vec<_>>()
-            } else {
-                element
-                    .children
-                    .iter()
-                    .map(|child| match child {
-                        ast::ChildEntry::Literal(child) => self.compile_element(child, sink),
-                        ast::ChildEntry::Ref(name) => {
-                            let Some((binding, _)) = self.lets.get(name) else {
-                                return Err(format!(
-                                    "template child reference `{name}` is not defined"
-                                ));
-                            };
-                            Ok(quote! { #binding.clone() })
-                        }
-                        _ => unreachable!(),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-            };
-            // A generated component receives literal children through its constructor/content
-            // property, exactly like the ordinary View compiler.  Builtin/external elements do
-            // not have a local constructor shape, so their exported props macro owns attachment.
-            // Never attach the same child a second time after passing it to a user component.
-            let attach = if user_element {
-                TokenStream::new()
-            } else {
-                quote! {
-                    #props_macro_path!(@children #node, [#(#children),*]);
-                }
-            };
-            return Ok(quote! {{
-                let #node = #construction;
-                #statements
-                #template_presenter_bind
-                #attach
-                #node
-            }});
-        }
-
-        // Dynamic nested regions are selected from the host's effective `#[content]` metadata.
-        // Local metadata lets us choose the scalar/collection path before emitting tokens; an
-        // unresolved/external host keeps both candidates in its exported props macro so the same
-        // declaration remains authoritative across crates.  Layout is only one collection shape,
-        // never the generic dynamic-child host.
-        let content_shape = self
-            .resolve_info(&element.type_path)
-            .map(codegen::effective_content_shape);
-        let external_scalar = if matches!(
-            content_shape,
-            None | Some(codegen::EffectiveContentShape::External)
-        ) {
-            let mut scalar_backend = self.clone();
-            let scalar = scalar_backend.compile_scalar_dynamic_element(
-                element,
-                &node,
-                construction.clone(),
-                statements.clone(),
-                template_presenter_bind.clone(),
-                sink,
-            )?;
-            self.iterable_properties
-                .extend(scalar_backend.iterable_properties);
-            self.has_deferred_views |= scalar_backend.has_deferred_views;
-            self.next_binding = self.next_binding.max(scalar_backend.next_binding);
-            Some(scalar)
-        } else {
-            None
-        };
-        if content_shape == Some(codegen::EffectiveContentShape::Scalar) {
-            return self.compile_scalar_dynamic_element(
-                element,
-                &node,
-                construction,
-                statements,
-                template_presenter_bind,
-                sink,
-            );
-        }
-        let host = self.fresh("host");
-        let host_handle = self.fresh("host_handle");
-        let collection_item_trait = self
-            .resolve_info(&element.type_path)
-            .filter(|info| {
-                codegen::effective_content_shape(info) == codegen::EffectiveContentShape::Collection
-            })
-            .map(|_| {
-                codegen::dynamic_collection_item_trait_for_type(
-                    &element.type_path,
-                    &self.from,
-                    &self.table,
-                )
-            })
-            .unwrap_or_else(|| {
-                codegen::ItemTraitTokens::External(quote! { #props_macro_path!(@content_item_dyn) })
-            });
-        let mut child_statements = TokenStream::new();
-        let mut index_offset = 0usize;
-        for (source_index, child) in element.children.iter().enumerate() {
-            let index = source_index + index_offset;
-            match child {
-                ast::ChildEntry::Literal(child) if is_environment_scope_type(&child.type_path) => {
-                    let values = self.compile_environment_scope_children(child, sink)?;
-                    for (offset, value) in values.iter().enumerate() {
-                        let insert_index = index + offset;
-                        child_statements.extend(quote! { #host.insert(#insert_index, #value); });
-                    }
-                    index_offset = index_offset.saturating_add(values.len().saturating_sub(1));
-                }
-                ast::ChildEntry::Literal(child) => {
-                    let value = self.compile_element(child, sink)?;
-                    child_statements.extend(quote! { #host.insert(#index, #value); });
-                }
-                ast::ChildEntry::If {
-                    condition,
-                    then_branch,
-                    else_branch,
-                } => {
-                    let slot = self.fresh("slot");
-                    let branch_state = self.fresh("branch_state");
-                    let branch_vec = self.fresh("branch_subscriptions");
-                    let then_cache = (then_branch.len() == 1
-                        && Self::can_cache_dynamic_branch(&then_branch[0]))
-                    .then(|| self.fresh("then_branch_cache"));
-                    let else_cache = (else_branch.len() == 1
-                        && Self::can_cache_dynamic_branch(&else_branch[0]))
-                    .then(|| self.fresh("else_branch_cache"));
-                    let initial_parent_ident = format_ident!("{}", self.parent_ident);
-                    let then_value = self.compile_dynamic_branch_children_for_content(
-                        then_branch,
-                        &SubscriptionSink::Local(branch_vec.clone()),
-                        then_cache.as_ref(),
-                        &collection_item_trait,
-                    )?;
-                    let else_value = self.compile_dynamic_branch_children_for_content(
-                        else_branch,
-                        &SubscriptionSink::Local(branch_vec.clone()),
-                        else_cache.as_ref(),
-                        &collection_item_trait,
-                    )?;
-                    let condition_value = self.expression(condition)?;
-                    let keys = self.expression_property_keys(condition);
-                    for key in &keys {
-                        self.constrain_property(*key, quote! { bool });
-                    }
-                    let callback_parent_ident = self.fresh("callback_parent");
-                    let callback_branch_vec = self.fresh("next_branch_subscriptions");
-                    let previous_parent_ident = std::mem::replace(
-                        &mut self.parent_ident,
-                        callback_parent_ident.to_string(),
-                    );
-                    let callback_condition_value = self.expression(condition)?;
-                    let callback_then_value = self.compile_dynamic_branch_children_for_content(
-                        then_branch,
-                        &SubscriptionSink::Local(callback_branch_vec.clone()),
-                        then_cache.as_ref(),
-                        &collection_item_trait,
-                    )?;
-                    let callback_else_value = self.compile_dynamic_branch_children_for_content(
-                        else_branch,
-                        &SubscriptionSink::Local(callback_branch_vec.clone()),
-                        else_cache.as_ref(),
-                        &collection_item_trait,
-                    )?;
-                    self.parent_ident = previous_parent_ident;
-                    let host_owner = self.fresh("host_owner");
-                    let branch_cache_declarations: TokenStream = [
-                        then_cache.as_ref(),
-                        else_cache.as_ref(),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .map(|cache| {
-                        quote! {
-                            let #cache = std::rc::Rc::new(
-                                std::cell::RefCell::new(
-                                    None::<std::rc::Rc<dyn elwindui::core::ui::UIElementExt>>
-                                )
-                            );
-                        }
-                    })
-                    .collect();
-                    let replacement: TokenStream = keys
-                        .iter()
-                        .map(|key| {
-                            let weak_control = self.fresh("control_weak");
-                            let callback_state = self.fresh("callback_branch_state");
-                            let callback_slot = self.fresh("callback_slot");
-                            let callback_host_owner = self.fresh("callback_host_owner");
-                            let next_value = self.fresh("next_value");
-                            let callback_environment = self.fresh("callback_environment");
-                            let property_receiver = self.template_property_receiver(*key);
-                            let callback_content =
-                                self.content_field_get(&element.type_path, &callback_host_owner);
-                            let callback_content_handle = self.fresh("callback_content_handle");
-                            let callback_content_ref = self.fresh("callback_content_ref");
-                            let sub = quote! {
-                                {
-                                    let #weak_control = std::rc::Rc::downgrade(&#initial_parent_ident);
-                                    let #callback_state = #branch_state.clone();
-                                    let #callback_slot = #slot.clone();
-                                    let #callback_host_owner = #host_owner.clone();
-                                    let #callback_environment = __environment.clone();
-                                    #property_receiver::__template_subscribe(
-                                        &*#initial_parent_ident,
-                                        move || {
-                                            if let Some(control) = #weak_control.upgrade() {
-                                                let __environment = #callback_environment.clone();
-                                                #callback_state.borrow_mut().clear();
-                                                let mut #callback_branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
-                                                let #callback_parent_ident = control;
-                                                let #next_value = if #callback_condition_value {
-                                                    #callback_then_value
-                                                } else {
-                                                    #callback_else_value
-                                                };
-                                                *#callback_state.borrow_mut() = #callback_branch_vec;
-                                                let #callback_content_handle = #callback_content;
-                                                let #callback_content_ref:
-                                                    &dyn elwindui::core::ui::ListExt<#collection_item_trait> =
-                                                    &*#callback_content_handle;
-                                                #callback_slot.replace_children(
-                                                    #callback_content_ref,
-                                                    #index,
-                                                    #next_value,
-                                                );
-                                            }
-                                        },
-                                    )
-                                }
-                            };
-                            sink.push(sub)
-                        })
-                        .collect();
-                    let initial = self.fresh("initial_value");
-                    child_statements.extend(quote! {
-                        let #host_owner = #node.clone();
-                        let #slot = std::rc::Rc::new(
-                            elwindui::core::ui::DynamicChildSlot::<#collection_item_trait>::default()
-                        );
-                        #branch_cache_declarations
-                        let mut #branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
-                        let #initial = if #condition_value { #then_value } else { #else_value };
-                        #slot.replace_children(#host, #index, #initial);
-                        let #branch_state = std::rc::Rc::new(std::cell::RefCell::new(#branch_vec));
-                        #replacement
-                    });
-                }
-                ast::ChildEntry::Match { value, arms } => {
-                    let slot = self.fresh("slot");
-                    let branch_state = self.fresh("branch_state");
-                    let branch_vec = self.fresh("branch_subscriptions");
-                    let arm_caches: Vec<Option<syn::Ident>> = arms
-                        .iter()
-                        .map(|arm| {
-                            (arm.body.len() == 1 && Self::can_cache_dynamic_branch(&arm.body[0]))
-                                .then(|| self.fresh("match_branch_cache"))
-                        })
-                        .collect();
-                    let initial_parent_ident = format_ident!("{}", self.parent_ident);
-                    let initial_branches: Vec<_> = arms
-                        .iter()
-                        .zip(arm_caches.iter())
-                        .map(|(arm, cache)| {
-                            self.compile_dynamic_branch_children_for_content(
-                                &arm.body,
-                                &SubscriptionSink::Local(branch_vec.clone()),
-                                cache.as_ref(),
-                                &collection_item_trait,
-                            )
-                        })
-                        .collect::<Result<_, _>>()?;
-                    let selector_value = self.expression(value)?;
-                    let keys = self.expression_property_keys(value);
-                    if arms
-                        .iter()
-                        .all(|arm| matches!(arm.pattern.trim(), "true" | "false"))
-                    {
-                        for key in &keys {
-                            self.constrain_property(*key, quote! { bool });
-                        }
-                    }
-                    let callback_parent_ident = self.fresh("callback_parent");
-                    let callback_branch_vec = self.fresh("next_branch_subscriptions");
-                    let previous_parent_ident = std::mem::replace(
-                        &mut self.parent_ident,
-                        callback_parent_ident.to_string(),
-                    );
-                    let callback_branches: Vec<_> = arms
-                        .iter()
-                        .zip(arm_caches.iter())
-                        .map(|(arm, cache)| {
-                            self.compile_dynamic_branch_children_for_content(
-                                &arm.body,
-                                &SubscriptionSink::Local(callback_branch_vec.clone()),
-                                cache.as_ref(),
-                                &collection_item_trait,
-                            )
-                        })
-                        .collect::<Result<_, _>>()?;
-                    self.parent_ident = previous_parent_ident;
-                    let initial_arms = arms
-                        .iter()
-                        .zip(initial_branches.iter())
-                        .map(|(arm, branch)| {
-                            let pattern = syn::Pat::parse_single.parse_str(&arm.pattern).map_err(
-                                |error| format!("invalid template match pattern: {error}"),
-                            )?;
-                            Ok::<_, String>(quote! { #pattern => #branch })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let callback_selector_value = {
-                        let previous = std::mem::replace(
-                            &mut self.parent_ident,
-                            callback_parent_ident.to_string(),
-                        );
-                        let value = self.expression(value)?;
-                        self.parent_ident = previous;
-                        value
-                    };
-                    let callback_arms = arms
-                        .iter()
-                        .zip(callback_branches.iter())
-                        .map(|(arm, branch)| {
-                            let pattern = syn::Pat::parse_single.parse_str(&arm.pattern).map_err(
-                                |error| format!("invalid template match pattern: {error}"),
-                            )?;
-                            Ok::<_, String>(quote! { #pattern => #branch })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let initial_value = quote! { match #selector_value { #(#initial_arms),* } };
-                    let callback_value =
-                        quote! { match #callback_selector_value { #(#callback_arms),* } };
-                    let host_owner = self.fresh("host_owner");
-                    let branch_cache_declarations: TokenStream = arm_caches
-                        .iter()
-                        .flatten()
-                        .map(|cache| {
-                            quote! {
-                                let #cache = std::rc::Rc::new(
-                                    std::cell::RefCell::new(
-                                        None::<std::rc::Rc<dyn elwindui::core::ui::UIElementExt>>
-                                    )
-                                );
-                            }
-                        })
-                        .collect();
-                    let subscriptions: TokenStream = keys
-                        .iter()
-                        .map(|key| {
-                            let weak_control = self.fresh("control_weak");
-                            let callback_state = self.fresh("callback_branch_state");
-                            let callback_slot = self.fresh("callback_slot");
-                            let callback_host_owner = self.fresh("callback_host_owner");
-                            let next_value = self.fresh("next_value");
-                            let callback_environment = self.fresh("callback_environment");
-                            let property_receiver = self.template_property_receiver(*key);
-                            let callback_content =
-                                self.content_field_get(&element.type_path, &callback_host_owner);
-                            let callback_content_handle = self.fresh("callback_content_handle");
-                            let callback_content_ref = self.fresh("callback_content_ref");
-                            let sub = quote! {
-                                {
-                                    let #weak_control = std::rc::Rc::downgrade(&#initial_parent_ident);
-                                    let #callback_state = #branch_state.clone();
-                                    let #callback_slot = #slot.clone();
-                                    let #callback_host_owner = #host_owner.clone();
-                                    let #callback_environment = __environment.clone();
-                                    #property_receiver::__template_subscribe(
-                                        &*#initial_parent_ident,
-                                        move || {
-                                            if let Some(control) = #weak_control.upgrade() {
-                                                let __environment = #callback_environment.clone();
-                                                #callback_state.borrow_mut().clear();
-                                                let mut #callback_branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
-                                                let #callback_parent_ident = control;
-                                                let #next_value = #callback_value;
-                                                *#callback_state.borrow_mut() = #callback_branch_vec;
-                                                let #callback_content_handle = #callback_content;
-                                                let #callback_content_ref:
-                                                    &dyn elwindui::core::ui::ListExt<#collection_item_trait> =
-                                                    &*#callback_content_handle;
-                                                #callback_slot.replace_children(
-                                                    #callback_content_ref,
-                                                    #index,
-                                                    #next_value,
-                                                );
-                                            }
-                                        },
-                                    )
-                                }
-                            };
-                            sink.push(sub)
-                        })
-                        .collect();
-                    child_statements.extend(quote! {
-                        let #host_owner = #node.clone();
-                        let #slot = std::rc::Rc::new(
-                            elwindui::core::ui::DynamicChildSlot::<#collection_item_trait>::default()
-                        );
-                        #branch_cache_declarations
-                        let mut #branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
-                        let __initial_value = #initial_value;
-                        #slot.replace_children(#host, #index, __initial_value);
-                        let #branch_state = std::rc::Rc::new(std::cell::RefCell::new(#branch_vec));
-                        #subscriptions
-                    });
-                }
-                ast::ChildEntry::For { .. } => {
-                    let ast::ChildEntry::For {
-                        binding,
-                        collection,
-                        body,
-                    } = child
-                    else {
-                        unreachable!();
-                    };
-                    if body.is_empty()
-                        || body
-                            .iter()
-                            .any(|entry| !matches!(entry, ast::ChildEntry::Literal(_)))
-                    {
-                        return Err(
-                            "template `for` bodies must contain one or more literal elements"
-                                .into(),
-                        );
-                    }
-                    let collection_value = self.expression(collection)?;
-                    let collection_keys = self.expression_property_keys(collection);
-                    self.iterable_properties
-                        .extend(collection_keys.iter().copied());
-                    let rc_identity = codegen::for_body_binds_item_to_a_bindable_field(
-                        body,
-                        binding,
-                        &self.from,
-                        &self.table,
-                    );
-                    let item_ident = format_ident!("{binding}");
-                    let item_subscriptions = self.fresh("item_subscriptions");
-                    self.loop_bindings
-                        .push((binding.clone(), item_ident.clone()));
-                    let item_children = body
-                        .iter()
-                        .map(|entry| {
-                            self.compile_dynamic_branch_for_content(
-                                entry,
-                                &SubscriptionSink::Local(item_subscriptions.clone()),
-                                &collection_item_trait,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    self.loop_bindings.pop();
-                    let host_owner = self.fresh("host_owner");
-                    let slot = self.fresh("slot");
-                    let render = quote! {
-                        {
-                            let __render_environment = __environment.clone();
-                            move |#item_ident| {
-                                let __environment = __render_environment.clone();
-                                // DynamicChildSlot renderers receive a borrowed item, while
-                                // nested event/two-way handlers require an owned value that can
-                                // outlive this invocation.  Clone the item at the shared backend
-                                // boundary so both `replace_items` and identity-preserving
-                                // `replace_rc_items` use the same lifetime-safe lowering.
-                                let #item_ident = #item_ident.clone();
-                                let mut #item_subscriptions =
-                                    Vec::<elwindui::core::reactive::Subscription>::new();
-                                elwindui::core::ui::DynamicChild::with_children(
-                                    vec![#(#item_children),*],
-                                    #item_subscriptions,
-                                )
-                            }
-                        }
-                    };
-                    let initial_replace = if rc_identity {
-                        quote! {
-                            #slot.replace_rc_items(
-                                #host,
-                                #index,
-                                &__initial_collection,
-                                #render,
-                            );
-                        }
-                    } else {
-                        quote! {
-                            #slot.replace_items(
-                                #host,
-                                #index,
-                                __initial_collection,
-                                #render,
-                            );
-                        }
-                    };
-                    let initial_parent_ident = format_ident!("{}", self.parent_ident);
-                    let callback_parent_ident = self.fresh("callback_parent");
-                    let previous_parent_ident = std::mem::replace(
-                        &mut self.parent_ident,
-                        callback_parent_ident.to_string(),
-                    );
-                    let callback_collection_value = self.expression(collection)?;
-                    self.parent_ident = previous_parent_ident;
-                    let refresh_subscriptions: TokenStream = collection_keys
-                        .iter()
-                        .map(|key| {
-                            let weak_control = self.fresh("control_weak");
-                            let callback_slot = self.fresh("callback_slot");
-                            let callback_host_owner = self.fresh("callback_host_owner");
-                            let callback_collection = self.fresh("callback_collection");
-                            let callback_environment = self.fresh("callback_environment");
-                            let property_receiver = self.template_property_receiver(*key);
-                            let callback_content =
-                                self.content_field_get(&element.type_path, &callback_host_owner);
-                            let callback_content_handle = self.fresh("callback_content_handle");
-                            let callback_content_ref = self.fresh("callback_content_ref");
-                            let callback_replace = if rc_identity {
-                                quote! {
-                                let #callback_content_handle = #callback_content;
-                                let #callback_content_ref:
-                                    &dyn elwindui::core::ui::ListExt<#collection_item_trait> =
-                                    &*#callback_content_handle;
-                                #callback_slot.replace_rc_items(
-                                        #callback_content_ref,
-                                        #index,
-                                        &(#callback_collection),
-                                        #render,
-                                    );
-                                }
-                            } else {
-                                quote! {
-                                let #callback_content_handle = #callback_content;
-                                let #callback_content_ref:
-                                    &dyn elwindui::core::ui::ListExt<#collection_item_trait> =
-                                    &*#callback_content_handle;
-                                #callback_slot.replace_items(
-                                        #callback_content_ref,
-                                        #index,
-                                        #callback_collection,
-                                        #render,
-                                    );
-                                }
-                            };
-                            let subscription = quote! {
-                                {
-                                    let #weak_control = std::rc::Rc::downgrade(&#initial_parent_ident);
-                                    let #callback_slot = #slot.clone();
-                                    let #callback_host_owner = #host_owner.clone();
-                                    let #callback_environment = __environment.clone();
-                                    #property_receiver::__template_subscribe(
-                                        &*#initial_parent_ident,
-                                        move || {
-                                            if let Some(control) = #weak_control.upgrade() {
-                                                let __environment = #callback_environment.clone();
-                                                let #callback_parent_ident = control;
-                                                let #callback_collection = #callback_collection_value;
-                                                #callback_replace
-                                            }
-                                        },
-                                    )
-                                }
-                            };
-                            sink.push(subscription)
-                        })
-                        .collect();
-                    child_statements.extend(quote! {
-                        let #host_owner = #node.clone();
-                        let #slot = std::rc::Rc::new(
-                            elwindui::core::ui::DynamicChildSlot::<#collection_item_trait>::default()
-                        );
-                        let __initial_collection = #collection_value;
-                        #initial_replace
-                        #refresh_subscriptions
-                    });
-                }
-                ast::ChildEntry::Ref(name) => {
-                    let Some((binding, _)) = self.lets.get(name) else {
-                        return Err(format!("template child reference `{name}` is not defined"));
-                    };
-                    child_statements.extend(quote! {
-                        #host.insert(#index, #binding.clone());
-                    });
-                }
-            }
-        }
-        let host_content = self.content_field_get(&element.type_path, &node);
-        let collection = quote! {{
-            let #node = #construction;
-            #statements
-            #template_presenter_bind
-            let #host_handle = #host_content;
-            let #host: &dyn elwindui::core::ui::ListExt<#collection_item_trait> =
-                &*#host_handle;
-            #child_statements
-            #node
-        }};
-        if let Some(scalar) = external_scalar {
-            Ok(quote! {
-                #props_macro_path!(@content_shape { #scalar }, { #collection })
-            })
-        } else {
-            Ok(collection)
-        }
-    }
-
-    /// Lower a dynamic region hosted by a scalar `#[content]` property.  Scalar content has no
-    /// collection host or `DynamicChildSlot`: each selector branch materializes one element and
-    /// replaces the effective content field through the generated props metadata.  Keeping this
-    /// path separate from the collection loop makes it impossible for scalar templates to acquire
-    /// an accidental `LayoutExt` requirement.
-    fn compile_scalar_dynamic_element(
-        &mut self,
-        element: &ast::ElementNode,
-        node: &syn::Ident,
-        construction: TokenStream,
-        statements: TokenStream,
-        template_presenter_bind: TokenStream,
-        sink: &SubscriptionSink,
-    ) -> Result<TokenStream, String> {
-        let props_macro_path =
-            template_props_macro_path(&element.type_path, self.resolve_info(&element.type_path));
-        let invalid = |message: &'static str| {
-            Ok::<TokenStream, String>(quote! {{
-                let #node = #construction;
-                #statements
-                #template_presenter_bind
-                compile_error!(#message);
-                #node
-            }})
-        };
-        let Some(entry) = (element.children.len() == 1).then(|| &element.children[0]) else {
-            return invalid(
-                "dynamic children under scalar #[content] must contain exactly one if/match region",
-            );
-        };
-        let (selector, branches, match_patterns): (
-            &ast::ViewExpr,
-            Vec<&[ast::ChildEntry]>,
-            Option<Vec<String>>,
-        ) = match entry {
-            ast::ChildEntry::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => (
-                condition,
-                vec![then_branch.as_slice(), else_branch.as_slice()],
-                None,
-            ),
-            ast::ChildEntry::Match { value, arms } => (
-                value,
-                arms.iter().map(|arm| arm.body.as_slice()).collect(),
-                Some(arms.iter().map(|arm| arm.pattern.clone()).collect()),
-            ),
-            ast::ChildEntry::For { .. } => {
-                return invalid(
-                    "a `for` region cannot be the sole content of a scalar #[content] field",
-                );
-            }
-            ast::ChildEntry::Literal(_) | ast::ChildEntry::Ref(_) => {
-                return invalid(
-                    "scalar dynamic content requires an if/match region with one child per branch",
-                );
-            }
-        };
-        if branches.iter().any(|branch| branch.len() != 1) {
-            return invalid(
-                "every scalar dynamic content branch must resolve to exactly one child",
-            );
-        }
-
-        let branch_vec = self.fresh("scalar_branch_subscriptions");
-        let branch_state = self.fresh("scalar_branch_state");
-        let branch_caches: Vec<Option<syn::Ident>> = branches
-            .iter()
-            .map(|branch| {
-                Self::can_cache_dynamic_branch(&branch[0])
-                    .then(|| self.fresh("scalar_branch_cache"))
-            })
-            .collect();
-        let initial_values: Vec<_> = branches
-            .iter()
-            .zip(branch_caches.iter())
-            .map(|(branch, cache)| {
-                self.compile_dynamic_branch_children(
-                    branch,
-                    &SubscriptionSink::Local(branch_vec.clone()),
-                    cache.as_ref(),
-                )
-            })
-            .collect::<Result<_, _>>()?;
-        let selector_value = self.expression(selector)?;
-        let selector_keys = self.expression_property_keys(selector);
-        if match_patterns.is_none()
-            || match_patterns.as_ref().is_some_and(|patterns| {
-                patterns
-                    .iter()
-                    .all(|pattern| matches!(pattern.trim(), "true" | "false"))
-            })
-        {
-            for key in &selector_keys {
-                self.constrain_property(*key, quote! { bool });
-            }
-        }
-        let initial_value = if let Some(patterns) = &match_patterns {
-            let arms = patterns
-                .iter()
-                .zip(initial_values.iter())
-                .map(|(pattern, value)| {
-                    let pattern = syn::Pat::parse_single.parse_str(pattern).map_err(|error| {
-                        format!("invalid scalar template match pattern: {error}")
-                    })?;
-                    Ok::<_, String>(quote! { #pattern => #value })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            quote! { match #selector_value { #(#arms),* } }
-        } else {
-            let then_value = &initial_values[0];
-            let else_value = &initial_values[1];
-            quote! { if #selector_value { #then_value } else { #else_value } }
-        };
-
-        let callback_parent_ident = self.fresh("scalar_callback_parent");
-        let callback_branch_vec = self.fresh("scalar_next_branch_subscriptions");
-        let previous_parent_ident =
-            std::mem::replace(&mut self.parent_ident, callback_parent_ident.to_string());
-        let callback_values: Vec<_> = branches
-            .iter()
-            .zip(branch_caches.iter())
-            .map(|(branch, cache)| {
-                self.compile_dynamic_branch_children(
-                    branch,
-                    &SubscriptionSink::Local(callback_branch_vec.clone()),
-                    cache.as_ref(),
-                )
-            })
-            .collect::<Result<_, _>>()?;
-        let callback_selector_value = self.expression(selector)?;
-        self.parent_ident = previous_parent_ident;
-        let callback_value = if let Some(patterns) = &match_patterns {
-            let arms = patterns
-                .iter()
-                .zip(callback_values.iter())
-                .map(|(pattern, value)| {
-                    let pattern = syn::Pat::parse_single.parse_str(pattern).map_err(|error| {
-                        format!("invalid scalar template match pattern: {error}")
-                    })?;
-                    Ok::<_, String>(quote! { #pattern => #value })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            quote! { match #callback_selector_value { #(#arms),* } }
-        } else {
-            let then_value = &callback_values[0];
-            let else_value = &callback_values[1];
-            quote! { if #callback_selector_value { #then_value } else { #else_value } }
-        };
-
-        let initial_parent_ident = format_ident!("{}", self.parent_ident);
-        let node_weak = self.fresh("scalar_node_weak");
-        let control_weak = self.fresh("scalar_control_weak");
-        let callback_state = self.fresh("scalar_callback_state");
-        let callback_environment = self.fresh("scalar_callback_environment");
-        let next_vec = self.fresh("scalar_next_value");
-        let next_child = self.fresh("scalar_next_child");
-        let replacement: TokenStream = selector_keys
-            .iter()
-            .map(|key| {
-                let property_receiver = self.template_property_receiver(*key);
-                let callback_branch_vec = callback_branch_vec.clone();
-                quote! {
-                    {
-                        let #node_weak = std::rc::Rc::downgrade(&#node);
-                        let #control_weak = std::rc::Rc::downgrade(&#initial_parent_ident);
-                        let #callback_state = #branch_state.clone();
-                        let #callback_environment = __environment.clone();
-                        #property_receiver::__template_subscribe(
-                            &*#initial_parent_ident,
-                            move || {
-                                if let (Some(node), Some(control)) =
-                                    (#node_weak.upgrade(), #control_weak.upgrade())
-                                {
-                                    let __environment = #callback_environment.clone();
-                                    #callback_state.borrow_mut().clear();
-                                    let mut #callback_branch_vec =
-                                        Vec::<elwindui::core::reactive::Subscription>::new();
-                                    let #callback_parent_ident = control;
-                                    let #next_vec = #callback_value;
-                                    let #next_child = #next_vec
-                                        .into_iter()
-                                        .next()
-                                        .expect("scalar dynamic branch must contain one child");
-                                    #props_macro_path!(@children_erased node, [#next_child]);
-                                    *#callback_state.borrow_mut() = #callback_branch_vec;
-                                }
-                            },
-                        )
-                    }
-                }
-            })
-            .map(|subscription| sink.push(subscription))
-            .collect();
-        let cache_declarations: TokenStream = branch_caches
-            .iter()
-            .flatten()
-            .map(|cache| {
-                quote! {
-                    let #cache = std::rc::Rc::new(
-                        std::cell::RefCell::new(
-                            None::<std::rc::Rc<dyn elwindui::core::ui::UIElementExt>>
-                        )
-                    );
-                }
-            })
-            .collect();
-        let initial_vec = self.fresh("scalar_initial_value");
-        let initial_child = self.fresh("scalar_initial_child");
-        Ok(quote! {{
-            let #node = #construction;
-            #statements
-            #template_presenter_bind
-            #cache_declarations
-            let mut #branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
-            let #initial_vec = #initial_value;
-            let #initial_child = #initial_vec
-                .into_iter()
-                .next()
-                .expect("scalar dynamic branch must contain one child");
-            #props_macro_path!(@children_erased #node, [#initial_child]);
-            let #branch_state = std::rc::Rc::new(std::cell::RefCell::new(#branch_vec));
-            #replacement
-            #node
-        }})
-    }
-
-    /// Resolve a dynamic collection host's getter from the same effective content metadata used
-    /// to choose the scalar/collection branch.  Local generated components expose their content
-    /// accessor as an inherent method, while an external/builtin host keeps the exported props
-    /// macro as the cross-crate metadata boundary.  Neither path relies on LayoutExt or on a
-    /// concrete host type name.
-    fn content_field_get(&self, type_path: &str, receiver: &syn::Ident) -> TokenStream {
-        if let Some(info) = self.resolve_info(type_path) {
-            if codegen::effective_content_shape(info) != codegen::EffectiveContentShape::External {
-                if let Some(field) = info.content_field.as_deref() {
-                    let field = format_ident!("{field}");
-                    return quote! { #receiver.#field() };
-                }
-            }
-        }
-        let props_macro_path = template_props_macro_path(type_path, self.resolve_info(type_path));
-        quote! { #props_macro_path!(@content_field_get #receiver) }
-    }
-
-    fn expression(&mut self, expr: &ast::ViewExpr) -> Result<TokenStream, String> {
-        match expr {
-            ast::ViewExpr::Path(path) if !path.is_empty() => {
-                if let Some(binding) = self.loop_binding(&path[0]).cloned() {
-                    let mut value = quote! { #binding };
-                    if path.len() == 1 {
-                        return Ok(quote! { #value.clone() });
-                    }
-                    for segment in &path[1..] {
-                        let getter = format_ident!("{segment}");
-                        value = quote! { #value.#getter() };
-                    }
-                    return Ok(value);
-                }
-                self.expression_path(path)
-            }
-            ast::ViewExpr::Path(_) => unreachable!("empty template path was parsed"),
-            ast::ViewExpr::TFluent(key, args) => {
-                // Fluent arguments are expressions in their own right.  Lower them through
-                // this backend rather than handing the whole node to the generic Rust
-                // expression emitter so component-default shorthand such as
-                // `t!("count", value: doc.count)` is normalized to the typed
-                // `templated_parent` bridge as well.
-                let args = args
-                    .iter()
-                    .map(|(name, value)| {
-                        let value = self.expression(value)?;
-                        Ok::<_, String>(quote! {
-                            (#name, elwindui::i18n::FluentValue::from(#value))
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(quote! { elwindui::i18n::t(#key, &[ #(#args),* ]) })
-            }
-            ast::ViewExpr::Expr(_) => Ok(codegen::emit_template_expression_for_target_with_fields(
-                expr,
-                &format_ident!("{}", self.parent_ident),
-                &self.property_bounds,
-                self.target_type.clone(),
-                self.bare_parent_fields.clone(),
-            )),
-            ast::ViewExpr::Element(element) => self.compile_element(
-                element,
-                &SubscriptionSink::Shared(quote! {
-                    __subscriptions
-                }),
-            ),
-            ast::ViewExpr::Closure { params, body } => {
-                let parent = format_ident!("{}", self.parent_ident);
-                Ok(codegen::emit_template_closure_value_for_target_with_fields(
-                    params,
-                    body,
-                    &parent,
-                    &self.property_bounds,
-                    &self.from,
-                    &self.table,
-                    self.target_type.clone(),
-                    self.bare_parent_fields.clone(),
-                ))
-            }
-            ast::ViewExpr::DeferredView(deferred) => {
-                self.has_deferred_views = true;
-                let compiled = compile_template_body(
-                    &deferred.body.root,
-                    &deferred.body.lets,
-                    deferred.body.on_mount.as_ref(),
-                    deferred.body.on_unmount.as_ref(),
-                    deferred.body.on_update.as_ref(),
-                    self.from.clone(),
-                    self.table.clone(),
-                    self.target_type.clone(),
-                    self.bare_parent_fields.clone(),
-                )?;
-                let parent = format_ident!("{}", self.parent_ident);
-                Ok(emit_view_template_factory(
-                    &compiled,
-                    self.target_type.clone(),
-                    &parent,
-                ))
-            }
-        }
-    }
-
-    fn expression_path(&mut self, path: &[String]) -> Result<TokenStream, String> {
-        if self.bare_parent_fields.contains(path[0].as_str()) {
-            // Component default templates historically allowed both `label` and
-            // `label.text` shorthand.  Normalize the first segment through the same typed
-            // `templated_parent` bridge used by explicit template expressions, preserving
-            // the remaining getter path for compound values such as `doc.content`.
-            let parent_path = ast::ViewExpr::Path(
-                std::iter::once("templated_parent".to_string())
-                    .chain(path.iter().cloned())
-                    .collect(),
-            );
-            return Ok(codegen::emit_template_expression_for_target_with_fields(
-                &parent_path,
-                &format_ident!("{}", self.parent_ident),
-                &self.property_bounds,
-                self.target_type.clone(),
-                self.bare_parent_fields.clone(),
-            ));
-        }
-        Ok(codegen::emit_template_expression_for_target_with_fields(
-            &ast::ViewExpr::Path(path.to_vec()),
-            &format_ident!("{}", self.parent_ident),
-            &self.property_bounds,
-            self.target_type.clone(),
-            self.bare_parent_fields.clone(),
-        ))
-    }
-
-    fn expression_property_keys(&mut self, expr: &ast::ViewExpr) -> BTreeSet<u64> {
-        let mut keys = BTreeSet::new();
-        match expr {
-            ast::ViewExpr::Path(path)
-                if !path.is_empty() && self.bare_parent_fields.contains(path[0].as_str()) =>
-            {
-                keys.insert(crate::template_property_key(&path[0]));
-            }
-            ast::ViewExpr::Expr(expression) if !self.bare_parent_fields.is_empty() => {
-                // Raw Rust expressions in a component default template may use the same bare
-                // property spelling as ordinary `view!` attributes.  The shared closure rewriter
-                // handles explicit `templated_parent.foo`; dependency collection here only needs
-                // to add keys for bare names that belong to the concrete target.
-                struct Collector<'a> {
-                    fields: &'a HashSet<String>,
-                    keys: &'a mut BTreeSet<u64>,
-                }
-                impl<'ast> syn::visit::Visit<'ast> for Collector<'_> {
-                    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-                        if node.path.segments.len() == 1 {
-                            let name = node.path.segments[0].ident.to_string();
-                            if self.fields.contains(&name) {
-                                self.keys.insert(crate::template_property_key(&name));
-                            }
-                        }
-                        syn::visit::visit_expr_path(self, node);
-                    }
-                }
-                let mut collector = Collector {
-                    fields: &self.bare_parent_fields,
-                    keys: &mut keys,
-                };
-                syn::visit::Visit::visit_expr(&mut collector, expression);
-                codegen::collect_template_property_keys(expr, &mut keys);
-            }
-            ast::ViewExpr::TFluent(_, args) => {
-                for (_, value) in args {
-                    keys.extend(self.expression_property_keys(value));
-                }
-            }
-            _ => codegen::collect_template_property_keys(expr, &mut keys),
-        }
-        keys
-    }
-
-    fn constrain_property(&mut self, key: u64, expected: TokenStream) {
-        self.property_bounds
-            .borrow_mut()
-            .entry(key)
-            .and_modify(|current| {
-                if current.is_none() {
-                    *current = Some(expected.clone());
-                }
-            })
-            .or_insert(Some(expected));
-    }
-
-    fn template_property_receiver(&self, key: u64) -> TokenStream {
-        let target = &self.target_type;
-        quote! { <#target as elwindui::core::ui::TemplateProperty<#key>> }
-    }
-}
 
 /// The semantic result of compiling a template body.  All three template frontends (a component
 /// default, a named `#[control_template]`, and the expression-form `template_view!`) use this
@@ -2729,13 +274,16 @@ impl TemplateBackend {
 pub(crate) struct CompiledTemplateBody {
     root: TokenStream,
     let_statements: TokenStream,
+    refresh: TokenStream,
     property_bounds: Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
+    writable_properties: BTreeSet<u64>,
     iterable_properties: BTreeSet<u64>,
     on_mount: Option<TokenStream>,
     on_unmount: Option<TokenStream>,
     on_update: Option<TokenStream>,
     lifecycle_keys: BTreeSet<u64>,
     has_deferred_views: bool,
+    requires_parent: bool,
 }
 
 /// Compiles a parsed template body through the shared semantic backend.  The caller is
@@ -2752,32 +300,26 @@ pub(crate) fn compile_template_body(
     target_type: TokenStream,
     bare_parent_fields: HashSet<String>,
 ) -> Result<CompiledTemplateBody, String> {
-    let mut compiler = TemplateBackend::new(from.clone(), table, target_type, bare_parent_fields);
-    let mut let_statements = TokenStream::new();
-    for binding in lets {
-        let value = compiler.compile_element(
-            &binding.element,
-            &SubscriptionSink::Shared(quote! { __subscriptions }),
-        )?;
-        let ident = format_ident!("__elwindui_let_{}", binding.name);
-        compiler.lets.insert(
-            binding.name.clone(),
-            (ident.clone(), binding.element.type_path.clone()),
-        );
-        let_statements.extend(quote! {
-            let #ident = #value;
-        });
-    }
-    let root = compiler.compile_root(body)?;
+    let lowered = codegen::lower_template_body(
+        body,
+        lets,
+        on_mount,
+        on_unmount,
+        on_update,
+        &from,
+        &table,
+        target_type.clone(),
+        bare_parent_fields.clone(),
+    )?;
     let template_parent_ident = format_ident!("__elwindui_template_parent");
     let on_mount_tokens = on_mount.map(|block| {
         codegen::emit_template_event_closure_body_for_target_with_fields(
             &ast::ClosureBody::Block(block.clone()),
             &[],
             &template_parent_ident,
-            &compiler.property_bounds,
-            compiler.target_type.clone(),
-            compiler.bare_parent_fields.clone(),
+            &lowered.property_bounds,
+            target_type.clone(),
+            bare_parent_fields.clone(),
         )
     });
     let on_unmount_tokens = on_unmount.map(|block| {
@@ -2785,9 +327,9 @@ pub(crate) fn compile_template_body(
             &ast::ClosureBody::Block(block.clone()),
             &[],
             &template_parent_ident,
-            &compiler.property_bounds,
-            compiler.target_type.clone(),
-            compiler.bare_parent_fields.clone(),
+            &lowered.property_bounds,
+            target_type.clone(),
+            bare_parent_fields.clone(),
         )
     });
     let on_update_tokens = on_update.map(|hook| {
@@ -2795,9 +337,9 @@ pub(crate) fn compile_template_body(
             &ast::ClosureBody::Block(hook.block.clone()),
             &[],
             &template_parent_ident,
-            &compiler.property_bounds,
-            compiler.target_type.clone(),
-            compiler.bare_parent_fields.clone(),
+            &lowered.property_bounds,
+            target_type.clone(),
+            bare_parent_fields.clone(),
         )
     });
     let mut lifecycle_keys = BTreeSet::new();
@@ -2818,16 +360,59 @@ pub(crate) fn compile_template_body(
         }
     }
     Ok(CompiledTemplateBody {
-        root,
-        let_statements,
-        property_bounds: compiler.property_bounds,
-        iterable_properties: compiler.iterable_properties,
+        root: lowered.root,
+        let_statements: lowered.let_statements,
+        refresh: lowered.refresh,
+        property_bounds: lowered.property_bounds,
+        writable_properties: lowered.writable_properties,
+        iterable_properties: lowered.iterable_properties,
         on_mount: on_mount_tokens,
         on_unmount: on_unmount_tokens,
         on_update: on_update_tokens,
         lifecycle_keys,
-        has_deferred_views: compiler.has_deferred_views,
+        has_deferred_views: lowered.has_deferred_views,
+        requires_parent: lowered.requires_parent,
     })
+}
+
+/// Emits the property-change subscriptions shared by every typed template factory.  Property
+/// reads are lowered into `TemplateProperty<KEY>` accesses; the corresponding subscription merely
+/// schedules the same refresh closure used by event wiring and dynamic regions.  Keeping this in
+/// the factory layer means the semantic lowerer has no knowledge of how a `ControlTemplate` or a
+/// deferred view owns its cleanup subscription vector.
+fn emit_template_property_subscriptions(
+    target_type: &TokenStream,
+    property_bounds: &Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
+) -> TokenStream {
+    property_bounds
+        .borrow()
+        .keys()
+        .copied()
+        .map(|key| {
+            let weak_parent = format_ident!("__elwindui_template_property_weak_{key}");
+            let refresh_cell = format_ident!("__elwindui_template_property_refresh_cell_{key}");
+            quote! {
+                {
+                    let #weak_parent = std::rc::Rc::downgrade(&__elwindui_template_parent);
+                    let #refresh_cell = std::rc::Rc::clone(&__elwindui_template_refresh_cell);
+                    __subscriptions.borrow_mut().push(
+                        <#target_type as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
+                            &*__elwindui_template_parent,
+                            move || {
+                                if #weak_parent.upgrade().is_some() {
+                                    if let Some(__elwindui_template_refresh_callback) =
+                                        #refresh_cell.borrow().as_ref().cloned()
+                                    {
+                                        __elwindui_template_refresh_callback();
+                                    }
+                                }
+                            },
+                        ),
+                    );
+                }
+            }
+        })
+        .collect()
 }
 
 /// Wraps a compiled semantic template body in a concrete `ControlTemplate<T>` factory.  The
@@ -2848,6 +433,8 @@ pub(crate) fn emit_compiled_template_factory(
         && body.property_bounds.borrow().is_empty()
         && body.iterable_properties.is_empty()
         && body.lifecycle_keys.is_empty()
+        && body.writable_properties.is_empty()
+        && !body.requires_parent
     {
         let root = &body.root;
         let let_statements = &body.let_statements;
@@ -2903,6 +490,9 @@ pub(crate) fn emit_compiled_template_factory(
 
     let root = &body.root;
     let let_statements = &body.let_statements;
+    let refresh = &body.refresh;
+    let property_subscriptions =
+        emit_template_property_subscriptions(&target_type, &body.property_bounds);
     let on_unmount = body.on_unmount.clone();
     let on_mount_hook = body
         .on_mount
@@ -2985,8 +575,27 @@ pub(crate) fn emit_compiled_template_factory(
             let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
                 Vec::<elwindui::core::reactive::Subscription>::new(),
             ));
+            let __elwindui_template_refresh_cell = std::rc::Rc::new(
+                std::cell::RefCell::new(None::<std::rc::Rc<dyn Fn()>>),
+            );
+            let __elwindui_template_refresh_parent = __elwindui_template_parent.clone();
+            let __elwindui_template_refresh_environment = __environment.clone();
+            let __elwindui_template_refresh_cell_for_callback =
+                std::rc::Rc::clone(&__elwindui_template_refresh_cell);
+            let this = __elwindui_template_parent.clone();
             #let_statements
             let __root = #root;
+            let __elwindui_template_refresh_callback: std::rc::Rc<dyn Fn()> =
+                std::rc::Rc::new(move || {
+                    let __elwindui_template_parent =
+                        __elwindui_template_refresh_parent.clone();
+                    let this = __elwindui_template_parent.clone();
+                    let __environment = __elwindui_template_refresh_environment.clone();
+                    #refresh
+                });
+            *__elwindui_template_refresh_cell_for_callback.borrow_mut() =
+                Some(__elwindui_template_refresh_callback);
+            #property_subscriptions
             #on_mount_hook
             #update_subscriptions
             #on_unmount_hook
@@ -3012,6 +621,9 @@ fn emit_view_template_factory(
 ) -> TokenStream {
     let root = &body.root;
     let let_statements = &body.let_statements;
+    let refresh = &body.refresh;
+    let property_subscriptions =
+        emit_template_property_subscriptions(&target_type, &body.property_bounds);
     let on_mount_hook = body
         .on_mount
         .clone()
@@ -3097,8 +709,27 @@ fn emit_view_template_factory(
                 let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
                     Vec::<elwindui::core::reactive::Subscription>::new(),
                 ));
+                let __elwindui_template_refresh_cell = std::rc::Rc::new(
+                    std::cell::RefCell::new(None::<std::rc::Rc<dyn Fn()>>),
+                );
+                let __elwindui_template_refresh_parent = __elwindui_template_parent.clone();
+                let __elwindui_template_refresh_environment = __environment.clone();
+                let __elwindui_template_refresh_cell_for_callback =
+                    std::rc::Rc::clone(&__elwindui_template_refresh_cell);
+                let this = __elwindui_template_parent.clone();
                 #let_statements
                 let __root = #root;
+                let __elwindui_template_refresh_callback: std::rc::Rc<dyn Fn()> =
+                    std::rc::Rc::new(move || {
+                        let __elwindui_template_parent =
+                            __elwindui_template_refresh_parent.clone();
+                        let this = __elwindui_template_parent.clone();
+                        let __environment = __elwindui_template_refresh_environment.clone();
+                        #refresh
+                    });
+                *__elwindui_template_refresh_cell_for_callback.borrow_mut() =
+                    Some(__elwindui_template_refresh_callback);
+                #property_subscriptions
                 #on_mount_hook
                 #update_subscriptions
                 #on_unmount_hook
@@ -3125,7 +756,9 @@ fn emit_standalone_template_factory(body: &CompiledTemplateBody) -> TokenStream 
     let parent_dependent = !body.property_bounds.borrow().is_empty()
         || !body.iterable_properties.is_empty()
         || !body.lifecycle_keys.is_empty()
-        || body.has_deferred_views;
+        || !body.writable_properties.is_empty()
+        || body.has_deferred_views
+        || body.requires_parent;
     let root = &body.root;
     let let_statements = &body.let_statements;
 
@@ -3191,6 +824,19 @@ fn emit_standalone_template_factory(body: &CompiledTemplateBody) -> TokenStream 
             None => quote! { elwindui::core::ui::TemplateProperty<#key> },
         })
         .collect();
+    let writable_bounds: Vec<_> = body
+        .writable_properties
+        .iter()
+        .map(|key| quote! { elwindui::core::ui::WritableTemplateProperty<#key> })
+        .collect();
+    let template_bounds =
+        bounds
+            .into_iter()
+            .chain(writable_bounds)
+            .fold(TokenStream::new(), |mut tokens, bound| {
+                tokens.extend(quote! { + #bound });
+                tokens
+            });
     let iterable_bounds: Vec<_> = body
         .iterable_properties
         .iter()
@@ -3206,6 +852,9 @@ fn emit_standalone_template_factory(body: &CompiledTemplateBody) -> TokenStream 
         "__elwindui_template_factory_{}",
         TEMPLATE_VIEW_FACTORY_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
+    let refresh = &body.refresh;
+    let property_subscriptions =
+        emit_template_property_subscriptions(&quote! { C }, &body.property_bounds);
     let update_subscriptions: TokenStream = if let Some(update_body) = body.on_update.clone() {
         body.lifecycle_keys
             .iter()
@@ -3286,7 +935,7 @@ fn emit_standalone_template_factory(body: &CompiledTemplateBody) -> TokenStream 
             context: elwindui::core::ui::ControlTemplateContext<C>,
         ) -> std::rc::Rc<dyn elwindui::core::ui::UIElementExt>
         where
-            C: elwindui::core::ui::ControlExt + 'static + #(#bounds)+*,
+            C: elwindui::core::ui::ControlExt + 'static #template_bounds,
             #(#iterable_bounds,)*
         {
             use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
@@ -3296,8 +945,27 @@ fn emit_standalone_template_factory(body: &CompiledTemplateBody) -> TokenStream 
             let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
                 Vec::<elwindui::core::reactive::Subscription>::new(),
             ));
+            let __elwindui_template_refresh_cell = std::rc::Rc::new(
+                std::cell::RefCell::new(None::<std::rc::Rc<dyn Fn()>>),
+            );
+            let __elwindui_template_refresh_parent = __elwindui_template_parent.clone();
+            let __elwindui_template_refresh_environment = __environment.clone();
+            let __elwindui_template_refresh_cell_for_callback =
+                std::rc::Rc::clone(&__elwindui_template_refresh_cell);
+            let this = __elwindui_template_parent.clone();
             #let_statements
             let __root = #root;
+            let __elwindui_template_refresh_callback: std::rc::Rc<dyn Fn()> =
+                std::rc::Rc::new(move || {
+                    let __elwindui_template_parent =
+                        __elwindui_template_refresh_parent.clone();
+                    let this = __elwindui_template_parent.clone();
+                    let __environment = __elwindui_template_refresh_environment.clone();
+                    #refresh
+                });
+            *__elwindui_template_refresh_cell_for_callback.borrow_mut() =
+                Some(__elwindui_template_refresh_callback);
+            #property_subscriptions
             #on_mount_hook
             #update_subscriptions
             #on_unmount_hook
@@ -4402,6 +2070,54 @@ mod template_view_expression_tests {
             generated.contains("for` region cannot be the sole content")
                 || generated.contains("for region cannot be the sole content"),
             "{generated}"
+        );
+    }
+
+    #[test]
+    fn standalone_template_property_reads_and_writes_use_separate_capabilities() {
+        let key = crate::template_property_key("label");
+        let readable = generate_template_view_expression(
+            r#"
+                TextBlock { text: templated_parent.label }
+            "#,
+        )
+        .expect("a readable template property should generate")
+        .to_string();
+        assert!(
+            readable.contains(&format!("TemplateProperty < {key}u64 >")),
+            "readable access must carry the read capability: {readable}"
+        );
+        assert!(
+            !readable.contains("WritableTemplateProperty"),
+            "a one-way read must not request the write capability: {readable}"
+        );
+
+        let two_way = generate_template_view_expression(
+            r#"
+                TextArea { text <=> templated_parent.label }
+            "#,
+        )
+        .expect("a two-way template property should generate a writable bound")
+        .to_string();
+        assert!(
+            two_way.contains(&format!("WritableTemplateProperty < {key}u64 >")),
+            "two-way access must carry the write capability: {two_way}"
+        );
+
+        let event_write = generate_template_view_expression(
+            r#"
+                TextBlock {
+                    on_tapped: |_event| {
+                        templated_parent.set_label("clicked".to_string());
+                    }
+                }
+            "#,
+        )
+        .expect("an event write should generate a writable bound")
+        .to_string();
+        assert!(
+            event_write.contains(&format!("WritableTemplateProperty < {key}u64 >")),
+            "event writes must carry the write capability: {event_write}"
         );
     }
 }

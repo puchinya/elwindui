@@ -32,17 +32,54 @@ pub trait TemplateProperty<const KEY: u64> {
     type Value: Clone + 'static;
 
     fn __template_get(&self) -> Self::Value;
-
-    /// Sets a template-parent property from a template event/lifecycle closure when the
-    /// corresponding generated component property is writable.  Read-only properties retain the
-    /// default panic so the compile-time bridge remains useful for reads without inventing a
-    /// second erased setter lookup surface.
-    #[doc(hidden)]
-    fn __template_set(&self, _value: Self::Value) {
-        panic!("template parent property is not writable");
-    }
-
     fn __template_subscribe(&self, listener: impl Fn() + 'static) -> Subscription;
+}
+
+/// Compile-time writable capability for a [`TemplateProperty`] bridge entry.
+///
+/// Code generation implements this trait only for a property that has a real typed setter.  A
+/// template two-way binding or an explicit `set_<property>` call therefore fails during Rust trait
+/// resolution for computed, read-only, derived, and otherwise non-settable properties instead of
+/// reaching a runtime panic or a silent no-op.
+///
+/// ```compile_fail
+/// use elwindui_core::reactive::Subscription;
+/// use elwindui_core::ui::{TemplateProperty, WritableTemplateProperty};
+///
+/// struct ReadOnly;
+///
+/// impl TemplateProperty<7> for ReadOnly {
+///     type Value = String;
+///
+///     fn __template_get(&self) -> Self::Value {
+///         String::new()
+///     }
+///
+///     fn __template_subscribe(&self, _listener: impl Fn() + 'static) -> Subscription {
+///         Subscription::new(|| {})
+///     }
+/// }
+///
+/// fn write<T>(target: &T)
+/// where
+///     T: WritableTemplateProperty<7> + TemplateProperty<7, Value = String>,
+/// {
+///     <T as WritableTemplateProperty<7>>::__template_set(target, String::from("x"));
+/// }
+///
+/// fn main() {
+///     write(&ReadOnly);
+/// }
+/// ```
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` has no writable template-property capability for this key",
+    note = "template two-way bindings and templated_parent.set_* require a #[prop] or #[state] property with a setter"
+)]
+pub trait WritableTemplateProperty<const KEY: u64>: TemplateProperty<KEY> {
+    /// Writes the value through the generated component property's typed setter.
+    #[doc(hidden)]
+    fn __template_set(&self, value: Self::Value);
 }
 
 /// The context supplied to a [`ControlTemplate`] factory.

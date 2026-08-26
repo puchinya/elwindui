@@ -45,13 +45,22 @@ backend-independent Rust token generation
 
 `template_view!`、componentの`template:` pseudo-field、`#[control_template(target = T)]`は同じView ASTと
 template compilation contextへlowerする。contextはtyped `templated_parent`、selected
-`ControlTemplateContext.environment`、template-root ownershipを保持し、同じvalidator、property
-resync、dynamic-region reconciliation、ContentPresenter wiringを使って`ControlTemplate<T>` factoryを
-生成する。standalone `template_view!`は期待される`ControlTemplate<C>`型からtargetを推論でき、property
-参照は消去されないcompile-time `TemplateProperty` boundへlowerされる。componentの`template:`はその
-factoryをtype-level defaultとして登録し、`#[control_template]`は同じcompilerを使うnamed wrapperとして
-`Name::template()`を提供する。生成されたtemplate subtreeのcomponent descendantsはfactoryへ渡された
-Environmentを明示的にmountへ伝播する。
+`ControlTemplateContext.environment`、template-root ownershipを保持する。通常の`view!`とtemplateの
+両方が共有するplanner/emitterが、construction、metadata/property/content lowering、event・two-way・
+lifecycle wiring、dynamic-region reconciliation、ContentPresenter、EnvironmentScope、deferred view、
+let/reference、semantic Brush、cleanupを生成する。template-specific adapterはtyped parentの取得、
+`TemplateProperty`/`WritableTemplateProperty` capability bound、factory wrapping、template-root replacement
+だけを担当する。standalone `template_view!`は期待される`ControlTemplate<C>`型からtargetを推論でき、property
+参照は消去されないcompile-time `TemplateProperty<KEY>` boundへlowerされ、書込み経路は
+`WritableTemplateProperty<KEY>` boundへlowerされる。componentの`template:`はそのfactoryをtype-level
+defaultとして登録し、`#[control_template]`は同じlowererを使うnamed wrapperとして`Name::template()`を
+提供する。生成されたtemplate subtreeのcomponent descendantsはfactoryへ渡されたEnvironmentを明示的に
+mountへ伝播する。
+
+Template propertyの`KEY`はfield-name literalから生成時に計算するcompile-time 64-bit FNV-1a-style token
+であり、runtime registryやstring lookupは持たない。衝突は同一targetへの重複trait impl/associated type
+としてRustのcompile-time errorになる。effective `#[prop]`/`#[state]`に実setterがある場合だけ
+`WritableTemplateProperty<KEY>`を実装し、inherited fieldはcomposed baseの既存setterへ委譲する。
 
 ### 3.2 Registry resolution
 
@@ -183,9 +192,9 @@ lowering からは見えない。`Layout` の `children`、`ContentControl` の 
 specialized control の typed `children` はすべて同じ metadata-driven rule を通る。
 
 component自身のauthored presentationと、componentを使用する側のbare childは別のlowering siteである。
-`template: template_view!`はshared template compilerを通じてtyped `ControlTemplate<Self>` factoryに
+`template: template_view!`はshared semantic lowerer/planner/emitterを通じてtyped `ControlTemplate<Self>` factoryに
 なり、mount時にtyped Environment lookupでdefaultまたはoverrideを選択する。使用側のbare childは
-template compilerを経由せず、effective `#[content(...)]`のscalar/collection loweringへ送られる。
+template lowererを経由せず、effective `#[content(...)]`のscalar/collection loweringへ送られる。
 この区別はtype-name dispatchやhidden presentation metadataではなく、authoring slotの種類から決まる。
 
 #### Component override bridge

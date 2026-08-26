@@ -1,10 +1,10 @@
 # Tooling status
 
-Snapshot: 2026-08-24. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-08-27. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
 
 | Tool | State | Current capability / gap |
 |---|---|---|
-| `elwindui-codegen` | 🚧 | component/ViewModel/enum/ControlTemplate frontend, parser, diagnostics, and one semantic template backend for construction, property/content lowering, lifecycle, bindings, dynamic regions, ownership, and Environment propagation; `body: view!` remains ordinary composition, while `template: template_view!` and standalone `template_view!` expressions compile to typed `ControlTemplate<C>` values through that backend. Bare children and dynamic regions lower from effective `#[content(field)]` metadata plus field shape (scalar setter or collection surface); Layout is not a special host category. Control-specific type-name lowering, standalone compiler/type lists, and hidden body-presentation metadata are absent. |
+| `elwindui-codegen` | 🚧 | component/ViewModel/enum/ControlTemplate frontend, parser, diagnostics, and one shared semantic planner/emitter for ordinary `view!` plus template construction, property/content lowering, lifecycle, bindings, dynamic regions, ownership, Environment propagation, deferred views, and cleanup; `body: view!` remains ordinary composition, while `template: template_view!` and standalone `template_view!` expressions compile to typed `ControlTemplate<C>` values through the same lowerer. Template-only work is limited to typed-parent acquisition, capability bounds, factory wrapping, and template-root replacement. Bare children and dynamic regions lower from effective `#[content(field)]` metadata plus field shape (scalar setter or collection surface); Layout is not a special host category. Control-specific type-name lowering, standalone compiler/type lists, and hidden body-presentation metadata are absent. |
 | `elwindui-languageserver` | 🚧 | single-file diagnostics, member completion, and DSL semantic tokens; no cross-file resolution, hover, or generated-code preview |
 | Preview | ⬜ | design exists; no workspace preview application |
 | `elwindui-hotreload` | 🚧 | tested Patch/Remount decision helper exists; artifact loading and live replacement pipeline are absent |

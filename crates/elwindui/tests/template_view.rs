@@ -2,8 +2,10 @@
 
 use elwindui::core::base::Point;
 use elwindui::core::environment::EnvironmentContext;
-use elwindui::core::ui::{ControlTemplate, UIElementExt as _};
-use elwindui::ui::{ContentControl, ListExt as _, Rectangle, TextBlock};
+use elwindui::core::ui::{
+    ControlTemplate, TemplateProperty as _, UIElementExt as _, WritableTemplateProperty as _,
+};
+use elwindui::ui::{ContentControl, ListExt as _, Rectangle, TextArea, TextBlock};
 use elwindui::{component, control_template, template_view};
 use std::cell::Cell;
 use std::marker::PhantomData;
@@ -27,6 +29,18 @@ fn record_standalone_update() {
     STANDALONE_UPDATE_COUNT.with(|count| count.set(count.get() + 1));
 }
 
+const fn template_property_key(name: &str) -> u64 {
+    let bytes = name.as_bytes();
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut index = 0;
+    while index < bytes.len() {
+        hash ^= bytes[index] as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+        index += 1;
+    }
+    hash
+}
+
 #[elwindui::environment_key(
     name = standalone_template_environment_text,
     value = String,
@@ -45,6 +59,28 @@ struct TemplateProbe {
 
 #[component]
 impl TemplateProbe {}
+
+#[component(inherits Control)]
+struct InheritedWritableTemplateBase {
+    #[prop(default = String::from("base"))]
+    value: String,
+    template: template_view! {
+        TextBlock { text: value }
+    },
+}
+
+#[component]
+impl InheritedWritableTemplateBase {}
+
+#[component(inherits crate::InheritedWritableTemplateBase)]
+struct InheritedWritableTemplateChild {
+    template: template_view! {
+        TextArea { text <=> templated_parent.value }
+    },
+}
+
+#[component]
+impl InheritedWritableTemplateChild {}
 
 #[control_template(target = TemplateProbe)]
 struct NamedTemplateProbe {
@@ -844,6 +880,24 @@ fn standalone_template_view_two_way_binding_uses_shared_property_wiring() {
     let _: ControlTemplate<TemplateProbe> = template_view! {
         TextArea { text <=> templated_parent.label }
     };
+}
+
+#[test]
+fn inherited_writable_template_property_delegates_to_base() {
+    const VALUE_KEY: u64 = template_property_key("value");
+
+    let child = InheritedWritableTemplateChild::__new_unmounted();
+    assert_eq!(
+        <InheritedWritableTemplateChild as elwindui::core::ui::TemplateProperty<VALUE_KEY>>::__template_get(
+            &*child,
+        ),
+        "base"
+    );
+    <InheritedWritableTemplateChild as elwindui::core::ui::WritableTemplateProperty<VALUE_KEY>>::__template_set(
+        &*child,
+        "updated".to_string(),
+    );
+    assert_eq!(child.base.value(), "updated");
 }
 
 #[test]

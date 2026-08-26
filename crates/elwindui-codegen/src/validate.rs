@@ -472,6 +472,7 @@ pub(crate) fn validate_classified(modules: &[Module]) -> Vec<ValidationDiagnosti
                                 c,
                                 &table,
                                 None,
+                                view.is_template,
                                 &mut errors,
                             );
                         }
@@ -533,6 +534,7 @@ pub(crate) fn validate_classified(modules: &[Module]) -> Vec<ValidationDiagnosti
                                     c,
                                     &table,
                                     None,
+                                    view.is_template,
                                     &mut errors,
                                 );
                                 check_match_exhaustiveness(
@@ -598,6 +600,7 @@ fn check_binding_assignments(
     component: &ComponentDef,
     table: &SymbolTable,
     for_binding: Option<ForBinding<'_>>,
+    allow_template_parent: bool,
     errors: &mut ValidationErrors,
 ) {
     let target_info = table.resolve(from, &node.type_path);
@@ -633,65 +636,83 @@ fn check_binding_assignments(
                 );
             } else {
                 match &attribute.value {
-                ViewExpr::Path(path) if path.len() == 1 => {
-                    let source = &path[0];
-                    match component.fields.iter().find(|field| &field.name == source) {
-                        Some(field) if matches!(field.kind, FieldKind::Prop | FieldKind::State) => {}
-                        Some(field) => errors.item_local(format!(
-                            "{}: {location}: `{source}` is {:?}; a two-way source must be a mutable #[prop] or #[state] field",
-                            component.name, field.kind
-                        )),
-                        None => errors.item_local(format!(
-                            "{}: {location}: unknown two-way source `{source}`",
-                            component.name
-                        )),
+                    ViewExpr::Path(path) if path.len() == 1 => {
+                        let source = &path[0];
+                        match component.fields.iter().find(|field| &field.name == source) {
+                            Some(field)
+                                if matches!(field.kind, FieldKind::Prop | FieldKind::State) => {}
+                            Some(field) => errors.item_local(format!(
+                                "{}: {location}: `{source}` is {:?}; a two-way source must be a mutable #[prop] or #[state] field",
+                                component.name, field.kind
+                            )),
+                            None => errors.item_local(format!(
+                                "{}: {location}: unknown two-way source `{source}`",
+                                component.name
+                            )),
+                        }
                     }
-                }
-                ViewExpr::Path(path) if path.len() == 2 => {
-                    let owner = &path[0];
-                    let property = &path[1];
-                    match component.fields.iter().find(|field| &field.name == owner) {
-                        Some(field)
-                            if field.attrs.iter().any(|attr| matches!(attr, Attr::Bindable))
-                                || (field.name == "templated_parent"
-                                    && strip_weak_wrapper(&field.ty) != field.ty.trim()) =>
-                        {
-                            let owner_ty = if field.name == "templated_parent" {
-                                strip_weak_wrapper(&field.ty)
-                            } else {
-                                strip_rc_wrapper(&field.ty)
-                            };
-                            match table.resolve(from, owner_ty) {
+                    ViewExpr::Path(path) if path.len() == 2 => {
+                        let owner = &path[0];
+                        let property = &path[1];
+                        if allow_template_parent && owner == "templated_parent" {
+                            match table.resolve(from, &component.name) {
                                 Some(info) if info.fields.contains_key(property) => {}
                                 Some(_) => errors.registry_dependent(format!(
-                                    "{}: {location}: bindable owner `{owner}` has no property `{property}`",
+                                    "{}: {location}: template parent `{owner}` has no property `{property}`",
                                     component.name
                                 )),
                                 None => errors.registry_dependent(format!(
-                                    "{}: {location}: cannot resolve bindable owner type `{owner_ty}`",
+                                    "{}: {location}: cannot resolve template parent type `{}`",
+                                    component.name, component.name
+                                )),
+                            }
+                        } else {
+                            match component.fields.iter().find(|field| &field.name == owner) {
+                                Some(field)
+                                    if field
+                                        .attrs
+                                        .iter()
+                                        .any(|attr| matches!(attr, Attr::Bindable))
+                                        || (field.name == "templated_parent"
+                                            && strip_weak_wrapper(&field.ty) != field.ty.trim()) =>
+                                {
+                                    let owner_ty = if field.name == "templated_parent" {
+                                        strip_weak_wrapper(&field.ty)
+                                    } else {
+                                        strip_rc_wrapper(&field.ty)
+                                    };
+                                    match table.resolve(from, owner_ty) {
+                                        Some(info) if info.fields.contains_key(property) => {}
+                                        Some(_) => errors.registry_dependent(format!(
+                                            "{}: {location}: bindable owner `{owner}` has no property `{property}`",
+                                            component.name
+                                        )),
+                                        None => errors.registry_dependent(format!(
+                                            "{}: {location}: cannot resolve bindable owner type `{owner_ty}`",
+                                            component.name
+                                        )),
+                                    }
+                                }
+                                Some(_) => errors.item_local(format!(
+                                    "{}: {location}: `{owner}` is not a direct #[bindable] owner",
+                                    component.name
+                                )),
+                                None => errors.item_local(format!(
+                                    "{}: {location}: unknown bindable owner `{owner}`",
                                     component.name
                                 )),
                             }
                         }
-                        Some(_) => errors.item_local(format!(
-                            "{}: {location}: `{owner}` is not a direct #[bindable] owner",
-                            component.name
-                        )),
-                        None => errors.item_local(format!(
-                            "{}: {location}: unknown bindable owner `{owner}`",
-                            component.name
-                        )),
                     }
-                }
-                ViewExpr::Path(path) => errors.item_local(format!(
-                    "{}: {location}: unsupported two-way path `{}`; use a component field or direct bindable owner.field",
-                    component.name,
-                    path.join(".")
-                )),
-                _ => errors.item_local(format!(
-                    "{}: {location}: two-way RHS must be a writable component field or direct bindable owner.field",
-                    component.name
-                )),
+                    ViewExpr::Path(path) => errors.item_local(format!(
+                        "{}: {location}: unsupported two-way path `{}`; use a component field or direct bindable owner.field",
+                        component.name,
+                        path.join(".")
+                    )),
+                    _ => errors.item_local(format!(
+                        "{}: {location}: two-way RHS must be a writable component field or direct bindable owner.field",
+                        component.name
+                    )),
                 }
             }
         }
@@ -701,14 +722,21 @@ fn check_binding_assignments(
             component,
             table,
             for_binding,
+            allow_template_parent,
             errors,
         );
     }
     for child in &node.children {
         match child {
-            ChildEntry::Literal(element) => {
-                check_binding_assignments(element, from, component, table, for_binding, errors)
-            }
+            ChildEntry::Literal(element) => check_binding_assignments(
+                element,
+                from,
+                component,
+                table,
+                for_binding,
+                allow_template_parent,
+                errors,
+            ),
             ChildEntry::Ref(_) => {}
             ChildEntry::If {
                 then_branch,
@@ -722,6 +750,7 @@ fn check_binding_assignments(
                         component,
                         table,
                         for_binding,
+                        allow_template_parent,
                         errors,
                     );
                 }
@@ -734,6 +763,7 @@ fn check_binding_assignments(
                         component,
                         table,
                         for_binding,
+                        allow_template_parent,
                         errors,
                     );
                 }
@@ -753,6 +783,7 @@ fn check_binding_assignments(
                             name: binding,
                             collection,
                         }),
+                        allow_template_parent,
                         errors,
                     );
                 }
@@ -1014,10 +1045,19 @@ fn check_binding_assignment_child(
     component: &ComponentDef,
     table: &SymbolTable,
     for_binding: Option<ForBinding<'_>>,
+    allow_template_parent: bool,
     errors: &mut ValidationErrors,
 ) {
     if let ChildEntry::Literal(element) = child {
-        check_binding_assignments(element, from, component, table, for_binding, errors);
+        check_binding_assignments(
+            element,
+            from,
+            component,
+            table,
+            for_binding,
+            allow_template_parent,
+            errors,
+        );
     } else {
         let wrapper = ElementNode {
             type_path: String::new(),
@@ -1026,7 +1066,15 @@ fn check_binding_assignment_child(
             attribute_shortcuts: Vec::new(),
             children: vec![child.clone()],
         };
-        check_binding_assignments(&wrapper, from, component, table, for_binding, errors);
+        check_binding_assignments(
+            &wrapper,
+            from,
+            component,
+            table,
+            for_binding,
+            allow_template_parent,
+            errors,
+        );
     }
 }
 
@@ -1036,16 +1084,31 @@ fn check_binding_assignments_in_expr(
     component: &ComponentDef,
     table: &SymbolTable,
     for_binding: Option<ForBinding<'_>>,
+    allow_template_parent: bool,
     errors: &mut ValidationErrors,
 ) {
     match expr {
-        ViewExpr::Element(element) => {
-            check_binding_assignments(element, from, component, table, for_binding, errors)
-        }
+        ViewExpr::Element(element) => check_binding_assignments(
+            element,
+            from,
+            component,
+            table,
+            for_binding,
+            allow_template_parent,
+            errors,
+        ),
         ViewExpr::Closure {
             body: ClosureBody::Element(element),
             ..
-        } => check_binding_assignments(element, from, component, table, for_binding, errors),
+        } => check_binding_assignments(
+            element,
+            from,
+            component,
+            table,
+            for_binding,
+            allow_template_parent,
+            errors,
+        ),
         _ => {}
     }
 }

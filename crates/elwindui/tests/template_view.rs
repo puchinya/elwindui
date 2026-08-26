@@ -3,9 +3,10 @@
 use elwindui::core::base::Point;
 use elwindui::core::environment::EnvironmentContext;
 use elwindui::core::ui::{ControlTemplate, UIElementExt as _};
-use elwindui::ui::TextBlock;
+use elwindui::ui::{ContentControl, ListExt as _, Rectangle, TextBlock};
 use elwindui::{component, control_template, template_view};
 use std::cell::Cell;
+use std::marker::PhantomData;
 use std::rc::Rc;
 
 thread_local! {
@@ -113,6 +114,85 @@ struct RequiredLabelChild {
 
 #[component]
 impl RequiredLabelChild {}
+
+#[component(inherits ContentControl)]
+struct UserScalarContentHost {
+    template: template_view! { TextBlock { text: "host" } },
+}
+
+#[component]
+impl UserScalarContentHost {}
+
+pub struct TestListExt<T: ?Sized> {
+    items: std::cell::RefCell<Vec<Rc<dyn elwindui::core::ui::UIElementExt>>>,
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T: ?Sized> Default for TestListExt<T> {
+    fn default() -> Self {
+        Self {
+            items: std::cell::RefCell::new(Vec::new()),
+            marker: PhantomData,
+        }
+    }
+}
+
+impl elwindui::core::ui::ListExt<dyn elwindui::core::ui::UIElementExt>
+    for TestListExt<dyn elwindui::core::ui::UIElementExt>
+{
+    fn add(&self, item: Rc<dyn elwindui::core::ui::UIElementExt>) {
+        self.items.borrow_mut().push(item);
+    }
+
+    fn insert(&self, index: usize, item: Rc<dyn elwindui::core::ui::UIElementExt>) {
+        let mut items = self.items.borrow_mut();
+        let index = index.min(items.len());
+        items.insert(index, item);
+    }
+
+    fn remove(&self, item: &Rc<dyn elwindui::core::ui::UIElementExt>) -> bool {
+        let mut items = self.items.borrow_mut();
+        let Some(index) = items
+            .iter()
+            .position(|candidate| Rc::ptr_eq(candidate, item))
+        else {
+            return false;
+        };
+        items.remove(index);
+        true
+    }
+
+    fn remove_at(&self, index: usize) -> Rc<dyn elwindui::core::ui::UIElementExt> {
+        self.items.borrow_mut().remove(index)
+    }
+
+    fn clear(&self) {
+        self.items.borrow_mut().clear();
+    }
+
+    fn len(&self) -> usize {
+        self.items.borrow().len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.items.borrow().is_empty()
+    }
+
+    fn to_vec(&self) -> Vec<Rc<dyn elwindui::core::ui::UIElementExt>> {
+        self.items.borrow().clone()
+    }
+}
+
+#[component(inherits Control)]
+#[content(children)]
+struct UserCollectionContentHost {
+    #[prop(default = Rc::new(TestListExt::<dyn elwindui::core::ui::UIElementExt>::default()))]
+    children: Rc<TestListExt<dyn elwindui::core::ui::UIElementExt>>,
+    template: template_view! { Rectangle {} },
+}
+
+#[component]
+impl UserCollectionContentHost {}
 
 // A user-defined Layout-derived host must take the generic dynamic-child path.  This deliberately
 // avoids naming any builtin layout type in the template itself.
@@ -274,6 +354,135 @@ fn standalone_template_view_replaces_dynamic_root() {
         .downcast_ref::<elwindui::core::ui::TextBlock>()
         .expect("dynamic template root is TextBlock");
     assert_eq!(text.text.borrow().as_str(), "alternate");
+}
+
+#[test]
+fn standalone_template_view_replaces_scalar_content_without_layout_host() {
+    let template: ControlTemplate<DynamicTemplateProbe> = template_view! {
+        ContentControl {
+            if templated_parent.alternate {
+                TextBlock { text: "alternate" }
+            } else {
+                TextBlock { text: "initial" }
+            }
+        }
+    };
+    let probe = DynamicTemplateProbe::__new_unmounted();
+    use elwindui::core::ui::{ContentControlExt as _, ControlExt as _};
+    probe.__prepare_template_presentation();
+    let root = template.__build(elwindui::core::ui::ControlTemplateContext {
+        control: probe.clone(),
+        environment: EnvironmentContext::root(),
+    });
+    probe.__set_template_root(root.clone());
+    let host = root
+        .as_any()
+        .downcast_ref::<ContentControl>()
+        .expect("scalar template host is ContentControl");
+    let old = host.content();
+    let old_text = old
+        .as_any()
+        .downcast_ref::<TextBlock>()
+        .expect("initial scalar content is TextBlock");
+    assert_eq!(old_text.text.borrow().as_str(), "initial");
+    probe.set_alternate(true);
+    let new = host.content();
+    let new_text = new
+        .as_any()
+        .downcast_ref::<TextBlock>()
+        .expect("replacement scalar content is TextBlock");
+    assert_eq!(new_text.text.borrow().as_str(), "alternate");
+    assert!(!Rc::ptr_eq(&old, &new));
+    assert!(old.visual_parent().is_none());
+    assert!(new.visual_parent().is_some());
+}
+
+#[test]
+fn standalone_template_view_uses_user_scalar_content_metadata() {
+    let template: ControlTemplate<DynamicTemplateProbe> = template_view! {
+        UserScalarContentHost {
+            if templated_parent.alternate {
+                TextBlock { text: "user-alternate" }
+            } else {
+                TextBlock { text: "user-initial" }
+            }
+        }
+    };
+    let probe = DynamicTemplateProbe::__new_unmounted();
+    let root = template.__build(elwindui::core::ui::ControlTemplateContext {
+        control: probe.clone(),
+        environment: EnvironmentContext::root(),
+    });
+    let host = root
+        .as_any()
+        .downcast_ref::<UserScalarContentHost>()
+        .expect("user scalar host keeps its concrete type");
+    use elwindui::core::ui::ContentControlExt as _;
+    let initial = host.content();
+    assert_eq!(
+        initial
+            .as_any()
+            .downcast_ref::<TextBlock>()
+            .expect("initial user scalar content is TextBlock")
+            .text
+            .borrow()
+            .as_str(),
+        "user-initial"
+    );
+    probe.set_alternate(true);
+    let replacement = host.content();
+    assert_eq!(
+        replacement
+            .as_any()
+            .downcast_ref::<TextBlock>()
+            .expect("replacement user scalar content is TextBlock")
+            .text
+            .borrow()
+            .as_str(),
+        "user-alternate"
+    );
+    assert!(!Rc::ptr_eq(&initial, &replacement));
+}
+
+#[test]
+fn standalone_template_view_uses_non_layout_collection_content_metadata() {
+    let template: ControlTemplate<DynamicTemplateProbe> = template_view! {
+        UserCollectionContentHost {
+            TextBlock { text: "static" }
+            if templated_parent.alternate {
+                TextBlock { text: "A" }
+            } else {
+                TextBlock { text: "B" }
+            }
+        }
+    };
+    let probe = DynamicTemplateProbe::__new_unmounted();
+    let root = template.__build(elwindui::core::ui::ControlTemplateContext {
+        control: probe.clone(),
+        environment: EnvironmentContext::root(),
+    });
+    let host = root
+        .as_any()
+        .downcast_ref::<UserCollectionContentHost>()
+        .expect("user collection host keeps its concrete type");
+    let labels = || {
+        host.children()
+            .to_vec()
+            .into_iter()
+            .map(|child| {
+                child
+                    .as_any()
+                    .downcast_ref::<TextBlock>()
+                    .expect("collection item is TextBlock")
+                    .text
+                    .borrow()
+                    .clone()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(labels(), vec!["static", "B"]);
+    probe.set_alternate(true);
+    assert_eq!(labels(), vec!["static", "A"]);
 }
 
 #[test]
@@ -682,10 +891,43 @@ fn standalone_template_view_lifecycle_hooks_run_once() {
 }
 
 #[test]
-fn standalone_template_view_on_update_uses_shared_lifecycle_subscription() {
+fn component_default_template_view_on_update_uses_shared_lifecycle_subscription() {
     STANDALONE_UPDATE_COUNT.with(|count| count.set(0));
     let probe = UpdateLifecycleTemplateProbe::new("initial".to_string());
     assert_eq!(STANDALONE_UPDATE_COUNT.with(Cell::get), 0);
     probe.set_label("updated".to_string());
     assert_eq!(STANDALONE_UPDATE_COUNT.with(Cell::get), 1);
+}
+
+#[test]
+fn standalone_template_view_on_update_uses_shared_lifecycle_subscription() {
+    STANDALONE_UPDATE_COUNT.with(|count| count.set(0));
+    let template: ControlTemplate<UpdateLifecycleTemplateProbe> = template_view! {
+        on_update(label) {
+            record_standalone_update();
+        }
+        TextBlock {
+            text: templated_parent.label
+        }
+    };
+
+    let probe = UpdateLifecycleTemplateProbe::__new_unmounted("initial".to_string());
+    use elwindui::core::ui::ControlExt as _;
+    probe.__prepare_template_presentation();
+    let root = template.__build(elwindui::core::ui::ControlTemplateContext {
+        control: probe.clone(),
+        environment: EnvironmentContext::root(),
+    });
+    probe.__set_template_root(root);
+
+    assert_eq!(STANDALONE_UPDATE_COUNT.with(Cell::get), 0);
+    probe.set_label("updated".to_string());
+    assert_eq!(STANDALONE_UPDATE_COUNT.with(Cell::get), 1);
+    probe.set_label("updated-again".to_string());
+    assert_eq!(STANDALONE_UPDATE_COUNT.with(Cell::get), 2);
+
+    let probe_node: Rc<dyn elwindui::core::ui::UIElementExt> = probe.clone();
+    elwindui::core::ui::unmount_subtree(&probe_node);
+    probe.set_label("after-unmount".to_string());
+    assert_eq!(STANDALONE_UPDATE_COUNT.with(Cell::get), 2);
 }

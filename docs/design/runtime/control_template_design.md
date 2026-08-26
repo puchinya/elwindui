@@ -117,3 +117,11 @@ ContentPresenter remains forbidden in dynamic regions. There is one active
 template root and no runtime re-template operation. Every generated descendant
 is mounted with the `ControlTemplateContext.environment` passed to the
 selected factory rather than an ambient application context.
+
+The dynamic-child host is resolved from the host's effective `#[content(...)]`
+metadata and field shape. Scalar content materializes exactly one active branch
+and replaces it through the effective setter. Collection content uses the
+effective collection getter with `DynamicChildSlot`; this applies equally to
+`Layout` and non-`Layout` collection hosts, including external shapes selected
+through exported props metadata. No dynamic template path assumes
+`LayoutExt::children` merely because a node is nested in a template.

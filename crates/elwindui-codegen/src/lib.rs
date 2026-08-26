@@ -299,6 +299,7 @@ static TEMPLATE_VIEW_FACTORY_COUNTER: AtomicUsize = AtomicUsize::new(0);
 /// component path uses the same typed parent, dynamic-region, ContentPresenter, and Environment
 /// contracts. This backend owns the expression-form factory lowering used when the target type is
 /// acquired from an expected `ControlTemplate<C>` value.
+#[derive(Clone)]
 struct TemplateBackend {
     property_bounds: Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
     iterable_properties: BTreeSet<u64>,
@@ -1028,6 +1029,48 @@ impl TemplateBackend {
         }
     }
 
+    /// Compiles one branch for a declared content collection.  Unlike the template-root helper
+    /// above, this keeps the collection's item trait from effective `#[content]` metadata all the
+    /// way through the branch boundary (for example `TabViewItemExt` rather than always coercing
+    /// to `UIElementExt`).
+    fn compile_dynamic_branch_for_content(
+        &mut self,
+        entry: &ast::ChildEntry,
+        sink: &SubscriptionSink,
+        item_trait: &codegen::ItemTraitTokens,
+    ) -> Result<TokenStream, String> {
+        match entry {
+            ast::ChildEntry::Literal(element) => {
+                let value = self.compile_element(element, sink)?;
+                Ok(codegen::dynamic_child_binding(
+                    value,
+                    &element.type_path,
+                    item_trait,
+                    &self.from,
+                    &self.table,
+                ))
+            }
+            ast::ChildEntry::If { .. } | ast::ChildEntry::Match { .. } => {
+                Err("nested dynamic roots require a static visual parent".into())
+            }
+            ast::ChildEntry::For { .. } => {
+                Err("a `for` region cannot be a scalar template root branch".into())
+            }
+            ast::ChildEntry::Ref(name) => {
+                let Some((binding, type_path)) = self.lets.get(name) else {
+                    return Err(format!("template branch reference `{name}` is not defined"));
+                };
+                Ok(codegen::dynamic_child_binding(
+                    quote! { #binding.clone() },
+                    type_path,
+                    item_trait,
+                    &self.from,
+                    &self.table,
+                ))
+            }
+        }
+    }
+
     /// Compiles the ordered contents of one dynamic branch.  A branch may be empty (the common
     /// `if condition { child }` form has no `else` arm) or contain several literal children; the
     /// collection slot replaces the whole branch range atomically.  Each entry is still lowered
@@ -1042,6 +1085,28 @@ impl TemplateBackend {
         let values = entries
             .iter()
             .map(|entry| self.compile_dynamic_branch(entry, sink))
+            .collect::<Result<Vec<_>, _>>()?;
+        let values = if cache.is_some() {
+            values
+                .into_iter()
+                .map(|value| Self::cache_dynamic_branch_value(value, cache))
+                .collect()
+        } else {
+            values
+        };
+        Ok(quote! { vec![#(#values),*] })
+    }
+
+    fn compile_dynamic_branch_children_for_content(
+        &mut self,
+        entries: &[ast::ChildEntry],
+        sink: &SubscriptionSink,
+        cache: Option<&syn::Ident>,
+        item_trait: &codegen::ItemTraitTokens,
+    ) -> Result<TokenStream, String> {
+        let values = entries
+            .iter()
+            .map(|entry| self.compile_dynamic_branch_for_content(entry, sink, item_trait))
             .collect::<Result<Vec<_>, _>>()?;
         let values = if cache.is_some() {
             values
@@ -1672,12 +1737,62 @@ impl TemplateBackend {
             }});
         }
 
-        // Dynamic nested regions use the same collection operation as generated view code.  The
-        // host is intentionally not classified by a frontend-specific type-name table: the
-        // generated `LayoutExt::children` call is the generic capability boundary.  Builtin and
-        // user-defined Layout-derived controls therefore follow exactly the same path, while a
-        // non-layout host fails through the normal trait/type diagnostics.
+        // Dynamic nested regions are selected from the host's effective `#[content]` metadata.
+        // Local metadata lets us choose the scalar/collection path before emitting tokens; an
+        // unresolved/external host keeps both candidates in its exported props macro so the same
+        // declaration remains authoritative across crates.  Layout is only one collection shape,
+        // never the generic dynamic-child host.
+        let content_shape = self
+            .resolve_info(&element.type_path)
+            .map(codegen::effective_content_shape);
+        let external_scalar = if matches!(
+            content_shape,
+            None | Some(codegen::EffectiveContentShape::External)
+        ) {
+            let mut scalar_backend = self.clone();
+            let scalar = scalar_backend.compile_scalar_dynamic_element(
+                element,
+                &node,
+                construction.clone(),
+                statements.clone(),
+                template_presenter_bind.clone(),
+                sink,
+            )?;
+            self.iterable_properties
+                .extend(scalar_backend.iterable_properties);
+            self.has_deferred_views |= scalar_backend.has_deferred_views;
+            self.next_binding = self.next_binding.max(scalar_backend.next_binding);
+            Some(scalar)
+        } else {
+            None
+        };
+        if content_shape == Some(codegen::EffectiveContentShape::Scalar) {
+            return self.compile_scalar_dynamic_element(
+                element,
+                &node,
+                construction,
+                statements,
+                template_presenter_bind,
+                sink,
+            );
+        }
         let host = self.fresh("host");
+        let host_handle = self.fresh("host_handle");
+        let collection_item_trait = self
+            .resolve_info(&element.type_path)
+            .filter(|info| {
+                codegen::effective_content_shape(info) == codegen::EffectiveContentShape::Collection
+            })
+            .map(|_| {
+                codegen::dynamic_collection_item_trait_for_type(
+                    &element.type_path,
+                    &self.from,
+                    &self.table,
+                )
+            })
+            .unwrap_or_else(|| {
+                codegen::ItemTraitTokens::External(quote! { #props_macro_path!(@content_item_dyn) })
+            });
         let mut child_statements = TokenStream::new();
         let mut index_offset = 0usize;
         for (source_index, child) in element.children.iter().enumerate() {
@@ -1710,15 +1825,17 @@ impl TemplateBackend {
                         && Self::can_cache_dynamic_branch(&else_branch[0]))
                     .then(|| self.fresh("else_branch_cache"));
                     let initial_parent_ident = format_ident!("{}", self.parent_ident);
-                    let then_value = self.compile_dynamic_branch_children(
+                    let then_value = self.compile_dynamic_branch_children_for_content(
                         then_branch,
                         &SubscriptionSink::Local(branch_vec.clone()),
                         then_cache.as_ref(),
+                        &collection_item_trait,
                     )?;
-                    let else_value = self.compile_dynamic_branch_children(
+                    let else_value = self.compile_dynamic_branch_children_for_content(
                         else_branch,
                         &SubscriptionSink::Local(branch_vec.clone()),
                         else_cache.as_ref(),
+                        &collection_item_trait,
                     )?;
                     let condition_value = self.expression(condition)?;
                     let keys = self.expression_property_keys(condition);
@@ -1732,15 +1849,17 @@ impl TemplateBackend {
                         callback_parent_ident.to_string(),
                     );
                     let callback_condition_value = self.expression(condition)?;
-                    let callback_then_value = self.compile_dynamic_branch_children(
+                    let callback_then_value = self.compile_dynamic_branch_children_for_content(
                         then_branch,
                         &SubscriptionSink::Local(callback_branch_vec.clone()),
                         then_cache.as_ref(),
+                        &collection_item_trait,
                     )?;
-                    let callback_else_value = self.compile_dynamic_branch_children(
+                    let callback_else_value = self.compile_dynamic_branch_children_for_content(
                         else_branch,
                         &SubscriptionSink::Local(callback_branch_vec.clone()),
                         else_cache.as_ref(),
+                        &collection_item_trait,
                     )?;
                     self.parent_ident = previous_parent_ident;
                     let host_owner = self.fresh("host_owner");
@@ -1770,6 +1889,10 @@ impl TemplateBackend {
                             let next_value = self.fresh("next_value");
                             let callback_environment = self.fresh("callback_environment");
                             let property_receiver = self.template_property_receiver(*key);
+                            let callback_content =
+                                self.content_field_get(&element.type_path, &callback_host_owner);
+                            let callback_content_handle = self.fresh("callback_content_handle");
+                            let callback_content_ref = self.fresh("callback_content_ref");
                             let sub = quote! {
                                 {
                                     let #weak_control = std::rc::Rc::downgrade(&#initial_parent_ident);
@@ -1791,8 +1914,12 @@ impl TemplateBackend {
                                                     #callback_else_value
                                                 };
                                                 *#callback_state.borrow_mut() = #callback_branch_vec;
+                                                let #callback_content_handle = #callback_content;
+                                                let #callback_content_ref:
+                                                    &dyn elwindui::core::ui::ListExt<#collection_item_trait> =
+                                                    &*#callback_content_handle;
                                                 #callback_slot.replace_children(
-                                                    elwindui::core::ui::LayoutExt::children(&*#callback_host_owner),
+                                                    #callback_content_ref,
                                                     #index,
                                                     #next_value,
                                                 );
@@ -1807,7 +1934,9 @@ impl TemplateBackend {
                     let initial = self.fresh("initial_value");
                     child_statements.extend(quote! {
                         let #host_owner = #node.clone();
-                        let #slot = std::rc::Rc::new(elwindui::core::ui::DynamicChildSlot::<dyn elwindui::core::ui::UIElementExt>::default());
+                        let #slot = std::rc::Rc::new(
+                            elwindui::core::ui::DynamicChildSlot::<#collection_item_trait>::default()
+                        );
                         #branch_cache_declarations
                         let mut #branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
                         let #initial = if #condition_value { #then_value } else { #else_value };
@@ -1832,10 +1961,11 @@ impl TemplateBackend {
                         .iter()
                         .zip(arm_caches.iter())
                         .map(|(arm, cache)| {
-                            self.compile_dynamic_branch_children(
+                            self.compile_dynamic_branch_children_for_content(
                                 &arm.body,
                                 &SubscriptionSink::Local(branch_vec.clone()),
                                 cache.as_ref(),
+                                &collection_item_trait,
                             )
                         })
                         .collect::<Result<_, _>>()?;
@@ -1859,10 +1989,11 @@ impl TemplateBackend {
                         .iter()
                         .zip(arm_caches.iter())
                         .map(|(arm, cache)| {
-                            self.compile_dynamic_branch_children(
+                            self.compile_dynamic_branch_children_for_content(
                                 &arm.body,
                                 &SubscriptionSink::Local(callback_branch_vec.clone()),
                                 cache.as_ref(),
+                                &collection_item_trait,
                             )
                         })
                         .collect::<Result<_, _>>()?;
@@ -1923,6 +2054,10 @@ impl TemplateBackend {
                             let next_value = self.fresh("next_value");
                             let callback_environment = self.fresh("callback_environment");
                             let property_receiver = self.template_property_receiver(*key);
+                            let callback_content =
+                                self.content_field_get(&element.type_path, &callback_host_owner);
+                            let callback_content_handle = self.fresh("callback_content_handle");
+                            let callback_content_ref = self.fresh("callback_content_ref");
                             let sub = quote! {
                                 {
                                     let #weak_control = std::rc::Rc::downgrade(&#initial_parent_ident);
@@ -1940,8 +2075,12 @@ impl TemplateBackend {
                                                 let #callback_parent_ident = control;
                                                 let #next_value = #callback_value;
                                                 *#callback_state.borrow_mut() = #callback_branch_vec;
+                                                let #callback_content_handle = #callback_content;
+                                                let #callback_content_ref:
+                                                    &dyn elwindui::core::ui::ListExt<#collection_item_trait> =
+                                                    &*#callback_content_handle;
                                                 #callback_slot.replace_children(
-                                                    elwindui::core::ui::LayoutExt::children(&*#callback_host_owner),
+                                                    #callback_content_ref,
                                                     #index,
                                                     #next_value,
                                                 );
@@ -1955,7 +2094,9 @@ impl TemplateBackend {
                         .collect();
                     child_statements.extend(quote! {
                         let #host_owner = #node.clone();
-                        let #slot = std::rc::Rc::new(elwindui::core::ui::DynamicChildSlot::<dyn elwindui::core::ui::UIElementExt>::default());
+                        let #slot = std::rc::Rc::new(
+                            elwindui::core::ui::DynamicChildSlot::<#collection_item_trait>::default()
+                        );
                         #branch_cache_declarations
                         let mut #branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
                         let __initial_value = #initial_value;
@@ -2000,9 +2141,10 @@ impl TemplateBackend {
                     let item_children = body
                         .iter()
                         .map(|entry| {
-                            self.compile_dynamic_branch(
+                            self.compile_dynamic_branch_for_content(
                                 entry,
                                 &SubscriptionSink::Local(item_subscriptions.clone()),
+                                &collection_item_trait,
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?;
@@ -2065,10 +2207,18 @@ impl TemplateBackend {
                             let callback_collection = self.fresh("callback_collection");
                             let callback_environment = self.fresh("callback_environment");
                             let property_receiver = self.template_property_receiver(*key);
+                            let callback_content =
+                                self.content_field_get(&element.type_path, &callback_host_owner);
+                            let callback_content_handle = self.fresh("callback_content_handle");
+                            let callback_content_ref = self.fresh("callback_content_ref");
                             let callback_replace = if rc_identity {
                                 quote! {
-                                    #callback_slot.replace_rc_items(
-                                        elwindui::core::ui::LayoutExt::children(&*#callback_host_owner),
+                                let #callback_content_handle = #callback_content;
+                                let #callback_content_ref:
+                                    &dyn elwindui::core::ui::ListExt<#collection_item_trait> =
+                                    &*#callback_content_handle;
+                                #callback_slot.replace_rc_items(
+                                        #callback_content_ref,
                                         #index,
                                         &(#callback_collection),
                                         #render,
@@ -2076,8 +2226,12 @@ impl TemplateBackend {
                                 }
                             } else {
                                 quote! {
-                                    #callback_slot.replace_items(
-                                        elwindui::core::ui::LayoutExt::children(&*#callback_host_owner),
+                                let #callback_content_handle = #callback_content;
+                                let #callback_content_ref:
+                                    &dyn elwindui::core::ui::ListExt<#collection_item_trait> =
+                                    &*#callback_content_handle;
+                                #callback_slot.replace_items(
+                                        #callback_content_ref,
                                         #index,
                                         #callback_collection,
                                         #render,
@@ -2109,7 +2263,7 @@ impl TemplateBackend {
                     child_statements.extend(quote! {
                         let #host_owner = #node.clone();
                         let #slot = std::rc::Rc::new(
-                            elwindui::core::ui::DynamicChildSlot::<dyn elwindui::core::ui::UIElementExt>::default()
+                            elwindui::core::ui::DynamicChildSlot::<#collection_item_trait>::default()
                         );
                         let __initial_collection = #collection_value;
                         #initial_replace
@@ -2126,14 +2280,271 @@ impl TemplateBackend {
                 }
             }
         }
+        let host_content = self.content_field_get(&element.type_path, &node);
+        let collection = quote! {{
+            let #node = #construction;
+            #statements
+            #template_presenter_bind
+            let #host_handle = #host_content;
+            let #host: &dyn elwindui::core::ui::ListExt<#collection_item_trait> =
+                &*#host_handle;
+            #child_statements
+            #node
+        }};
+        if let Some(scalar) = external_scalar {
+            Ok(quote! {
+                #props_macro_path!(@content_shape { #scalar }, { #collection })
+            })
+        } else {
+            Ok(collection)
+        }
+    }
+
+    /// Lower a dynamic region hosted by a scalar `#[content]` property.  Scalar content has no
+    /// collection host or `DynamicChildSlot`: each selector branch materializes one element and
+    /// replaces the effective content field through the generated props metadata.  Keeping this
+    /// path separate from the collection loop makes it impossible for scalar templates to acquire
+    /// an accidental `LayoutExt` requirement.
+    fn compile_scalar_dynamic_element(
+        &mut self,
+        element: &ast::ElementNode,
+        node: &syn::Ident,
+        construction: TokenStream,
+        statements: TokenStream,
+        template_presenter_bind: TokenStream,
+        sink: &SubscriptionSink,
+    ) -> Result<TokenStream, String> {
+        let props_macro_path =
+            template_props_macro_path(&element.type_path, self.resolve_info(&element.type_path));
+        let invalid = |message: &'static str| {
+            Ok::<TokenStream, String>(quote! {{
+                let #node = #construction;
+                #statements
+                #template_presenter_bind
+                compile_error!(#message);
+                #node
+            }})
+        };
+        let Some(entry) = (element.children.len() == 1).then(|| &element.children[0]) else {
+            return invalid(
+                "dynamic children under scalar #[content] must contain exactly one if/match region",
+            );
+        };
+        let (selector, branches, match_patterns): (
+            &ast::ViewExpr,
+            Vec<&[ast::ChildEntry]>,
+            Option<Vec<String>>,
+        ) = match entry {
+            ast::ChildEntry::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => (
+                condition,
+                vec![then_branch.as_slice(), else_branch.as_slice()],
+                None,
+            ),
+            ast::ChildEntry::Match { value, arms } => (
+                value,
+                arms.iter().map(|arm| arm.body.as_slice()).collect(),
+                Some(arms.iter().map(|arm| arm.pattern.clone()).collect()),
+            ),
+            ast::ChildEntry::For { .. } => {
+                return invalid(
+                    "a `for` region cannot be the sole content of a scalar #[content] field",
+                );
+            }
+            ast::ChildEntry::Literal(_) | ast::ChildEntry::Ref(_) => {
+                return invalid(
+                    "scalar dynamic content requires an if/match region with one child per branch",
+                );
+            }
+        };
+        if branches.iter().any(|branch| branch.len() != 1) {
+            return invalid(
+                "every scalar dynamic content branch must resolve to exactly one child",
+            );
+        }
+
+        let branch_vec = self.fresh("scalar_branch_subscriptions");
+        let branch_state = self.fresh("scalar_branch_state");
+        let branch_caches: Vec<Option<syn::Ident>> = branches
+            .iter()
+            .map(|branch| {
+                Self::can_cache_dynamic_branch(&branch[0])
+                    .then(|| self.fresh("scalar_branch_cache"))
+            })
+            .collect();
+        let initial_values: Vec<_> = branches
+            .iter()
+            .zip(branch_caches.iter())
+            .map(|(branch, cache)| {
+                self.compile_dynamic_branch_children(
+                    branch,
+                    &SubscriptionSink::Local(branch_vec.clone()),
+                    cache.as_ref(),
+                )
+            })
+            .collect::<Result<_, _>>()?;
+        let selector_value = self.expression(selector)?;
+        let selector_keys = self.expression_property_keys(selector);
+        if match_patterns.is_none()
+            || match_patterns.as_ref().is_some_and(|patterns| {
+                patterns
+                    .iter()
+                    .all(|pattern| matches!(pattern.trim(), "true" | "false"))
+            })
+        {
+            for key in &selector_keys {
+                self.constrain_property(*key, quote! { bool });
+            }
+        }
+        let initial_value = if let Some(patterns) = &match_patterns {
+            let arms = patterns
+                .iter()
+                .zip(initial_values.iter())
+                .map(|(pattern, value)| {
+                    let pattern = syn::Pat::parse_single.parse_str(pattern).map_err(|error| {
+                        format!("invalid scalar template match pattern: {error}")
+                    })?;
+                    Ok::<_, String>(quote! { #pattern => #value })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            quote! { match #selector_value { #(#arms),* } }
+        } else {
+            let then_value = &initial_values[0];
+            let else_value = &initial_values[1];
+            quote! { if #selector_value { #then_value } else { #else_value } }
+        };
+
+        let callback_parent_ident = self.fresh("scalar_callback_parent");
+        let callback_branch_vec = self.fresh("scalar_next_branch_subscriptions");
+        let previous_parent_ident =
+            std::mem::replace(&mut self.parent_ident, callback_parent_ident.to_string());
+        let callback_values: Vec<_> = branches
+            .iter()
+            .zip(branch_caches.iter())
+            .map(|(branch, cache)| {
+                self.compile_dynamic_branch_children(
+                    branch,
+                    &SubscriptionSink::Local(callback_branch_vec.clone()),
+                    cache.as_ref(),
+                )
+            })
+            .collect::<Result<_, _>>()?;
+        let callback_selector_value = self.expression(selector)?;
+        self.parent_ident = previous_parent_ident;
+        let callback_value = if let Some(patterns) = &match_patterns {
+            let arms = patterns
+                .iter()
+                .zip(callback_values.iter())
+                .map(|(pattern, value)| {
+                    let pattern = syn::Pat::parse_single.parse_str(pattern).map_err(|error| {
+                        format!("invalid scalar template match pattern: {error}")
+                    })?;
+                    Ok::<_, String>(quote! { #pattern => #value })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            quote! { match #callback_selector_value { #(#arms),* } }
+        } else {
+            let then_value = &callback_values[0];
+            let else_value = &callback_values[1];
+            quote! { if #callback_selector_value { #then_value } else { #else_value } }
+        };
+
+        let initial_parent_ident = format_ident!("{}", self.parent_ident);
+        let node_weak = self.fresh("scalar_node_weak");
+        let control_weak = self.fresh("scalar_control_weak");
+        let callback_state = self.fresh("scalar_callback_state");
+        let callback_environment = self.fresh("scalar_callback_environment");
+        let next_vec = self.fresh("scalar_next_value");
+        let next_child = self.fresh("scalar_next_child");
+        let replacement: TokenStream = selector_keys
+            .iter()
+            .map(|key| {
+                let property_receiver = self.template_property_receiver(*key);
+                let callback_branch_vec = callback_branch_vec.clone();
+                quote! {
+                    {
+                        let #node_weak = std::rc::Rc::downgrade(&#node);
+                        let #control_weak = std::rc::Rc::downgrade(&#initial_parent_ident);
+                        let #callback_state = #branch_state.clone();
+                        let #callback_environment = __environment.clone();
+                        #property_receiver::__template_subscribe(
+                            &*#initial_parent_ident,
+                            move || {
+                                if let (Some(node), Some(control)) =
+                                    (#node_weak.upgrade(), #control_weak.upgrade())
+                                {
+                                    let __environment = #callback_environment.clone();
+                                    #callback_state.borrow_mut().clear();
+                                    let mut #callback_branch_vec =
+                                        Vec::<elwindui::core::reactive::Subscription>::new();
+                                    let #callback_parent_ident = control;
+                                    let #next_vec = #callback_value;
+                                    let #next_child = #next_vec
+                                        .into_iter()
+                                        .next()
+                                        .expect("scalar dynamic branch must contain one child");
+                                    #props_macro_path!(@children_erased node, [#next_child]);
+                                    *#callback_state.borrow_mut() = #callback_branch_vec;
+                                }
+                            },
+                        )
+                    }
+                }
+            })
+            .map(|subscription| sink.push(subscription))
+            .collect();
+        let cache_declarations: TokenStream = branch_caches
+            .iter()
+            .flatten()
+            .map(|cache| {
+                quote! {
+                    let #cache = std::rc::Rc::new(
+                        std::cell::RefCell::new(
+                            None::<std::rc::Rc<dyn elwindui::core::ui::UIElementExt>>
+                        )
+                    );
+                }
+            })
+            .collect();
+        let initial_vec = self.fresh("scalar_initial_value");
+        let initial_child = self.fresh("scalar_initial_child");
         Ok(quote! {{
             let #node = #construction;
             #statements
             #template_presenter_bind
-            let #host = elwindui::core::ui::LayoutExt::children(&*#node);
-            #child_statements
+            #cache_declarations
+            let mut #branch_vec = Vec::<elwindui::core::reactive::Subscription>::new();
+            let #initial_vec = #initial_value;
+            let #initial_child = #initial_vec
+                .into_iter()
+                .next()
+                .expect("scalar dynamic branch must contain one child");
+            #props_macro_path!(@children_erased #node, [#initial_child]);
+            let #branch_state = std::rc::Rc::new(std::cell::RefCell::new(#branch_vec));
+            #replacement
             #node
         }})
+    }
+
+    /// Resolve a dynamic collection host's getter from the same effective content metadata used
+    /// to choose the scalar/collection branch.  Local generated components expose their content
+    /// accessor as an inherent method, while an external/builtin host keeps the exported props
+    /// macro as the cross-crate metadata boundary.  Neither path relies on LayoutExt or on a
+    /// concrete host type name.
+    fn content_field_get(&self, type_path: &str, receiver: &syn::Ident) -> TokenStream {
+        if let Some(info) = self.resolve_info(type_path) {
+            if codegen::effective_content_shape(info) != codegen::EffectiveContentShape::External {
+                if let Some(field) = info.content_field.as_deref() {
+                    let field = format_ident!("{field}");
+                    return quote! { #receiver.#field() };
+                }
+            }
+        }
+        let props_macro_path = template_props_macro_path(type_path, self.resolve_info(type_path));
+        quote! { #props_macro_path!(@content_field_get #receiver) }
     }
 
     fn expression(&mut self, expr: &ast::ViewExpr) -> Result<TokenStream, String> {
@@ -3946,6 +4357,51 @@ mod template_view_expression_tests {
         assert!(
             error.contains("dynamic") || error.contains("ContentPresenter"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn standalone_dynamic_external_host_uses_exported_content_shape_dispatch() {
+        let generated = generate_template_view_expression(
+            r#"
+                ExternalCollectionHost {
+                    if true {
+                        TextBlock { text: "a" }
+                    } else {
+                        TextBlock { text: "b" }
+                    }
+                }
+            "#,
+        )
+        .expect("an unresolved host should defer content-shape selection to its props macro");
+        let generated = generated.to_string();
+        assert!(
+            generated.contains("@ content_shape") || generated.contains("@content_shape"),
+            "{generated}"
+        );
+        assert!(
+            !generated.contains("LayoutExt :: children"),
+            "external dynamic hosts must not default to LayoutExt: {generated}"
+        );
+    }
+
+    #[test]
+    fn standalone_scalar_content_rejects_for_with_a_compile_time_diagnostic() {
+        let generated = generate_template_view_expression(
+            r#"
+                ContentControl {
+                    for item in templated_parent.items {
+                        TextBlock { text: item }
+                    }
+                }
+            "#,
+        )
+        .expect("the scalar-content diagnostic is emitted in the generated expression");
+        let generated = generated.to_string();
+        assert!(
+            generated.contains("for` region cannot be the sole content")
+                || generated.contains("for region cannot be the sole content"),
+            "{generated}"
         );
     }
 }

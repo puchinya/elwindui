@@ -1629,7 +1629,10 @@ fn check_static_content_shapes(
         // misclassifying it as a known no-content leaf (the inheritance-demo `LoudPanel` chain is
         // the regression case). Builtin and locally-declared unqualified components remain fully
         // decidable here.
-        let content_is_external = info.content_field.is_none() && !info.is_builtin && info.has_view;
+        let content_is_external = codegen::effective_content_shape(info)
+            == codegen::EffectiveContentShape::External
+            && !info.is_builtin
+            && info.has_view;
         let has_dynamic_child = node.children.iter().any(|child| {
             matches!(
                 child,
@@ -1650,11 +1653,13 @@ fn check_static_content_shapes(
                     let field_ty = info
                         .field_types
                         .get(field)
+                        .or_else(|| info.value_field_types.get(field))
                         .map(String::as_str)
                         .unwrap_or("<missing>");
-                    let is_collection = field_ty.contains("UIElementCollection")
-                        || field_ty.trim_start().starts_with("Vec<")
-                        || field_ty.contains("ListExt<");
+                    let is_collection = matches!(
+                        codegen::effective_content_shape(info),
+                        codegen::EffectiveContentShape::Collection
+                    );
                     if !is_collection && node.children.len() > 1 {
                         errors.registry_dependent(format!(
                             "{component_name}: `{}` has scalar #[content({field})] type `{field_ty}` but received {} bare children; exactly one child is allowed",
@@ -1725,8 +1730,10 @@ fn check_dynamic_child_hosts(
         )
     }) {
         if let Some(info) = table.resolve(from, &node.type_path) {
-            let content_is_external =
-                info.content_field.is_none() && !info.is_builtin && info.has_view;
+            let content_is_external = codegen::effective_content_shape(info)
+                == codegen::EffectiveContentShape::External
+                && !info.is_builtin
+                && info.has_view;
             if content_is_external {
                 for child in &node.children {
                     check_dynamic_child_host_in_child(child, from, component_name, table, errors);
@@ -1734,11 +1741,8 @@ fn check_dynamic_child_hosts(
                 return;
             }
             let field = info.content_field.as_deref().unwrap_or("children");
-            let is_collection = info.field_types.get(field).is_some_and(|ty| {
-                ty.contains("UIElementCollection")
-                    || ty.trim_start().starts_with("Vec<")
-                    || ty.contains("ListExt<")
-            });
+            let content_shape = codegen::effective_content_shape(info);
+            let is_collection = content_shape == codegen::EffectiveContentShape::Collection;
             // Phase 2 (docs/design/runtime/ui_tree_design.md): a *scalar* `#[content(...)]` field (e.g.
             // `ContentControl`/`Window`'s `content: Rc<dyn UIElement>`) can also host `if`/`match`
             // dynamic children now — not `for` (a variable-length list can never fit one slot), and
@@ -1750,7 +1754,12 @@ fn check_dynamic_child_hosts(
                 errors.registry_dependent(format!(
                     "{component_name}: dynamic child control flow under `{}` — `#[content({field})]` has scalar type `{}`, so every branch must resolve to exactly one element (`for` and multiple children per branch aren't allowed here; a collection-typed content field allows both, see `#[content({field})]`'s own type)",
                     node.type_path,
-                    info.field_types.get(field).map(String::as_str).unwrap_or("<missing>")
+                    info
+                        .field_types
+                        .get(field)
+                        .or_else(|| info.value_field_types.get(field))
+                        .map(String::as_str)
+                        .unwrap_or("<missing>")
                 ));
             }
         }

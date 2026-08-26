@@ -2174,7 +2174,7 @@ fn build_props_macro(
     let content_shape_entry = shape.content_field().map(|content| {
         quote! {
             (@content_shape $scalar:block, $collection:block) => {
-                $crate::#macro_ident!(@content_shape_into #bare_ident, #content, $scalar, $collection);
+                $crate::#macro_ident!(@content_shape_into #bare_ident, #content, $scalar, $collection)
             };
         }
     });
@@ -2325,10 +2325,10 @@ fn build_props_macro(
                 },
                 quote! {
                     (@content_shape $scalar:block, $collection:block) => {
-                        #parent_macro!(@content_shape $scalar, $collection);
+                        #parent_macro!(@content_shape $scalar, $collection)
                     };
                     (@content_shape_into $origin:ident, $name:ident, $scalar:block, $collection:block) => {
-                        #parent_macro!(@content_shape_into $origin, $name, $scalar, $collection);
+                        #parent_macro!(@content_shape_into $origin, $name, $scalar, $collection)
                     };
                 },
                 quote! {

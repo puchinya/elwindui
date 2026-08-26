@@ -5295,18 +5295,29 @@ fn generate_view(
         // defining shape macro selects `()` for scalar content and `DynamicChildSlot<_>` for
         // collection content in type position.
         let parent_info = table.resolve(from, &parent.type_path);
-        if parent_info.is_some_and(|info| !content_field_is_list(info)) {
+        let parent_shape = parent_info.map(effective_content_shape);
+        if parent_shape == Some(EffectiveContentShape::Scalar) {
             continue;
         }
         let slot = dynamic_slot_ident(&node.binding);
-        let item_ext = dynamic_collection_item_trait_ty(parent, from, table);
-        let slot_type = if parent_info.is_some() {
-            quote! { elwindui::core::ui::DynamicChildSlot<#item_ext> }
-        } else {
-            let props_macro = format_ident!("__elwindui_props_{}", parent.type_path);
-            quote! {
-                elwindui::core::#props_macro!(@content_slot_type #item_ext)
+        let item_ext = dynamic_collection_item_trait_for_type_with_props_macro(
+            &parent.type_path,
+            from,
+            table,
+            dynamic_content_props_macro_path(component, &parent.type_path, parent_info),
+        );
+        let slot_type = match parent_shape {
+            Some(EffectiveContentShape::Collection) => {
+                quote! { elwindui::core::ui::DynamicChildSlot<#item_ext> }
             }
+            Some(EffectiveContentShape::External) | None => {
+                let props_macro_path =
+                    dynamic_content_props_macro_path(component, &parent.type_path, parent_info);
+                quote! {
+                    #props_macro_path!(@content_slot_type #item_ext)
+                }
+            }
+            Some(EffectiveContentShape::Scalar) => unreachable!(),
         };
         struct_fields.extend(quote! {
             #slot: #slot_type,
@@ -5760,9 +5771,15 @@ fn generate_view(
                     template_presentation,
                 )
             };
-            let body = if let Some(info) = parent_info {
-                if content_field_is_list(info) {
-                    let item_ext = dynamic_collection_item_trait_ty(parent, from, table);
+            let body = match parent_info.map(effective_content_shape) {
+                Some(EffectiveContentShape::Collection) => {
+                    let info = parent_info.expect("content shape came from parent metadata");
+                    let item_ext = dynamic_collection_item_trait_for_type_with_props_macro(
+                        &parent.type_path,
+                        from,
+                        table,
+                        dynamic_content_props_macro_path(component, &parent.type_path, parent_info),
+                    );
                     // The getter `#[content(..)]` names, not always literally `children` (`Dropdown`'s
                     // is `items`, `Menu`'s is `items`) — a local `TypeInfo` names it directly.
                     let field = info
@@ -5772,23 +5789,29 @@ fn generate_view(
                     let field_ident = format_ident!("{field}");
                     let host = quote! { #parent_receiver.#field_ident() };
                     emit_dynamic_node_refresh(&plan, node, &host, &item_ext, &ctx, from, table)
-                } else {
-                    scalar_body
                 }
-            } else {
-                // External classes do not contribute a local `TypeInfo`. Dispatch both lowering
-                // blocks through the defining class's shape macro; the macro chooses the scalar
-                // or collection branch from effective `#[content]` metadata, so external Control
-                // remains scalar without a codegen type-name special case.
-                let props_macro = format_ident!("__elwindui_props_{}", parent.type_path);
-                let item_ext = dynamic_collection_item_trait_ty(parent, from, table);
-                let host = quote! {
-                    elwindui::core::#props_macro!(@content_field_get #parent_receiver)
-                };
-                let collection_body =
-                    emit_dynamic_node_refresh(&plan, node, &host, &item_ext, &ctx, from, table);
-                quote! {
-                    elwindui::core::#props_macro!(@content_shape { #scalar_body }, { #collection_body });
+                Some(EffectiveContentShape::Scalar) => scalar_body,
+                Some(EffectiveContentShape::External) | None => {
+                    // External classes do not contribute a local `TypeInfo`. Dispatch both lowering
+                    // blocks through the defining class's shape macro; the macro chooses the scalar
+                    // or collection branch from effective `#[content]` metadata, so external Control
+                    // remains scalar without a codegen type-name special case.
+                    let props_macro_path =
+                        dynamic_content_props_macro_path(component, &parent.type_path, parent_info);
+                    let item_ext = dynamic_collection_item_trait_for_type_with_props_macro(
+                        &parent.type_path,
+                        from,
+                        table,
+                        props_macro_path.clone(),
+                    );
+                    let host = quote! {
+                        #props_macro_path!(@content_field_get #parent_receiver)
+                    };
+                    let collection_body =
+                        emit_dynamic_node_refresh(&plan, node, &host, &item_ext, &ctx, from, table);
+                    quote! {
+                        #props_macro_path!(@content_shape { #scalar_body }, { #collection_body });
+                    }
                 }
             };
             // `.children()` (called inside `#body`, when the parent is a `Layout` family type —
@@ -5796,7 +5819,7 @@ fn generate_view(
             // own default method, inherited (not redeclared) by each of those — `#parent_ext` alone
             // isn't enough to bring a default *ancestor* trait method into scope, the same reason
             // `emit_wiring`'s routed-handler registration needs its own explicit `UIElementExt`
-            // import. Not needed for `TabView` (the only other `content_field_is_list` type), whose
+            // import. Not needed for `TabView` (the only other collection-content type), whose
             // own `children()` is declared directly on `TabViewExt` — gated instead of unconditional
             // to avoid an always-unused import there.
             // External (no local `TypeInfo`): can't tell a `Layout`-family parent (needs this) from
@@ -8093,19 +8116,44 @@ fn view_expr_references_closure_parameter(expr: &ViewExpr, parameter: &str) -> b
     }
 }
 
-/// Phase 2 (docs/design/runtime/ui_tree_design.md): whether `info`'s own `#[content(...)]` field
-/// (`children` if unnamed) is list-shaped (`Vec<...>`/`ListExt<...>`/`UIElementCollection`) rather
-/// than scalar (e.g. `ContentControl`/`Window`'s `content: Rc<dyn UIElement>`) — mirrors
-/// `validate.rs`'s `check_dynamic_child_hosts`'s own `is_collection` check exactly, reused here to
-/// decide which of the two dynamic-region refresh shapes applies (`DynamicChildSlot`/`ListExt` vs a
-/// plain `set_<field>(..)` swap — see `dynamic_region_refresh_method`'s own call site).
-fn content_field_is_list(info: &TypeInfo) -> bool {
-    let field = info.content_field.as_deref().unwrap_or("children");
-    info.field_types.get(field).is_some_and(|ty| {
-        ty.contains("UIElementCollection")
-            || ty.trim_start().starts_with("Vec<")
-            || ty.contains("ListExt<")
-    })
+/// The effective content destination's shape.  This small metadata-driven boundary is shared by
+/// ordinary `view!` lowering and the template backend; neither compiler is allowed to infer a
+/// dynamic child host from a concrete type name or from the presence of `LayoutExt`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EffectiveContentShape {
+    Scalar,
+    Collection,
+    /// The type is known, but its effective content declaration is inherited from metadata that is
+    /// not present in the current symbol table (for example a user component inheriting a builtin).
+    /// Generated props macros remain authoritative for this cross-boundary case.
+    External,
+}
+
+/// Resolve the effective `#[content(...)]` field's scalar/collection shape from declaration
+/// metadata.  The field type checks intentionally mirror validation's content-shape predicate.
+pub(crate) fn effective_content_shape(info: &TypeInfo) -> EffectiveContentShape {
+    let Some(field) = info.content_field.as_deref() else {
+        return EffectiveContentShape::External;
+    };
+    // `field_types` intentionally omits initialized fields because they are not constructor
+    // parameters.  A content property may still have a default initializer, however, and its
+    // declared type remains the authoritative shape for dynamic lowering.  Fall back to the
+    // complete value map before treating the shape as external.
+    let Some(ty) = info
+        .field_types
+        .get(field)
+        .or_else(|| info.value_field_types.get(field))
+    else {
+        return EffectiveContentShape::External;
+    };
+    if ty.contains("UIElementCollection")
+        || ty.trim_start().starts_with("Vec<")
+        || ty.contains("ListExt<")
+    {
+        EffectiveContentShape::Collection
+    } else {
+        EffectiveContentShape::Scalar
+    }
 }
 
 /// The trait-object element type of a parent's declared content collection, in whichever form
@@ -8117,7 +8165,7 @@ fn content_field_is_list(info: &TypeInfo) -> bool {
 /// is the only reader that needs to tell the two apart (the `KnownIdent(UIElementExt)` case has its
 /// own `into_node_if_needed`-based shortcut) — every other caller treats both uniformly as "already
 /// the trait-object element type this dynamic region's `DynamicChildSlot<..>` is generic over".
-enum ItemTraitTokens {
+pub(crate) enum ItemTraitTokens {
     KnownIdent(syn::Ident),
     External(TokenStream),
 }
@@ -8140,35 +8188,92 @@ fn dynamic_collection_item_trait_ty(
     from: &Module,
     table: &SymbolTable,
 ) -> ItemTraitTokens {
-    if table.resolve(from, &parent.type_path).is_none() {
-        let props_macro = format_ident!("__elwindui_props_{}", parent.type_path);
-        return ItemTraitTokens::External(
-            quote! { elwindui::core::#props_macro!(@content_item_dyn) },
-        );
-    }
-    ItemTraitTokens::KnownIdent(dynamic_collection_item_trait(parent, from, table))
+    dynamic_collection_item_trait_for_type(&parent.type_path, from, table)
 }
 
-/// Resolves the trait-object element type of a parent's declared content collection. This is driven
-/// by the resolved `#[content]` field rather than a widget-name branch: `Vec<TabViewItem>` becomes
-/// `TabViewItemExt`, while layout `Vec<Rc<dyn UIElement>>` becomes `UIElementExt`. Only ever called
-/// (via `dynamic_collection_item_trait_ty`) once a shape table has already resolved `parent` — see
-/// that function's own doc comment for the external/no-`TypeInfo` counterpart.
-fn dynamic_collection_item_trait(
-    parent: &PlannedNode,
+/// Resolve the collection item trait for a host type using the same effective-content metadata
+/// boundary as ordinary and template dynamic lowering.  External hosts keep the query in their
+/// exported props macro; local hosts derive the trait from the declared collection item type.
+pub(crate) fn dynamic_collection_item_trait_for_type(
+    type_path: &str,
     from: &Module,
     table: &SymbolTable,
-) -> syn::Ident {
-    let info = table
-        .resolve(from, &parent.type_path)
-        .unwrap_or_else(|| panic!("unknown dynamic-child parent `{}`", parent.type_path));
+) -> ItemTraitTokens {
+    let type_name = type_path.rsplit("::").next().unwrap_or(type_path);
+    let props_macro = format_ident!("__elwindui_props_{type_name}");
+    dynamic_collection_item_trait_for_type_with_props_macro(
+        type_path,
+        from,
+        table,
+        quote! { elwindui::core::#props_macro },
+    )
+}
+
+/// Variant of [`dynamic_collection_item_trait_for_type`] used by the ordinary generated-view
+/// path, where an unresolved immediate base may still be a consumer-local component.  The caller
+/// supplies the already-resolved props-macro path so the fallback remains valid without guessing
+/// from a concrete control name.
+pub(crate) fn dynamic_collection_item_trait_for_type_with_props_macro(
+    type_path: &str,
+    from: &Module,
+    table: &SymbolTable,
+    external_props_macro: TokenStream,
+) -> ItemTraitTokens {
+    let Some(info) = table.resolve(from, type_path) else {
+        return ItemTraitTokens::External(quote! { #external_props_macro!(@content_item_dyn) });
+    };
+    if effective_content_shape(info) == EffectiveContentShape::Collection {
+        ItemTraitTokens::KnownIdent(dynamic_collection_item_trait_for_info(info))
+    } else {
+        ItemTraitTokens::External(quote! { #external_props_macro!(@content_item_dyn) })
+    }
+}
+
+fn dynamic_content_props_macro_ident(type_path: &str) -> syn::Ident {
+    let type_name = type_path.rsplit("::").next().unwrap_or(type_path);
+    format_ident!("__elwindui_props_{type_name}")
+}
+
+/// Resolve the props macro used for an unresolved dynamic-content host.  Ordinary generated views
+/// normally encounter unresolved framework types (which live under `elwindui::core`), but an
+/// immediate qualified component base can be a consumer-local type whose `#[macro_export]` props
+/// macro is re-exported at the consumer crate root.  This helper keeps that distinction driven by
+/// path/metadata, never by a control or property name.
+fn dynamic_content_props_macro_path(
+    component: &ComponentDef,
+    type_path: &str,
+    info: Option<&TypeInfo>,
+) -> TokenStream {
+    let ident = dynamic_content_props_macro_ident(type_path);
+    if info.is_some_and(|i| i.is_builtin) || type_path.starts_with("elwindui::") {
+        quote! { elwindui::core::#ident }
+    } else if info.is_some()
+        || type_path.starts_with("crate::")
+        || component.name == type_path
+        || (component.base.as_deref() == Some(type_path)
+            && component
+                .base_path
+                .as_deref()
+                .is_some_and(|path| path.starts_with("crate::")))
+    {
+        quote! { crate::#ident }
+    } else if !type_path.contains("::") {
+        quote! { elwindui::core::#ident }
+    } else if let Some(prefix) = type_path.split("::").next() {
+        let prefix = format_ident!("{prefix}");
+        quote! { #prefix::#ident }
+    } else {
+        quote! { crate::#ident }
+    }
+}
+
+fn dynamic_collection_item_trait_for_info(info: &TypeInfo) -> syn::Ident {
     let field = info.content_field.as_deref().unwrap_or("children");
-    let ty = info.field_types.get(field).unwrap_or_else(|| {
-        panic!(
-            "`{}` has no content collection field `{field}`",
-            parent.type_path
-        )
-    });
+    let ty = info
+        .field_types
+        .get(field)
+        .or_else(|| info.value_field_types.get(field))
+        .unwrap_or_else(|| panic!("content host has no declared collection field `{field}`"));
     if is_ui_element_type(ty) || ty.contains("UIElementCollection") {
         return format_ident!("UIElementExt");
     }
@@ -8306,7 +8411,7 @@ pub(crate) fn for_body_binds_item_to_a_bindable_field(
     })
 }
 
-fn dynamic_child_binding(
+pub(crate) fn dynamic_child_binding(
     binding: TokenStream,
     child_type: &str,
     item_trait: &ItemTraitTokens,
@@ -15518,7 +15623,7 @@ struct NotepadWindow {
 
     /// Same as above, but composing over `Window` (host composition) instead of `ContentControl` —
     /// confirms the scalar swap path works uniformly regardless of which composed base declares the
-    /// scalar `#[content(...)]` field (`codegen.rs`'s `content_field_is_list`/
+    /// scalar `#[content(...)]` field (`effective_content_shape`/
     /// `emit_scalar_dynamic_node_refresh` don't special-case either type by name).
     #[test]
     fn generates_scalar_content_dynamic_region_via_window_host_composition() {

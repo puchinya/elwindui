@@ -70,6 +70,14 @@ the effective `#[content(...)]` metadata and, for `ContentControl`, becomes its
 single logical `content`. It never becomes the template root and is never
 lowered through the template declaration.
 
+Dynamic template children use the same effective content-shape rule. A scalar
+content destination requires one active element and replaces that value through
+its content setter; a collection destination is reconciled through the
+effective collection surface and `DynamicChildSlot`. `Layout` is only one
+collection-content implementation, not a special template host category, and
+non-`Layout` controls may provide either shape through their `#[content(...)]`
+metadata.
+
 ## 4. Core API and Environment lookup
 
 The existing typed values remain:

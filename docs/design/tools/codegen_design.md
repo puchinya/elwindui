@@ -174,7 +174,10 @@ effective #[content(field)] metadata
 
 scalar field は静的にちょうど一つの子を検証し、`set_<field>(child)` へ lower する。
 collection field は宣言された collection surface へ順序を保って挿入し、既存の dynamic
-reconciliation を使う。`Control` は内部 scalar `visual_root` content destination を宣言し、
+reconciliation を使う。dynamic な template child も同じ shape resolver を使い、scalar なら
+active branch を setter で置換し、collection なら effective getter に対する
+`DynamicChildSlot` で reconcile する。`LayoutExt` の有無は host shape の判定には使わない。
+`Control` は内部 scalar `visual_root` content destination を宣言し、
 setter が private `template_root` replacement path へ委譲するが、この runtime 実装は generic
 lowering からは見えない。`Layout` の `children`、`ContentControl` の `content`、将来の
 specialized control の typed `children` はすべて同じ metadata-driven rule を通る。

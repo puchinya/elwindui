@@ -23,9 +23,11 @@ let template: ControlTemplate<MyButton> = template_view! {
 `ControlTemplate<C>`. `templated_parent` is the typed target from
 `ControlTemplateContext<C>` and uses the ordinary typed getter/event wiring
 system. Component defaults, named `#[control_template]` templates, and
-standalone expressions share the same parser, validator, dynamic-region
-lowering, ContentPresenter restrictions, and Environment propagation. A
-completely unconstrained expression may require a Rust type annotation.
+standalone expressions all enter one semantic template backend. That backend
+owns element construction, metadata/property and content lowering, event and
+lifecycle wiring, dynamic-region reconciliation, ContentPresenter restrictions,
+ownership, and Environment propagation. A completely unconstrained expression
+may require a Rust type annotation.
 
 Inside a `#[component]` declaration, the reserved pseudo-field
 `template: template_view! { ... }` declares the component type's default

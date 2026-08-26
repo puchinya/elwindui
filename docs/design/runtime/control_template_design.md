@@ -29,19 +29,23 @@ template: template_view! { ... }
     -> typed ControlTemplate<Self> default factory
 ```
 
-`template_view!` reuses the existing View AST/parser and structural codegen.
-Only the context and output differ: its owner is a typed `templated_parent` and
-its result is a deferred factory rather than an immediately mounted node. The
-same compiler is used by `#[control_template(target = T)]`, which remains a
-thin named-template frontend.
+`template_view!` reuses the existing View AST/parser and enters the single
+semantic template backend used by every ControlTemplate source. The backend
+owns construction, metadata/property and content lowering, event/lifecycle
+wiring, dynamic regions, ContentPresenter handling, ownership, and Environment
+propagation. Only the frontend context and output wrapper differ: standalone
+expressions acquire a typed target from Rust's expected type, while component
+defaults and named templates already have a concrete target; all produce the
+same deferred factory semantics. `#[control_template(target = T)]` remains a
+thin named-template frontend over that backend.
 
 The standalone expression frontend acquires its `ControlTemplate<C>` target
-from Rust's expected type and then enters the same template compilation
+from Rust's expected type and then enters that same template compilation
 context. Its property reads are statically keyed `TemplateProperty` bounds on
 `C`; updates use the same subscription/resync contract as component and named
 templates. Dynamic `if`/`match`/supported `for` regions, root replacement,
-ContentPresenter validation, and nested component mounting are not separate
-runtime features of the standalone form.
+ContentPresenter validation, lifecycle hooks, and nested component mounting are
+not separate runtime features of the standalone form.
 
 The generated flow is:
 

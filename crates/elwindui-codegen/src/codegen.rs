@@ -10,7 +10,9 @@ use crate::ast::{
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
 
@@ -23,10 +25,12 @@ use syn::visit_mut::VisitMut;
 /// different modules never collide, and a lookup must go through `resolve` (i.e. through a `use`,
 /// or be in the same module) instead of being visible from anywhere in the compilation unit. See
 /// docs/specs/dsl_spec.md §11, docs/design/tools/codegen_design.md
+#[derive(Clone)]
 pub struct SymbolTable {
     types: HashMap<(Vec<String>, String), TypeInfo>,
 }
 
+#[derive(Clone)]
 pub struct TypeInfo {
     pub fields: HashMap<String, FieldKind>,
     /// Every no-initializer field, `#[param]` or plain `prop` alike (kind-agnostic — see
@@ -270,6 +274,22 @@ impl SymbolTable {
     /// error.
     pub fn resolve(&self, from: &Module, name: &str) -> Option<&TypeInfo> {
         self.resolve_key(from, name).map(|key| &self.types[&key])
+    }
+
+    /// Resolves an unqualified user-defined type when the frontend has no lexical module
+    /// context (the expression-form `template_view!` frontend is the one such caller).  The
+    /// normal `resolve` path remains authoritative whenever a module/import context exists.  In
+    /// the context-free case a name is accepted only when exactly one non-builtin type with that
+    /// spelling is present; ambiguous names stay unresolved instead of inventing a type-name
+    /// dispatch rule or silently selecting one component from another module.
+    pub fn resolve_unqualified(&self, name: &str) -> Option<&TypeInfo> {
+        let mut matches = self
+            .types
+            .iter()
+            .filter(|((_, candidate), info)| candidate == name && !info.is_builtin)
+            .map(|(_, info)| info);
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
     }
 }
 
@@ -3884,7 +3904,39 @@ fn generate_view(
         template_base_fields,
         implicit_owner: view.implicit_owner.as_ref().map(ImplicitOwnerCtx::from),
         target: target.clone(),
+        template_parent: None,
+        template_property_bounds: None,
+        template_target: None,
+        template_bare_parent_fields: HashSet::new(),
     };
+
+    // All explicit ControlTemplate bodies (component defaults and named template instances) are
+    // compiled through the same semantic body backend used by `template_view!`.  The surrounding
+    // component generation below still owns storage/class wiring; only the template's visual
+    // factory is supplied by this shared layer.
+    let shared_template_body = view.is_template.then(|| {
+        crate::compile_template_body(
+            &view.root,
+            &view.lets,
+            view.on_mount.as_ref(),
+            view.on_unmount.as_ref(),
+            view.on_update.as_ref(),
+            from.clone(),
+            table.clone(),
+            quote! { #target },
+            component
+                .fields
+                .iter()
+                .map(|field| field.name.clone())
+                .collect(),
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "{}: shared ControlTemplate body compilation failed: {error}",
+                view.target
+            )
+        })
+    });
 
     // PR #169 review remediation, round 2 (AD-R2-6), input corrected round 3 (A2/AD-R3-2/AD-R3-3):
     // `component_public_shape` is the single source-local classification of which no-initializer
@@ -4077,7 +4129,7 @@ fn generate_view(
     // ordinary `ChildEntry::Ref` path, tagged with `PASSTHROUGH_NODE` so `into_node_if_needed` uses
     // it as-is instead of trying to resolve it via `SymbolTable`.
     for field in &component.fields {
-        if field.initializer.is_none() && field.ty.contains("dyn UIElement") {
+        if field.initializer.is_none() && is_ui_element_type(&field.ty) {
             lets_map.insert(
                 field.name.clone(),
                 (
@@ -4599,7 +4651,43 @@ fn generate_view(
                 } else {
                     quote! { self.#getter() }
                 };
-                let subscription = if inherited_owner
+                let setter_available = mutable_property_names.contains(&name)
+                    && component.fields.iter().any(|field| {
+                        field.name == name
+                            && matches!(field.kind, FieldKind::Prop | FieldKind::State)
+                    });
+                let setter_body = if setter_available {
+                    let setter = format_ident!("set_{name}");
+                    quote! { self.#setter(value); }
+                } else {
+                    TokenStream::new()
+                };
+                let bindable = component
+                    .fields
+                    .iter()
+                    .find(|field| field.name == name)
+                    .is_some_and(|field| {
+                        field
+                            .attrs
+                            .iter()
+                            .any(|attr| matches!(attr, Attr::Bindable))
+                    });
+                let subscription = if bindable {
+                    // A bindable field is an owned observable object (normally `Rc<ViewModel>`).
+                    // Subscribe to that nested stream so a template expression such as
+                    // `templated_parent.vm.show_child` refreshes when the view-model property
+                    // changes; this is the same owner-level dependency used by ordinary `view!`
+                    // generation and remains metadata-driven.
+                    quote! {
+                        {
+                            let owner = self.#getter();
+                            elwindui::core::reactive::ObservableExt::subscribe_property_changed(
+                                &*owner,
+                                move |_| listener(),
+                            )
+                        }
+                    }
+                } else if inherited_owner
                     .as_deref()
                     .and_then(|owner| table.resolve(from, owner))
                     .is_some_and(|info| !info.is_builtin)
@@ -4625,6 +4713,10 @@ fn generate_view(
 
                         fn __template_get(&self) -> Self::Value {
                             #getter_body
+                        }
+
+                        fn __template_set(&self, value: Self::Value) {
+                            #setter_body
                         }
 
                         fn __template_subscribe(
@@ -5783,11 +5875,14 @@ fn generate_view(
     if let Some(block) = &base_on_unmount_block {
         shadow_hooks.extend(quote! { #[allow(dead_code)] fn __base_on_unmount(&self) #block });
     }
-    let on_unmount_method = view.on_unmount.as_ref().map(|block| {
-        let rewritten = rewrite_base_calls(block.clone(), &self_ident);
-        let rewritten = rewrite_view_closure_block(rewritten, &[], &ctx, &hook_mode);
-        quote! { #[allow(dead_code)] fn __run_on_unmount(&self) #rewritten }
-    });
+    let on_unmount_method = (!is_control_template_enabled)
+        .then(|| view.on_unmount.as_ref())
+        .flatten()
+        .map(|block| {
+            let rewritten = rewrite_base_calls(block.clone(), &self_ident);
+            let rewritten = rewrite_view_closure_block(rewritten, &[], &ctx, &hook_mode);
+            quote! { #[allow(dead_code)] fn __run_on_unmount(&self) #rewritten }
+        });
 
     // CI-8 of #80 (docs/design/runtime/component_lifecycle_design.md §4g): a host-composition
     // (`inherits Window`) component's own generated `new()` no longer auto-mounts (see this
@@ -6373,24 +6468,73 @@ fn generate_view(
         }
     });
 
+    let shared_template_factory = shared_template_body
+        .as_ref()
+        .map(|body| crate::emit_compiled_template_factory(body, quote! { #target }));
+    // Template-enabled components return from the specialized template branch before the
+    // ordinary authored-view path can install its lifecycle hooks.  Keep the component lifecycle
+    // state guard on the component itself so subtree traversal marks it Unmounting before visiting
+    // template children; the template backend owns the user on_unmount body, so this hook only
+    // performs the generated component teardown and never invokes that body a second time.
+    let template_unmount_hook_attach = (!is_host_composition).then(|| {
+        quote! {
+            let weak_begin = std::rc::Rc::downgrade(&this);
+            <Self as elwindui::core::ui::UIElementExt>::add_begin_unmount_hook(
+                self,
+                Box::new(move || {
+                    if let Some(this) = weak_begin.upgrade() {
+                        match this.__lifecycle_state.get() {
+                            elwindui::core::ui::ComponentLifecycleState::Mounted => {
+                                this.__lifecycle_state
+                                    .set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
+                                true
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                }),
+            );
+            let weak = std::rc::Rc::downgrade(&this);
+            <Self as elwindui::core::ui::UIElementExt>::add_unmount_hook(
+                self,
+                Box::new(move || {
+                    if let Some(this) = weak.upgrade() {
+                        this.__unmount_local();
+                    }
+                }),
+            );
+        }
+    });
     let custom_template_branch = view.is_template.then(|| {
+        let default_template = shared_template_factory
+            .as_ref()
+            .expect("template view always has a shared default factory");
         quote! {
             {
                 use elwindui::core::ui::ControlExt as _;
-                self.__prepare_template_presentation();
-                let __selected_template = self
-                    .__mount_environment
-                    .get()
-                    .expect("template selection: component is not yet mounted")
-                    .__control_template::<#target>();
-                if let Some(__selected_template) = __selected_template {
-                    let this: std::rc::Rc<#target> = self
-                        .__self_weak
-                        .borrow()
-                        .upgrade()
-                        .expect("template selection: object must already be Rc-constructed")
-                        .downcast::<#target>()
-                        .expect("template selection: template target must be the most-derived control");
+                // A component with an authored template may also be embedded as the composed
+                // `base` value of a more-derived component.  In that case `__self_weak` points at
+                // the outer most-derived Rc, so this component must not install its own template
+                // root (the outer component's template is authoritative).  The old generated
+                // path naturally skipped this branch when no Environment override existed; keep
+                // the same ownership rule while using the shared default factory.
+                let __template_target = self
+                    .__self_weak
+                    .borrow()
+                    .upgrade()
+                    .and_then(|value| value.downcast::<#target>().ok());
+                if let Some(this) = __template_target {
+                    self.__prepare_template_presentation();
+                    let __environment_template = self
+                        .__mount_environment
+                        .get()
+                        .expect("template selection: component is not yet mounted")
+                        .__control_template::<#target>();
+                    let __selected_template = __environment_template
+                        .clone()
+                        .unwrap_or_else(|| #default_template);
                     let __template_root = __selected_template.__build(
                         elwindui::core::ui::ControlTemplateContext {
                             control: this.clone(),
@@ -6402,12 +6546,13 @@ fn generate_view(
                         },
                     );
                     self.__set_template_root(__template_root);
+                    #template_unmount_hook_attach
                     #own_environment_subscribe_stmts
-                    #semantic_brush_subscribe_stmts
-                    #own_on_update_subscription
-                    #on_mount_stmt
-                    return;
+                    if __environment_template.is_some() {
+                        #on_mount_stmt
+                    }
                 }
+                return;
             }
         }
     });
@@ -6909,6 +7054,24 @@ struct ViewCtx {
     /// regions`), so wiring an `on_*` attribute on an item template element has to perform that
     /// upgrade itself.
     target: syn::Ident,
+    /// Optional typed parent used by the expression frontend of `template_view!`.  Ordinary
+    /// generated views leave this unset; template expressions provide the local binding that
+    /// represents `ControlTemplateContext<C>::control`.  Keeping this in the shared context makes
+    /// path rewriting and dependency discovery identical for component, named, and standalone
+    /// template sources.
+    template_parent: Option<syn::Ident>,
+    /// Shared compile-time property bounds collected while lowering a template expression.  The
+    /// standalone frontend owns the storage, while the semantic expression backend only borrows
+    /// it through this common context.
+    template_property_bounds: Option<Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>>,
+    /// Type used by the compile-time TemplateProperty bridge.  Standalone factories use the
+    /// generic `C`; generated component/named-template factories provide their concrete target so
+    /// all template frontends can share the same expression lowering.
+    template_target: Option<TokenStream>,
+    /// Bare property names accepted by a concrete component-default template.  They are
+    /// normalized to the same typed `templated_parent.<name>` bridge used by explicit template
+    /// expressions.  Standalone and named templates leave this empty.
+    template_bare_parent_fields: HashSet<String>,
 }
 
 impl ViewCtx {
@@ -6923,6 +7086,10 @@ impl ViewCtx {
             template_base_fields: self.template_base_fields.clone(),
             implicit_owner: self.implicit_owner.clone(),
             target: self.target.clone(),
+            template_parent: self.template_parent.clone(),
+            template_property_bounds: self.template_property_bounds.clone(),
+            template_target: self.template_target.clone(),
+            template_bare_parent_fields: self.template_bare_parent_fields.clone(),
         }
     }
 }
@@ -8002,7 +8169,7 @@ fn dynamic_collection_item_trait(
             parent.type_path
         )
     });
-    if ty.contains("dyn UIElement") || ty.contains("UIElementCollection") {
+    if is_ui_element_type(ty) || ty.contains("UIElementCollection") {
         return format_ident!("UIElementExt");
     }
     let Some(inner) = ty
@@ -8033,7 +8200,7 @@ fn dynamic_collection_item_trait(
 /// Three independent ways to prove that: the collection's own declared type textually says
 /// `Vec<Rc<T>>` (checked here directly), a known viewmodel's `#[observable] Vec<T>` field (which
 /// `generate_viewmodel` stores as `Vec<Rc<T>>`), or the loop body hands the item to some child
-/// element's `#[bindable]` field (`for_body_binds_item_to_a_bindable_field`, below) — the latter
+/// element's `#[bindable]` or `#[two_way]` field (`for_body_binds_item_to_a_bindable_field`, below) — the latter
 /// deliberately never resolves the *item*'s own type (e.g. `DocumentViewModel`) at all, only the
 /// *receiving component*'s (e.g. `DocumentView`), for the same reason `#[bindable]` itself exists: a
 /// `#[elwindui::viewmodel]` type is commonly declared in a plain `.rs` file (or a sibling
@@ -8104,9 +8271,9 @@ fn collection_type_is_vec_rc(
 /// (recursing into nested elements and `if`/`match` branches, but not into a nested `for`'s own
 /// body — a shadowing or unrelated inner loop variable can't carry the outer one), as the exact
 /// value of some attribute whose receiving element's resolved type declares that field
-/// `#[bindable]`. See `collection_uses_rc_identity`'s doc comment for why this is checked against
-/// the *receiving* component's type rather than the item's own.
-fn for_body_binds_item_to_a_bindable_field(
+/// `#[bindable]`/`#[two_way]`. See `collection_uses_rc_identity`'s doc comment for why this is
+/// checked against the *receiving* component's type rather than the item's own.
+pub(crate) fn for_body_binds_item_to_a_bindable_field(
     body: &[ChildEntry],
     binding: &str,
     from: &Module,
@@ -8117,7 +8284,8 @@ fn for_body_binds_item_to_a_bindable_field(
             let bound_here = table.resolve(from, &element.type_path).is_some_and(|info| {
                 element.attributes.iter().any(|attribute| {
                     matches!(&attribute.value, ViewExpr::Path(path) if path.len() == 1 && path[0] == binding)
-                        && info.bindable_fields.contains(&attribute.name)
+                        && (info.bindable_fields.contains(&attribute.name)
+                            || info.two_way_fields.contains(&attribute.name))
                 })
             });
             bound_here
@@ -8281,7 +8449,13 @@ fn initial_dynamic_branch_value(
         return initial_dynamic_content_value(plan, binding, inner_ty, ctx, from, table);
     }
     let value = lazy_leaf_or_field_value(lazy, binding, ctx, from, table);
-    if inner_ty.contains("dyn UIElement") {
+    // Synthesized/qualified trait types stringify with the path between `dyn` and the
+    // trait name (for example `dyn ::elwindui_core::ui::UIElementExt`), so the older
+    // `"dyn UIElement"` substring check misses exactly the Rc<dyn UIElementExt>
+    // content shape used by composed controls.  Treat every UIElementExt trait spelling
+    // as an erased visual child here; the source type still controls the concrete
+    // conversion performed by `into_node_if_needed`.
+    if is_ui_element_type(inner_ty) {
         into_node_if_needed(value, ty, from, table)
     } else {
         into_any_view_if_needed(value, inner_ty)
@@ -9212,6 +9386,15 @@ pub(crate) fn strip_option(ty: &str) -> (&str, bool) {
     }
 }
 
+/// Returns whether a generated type spelling denotes an erased UI-element trait object.
+///
+/// Type strings come from both local metadata and synthesized cross-crate declarations.  The
+/// latter may include a fully-qualified path between `dyn` and `UIElementExt`, so checking only
+/// for the contiguous `dyn UIElement` spelling is insufficient.
+fn is_ui_element_type(ty: &str) -> bool {
+    ty.contains("dyn UIElement") || ty.contains("UIElementExt")
+}
+
 fn is_brush_type(ty: &str) -> bool {
     ty.trim() == "elwindui::core::graphics::Brush"
 }
@@ -9361,7 +9544,7 @@ fn bare_own_field_type(expr: &ViewExpr, ctx: &ViewCtx) -> Option<String> {
     )
 }
 
-fn into_node_if_needed(
+pub(crate) fn into_node_if_needed(
     base: TokenStream,
     source_type_path: &str,
     from: &Module,
@@ -10503,7 +10686,7 @@ fn build_component_args(
             continue;
         }
         if name == "children" {
-            let wants_node = ty.contains("dyn UIElement");
+            let wants_node = is_ui_element_type(ty);
             let items = node
                 .child_bindings
                 .iter()
@@ -10527,7 +10710,7 @@ fn build_component_args(
                     .element_attr_bindings
                     .get(name.as_str())
                     .unwrap_or_else(|| panic!("planned element binding for `{name}` must exist"));
-                if inner_ty.contains("dyn UIElement") {
+                if is_ui_element_type(inner_ty) {
                     into_node_if_needed(quote! { #nested_binding }, nested_ty, from, table)
                 } else {
                     into_any_view_if_needed(quote! { #nested_binding }, inner_ty)
@@ -10569,7 +10752,7 @@ fn build_component_args(
                         } else {
                             quote! { &(#value) }
                         }
-                    } else if inner_ty.contains("dyn UIElement") {
+                    } else if is_ui_element_type(inner_ty) {
                         // A bare-forwarded own field (`content: canvas`, `ViewExpr::Path`) whose
                         // *target* wants `dyn UIElement` but whose own declared type is some
                         // concrete element (own `#[param] canvas: Rc<SomeConcreteElement>`) needs
@@ -10606,7 +10789,7 @@ fn build_component_args(
                 let (child, child_ty) = &node.child_bindings[0];
                 if child_ty == DYNAMIC_CHILD_SLOT_MARKER {
                     initial_dynamic_content_value(plan, child, inner_ty, ctx, from, table)
-                } else if inner_ty.contains("dyn UIElement") {
+                } else if is_ui_element_type(inner_ty) {
                     into_node_if_needed(quote! { #child }, child_ty, from, table)
                 } else {
                     into_any_view_if_needed(quote! { #child }, inner_ty)
@@ -10700,7 +10883,7 @@ fn build_component_setters(
         // uses the latter, mirroring `Layout`'s own `.children().add(..)`
         // convention for virtual builtins (`build_virtual_value`) one level up.
         if (name == "children" || is_this_field_content) && ty.trim_start().starts_with("Vec<") {
-            let wants_node = ty.contains("dyn UIElement");
+            let wants_node = is_ui_element_type(ty);
             let items = node
                 .child_bindings
                 .iter()
@@ -10756,7 +10939,7 @@ fn build_component_setters(
                     .element_attr_bindings
                     .get(name.as_str())
                     .unwrap_or_else(|| panic!("planned element binding for `{name}` must exist"));
-                if inner_ty.contains("dyn UIElement") {
+                if is_ui_element_type(inner_ty) {
                     into_node_if_needed(quote! { #nested_binding }, nested_ty, from, table)
                 } else {
                     into_any_view_if_needed(quote! { #nested_binding }, inner_ty)
@@ -10776,7 +10959,7 @@ fn build_component_setters(
                     quote! { Some(#value) }
                 } else if inner_ty == "String" {
                     quote! { &(#value) }
-                } else if inner_ty.contains("dyn UIElement") {
+                } else if is_ui_element_type(inner_ty) {
                     // Mirrors `build_component_args`/`build_virtual_value`'s identically-named
                     // branch — see that one's own doc comment.
                     let source_type = bare_own_field_type(other, ctx).unwrap_or_default();
@@ -10797,7 +10980,7 @@ fn build_component_setters(
                 let (child, child_ty) = &node.child_bindings[0];
                 if child_ty == DYNAMIC_CHILD_SLOT_MARKER {
                     initial_dynamic_content_value(plan, child, inner_ty, ctx, from, table)
-                } else if inner_ty.contains("dyn UIElement") {
+                } else if is_ui_element_type(inner_ty) {
                     into_node_if_needed(quote! { #child }, child_ty, from, table)
                 } else {
                     into_any_view_if_needed(quote! { #child }, inner_ty)
@@ -10878,7 +11061,7 @@ fn build_component_optional_setters(
                     .element_attr_bindings
                     .get(name)
                     .unwrap_or_else(|| panic!("planned element binding for `{name}` must exist"));
-                if inner_ty.contains("dyn UIElement") {
+                if is_ui_element_type(inner_ty) {
                     into_node_if_needed(quote! { #nested_binding }, nested_ty, from, table)
                 } else {
                     into_any_view_if_needed(quote! { #nested_binding }, inner_ty)
@@ -11194,7 +11377,7 @@ fn emit_shortcut_chord_expr(resolved: &ResolvedShortcutChord, backend_name: &str
 /// backend enum. A backend with no applicable chord at all (`resolve_shortcut_chord` returning
 /// `None`) is silently skipped — `validate::validate_shortcut_fields` warns about that case ahead of
 /// time so it's never a silent surprise.
-fn emit_shortcut_registration(
+pub(crate) fn emit_shortcut_registration(
     name: &str,
     chords: &[(Option<String>, String)],
     scope: ShortcutScope,
@@ -11489,7 +11672,7 @@ fn build_virtual_value(
                 quote! { (#value).to_string() }
             } else if inner_ty.starts_with("Vec<") {
                 quote! { (#value).to_vec() }
-            } else if inner_ty.contains("dyn UIElement") {
+            } else if is_ui_element_type(inner_ty) {
                 // Mirrors `build_component_args`'s own identically-named branch — a bare-forwarded
                 // own field (`content: canvas`) whose target wants `dyn UIElement` needs the same
                 // `.into_node()` conversion a literal nested element gets, which a bare
@@ -12164,6 +12347,11 @@ impl<'a> ViewClosureRewriter<'a> {
         if self.is_shadowed(name) {
             return None;
         }
+        if name == "templated_parent" {
+            if let Some(parent) = &self.ctx.template_parent {
+                return Some(quote! { #parent });
+            }
+        }
         if self.ctx.own_fields.contains_key(name) {
             return Some(owner_value_tokens(self.ctx, self.mode, name));
         }
@@ -12390,6 +12578,26 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                             *node = syn::parse_quote! { #self_tok.#setter(#rhs) };
                             return;
                         }
+                    } else if !self.is_shadowed(&name)
+                        && self.ctx.template_parent.is_some()
+                        && self.ctx.template_bare_parent_fields.contains(&name)
+                    {
+                        // Component default templates retain the ordinary bare-property
+                        // shorthand (`is_checked = !is_checked`).  The template closure is
+                        // evaluated against its captured parent, so assignments must target that
+                        // parent's generated setter just like an explicit `templated_parent`
+                        // setter call.  Keep this schema-driven; no component/type names are
+                        // involved in the lowering decision.
+                        self.visit_expr_mut(&mut assign.right);
+                        let setter = format_ident!("set_{}", name);
+                        let parent = self
+                            .ctx
+                            .template_parent
+                            .as_ref()
+                            .expect("template parent binding is available for bare assignment");
+                        let rhs = &assign.right;
+                        *node = syn::parse_quote! { #parent.#setter(#rhs) };
+                        return;
                     } else if let Some(setter) = self.resolved_implicit_owner_setter(&name) {
                         self.visit_expr_mut(&mut assign.right);
                         let rhs = &assign.right;
@@ -12434,6 +12642,79 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                 }
             }
         }
+        // Setter calls in raw template closures use the same typed property bridge as reads.  A
+        // generic `C` cannot invoke an inherent `set_<name>` method directly, so translate the
+        // explicit templated-parent setter spelling into its compile-time keyed operation.  This
+        // is metadata-driven by the property name supplied in the source expression; no target
+        // type or control-name dispatch is involved.
+        if let syn::Expr::MethodCall(call) = node {
+            if let syn::Expr::Path(receiver) = call.receiver.as_ref() {
+                if receiver.path.segments.len() == 1
+                    && receiver.path.segments[0].ident == "templated_parent"
+                    && call.method.to_string().starts_with("set_")
+                    && (self.ctx.template_property_bounds.is_some()
+                        || self.ctx.default_template_parent)
+                {
+                    let method = call.method.to_string();
+                    let property = method.trim_start_matches("set_");
+                    let key = crate::template_property_key(property);
+                    if let Some(bounds) = &self.ctx.template_property_bounds {
+                        bounds.borrow_mut().entry(key).or_insert(None);
+                    }
+                    for argument in &mut call.args {
+                        self.visit_expr_mut(argument);
+                    }
+                    let args = &call.args;
+                    if args.len() == 1 {
+                        let value = args.first().expect("one setter argument");
+                        if self.ctx.default_template_parent {
+                            let receiver = match self.mode {
+                                EmitMode::Construction => quote! { self },
+                                EmitMode::WithSelf(self_token) => self_token.clone(),
+                            };
+                            let setter = format_ident!("set_{property}");
+                            *node = syn::parse_quote! { #receiver.#setter(#value) };
+                        } else {
+                            let parent = self.ctx.template_parent.as_ref().expect(
+                                "template parent binding is available for template expressions",
+                            );
+                            let template_target = self
+                                .ctx
+                                .template_target
+                                .clone()
+                                .unwrap_or_else(|| quote! { C });
+                            *node = syn::parse_quote! {
+                                <#template_target as elwindui::core::ui::TemplateProperty<#key>>::__template_set(&*#parent, #value)
+                            };
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        // A raw Rust template expression spells a parent property as
+        // `templated_parent.field`, which syn represents as `Expr::Field` rather than the DSL
+        // `ViewExpr::Path` form handled by `emit_path_get`.  Lower it through the same typed
+        // TemplateProperty bridge before recursively visiting the base expression; otherwise a
+        // standalone event/lifecycle closure would try to access a field on the generic `C`
+        // directly and lose both the compile-time bound and resync dependency.
+        if let syn::Expr::Field(field) = node {
+            if let syn::Expr::Path(base) = field.base.as_ref() {
+                if base.path.segments.len() == 1
+                    && base.path.segments[0].ident == "templated_parent"
+                {
+                    if let syn::Member::Named(member) = &field.member {
+                        let path = vec!["templated_parent".to_string(), member.to_string()];
+                        let value = emit_path_get(&path, self.ctx, self.mode);
+                        *node = syn::parse2(value)
+                            .expect("generated template parent field expression parses");
+                        return;
+                    }
+                }
+            }
+            syn::visit_mut::visit_expr_field_mut(self, field);
+            return;
+        }
         if let syn::Expr::Path(p) = node {
             let segments: Vec<String> = p
                 .path
@@ -12441,6 +12722,18 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                 .iter()
                 .map(|s| s.ident.to_string())
                 .collect();
+            if self.ctx.template_parent.is_some() && segments.len() == 1 && segments[0] == "self" {
+                let parent =
+                    self.ctx.template_parent.as_ref().expect(
+                        "template parent binding is present for template closure rewriting",
+                    );
+                // Template lifecycle/event blocks historically used `self` as the borrowed
+                // component receiver.  The shared template factory owns that receiver as an
+                // `Rc`, so preserve the same reference semantics when rewriting raw `self` rather
+                // than exposing the owning `Rc` to APIs that expect `&dyn UIElementExt`.
+                *node = syn::parse_quote! { &*#parent };
+                return;
+            }
             if let [only] = segments.as_slice() {
                 if self.is_shadowed(only) {
                     return;
@@ -12453,12 +12746,30 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                     *node = syn::parse_quote! { #base };
                     return;
                 }
+                if self.ctx.template_parent.is_some()
+                    && self.ctx.template_bare_parent_fields.contains(only)
+                {
+                    let path = ["templated_parent".to_string(), only.to_string()];
+                    let value = emit_path_get(&path, self.ctx, self.mode);
+                    *node = syn::parse2(value)
+                        .expect("generated bare template parent expression parses");
+                    return;
+                }
                 if let Some(value) = self.resolved_implicit_owner_field(only) {
                     *node = syn::parse_quote! { #value };
                 }
                 return;
             }
             if let [owner, field] = segments.as_slice() {
+                if owner == "templated_parent"
+                    && (self.ctx.template_property_bounds.is_some()
+                        || self.ctx.default_template_parent)
+                {
+                    let value = emit_path_get(&segments, self.ctx, self.mode);
+                    *node =
+                        syn::parse2(value).expect("generated template parent expression parses");
+                    return;
+                }
                 let base = self
                     .resolved_owner(owner)
                     .or_else(|| self.resolved_implicit_bindable_owner(owner));
@@ -13401,7 +13712,7 @@ fn emit_resync_with_receiver(
                 from,
                 table,
             ));
-        } else if field_ty.is_some_and(|ty| strip_option(ty).0.contains("dyn UIElement")) {
+        } else if field_ty.is_some_and(|ty| is_ui_element_type(strip_option(ty).0)) {
             // A hand-written native's `dyn UIElement`-typed setter (`Window::set_content`) takes
             // its argument *by value*, unlike the `&str`-taking convention the blanket `else`
             // branch below assumes for every other hand-written-native field — and, same as
@@ -13508,6 +13819,10 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                     }
                     return mode.owner_tokens(only);
                 }
+                if ctx.template_parent.is_some() && ctx.template_bare_parent_fields.contains(only) {
+                    let parent_path = ["templated_parent".to_string(), only.to_string()];
+                    return emit_path_get(&parent_path, ctx, mode);
+                }
                 // Issue #162 §3.11: inside a lowered deferred view (`ViewDef::implicit_owner`), a
                 // bare name that is a known-*readable* field of the source lexical owner Component
                 // (PR #165 final rereview remediation, A2 — `ImplicitOwnerCtx::readable_fields`,
@@ -13562,6 +13877,11 @@ fn owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> TokenStrea
             EmitMode::WithSelf(self_tok) => self_tok.clone(),
         };
     }
+    if owner == "templated_parent" {
+        if let Some(parent) = &ctx.template_parent {
+            return quote! { #parent };
+        }
+    }
     let base = mode.owner_tokens(owner);
     if ctx.weak_bindable_owners.contains(owner) {
         let upgrade_panic_message =
@@ -13610,6 +13930,26 @@ fn path_owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> Token
 
 fn emit_path_get(path: &[String], ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
     match path {
+        [owner, field, rest @ ..]
+            if owner == "templated_parent"
+                && ctx.template_property_bounds.is_some()
+                && !ctx.default_template_parent =>
+        {
+            let base = path_owner_value_tokens(ctx, mode, owner);
+            let key = crate::template_property_key(field);
+            if let Some(bounds) = &ctx.template_property_bounds {
+                bounds.borrow_mut().entry(key).or_insert(None);
+            }
+            let template_target = ctx.template_target.clone().unwrap_or_else(|| quote! { C });
+            let mut value = quote! {
+                <#template_target as elwindui::core::ui::TemplateProperty<#key>>::__template_get(&*#base)
+            };
+            for segment in rest {
+                let ident = format_ident!("{segment}");
+                value = quote! { #value.#ident() };
+            }
+            value
+        }
         [owner, field] => {
             let base = path_owner_value_tokens(ctx, mode, owner);
             let getter = format_ident!("{}", field);
@@ -13638,6 +13978,297 @@ fn emit_setter(path: &[String], ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
     let base = path_owner_value_tokens(ctx, mode, owner);
     let setter = format_ident!("set_{}", field);
     quote! { #base.#setter }
+}
+
+/// Target-aware template expression lowering with the optional bare-property schema used by a
+/// component's declared default template.  Explicit standalone/named templates pass an empty
+/// schema and therefore require `templated_parent.foo`; a component default may retain the
+/// ordinary authored shorthand `foo`, which is normalized through the same keyed bridge.
+pub(crate) fn emit_template_expression_for_target_with_fields(
+    expr: &ViewExpr,
+    parent: &syn::Ident,
+    property_bounds: &Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
+    template_target: TokenStream,
+    bare_parent_fields: HashSet<String>,
+) -> TokenStream {
+    let ctx = ViewCtx {
+        closure_param: None,
+        own_fields: HashMap::new(),
+        mutable_own_fields: HashSet::new(),
+        bindable_owners: HashSet::new(),
+        weak_bindable_owners: HashSet::new(),
+        default_template_parent: false,
+        template_base_fields: HashSet::new(),
+        implicit_owner: None,
+        target: format_ident!("__ElwinduiTemplateTarget"),
+        template_parent: Some(parent.clone()),
+        template_property_bounds: Some(property_bounds.clone()),
+        template_target: Some(template_target),
+        template_bare_parent_fields: bare_parent_fields,
+    };
+    emit_expr(expr, &ctx, &EmitMode::Construction)
+}
+
+/// Concrete-target closure lowering with the bare-property schema used by a component default
+/// template.  The closure rewriter remains the same implementation as standalone/named paths.
+pub(crate) fn emit_template_closure_value_for_target_with_fields(
+    params: &[String],
+    body: &ClosureBody,
+    parent: &syn::Ident,
+    property_bounds: &Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
+    from: &Module,
+    table: &SymbolTable,
+    template_target: TokenStream,
+    bare_parent_fields: HashSet<String>,
+) -> TokenStream {
+    // `emit_closure_value` emits a `move` closure.  Keep the factory's strong parent binding
+    // available for subsequent subscriptions/cleanup by giving the generated closure its own
+    // cloned capture rather than moving the shared local out of the factory scope.
+    let closure_parent = format_ident!("__elwindui_template_closure_parent");
+    let ctx = ViewCtx {
+        closure_param: None,
+        own_fields: HashMap::new(),
+        mutable_own_fields: HashSet::new(),
+        bindable_owners: HashSet::new(),
+        weak_bindable_owners: HashSet::new(),
+        default_template_parent: false,
+        template_base_fields: HashSet::new(),
+        implicit_owner: None,
+        target: format_ident!("__ElwinduiTemplateTarget"),
+        template_parent: Some(closure_parent.clone()),
+        template_property_bounds: Some(property_bounds.clone()),
+        template_target: Some(template_target),
+        template_bare_parent_fields: bare_parent_fields,
+    };
+    let value = emit_closure_value(params, body, &ctx, from, table);
+    quote! {{
+        let #closure_parent = #parent.clone();
+        #value
+    }}
+}
+
+/// Concrete-target lifecycle/event body lowering with a component-default bare-property schema.
+pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
+    body: &ClosureBody,
+    closure_params: &[String],
+    parent: &syn::Ident,
+    property_bounds: &Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
+    template_target: TokenStream,
+    bare_parent_fields: HashSet<String>,
+) -> TokenStream {
+    let ctx = ViewCtx {
+        closure_param: None,
+        own_fields: HashMap::new(),
+        mutable_own_fields: HashSet::new(),
+        bindable_owners: HashSet::new(),
+        weak_bindable_owners: HashSet::new(),
+        default_template_parent: false,
+        template_base_fields: HashSet::new(),
+        implicit_owner: None,
+        target: format_ident!("__ElwinduiTemplateTarget"),
+        template_parent: Some(parent.clone()),
+        template_property_bounds: Some(property_bounds.clone()),
+        template_target: Some(template_target),
+        template_bare_parent_fields: bare_parent_fields,
+    };
+    emit_on_event_closure_body(body, closure_params, &ctx, &EmitMode::Construction)
+}
+
+/// Collects typed parent property keys using the same recursive AST traversal used by the normal
+/// View backend.  This is intentionally generic over expression shape (including raw Rust
+/// expressions and Fluent arguments) so a standalone frontend does not need a second visitor.
+pub(crate) fn collect_template_property_keys(expr: &ViewExpr, out: &mut BTreeSet<u64>) {
+    match expr {
+        ViewExpr::Path(path) => {
+            if path.len() >= 2 && path.first().is_some_and(|name| name == "templated_parent") {
+                out.insert(crate::template_property_key(&path[1]));
+            }
+        }
+        ViewExpr::TFluent(_, args) => {
+            for (_, value) in args {
+                collect_template_property_keys(value, out);
+            }
+        }
+        ViewExpr::Expr(expr) => {
+            collect_template_rust_expr_property_keys(expr, out);
+        }
+        ViewExpr::Element(element) => {
+            for attribute in &element.attributes {
+                collect_template_property_keys(&attribute.value, out);
+            }
+            for child in &element.children {
+                match child {
+                    ChildEntry::Literal(element) => {
+                        for attribute in &element.attributes {
+                            collect_template_property_keys(&attribute.value, out);
+                        }
+                    }
+                    ChildEntry::If {
+                        condition,
+                        then_branch,
+                        else_branch,
+                    } => {
+                        collect_template_property_keys(condition, out);
+                        for entry in then_branch.iter().chain(else_branch) {
+                            if let ChildEntry::Literal(element) = entry {
+                                for attribute in &element.attributes {
+                                    collect_template_property_keys(&attribute.value, out);
+                                }
+                            }
+                        }
+                    }
+                    ChildEntry::Match { value, arms } => {
+                        collect_template_property_keys(value, out);
+                        for arm in arms {
+                            for entry in &arm.body {
+                                if let ChildEntry::Literal(element) = entry {
+                                    for attribute in &element.attributes {
+                                        collect_template_property_keys(&attribute.value, out);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ChildEntry::For {
+                        collection, body, ..
+                    } => {
+                        collect_template_property_keys(collection, out);
+                        for entry in body {
+                            if let ChildEntry::Literal(element) = entry {
+                                for attribute in &element.attributes {
+                                    collect_template_property_keys(&attribute.value, out);
+                                }
+                            }
+                        }
+                    }
+                    ChildEntry::Ref(_) => {}
+                }
+            }
+        }
+        ViewExpr::Closure { params: _, body } => {
+            collect_template_closure_property_keys(body, out);
+        }
+        ViewExpr::DeferredView(_) => {}
+    }
+}
+
+/// Collects `templated_parent.<property>` dependencies from an arbitrary Rust expression.  The
+/// structural expression visitor is shared by all template frontends; the standalone adapter uses
+/// this helper for the `ViewExpr::Expr` variant instead of maintaining a second path visitor.
+pub(crate) fn collect_template_rust_expr_property_keys(expr: &syn::Expr, out: &mut BTreeSet<u64>) {
+    struct Collector<'a> {
+        out: &'a mut BTreeSet<u64>,
+    }
+    impl<'ast> Visit<'ast> for Collector<'_> {
+        fn visit_expr_field(&mut self, node: &'ast syn::ExprField) {
+            if let syn::Expr::Path(base) = node.base.as_ref() {
+                if base.path.segments.len() == 1
+                    && base.path.segments[0].ident == "templated_parent"
+                {
+                    if let syn::Member::Named(field) = &node.member {
+                        self.out
+                            .insert(crate::template_property_key(&field.to_string()));
+                    }
+                }
+            }
+            syn::visit::visit_expr_field(self, node);
+        }
+    }
+    Collector { out }.visit_expr(expr);
+}
+
+/// Collects `templated_parent` dependencies from a template lifecycle/event closure body using
+/// the same expression visitor as property values.  Keeping this operation here means
+/// template_view! does not need a lifecycle-specific dependency scanner of its own.
+pub(crate) fn collect_template_closure_property_keys(body: &ClosureBody, out: &mut BTreeSet<u64>) {
+    match body {
+        ClosureBody::Expr(expr) => collect_template_property_keys(expr, out),
+        ClosureBody::Element(element) => {
+            for attribute in &element.attributes {
+                collect_template_property_keys(&attribute.value, out);
+            }
+            for child in &element.children {
+                if let ChildEntry::Literal(element) = child {
+                    collect_template_closure_element_property_keys(element, out);
+                } else {
+                    collect_template_child_property_keys(child, out);
+                }
+            }
+        }
+        ClosureBody::Block(block) => collect_template_rust_block_property_keys(block, out),
+    }
+}
+
+fn collect_template_closure_element_property_keys(element: &ElementNode, out: &mut BTreeSet<u64>) {
+    for attribute in &element.attributes {
+        collect_template_property_keys(&attribute.value, out);
+    }
+    for child in &element.children {
+        collect_template_child_property_keys(child, out);
+    }
+}
+
+fn collect_template_child_property_keys(child: &ChildEntry, out: &mut BTreeSet<u64>) {
+    match child {
+        ChildEntry::Literal(element) => {
+            collect_template_closure_element_property_keys(element, out)
+        }
+        ChildEntry::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_template_property_keys(condition, out);
+            for child in then_branch.iter().chain(else_branch) {
+                collect_template_child_property_keys(child, out);
+            }
+        }
+        ChildEntry::Match { value, arms } => {
+            collect_template_property_keys(value, out);
+            for arm in arms {
+                for child in &arm.body {
+                    collect_template_child_property_keys(child, out);
+                }
+            }
+        }
+        ChildEntry::For {
+            collection, body, ..
+        } => {
+            collect_template_property_keys(collection, out);
+            for child in body {
+                collect_template_child_property_keys(child, out);
+            }
+        }
+        ChildEntry::Ref(_) => {}
+    }
+}
+
+/// Collects template-parent paths from a lifecycle block.  This is the block counterpart of
+/// `collect_template_rust_expr_property_keys` and deliberately delegates all lexical traversal to
+/// `syn::visit`.
+pub(crate) fn collect_template_rust_block_property_keys(
+    block: &syn::Block,
+    out: &mut BTreeSet<u64>,
+) {
+    struct Collector<'a> {
+        out: &'a mut BTreeSet<u64>,
+    }
+    impl<'ast> Visit<'ast> for Collector<'_> {
+        fn visit_expr_field(&mut self, node: &'ast syn::ExprField) {
+            if let syn::Expr::Path(base) = node.base.as_ref() {
+                if base.path.segments.len() == 1
+                    && base.path.segments[0].ident == "templated_parent"
+                {
+                    if let syn::Member::Named(field) = &node.member {
+                        self.out
+                            .insert(crate::template_property_key(&field.to_string()));
+                    }
+                }
+            }
+            syn::visit::visit_expr_field(self, node);
+        }
+    }
+    Collector { out }.visit_block(block);
 }
 
 #[cfg(test)]
@@ -13697,7 +14328,7 @@ mod tests {
             control
                 .field_types
                 .get("visual_root")
-                .is_some_and(|ty| ty.contains("dyn UIElement")),
+                .is_some_and(|ty| is_ui_element_type(ty)),
             "{:#?}",
             control.field_types
         );
@@ -13709,7 +14340,7 @@ mod tests {
             content_control
                 .field_types
                 .get("content")
-                .is_some_and(|ty| ty.contains("dyn UIElement"))
+                .is_some_and(|ty| is_ui_element_type(ty))
         );
         let layout = table.resolve(module, "Layout").expect("Layout metadata");
         assert_eq!(layout.content_field.as_deref(), Some("children"));

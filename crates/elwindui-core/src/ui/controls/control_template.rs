@@ -33,6 +33,15 @@ pub trait TemplateProperty<const KEY: u64> {
 
     fn __template_get(&self) -> Self::Value;
 
+    /// Sets a template-parent property from a template event/lifecycle closure when the
+    /// corresponding generated component property is writable.  Read-only properties retain the
+    /// default panic so the compile-time bridge remains useful for reads without inventing a
+    /// second erased setter lookup surface.
+    #[doc(hidden)]
+    fn __template_set(&self, _value: Self::Value) {
+        panic!("template parent property is not writable");
+    }
+
     fn __template_subscribe(&self, listener: impl Fn() + 'static) -> Subscription;
 }
 

@@ -14,7 +14,7 @@ struct DemoPanel {
     template: template_view! {
         VerticalLayout {
             spacing: 8.0
-            TextBlock { text: "Default template" font_size: 18.0 }
+            TextBlock { text: "Default template" }
             TextBlock { text: label }
             ContentPresenter { }
         }
@@ -29,7 +29,7 @@ struct CompactDemoPanelTemplate {
     template: template_view! {
         VerticalLayout {
             spacing: 4.0
-            TextBlock { text: "Environment override" font_size: 18.0 }
+            TextBlock { text: "Environment override" }
             TextBlock { text: templated_parent.label }
             ContentPresenter { }
         }

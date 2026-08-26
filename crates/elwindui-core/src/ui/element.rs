@@ -267,6 +267,12 @@ pub struct UIElement {
     pub declared_shortcuts: RefCell<Vec<crate::input::ShortcutDecl>>,
     /// Pre-unmount hooks registered on this element (invoked before descending into children; returns false to abort traversal).
     pub begin_unmount_hooks: RefCell<Vec<Box<dyn Fn() -> bool>>>,
+    /// Mount hooks registered by deferred/template view construction.  They are invoked once when
+    /// this element is first attached to a Visual parent, after the parent edge has been installed.
+    /// Keeping this alongside the unmount hooks lets a ControlTemplate defer its `on_mount` block
+    /// until its root is actually owned by the target control without adding a second template
+    /// lifecycle or retaining a strong owner reference.
+    pub mount_hooks: RefCell<Vec<Box<dyn Fn()>>>,
     /// Unmount hooks registered on this element (e.g. Component teardown closures).
     pub unmount_hooks: RefCell<Vec<Box<dyn Fn()>>>,
 }
@@ -389,6 +395,7 @@ impl UIElement {
             context_popup: RefCell::new(None),
             environment: RefCell::new(None),
             begin_unmount_hooks: RefCell::new(Vec::new()),
+            mount_hooks: RefCell::new(Vec::new()),
             unmount_hooks: RefCell::new(Vec::new()),
         }
     }
@@ -833,6 +840,24 @@ impl UIElement {
             .borrow_mut()
             .push(hook);
     }
+    /// Registers a deferred mount callback.  The callback is invoked once, when this element is
+    /// first inserted into a Visual parent.  This is an internal lifecycle surface used by
+    /// generated ControlTemplate factories; ordinary components continue to run their own
+    /// `on_mount` inline from their generated mount path.
+    #[doc(hidden)]
+    fn add_mount_hook(&self, hook: Box<dyn Fn()>) {
+        self.as_ui_element().mount_hooks.borrow_mut().push(hook);
+    }
+    /// Runs and clears deferred mount callbacks after a Visual-parent edge has been installed.
+    /// Taking the vector before invoking callbacks keeps reentrant tree mutation safe and makes
+    /// each registered callback exactly-once.
+    #[doc(hidden)]
+    fn run_mount_hooks(&self) {
+        let hooks = std::mem::take(&mut *self.as_ui_element().mount_hooks.borrow_mut());
+        for hook in hooks {
+            hook();
+        }
+    }
     /// Invokes all registered begin-unmount hooks. Returns `true` if unmount traversal should continue.
     fn begin_unmount(&self) -> bool {
         let hooks = self.as_ui_element().begin_unmount_hooks.borrow();
@@ -856,6 +881,7 @@ impl UIElement {
             .begin_unmount_hooks
             .borrow_mut()
             .clear();
+        self.as_ui_element().mount_hooks.borrow_mut().clear();
         for hook in hooks {
             hook();
         }

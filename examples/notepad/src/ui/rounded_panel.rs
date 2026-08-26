@@ -27,7 +27,7 @@ struct RoundedPanel {
                 corner_radius: 8.0
             }
             TextBlock {
-                text: label
+                text: templated_parent.label
                 text_alignment: elwindui::core::ui::TextAlignment::Center
             }
         }

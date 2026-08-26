@@ -33,14 +33,20 @@ impl UIElementVisualCollection {
             *child.as_ui_element().visual_parent.borrow_mut() = Some(Rc::downgrade(&owner));
             owner.invalidate_measure();
         }
-        self.storage.borrow_mut().push(child);
+        self.storage.borrow_mut().push(child.clone());
+        if self.owner_rc().is_some() {
+            child.run_mount_hooks();
+        }
     }
     pub fn insert(&self, index: usize, child: Rc<dyn UIElementExt>) {
         if let Some(owner) = self.owner_rc() {
             *child.as_ui_element().visual_parent.borrow_mut() = Some(Rc::downgrade(&owner));
             owner.invalidate_measure();
         }
-        self.storage.borrow_mut().insert(index, child);
+        self.storage.borrow_mut().insert(index, child.clone());
+        if self.owner_rc().is_some() {
+            child.run_mount_hooks();
+        }
     }
     /// Removes the first entry pointer-equal to `child`, if any — returns whether one was found.
     pub fn remove(&self, child: &Rc<dyn UIElementExt>) -> bool {

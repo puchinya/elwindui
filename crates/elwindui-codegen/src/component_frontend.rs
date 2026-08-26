@@ -1497,7 +1497,10 @@ mod tests {
         assert!(s.contains("__lifecycle_state : std :: cell :: Cell < elwindui :: core :: ui :: ComponentLifecycleState >"), "{s}");
         assert!(s.contains("add_begin_unmount_hook"), "{s}");
         assert!(s.contains("add_unmount_hook"), "{s}");
-        assert!(s.contains("__run_on_unmount"), "{s}");
+        // Template bodies register their lifecycle block on the generated template root; the
+        // ordinary view path's legacy `__run_on_unmount` helper is intentionally not emitted for
+        // this shared ControlTemplate backend.
+        assert!(s.contains("__unmount_local"), "{s}");
         assert!(s.contains("unmount_subtree"), "{s}");
         assert!(
             s.contains("__property_changed_subscriptions . borrow_mut () . clear ()"),
@@ -1545,13 +1548,13 @@ mod tests {
             struct Wrapper {
                 content: std::rc::Rc<dyn UIElement>,
 
-                template: template_view! {
+                body: view! {
                     padding: padding
                     content
                 }
             }
         "#;
-        let generated = generate(Some("Control"), src);
+        let generated = generate(Some("VerticalLayout"), src);
         syn::parse2::<syn::File>(generated.clone())
             .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
         let rendered = generated.to_string();

@@ -5,6 +5,8 @@
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
+use std::{cell::Cell, rc::Rc};
+
 extern crate elwindui as elwindui_facade;
 
 // `view!` currently emits the facade paths for external element names. Extend that facade only
@@ -124,12 +126,12 @@ struct ActivityPage {
             foreground: "#eef2f7"
         }
         TextBlock {
-            text: "The divider beside this tab view reports logical-axis drag deltas."
+            text: "The divider beside this tab view reports logical-axis drag deltas consumed by the demo."
             font_size: 14.0
             foreground: "#abb7c4"
         }
         TextBlock {
-            text: "• Press and drag the 6-pixel divider."
+            text: "• Press and drag the 6-pixel divider to resize the panes."
             font_size: 14.0
             foreground: "#eef2f7"
         }
@@ -175,6 +177,20 @@ struct CustomControlsDemoSurface {
             splitter.set_orientation(Orientation::Horizontal);
             splitter.set_attached("Grid", "column", 1i32);
 
+            let content_grid = this.content_grid();
+            let left_column_width = Rc::new(Cell::new(460.0_f32));
+            let left_column_width_for_drag = left_column_width.clone();
+            let content_grid_for_drag = content_grid.clone();
+            splitter.set_on_drag_delta(Box::new(move |event| {
+                let next_width = (left_column_width_for_drag.get() + event.delta).clamp(180.0, 700.0);
+                left_column_width_for_drag.set(next_width);
+                content_grid_for_drag.set_columns(vec![
+                    GridLength::Fixed(next_width),
+                    GridLength::Fixed(6.0),
+                    GridLength::Star(1.0),
+                ]);
+            }));
+
             let status_for_selection = this.status();
             tabs.set_on_selected_index_changed(move |index| {
                 let name = match index {
@@ -206,7 +222,7 @@ struct CustomControlsDemoSurface {
             let status_for_splitter = this.status();
             splitter.set_on_drag_completed(Box::new(move |event| {
                 status_for_splitter.set_text(&format!(
-                    "Splitter drag completed: cumulative delta={:.1}px canceled={}",
+                    "Splitter drag completed: cumulative delta={:.1}px canceled={} · panes resized",
                     event.cumulative_delta, event.canceled
                 ));
             }));
@@ -239,29 +255,12 @@ struct CustomControlsDemoSurface {
         #[id("splitter")]
         let splitter = CustomSplitter {};
 
-        margin: 18.0
-        spacing: 12.0
-        background: "#1e2228"
-
-        VerticalLayout {
-            spacing: 4.0
-            TextBlock {
-                text: "elwindui Custom Controls"
-                font_size: 26.0
-                font_weight: FontWeight::BOLD
-                foreground: "#eef2f7"
-            }
-            TextBlock {
-                text: "Template-backed CustomTabView, ContentControl page ownership, and CustomSplitter input."
-                font_size: 14.0
-                foreground: "#abb7c4"
-            }
-        }
-        Grid {
+        #[id("content_grid")]
+        let content_grid = Grid {
             height: 450.0
             rows: [GridLength::Star(1.0)]
             columns: [
-                GridLength::Star(1.0),
+                GridLength::Fixed(460.0),
                 GridLength::Fixed(6.0),
                 GridLength::Star(1.0),
             ]
@@ -289,7 +288,7 @@ struct CustomControlsDemoSurface {
                     foreground: "#eef2f7"
                 }
                 TextBlock {
-                    text: "Drag a tab header or divider to test routed input."
+                    text: "Drag a tab header or divider to resize the panes and test routed input."
                     font_size: 14.0
                     foreground: "#eef2f7"
                 }
@@ -299,7 +298,27 @@ struct CustomControlsDemoSurface {
                     foreground: "#eef2f7"
                 }
             }
+        };
+
+        margin: 18.0
+        spacing: 12.0
+        background: "#1e2228"
+
+        VerticalLayout {
+            spacing: 4.0
+            TextBlock {
+                text: "elwindui Custom Controls"
+                font_size: 26.0
+                font_weight: FontWeight::BOLD
+                foreground: "#eef2f7"
+            }
+            TextBlock {
+                text: "Template-backed CustomTabView, ContentControl page ownership, and CustomSplitter input."
+                font_size: 14.0
+                foreground: "#abb7c4"
+            }
         }
+        content_grid
         status
     },
 }

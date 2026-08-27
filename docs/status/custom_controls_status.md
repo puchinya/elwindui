@@ -36,7 +36,7 @@ Snapshot: 2026-08-28. The public contract is
   window, layout, page content, and custom-control nodes are composed with
   `view!`; `on_mount` supplies the external custom-control property setup and
   callback wiring. It covers tab selection, advisory close requests, tab
-  dragging, and splitter-drag status reporting.
+  dragging, and splitter-driven pane resizing.
 
 ## Verification
 

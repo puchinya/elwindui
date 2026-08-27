@@ -32,9 +32,11 @@ Snapshot: 2026-08-28. The public contract is
   while the authored `template_view!` root owns the tab header presentation.
   The former `header_root` implementation bridge is removed; this separation
   uses the shared typed component-template path delivered by [#188](https://github.com/puchinya/elwindui/pull/188).
-- `examples/custom-controls-demo` provides an interactive AppKit sample using
-  the public `CustomTabView` and `CustomSplitter` APIs, including tab selection,
-  advisory close requests, tab dragging, and splitter-drag status reporting.
+- `examples/custom-controls-demo` provides an interactive AppKit sample whose
+  window, layout, page content, and custom-control nodes are composed with
+  `view!`; `on_mount` supplies the external custom-control property setup and
+  callback wiring. It covers tab selection, advisory close requests, tab
+  dragging, and splitter-drag status reporting.
 
 ## Verification
 

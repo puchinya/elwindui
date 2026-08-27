@@ -62,6 +62,14 @@ Template propertyの`KEY`はfield-name literalから生成時に計算するcomp
 としてRustのcompile-time errorになる。effective `#[prop]`/`#[state]`に実setterがある場合だけ
 `WritableTemplateProperty<KEY>`を実装し、inherited fieldはcomposed baseの既存setterへ委譲する。
 
+`ControlTemplate<C>`のtarget boundは有効なnon-`NativeControl` `ControlExt + 'static`を受け入れるため、
+property-freeな`template_view!`はraw framework/class-managed `Control`/`ContentControl`にも使用できる。
+一方、typed `templated_parent.<property>`は`TemplateProperty<KEY>`、`set_<property>(...)`とtwo-wayは
+`WritableTemplateProperty<KEY>`を要求する。generated Control-derived `#[component]`はeffective property
+metadataからこのbridgeをexportするが、raw framework/class-managed `ControlExt`に同じbridgeを要求しない。
+したがってcapability不在はcompile-time boundaryであり、runtime reflection、string lookup、fake no-op
+subscription/setter、または`#[class]`全体のreactive redesignで補完しない。
+
 ### 3.2 Registry resolution
 
 同一crate内のcomponent、viewmodel、DSL enumのmetadataはmacro展開中のregistryへ登録する。後続の展開はregistryから宣言済みmetadataを参照するため、DSLのcross-item検証は宣言順に依存する。

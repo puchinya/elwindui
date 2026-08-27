@@ -22,15 +22,16 @@ let template: ControlTemplate<MyButton> = template_view! {
 `template_view!` is an expression-producing macro returning
 `ControlTemplate<C>`. `templated_parent` is the typed target from
 `ControlTemplateContext<C>` and uses the ordinary typed getter/event wiring
-system. Component defaults, named `#[control_template]` templates, and
-standalone expressions all enter one shared semantic lowering path. Ordinary
-`view!` and all three template frontends use the same planner/emitter for
-element construction, metadata/property and content lowering, event and
-lifecycle wiring, dynamic-region reconciliation, ContentPresenter restrictions,
-ownership, and Environment propagation. Only typed-parent acquisition,
-template-property capability bridging, factory wrapping, and template-root
-replacement are template-specific. A completely unconstrained expression may
-require a Rust type annotation.
+when the corresponding compile-time capability is present. Component defaults,
+named `#[control_template]` templates, and standalone expressions all enter one
+shared semantic lowering path. Ordinary `view!` and all three template
+frontends use the same planner/emitter for element construction,
+metadata/property and content lowering, event and lifecycle wiring,
+dynamic-region reconciliation, ContentPresenter restrictions, ownership, and
+Environment propagation. Only typed-parent acquisition, template-property
+capability bridging, factory wrapping, and template-root replacement are
+template-specific. A completely unconstrained expression may require a Rust
+type annotation.
 
 ### 2.1 Read and write capabilities
 
@@ -52,6 +53,25 @@ without duplicating storage.
 literal. It is not a runtime registry or string lookup. A collision is an
 explicit compile-time duplicate-implementation/associated-type error and is
 never resolved silently.
+
+### 2.2 Target capability boundary
+
+`ControlTemplate<C>` accepts any valid non-`NativeControl` target satisfying
+`C: ControlExt + 'static`. A property-free `template_view!` therefore works for
+raw framework or class-managed targets such as `Control` and `ContentControl`.
+
+Typed template-parent property paths are capability-gated:
+
+- `templated_parent.<property>` requires `TemplateProperty<KEY>`;
+- `templated_parent.set_<property>(...)` and two-way bindings require
+  `WritableTemplateProperty<KEY>`.
+
+Generated Control-derived `#[component]` types export these capabilities from
+their effective property metadata. Raw framework/class-managed `ControlExt`
+types are not required by this contract to export a template-property bridge;
+the absence of that capability is a compile-time boundary, not a runtime
+reflection or string-lookup fallback. PR #187 does not add class-wide reactive
+property notifications or fake no-op subscriptions/setters.
 
 Inside a `#[component]` declaration, the reserved pseudo-field
 `template: template_view! { ... }` declares the component type's default

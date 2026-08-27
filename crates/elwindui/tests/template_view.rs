@@ -5,7 +5,7 @@ use elwindui::core::environment::EnvironmentContext;
 use elwindui::core::ui::{
     ControlTemplate, TemplateProperty as _, UIElementExt as _, WritableTemplateProperty as _,
 };
-use elwindui::ui::{ContentControl, ListExt as _, Rectangle, TextArea, TextBlock};
+use elwindui::ui::{ContentControl, Control, ListExt as _, Rectangle, TextArea, TextBlock};
 use elwindui::{component, control_template, template_view};
 use std::cell::Cell;
 use std::marker::PhantomData;
@@ -271,6 +271,20 @@ struct UpdateLifecycleTemplateProbe {
 #[component]
 impl UpdateLifecycleTemplateProbe {}
 
+#[component(inherits Control)]
+struct ReadOnlyComputedTemplateProbe {
+    #[prop(default = String::from("source"))]
+    source: String,
+    #[computed(expr = source.clone())]
+    read_only_value: String,
+    template: template_view! {
+        TextBlock { text: templated_parent.read_only_value }
+    },
+}
+
+#[component]
+impl ReadOnlyComputedTemplateProbe {}
+
 #[test]
 fn typed_template_view_can_be_passed_to_environment() {
     let environment = EnvironmentContext::root();
@@ -311,6 +325,13 @@ fn standalone_template_view_without_parent_expression_is_typed_by_context() {
     environment.set_control_template::<DynamicTemplateProbe>(Some(template_view! {
         TextBlock { text: "environment plain" }
     }));
+}
+
+#[test]
+fn property_free_template_view_accepts_raw_control_target() {
+    let _: ControlTemplate<Control> = template_view! {
+        TextBlock { text: "framework target" }
+    };
 }
 
 #[test]
@@ -951,6 +972,25 @@ fn component_default_template_view_on_update_uses_shared_lifecycle_subscription(
     assert_eq!(STANDALONE_UPDATE_COUNT.with(Cell::get), 0);
     probe.set_label("updated".to_string());
     assert_eq!(STANDALONE_UPDATE_COUNT.with(Cell::get), 1);
+}
+
+#[test]
+fn component_default_template_reads_and_resyncs_computed_property() {
+    use elwindui::core::ui::UIElementExt as _;
+
+    let probe = ReadOnlyComputedTemplateProbe::new();
+    let root = probe.visual_children()[0].clone();
+    let text = root
+        .as_any()
+        .downcast_ref::<TextBlock>()
+        .expect("computed-property template root is TextBlock");
+    assert_eq!(probe.read_only_value(), "source");
+    assert_eq!(text.text.borrow().as_str(), "source");
+
+    probe.set_source("updated".to_string());
+
+    assert_eq!(probe.read_only_value(), "updated");
+    assert_eq!(text.text.borrow().as_str(), "updated");
 }
 
 #[test]

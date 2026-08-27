@@ -82,6 +82,79 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// 内容をクレートルート直下に再エクスポートしている(各クレートの`src/lib.rs`参照)ため、
 /// ここではそのクレートルートを丸ごとglobする。
 ///
+/// Typed template-parent writes are capability-gated.  A generated component's computed field is
+/// readable through `TemplateProperty<KEY>` but does not receive
+/// `WritableTemplateProperty<KEY>`:
+///
+/// ```compile_fail
+/// use elwindui::{component, template_view};
+/// use elwindui::ui::{Control, TextArea};
+///
+/// #[component(inherits Control)]
+/// struct ReadOnlyTwoWayProbe {
+///     #[prop(default = String::from("source"))]
+///     source: String,
+///
+///     #[computed(expr = source.clone())]
+///     read_only_value: String,
+///
+///     template: template_view! {
+///         TextArea {
+///             text <=> templated_parent.read_only_value
+///         }
+///     },
+/// }
+///
+/// #[component]
+/// impl ReadOnlyTwoWayProbe {}
+///
+/// fn main() {}
+/// ```
+///
+/// An event setter against the same computed field is rejected before runtime as well:
+///
+/// ```compile_fail
+/// use elwindui::{component, template_view};
+/// use elwindui::ui::{Control, TextBlock};
+///
+/// #[component(inherits Control)]
+/// struct ReadOnlyEventWriteProbe {
+///     #[prop(default = String::from("source"))]
+///     source: String,
+///
+///     #[computed(expr = source.clone())]
+///     read_only_value: String,
+///
+///     template: template_view! {
+///         TextBlock {
+///             text: templated_parent.read_only_value,
+///             on_tapped: |_event| {
+///                 templated_parent
+///                     .set_read_only_value(String::from("illegal"));
+///             }
+///         }
+///     },
+/// }
+///
+/// #[component]
+/// impl ReadOnlyEventWriteProbe {}
+///
+/// fn main() {}
+/// ```
+///
+/// A template without a typed property-parent access remains valid for any `ControlExt` target:
+///
+/// ```
+/// use elwindui::template_view;
+/// use elwindui::core::ui::{Control, ControlTemplate, TextBlock};
+///
+/// fn main() {
+///     let _: ControlTemplate<Control> = template_view! {
+///         TextBlock { text: "framework target" }
+///     };
+/// }
+/// ```
+///
 /// A deferred view (`view! { .. }` written as an attribute value, e.g. `context_popup: view! {
 /// .. }`) may only be assigned to a property declared `ViewTemplate`/`Option<ViewTemplate>` — on a
 /// same-crate `#[elwindui::component]`-declared type this is caught by static DSL validation, but

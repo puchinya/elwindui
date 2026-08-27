@@ -52,6 +52,17 @@ regions, root replacement, ContentPresenter validation, lifecycle hooks, and
 nested component mounting are not separate runtime features of the standalone
 form.
 
+The target bound remains `C: ControlExt + 'static` for any valid non-
+`NativeControl` target. A property-free template can therefore target a raw
+framework/class-managed `Control` or `ContentControl`. A typed
+`templated_parent.<property>` path additionally requires the matching
+`TemplateProperty<KEY>`, while `templated_parent.set_<property>(...)` and
+two-way bindings require `WritableTemplateProperty<KEY>`. Generated
+Control-derived `#[component]` types provide these bridges from effective
+property metadata; raw framework/class-managed `ControlExt` types are not
+required to provide them in #187. No fake non-reactive bridge, runtime
+reflection, or class-wide reactive-property redesign is introduced here.
+
 The generated flow is:
 
 ```text

@@ -1,6 +1,6 @@
 # Custom controls status
 
-Snapshot: 2026-08-24. The public contract is
+Snapshot: 2026-08-27. The public contract is
 [`../specs/custom_controls_spec.md`](../specs/custom_controls_spec.md).
 
 ## Implemented
@@ -10,9 +10,10 @@ Snapshot: 2026-08-24. The public contract is
 - `CustomTabView`, `CustomTabViewItem`, and `CustomSplitter` use
   `#[elwindui::component]` with the required Control/ContentControl
   inheritance; no new custom `#[class]` declaration was introduced.
-- The controls are templated: authored `body: view!` subtrees use Grid,
-  HorizontalLayout, Rectangle, TextBlock, and IconSourceElement. CustomTabView
-  and CustomSplitter do not draw chrome through `render()`.
+- The controls are templated: authored `template: template_view! { ... }`
+  subtrees use Grid, HorizontalLayout, Rectangle, TextBlock, and
+  IconSourceElement. CustomTabView and CustomSplitter do not draw chrome
+  through `render()`.
 - CustomTabView owns the typed ordered item list and TwoWay selection. Private
   strip/content presenters preserve item identity and keep all current logical
   contents visually attached while selection changes.
@@ -27,10 +28,10 @@ Snapshot: 2026-08-24. The public contract is
   is merged. Host-path tests exercise `layout_root`, `RenderTree`, routed input,
   and PointerDispatcher implicit capture; no ignored test remains for the old
   override or direct-render architectures.
-- The inherited `ContentControl::content` plus authored default header-template
-  separation is blocked by [#187](https://github.com/puchinya/elwindui/issues/187),
-  which owns the missing generic component default-template path. #173 remains
-  open until that prerequisite replaces the temporary implementation bridge.
+- The inherited `ContentControl::content` remains the single logical page slot,
+  while the authored `template_view!` root owns the tab header presentation.
+  The former `header_root` implementation bridge is removed; this separation
+  uses the shared typed component-template path delivered by [#188](https://github.com/puchinya/elwindui/pull/188).
 
 ## Verification
 

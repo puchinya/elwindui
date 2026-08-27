@@ -8,25 +8,24 @@ machinery. There is no second observable system and no backend-specific code.
 
 `CustomTabView` and `CustomSplitter` are
 `#[component(inherits = Control)]` controls. `CustomTabViewItem` is a
-`#[component(inherits = ContentControl)]`. Their authored `body: view!` is the
-default visual composition. Standard `Grid`, `HorizontalLayout`,
+`#[component(inherits = ContentControl)]`. Their authored
+`template: template_view! { ... }` is the default visual composition, using the
+same shared view grammar as ordinary `view!`. Standard `Grid`, `HorizontalLayout`,
 `Rectangle`, `TextBlock`, and `IconSourceElement` nodes provide the chrome.
 None of these controls, nor their private presenters, implements `render()` to
 draw chrome through `RenderContext`.
 
 `CustomTabViewItem` keeps the inherited `ContentControl::content` as its single
-logical page-content property. Its authored `body: view!` is header presentation
-only; it must be installed as the component's default visual template through
-the existing ContentControl template path, without replacing the inherited
-`#[content(content)]` destination or introducing a second content property.
-The generic component default-template path is tracked separately in
-[#187](https://github.com/puchinya/elwindui/issues/187); until that prerequisite
-lands, this separation is an implementation gate rather than a completed
-claim for #173.
+logical page-content property. Its authored `template_view!` is header
+presentation only and is installed through the Control template-root path,
+without replacing the inherited `#[content(content)]` destination or
+introducing a second content property. The component does not use a
+`header_root` workaround.
 
-The tab view body is a `Grid` with two rows. The private
+The tab view template is a `Grid` with two rows. The private
 `CustomTabStripPresenter` is a `HorizontalLayout` that owns the ordered item
-controls. The private `CustomTabContentPresenter` owns the visual presentation
+controls; it retains an ordinary lifecycle-only `body: view!` because it has no
+authored root of its own. The private `CustomTabContentPresenter` owns the visual presentation
 of every current item content. Top uses `Fixed(32)` then `Star(1)`; Bottom uses
 `Star(1)` then `Fixed(32)`, with the presenters’ attached `Grid::row` values
 updated together.

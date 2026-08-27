@@ -330,7 +330,7 @@ content containerとして使うためのControlではない。
 Docking が共有する backend-neutral な templated tab control。通常の
 application control と同じ `#[component]` authoring で提供され、標準の
 `Grid`/`HorizontalLayout`/`TextBlock`/`IconSourceElement`/`Rectangle` を
-使う authored `body: view!` が既定の visual subtree になる。native
+使う authored `template: template_view! { ... }` が既定の visual subtree になる。native
 `TabView` の wrapper でも、`RenderContext` で chrome を直接描く control
 でもない。
 
@@ -357,7 +357,7 @@ Core cancellation は active drag を `canceled = true` で一度だけ完了さ
 
 ### `elwindui_custom_controls::CustomSplitter`
 
-`Control` を継承する templated splitter。`body: view!` の
+`Control` を継承する templated splitter。`template: template_view! { ... }` の
 orientation-dependent `Rectangle` が hit-test surface と six-pixel natural
 thickness を提供する。`orientation` は既定値 `Horizontal` で、水平時は
 X 軸/幅 6、垂直時は Y 軸/高さ 6 を使う。

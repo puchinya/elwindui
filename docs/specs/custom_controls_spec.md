@@ -19,9 +19,10 @@ pub struct CustomTabViewItem { /* ... */ }
 pub struct CustomSplitter { /* ... */ }
 ```
 
-They use the existing `#[component]` and `view!` composition mechanisms. Their
-appearance is authored as a default template subtree made from ordinary visual
-primitives. They do not introduce new `#[class]` controls, native
+They use the existing `#[component]` and `template_view!` composition
+mechanisms. Their appearance is authored as a default template subtree made
+from ordinary visual primitives; the template frontend shares the ordinary
+`view!` grammar. They do not introduce new `#[class]` controls, native
 TabView/SplitView wrappers, or backend-native public types, and these controls
 do not emit chrome directly from a `render()` override.
 
@@ -79,7 +80,7 @@ Bottom places it in row 1; the other row is the selected-content presenter.
 - `closable: bool`, default `true`;
 - inherited `content` as the single logical content element.
 
-The item’s authored visual subtree is the tab header: it contains a
+The item’s authored default template subtree is the tab header: it contains a
 `TextBlock`, an optional `IconSourceElement`, a fixed close slot, and a
 `Rectangle` selected-indicator slot. The inherited `content` is not rendered by
 the header. A private content presenter owns the visual presentation of all

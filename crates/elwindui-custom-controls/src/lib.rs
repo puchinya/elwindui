@@ -102,7 +102,7 @@ enum TabGestureKind {
 }
 
 #[derive(Clone, Debug)]
-struct TabGesture {
+pub struct TabGesture {
     item: std::rc::Weak<CustomTabViewItem>,
     press_position: Point,
     press_screen_position: Option<Point>,
@@ -111,7 +111,7 @@ struct TabGesture {
     kind: TabGestureKind,
 }
 
-enum TabItemPointerEvent {
+pub enum TabItemPointerEvent {
     Pressed(PointerEventArgs),
     Moved(PointerEventArgs),
     Released(PointerEventArgs),
@@ -120,7 +120,7 @@ enum TabItemPointerEvent {
     Exited,
 }
 
-struct ContentEntry {
+pub struct ContentEntry {
     item: std::rc::Weak<CustomTabViewItem>,
     content: Option<Rc<dyn UIElementExt>>,
     #[allow(dead_code)]
@@ -128,7 +128,7 @@ struct ContentEntry {
 }
 
 #[derive(Clone, Debug)]
-struct SplitterGesture {
+pub struct SplitterGesture {
     orientation: Orientation,
     position: Point,
     screen_position: Option<Point>,
@@ -194,7 +194,7 @@ struct CustomTabCloseButton {
     slot_visibility: Visibility,
     #[computed(expr = if glyph_visible { "×".to_string() } else { String::new() })]
     glyph_text: String,
-    body: view! {
+    template: template_view! {
         on_mount {
             this.bind_pointer_handlers();
         }
@@ -221,10 +221,7 @@ impl CustomTabCloseButton {
 /// One item displayed by [`CustomTabView`]. Its visual template is the tab header; its inherited
 /// `ContentControl` content remains the logical page presented by the private content presenter.
 #[elwindui::component(inherits ContentControl)]
-#[content(header_root)]
 pub struct CustomTabViewItem {
-    #[prop(default = elwindui::core::ui::TextBlock::new())]
-    header_root: Rc<dyn UIElementExt>,
     #[prop(default = String::new())]
     header: String,
     #[prop(default = None)]
@@ -273,16 +270,14 @@ pub struct CustomTabViewItem {
     close_glyph_visible: bool,
     #[computed(expr = if is_selected { Visibility::Visible } else { Visibility::Collapsed })]
     indicator_visibility: Visibility,
-    body: view! {
+    template: template_view! {
         on_mount {
-            this.prepare_content_presentation();
             this.bind_header_handlers();
             this.sync_close_button();
         }
         on_update(header, icon, closable, is_selected, is_pointer_over, tab_strip_position, close_button_presentation) {
             this.sync_close_button();
         }
-        #[id("close_button")]
         let close_button = CustomTabCloseButton {
             slot_visible: close_slot_visible
             glyph_visible: close_glyph_visible
@@ -403,7 +398,7 @@ struct CustomTabContentPresenter {
     bound_items: Vec<std::rc::Weak<CustomTabViewItem>>,
     #[state(default = None)]
     presentation_state: Option<Rc<std::cell::RefCell<Vec<ContentEntry>>>>,
-    body: view! {
+    template: template_view! {
         on_mount {
             this.reconcile_contents();
         }
@@ -446,7 +441,6 @@ impl CustomTabContentPresenter {
         }
         let mut entries = Vec::with_capacity(items.len());
         for item in &items {
-            item.prepare_content_presentation();
             let content = item.__content_opt();
             if let Some(content) = content.as_ref() {
                 if let Some(parent) = content.visual_parent() {
@@ -594,10 +588,10 @@ impl CustomTabContentPresenter {
 
 /// A templated tab strip and selected-content host.
 #[elwindui::component(inherits Control)]
-#[content(children)]
+#[content(tab_children)]
 pub struct CustomTabView {
     #[prop(default = Vec::new())]
-    children: Vec<Rc<CustomTabViewItem>>,
+    tab_children: Vec<Rc<CustomTabViewItem>>,
     #[prop(default = 0)]
     #[two_way]
     selected_index: usize,
@@ -641,15 +635,14 @@ pub struct CustomTabView {
     tab_items: Vec<Rc<CustomTabViewItem>>,
     #[computed(expr = template_items.clone())]
     content_items: Vec<Rc<CustomTabViewItem>>,
-    body: view! {
+    template: template_view! {
         on_mount {
             this.set_clip_to_bounds(Some(true));
             this.reconcile_children();
         }
-        on_update(children, template_items, selected_index, tab_strip_position, close_button_presentation) {
+        on_update(tab_children, template_items, selected_index, tab_strip_position, close_button_presentation) {
             this.reconcile_children();
         }
-        #[id("tab_strip")]
         let tab_strip = CustomTabStripPresenter {
             items: tab_items
             selected_index: selected_index
@@ -657,7 +650,6 @@ pub struct CustomTabView {
             close_button_presentation: close_button_presentation
             Grid::row: tab_strip_row
         };
-        #[id("content_presenter")]
         let content_presenter = CustomTabContentPresenter {
             items: content_items
             selected_index: selected_index
@@ -688,7 +680,7 @@ pub struct CustomSplitter {
     drag_completed_callback: Option<Rc<dyn Fn(SplitterDragCompletedEventArgs)>>,
     #[state(default = None)]
     gesture: Option<SplitterGesture>,
-    body: view! {
+    template: template_view! {
         on_mount {
             this.bind_pointer_handlers();
         }
@@ -857,11 +849,23 @@ impl CustomTabViewItem {
         self.sync_close_button();
     }
 
-    fn prepare_content_presentation(&self) {
-        if self.__template_root().is_none() {
-            self.set_visual_root(self.header_root());
+    fn update_pointer_over(&self, value: bool) {
+        if self.is_pointer_over() == value {
+            return;
         }
-        self.__prepare_template_presentation();
+        let old_glyph_visible = self.close_glyph_visible();
+        self.is_pointer_over.set(value);
+        let new_glyph_visible = self.closable()
+            && match self.close_button_presentation() {
+                CloseButtonPresentation::Always => true,
+                CloseButtonPresentation::OnPointerOver => value,
+                CloseButtonPresentation::Never => false,
+            };
+        self.close_glyph_visible.set(new_glyph_visible);
+        if old_glyph_visible != new_glyph_visible {
+            self.on_property_changed(CustomTabViewItemProperty::close_glyph_visible);
+        }
+        self.on_property_changed(CustomTabViewItemProperty::is_pointer_over);
     }
 
     fn set_presentation(
@@ -973,7 +977,7 @@ impl CustomTabViewItem {
             Box::new(move |_, args| {
                 if !args.handled.get() {
                     if let Some(item) = weak_self.upgrade() {
-                        item.set_is_pointer_over(true);
+                        item.update_pointer_over(true);
                         if let Some(callback) = item.owner_pointer_callback() {
                             callback(TabItemPointerEvent::Entered);
                         }
@@ -987,7 +991,7 @@ impl CustomTabViewItem {
             Box::new(move |_, args| {
                 if !args.handled.get() {
                     if let Some(item) = weak_self.upgrade() {
-                        item.set_is_pointer_over(false);
+                        item.update_pointer_over(false);
                         if let Some(callback) = item.owner_pointer_callback() {
                             callback(TabItemPointerEvent::Exited);
                         }
@@ -998,19 +1002,27 @@ impl CustomTabViewItem {
     }
 
     fn sync_close_button(&self) {
-        let button = self.close_button();
-        button.set_slot_visible(
-            self.closable() && self.close_button_presentation() != CloseButtonPresentation::Never,
-        );
-        button.set_glyph_visible(
-            self.closable()
+        for node in core::visual_tree::find_all::<CustomTabCloseButton>(self) {
+            let Some(button) = node.as_any().downcast_ref::<CustomTabCloseButton>() else {
+                continue;
+            };
+            let slot_visible = self.closable()
+                && self.close_button_presentation() != CloseButtonPresentation::Never;
+            if button.slot_visible() != slot_visible {
+                button.set_slot_visible(slot_visible);
+            }
+            let glyph_visible = self.closable()
                 && match self.close_button_presentation() {
                     CloseButtonPresentation::Always => true,
                     CloseButtonPresentation::OnPointerOver => self.is_pointer_over(),
                     CloseButtonPresentation::Never => false,
-                },
-        );
-        button.set_on_close(self.owner_close_callback());
+                };
+            if button.glyph_visible() != glyph_visible {
+                button.set_glyph_visible(glyph_visible);
+            }
+            button.set_on_close(self.owner_close_callback());
+            break;
+        }
     }
 
     fn weak_self(&self) -> std::rc::Weak<Self> {
@@ -1031,6 +1043,15 @@ impl CustomTabViewItem {
             icon.set_icon_source(Some(icon_source));
             icon as Rc<dyn UIElementExt>
         })
+    }
+
+    /// Returns the close affordance from the mounted header template.
+    pub fn close_button(&self) -> Rc<dyn UIElementExt> {
+        let button = core::visual_tree::find_all::<CustomTabCloseButton>(self)
+            .into_iter()
+            .next()
+            .expect("CustomTabViewItem close button is not mounted");
+        button
     }
 }
 
@@ -1062,7 +1083,7 @@ impl CustomTabView {
 
     /// Replaces the concrete list used by declarative and programmatic callers.
     pub fn set_children(&self, children: Vec<Rc<CustomTabViewItem>>) {
-        <Self as CustomTabViewExt>::set_children(self, children);
+        <Self as CustomTabViewExt>::set_tab_children(self, children);
     }
 
     /// Appends one item to the ordered tab list.
@@ -1151,11 +1172,11 @@ impl CustomTabView {
     }
 
     fn children_values(&self) -> Vec<Rc<CustomTabViewItem>> {
-        <Self as CustomTabViewExt>::children(self)
+        <Self as CustomTabViewExt>::tab_children(self)
     }
 
     /// Returns the typed ordered-list surface used by dynamic content composition.
-    pub fn children_list(&self) -> &dyn ListExt<CustomTabViewItem> {
+    pub fn children_list(&self) -> &dyn ListExt<dyn CustomTabViewItemExt> {
         self
     }
 
@@ -1220,17 +1241,9 @@ impl CustomTabView {
                 .all(|(old, new)| Rc::ptr_eq(old, new));
         if !template_matches {
             self.set_template_items(children.clone());
+            self.sync_presenters(&children);
             return;
         }
-        self.tab_strip().set_items(children.clone());
-        self.tab_strip().set_selected_index(self.selected_index());
-        self.tab_strip()
-            .set_tab_strip_position(self.tab_strip_position());
-        self.tab_strip()
-            .set_close_button_presentation(self.close_button_presentation());
-        self.content_presenter().set_items(children.clone());
-        self.content_presenter()
-            .set_selected_index(self.selected_index());
         self.sync_presenters(&children);
     }
 
@@ -1238,25 +1251,40 @@ impl CustomTabView {
         let selected = self.selected_index();
         let position = self.tab_strip_position();
         let close = self.close_button_presentation();
-        self.tab_strip().set_items(children.to_vec());
-        self.tab_strip().set_selected_index(selected);
-        self.tab_strip().set_tab_strip_position(position);
-        self.tab_strip().set_close_button_presentation(close);
-        self.content_presenter().set_items(children.to_vec());
-        self.content_presenter().set_selected_index(selected);
-        self.tab_strip()
-            .as_ui_element()
-            .set_attached::<i32>("Grid", "row", self.tab_strip_row());
-        self.content_presenter()
-            .as_ui_element()
-            .set_attached::<i32>("Grid", "row", self.content_row());
+
+        for node in core::visual_tree::find_all::<CustomTabStripPresenter>(self) {
+            let Some(presenter) = node.as_any().downcast_ref::<CustomTabStripPresenter>() else {
+                continue;
+            };
+            presenter.set_items(children.to_vec());
+            presenter.set_selected_index(selected);
+            presenter.set_tab_strip_position(position);
+            presenter.set_close_button_presentation(close);
+            presenter
+                .as_ui_element()
+                .set_attached::<i32>("Grid", "row", self.tab_strip_row());
+            break;
+        }
+        for node in core::visual_tree::find_all::<CustomTabContentPresenter>(self) {
+            let Some(presenter) = node.as_any().downcast_ref::<CustomTabContentPresenter>() else {
+                continue;
+            };
+            presenter.set_items(children.to_vec());
+            presenter.set_selected_index(selected);
+            presenter
+                .as_ui_element()
+                .set_attached::<i32>("Grid", "row", self.content_row());
+            break;
+        }
         for (index, item) in children.iter().enumerate() {
             item.set_presentation(index == selected, item.is_pointer_over(), position, close);
         }
     }
 
     fn validate_children(&self, children: &[Rc<CustomTabViewItem>]) {
-        let owner: Rc<dyn UIElementExt> = self.tab_strip();
+        let owner = core::visual_tree::find_all::<CustomTabStripPresenter>(self)
+            .into_iter()
+            .next();
         for (index, child) in children.iter().enumerate() {
             assert!(
                 !children[..index]
@@ -1266,7 +1294,9 @@ impl CustomTabView {
             );
             if let Some(parent) = child.visual_parent() {
                 assert!(
-                    Rc::ptr_eq(&parent, &owner),
+                    owner
+                        .as_ref()
+                        .is_some_and(|owner| Rc::ptr_eq(&parent, owner)),
                     "CustomTabViewItem is already owned by another Visual parent; detach it before attaching"
                 );
             }
@@ -1306,8 +1336,8 @@ impl CustomTabView {
             TabItemPointerEvent::Moved(event) => self.handle_pointer_moved(item, &event),
             TabItemPointerEvent::Released(event) => self.handle_pointer_released(item, &event),
             TabItemPointerEvent::Canceled(event) => self.handle_pointer_canceled(item, &event),
-            TabItemPointerEvent::Entered => item.set_is_pointer_over(true),
-            TabItemPointerEvent::Exited => item.set_is_pointer_over(false),
+            TabItemPointerEvent::Entered => item.update_pointer_over(true),
+            TabItemPointerEvent::Exited => item.update_pointer_over(false),
         }
     }
 

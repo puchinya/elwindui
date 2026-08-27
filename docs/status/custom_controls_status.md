@@ -1,6 +1,6 @@
 # Custom controls status
 
-Snapshot: 2026-08-27. The public contract is
+Snapshot: 2026-08-28. The public contract is
 [`../specs/custom_controls_spec.md`](../specs/custom_controls_spec.md).
 
 ## Implemented
@@ -32,6 +32,9 @@ Snapshot: 2026-08-27. The public contract is
   while the authored `template_view!` root owns the tab header presentation.
   The former `header_root` implementation bridge is removed; this separation
   uses the shared typed component-template path delivered by [#188](https://github.com/puchinya/elwindui/pull/188).
+- `examples/custom-controls-demo` provides an interactive AppKit sample using
+  the public `CustomTabView` and `CustomSplitter` APIs, including tab selection,
+  advisory close requests, tab dragging, and splitter-drag status reporting.
 
 ## Verification
 
@@ -41,7 +44,9 @@ and workspace test results are recorded in the PR completion report against
 the final head. Workspace-wide formatter or rust-analyzer diagnostics are
 reported separately when their baseline macro/environment diagnostics remain.
 Windows and GTK4 runtime interaction have not been run. Interactive AppKit
-verification remains unverified unless explicitly listed in the final report.
+verification of the custom-controls demo has been captured with
+`tools/macos-ui-driver`; frontmost interaction remains environment-limited when
+another agent application owns the foreground.
 
 ## Follow-up
 

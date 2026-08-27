@@ -1,6 +1,6 @@
 # Control implementation status
 
-Snapshot: 2026-08-24. Public behavior is defined by [`../specs/ui_spec.md`](../specs/ui_spec.md).
+Snapshot: 2026-08-27. Public behavior is defined by [`../specs/ui_spec.md`](../specs/ui_spec.md).
 
 | Control | AppKit | WinUI 3 | GTK4 | Notes |
 |---|---|---|---|---|
@@ -20,11 +20,12 @@ Snapshot: 2026-08-24. Public behavior is defined by [`../specs/ui_spec.md`](../s
 | TabView / TabViewItem | ✅ | ✅ | ⬜ | hosted page activation and native child reconciliation; AppKit tab chrome (layerless chip drawing, system-symbol close/new-tab, closable live sync, shrink-to-fit overflow) screenshot-verified on `controls-demo`/`notepad` ([#167](https://github.com/puchinya/elwindui/issues/167)) — Accessibility-driven interaction verification (`find`/`click`) not run, no Accessibility permission granted to the verification environment |
 | Rectangle / Ellipse / Image | ✅ | ✅ | ⬜ | backend-neutral self-rendered controls |
 | IconElement / IconSourceElement | ✅ | ✅ | ⬜ | backend-neutral self-rendered icon base/value wrapper; Core unit and cross-crate DSL tests, no backend-specific control path ([#176](https://github.com/puchinya/elwindui/issues/176)) |
-| ControlTemplate / ContentPresenter | ✅ | ✅ | ⬜ | mount-time typed Environment selection and ContentControl logical/Visual separation; backend-neutral runtime; Control authored roots use the internal scalar `visual_root` metadata surface and private template-root ownership |
+| ControlTemplate / ContentPresenter | ✅ | ✅ | ⬜ | mount-time typed Environment selection, explicit `template: template_view! { ... }` defaults, and logical/Visual separation; backend-neutral runtime; ordinary view/template planner-emitter is shared, with readable `TemplateProperty<KEY>` and setter-only `WritableTemplateProperty<KEY>` bridges (including inherited base delegation); property-free templates accept valid raw `ControlExt` targets, while property paths remain capability-gated and raw framework/class-managed property bridges are not guaranteed; template roots use private template-root ownership while caller bare content remains the inherited `content` slot |
 
 ## Current gaps
 
 - Runtime re-template、per-instance template property、TemplatePart、VisualStateは初期`ControlTemplate`の対象外である ([#83](https://github.com/puchinya/elwindui/issues/83))。
+- ContentControl-derived components declare their default visual template with `template: template_view! { ... }`; a static `ContentPresenter` is opt-in in that template, while raw `ContentControl` retains direct presentation. Caller bare children remain the inherited logical `content` slot.
 - `tooltip` is implemented for NativeControl descendants, not backend-neutral self-rendered elements.
 - Native control support has no GTK4 implementation.
 - Accessibility scaffolds and the NavigationHost/VirtualList/ErrorBoundary surface require an explicit public-contract decision ([#85](https://github.com/puchinya/elwindui/issues/85)).

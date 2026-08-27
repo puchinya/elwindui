@@ -34,7 +34,7 @@ struct ForItemTwoWayHost {
     #[bindable]
     vm: Rc<RowsViewModel>,
 
-    body: view! {
+    template: template_view! {
         VerticalLayout {
             for row in vm.rows {
                 TextArea { text <=> row.content }

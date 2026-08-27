@@ -14,10 +14,47 @@
 - 共有 `EnvironmentContext`(`Clone`)が型付きlookupを提供する: `get<K: EnvironmentKey>(&self) -> K::Value`、`set<K>(&self, value: K::Value)`、`derive(&self) -> EnvironmentContext`。内部storageはKeyの型消去(`TypeId`等)を用いてよいが、文字列によるruntime lookupは提供しない。
 - Environment entryはreactive cellとして保持する。overrideされていないKeyは親のcellをそのまま共有し、overrideされたKeyのみ新しいcellを持つ——`derive()`はこの共有・分岐を行う。
 - Environment解決はVisual Treeへのattachに依存しない。Componentは`mount`時に確立された`EnvironmentContext`を用いて自身の`#[environment(name)]` fieldを解決し、その後にbody/`view!`を評価してUIElementを生成する。child Componentへは、`mount`時に確立された(または`EnvironmentScope`が派生させた)contextを明示的に伝播してから、そのchildをmountする。
-- `#[component(template = key)]`は同じmount-time contextから`Option<ControlTemplate<Component>>`を一度だけ解決する。Key変更はmount済みControlを再テンプレート化しない。詳細は[`control_template_spec.md`](control_template_spec.md)を参照する。
+- `template: template_view! { ... }`を宣言するControl-derived componentは、同じmount-time contextから型付き`Option<ControlTemplate<Component>>`を一度だけ解決する。Key変更はmount済みControlを再テンプレート化しない。詳細は[`control_template_spec.md`](control_template_spec.md)を参照する。
 - `EnvironmentScope` はUIElement・Render nodeを生成しない。親Environmentをderiveし、指定したKeyのみ上書きした派生Environmentをchildrenの`mount`へ渡す。
 - `context_popup`（`ui_spec.md`）の内容は、owner要素の有効なEnvironmentから`derive()`したpopup専用のEnvironmentContextで構築される。owner自身のEnvironmentは変更しない。この派生Contextには`crate::ui::popup::PopupDismissActionKey`（`Value = Option<PopupDismissAction>`）が`ContextMenuService::open_custom_popup`によって`Some(..)`として設定され、popup content内から宣言的にpopupを閉じる手段を提供する——詳細は[`../design/runtime/popup_context_menu_design.md`](../design/runtime/popup_context_menu_design.md) §6を参照。`PopupDismissActionKey`の**既定値**（`EnvironmentKey::default_value()`）は`None`であり、フレームワークのDSL管理経路（popup機構自体）はpopup scopeの外側でこれを`Some(..)`にすることはない。ただし、これは「popup外では常にNone」という絶対的な保証ではない——低レベルの型付きRust API（`EnvironmentContext::set::<PopupDismissActionKey>(..)`）そのものにはアクセス制御が導入されておらず、任意のRustコードが明示的に`Some(..)`を設定することは可能である。今回の制約はDSL（`#[environment(name)]`/`EnvironmentScope`/`#[elwindui::theme]`）が対応する解決関数のみに適用される: `PopupDismissActionKey`は`#[environment(popup_dismiss)]`による**読み取り**は可能だが、`EnvironmentScope { popup_dismiss: .. }`や`#[elwindui::theme]`フィールドによる**書き込みはできない**（`dsl_spec.md`§4/§13ルール34–36）——`ContextMenuService::open_custom_popup`のみが実際にアクティブな`PopupDismissAction`を設定できるフレームワーク管理値であり、DSL側から上書き可能な通常のEnvironment値ではない。同名のユーザー定義Key（`#[elwindui::environment_key(name = popup_dismiss, ..)]`）を同一crate内で宣言した場合は、そのユーザーKeyが優先され通常通り読み書き可能になる（他の組み込みKey名のシャドーイングと同じ挙動）。
 - EnvironmentとThemeの責務は分離する。Theme(§3–§6)はEnvironmentのlookup/継承機構を再定義せず、`EnvironmentContext`のoverride経路を呼び出すのみである。
+
+## 2a. Typed ControlTemplate Environment slots
+
+ControlTemplate selection uses a generic typed Environment slot rather than a
+per-control key declaration. For every `C: ControlExt + 'static`, the framework
+provides the equivalent of:
+
+```rust
+#[doc(hidden)]
+pub struct ControlTemplateEnvironment<C: ControlExt + 'static>(
+    std::marker::PhantomData<fn() -> C>,
+);
+
+impl<C: ControlExt + 'static> EnvironmentKey
+    for ControlTemplateEnvironment<C>
+{
+    type Value = Option<ControlTemplate<C>>;
+
+    fn default_value() -> Self::Value { None }
+}
+```
+
+The ergonomic API is:
+
+```rust
+environment.set_control_template::<C>(Some(template));
+environment.set_control_template::<C>(None);
+```
+
+and the hidden read path is `__control_template::<C>()`. `Some` overrides the
+component's `template: template_view!` default. `None` is an explicit local
+entry that shadows an ancestor value and selects the default; it does not
+remove the local entry. Lookup is exact by target type/TypeId: a
+`ControlTemplate<Base>` never satisfies a `ControlTemplate<Derived>` slot.
+There is no string lookup, registry, reflection, covariance, or runtime
+re-templating subscription. The same derived-context cell inheritance and
+shadowing rules as other Environment keys apply.
 
 ## 3. Theme
 

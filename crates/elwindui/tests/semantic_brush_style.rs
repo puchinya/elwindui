@@ -95,7 +95,7 @@ struct NonSemanticFillLeaf {
     #[prop(default = String::from("default"))]
     fill: String,
 
-    body: view! {
+    template: template_view! {
         on_mount {
             NON_SEMANTIC_FILL.with(|value| *value.borrow_mut() = self.fill());
         }
@@ -111,7 +111,7 @@ impl NonSemanticFillLeaf {}
 
 #[elwindui::component(inherits ContentControl)]
 struct NonSemanticFillHost {
-    body: view! {
+    template: template_view! {
         NonSemanticFillLeaf { fill: "ordinary string" }
     },
 }
@@ -139,7 +139,7 @@ struct SemanticBrushScopeChild {
     #[environment(primary)]
     primary_style: BrushStyle,
 
-    body: view! {
+    template: template_view! {
         on_mount {
             SCOPED_PRIMARY.with(|value| *value.borrow_mut() = self.primary_style());
         }

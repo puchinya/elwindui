@@ -1,7 +1,7 @@
 // Demonstrates a custom component built by composing over another already-composed DSL component
 // (docs/design/runtime/ui_tree_design.md) —
-// `RoundedPanel inherits ContentControl`, own `view!` body implicitly `ContentControl`'s (no
-// wrapper element written — the implicit-composition sugar), with a `Grid` overlaying a background
+// `RoundedPanel inherits ContentControl`, own `template_view!` declares its typed default
+// ControlTemplate, with a `Grid` overlaying a background
 // `Rectangle` and the `TextBlock` label in the same (default `(0, 0)`) cell. `elwindui-codegen`
 // generates the real struct as the bare `RoundedPanel` name itself (its auto-derived
 // `pub trait RoundedPanelExt: UIElementExt + ControlExt` lives alongside it) with a
@@ -18,7 +18,7 @@ struct RoundedPanel {
     // and would silently freeze the very first value forever.
     label: String,
 
-    body: view! {
+    template: template_view! {
         Grid {
             rows: [elwindui::core::layout::GridLength::Star(1.0)]
             columns: [elwindui::core::layout::GridLength::Star(1.0)]
@@ -27,7 +27,7 @@ struct RoundedPanel {
                 corner_radius: 8.0
             }
             TextBlock {
-                text: label
+                text: templated_parent.label
                 text_alignment: elwindui::core::ui::TextAlignment::Center
             }
         }

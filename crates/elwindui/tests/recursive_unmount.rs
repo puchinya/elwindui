@@ -39,7 +39,7 @@ fn clear_unmount_events() {
 
 #[elwindui::component(inherits ContentControl)]
 struct LeafChild {
-    body: view! {
+    template: template_view! {
         on_unmount {
             record_unmount("LeafChild");
         }
@@ -109,7 +109,7 @@ struct SubscribingChild {
     #[prop]
     label: String,
 
-    body: view! {
+    template: template_view! {
         on_unmount {
             record_unmount("SubscribingChild");
         }
@@ -185,7 +185,7 @@ struct EnvChild {
     #[environment(recursive_unmount_theme_color)]
     theme: String,
 
-    body: view! {
+    template: template_view! {
         on_unmount {
             record_unmount("EnvChild");
         }
@@ -266,7 +266,7 @@ thread_local! {
 
 #[elwindui::component(inherits ContentControl)]
 struct ReentrantComponent {
-    body: view! {
+    template: template_view! {
         on_unmount {
             record_unmount("ReentrantComponent:start");
             // Call unmount reentrantly from inside on_unmount
@@ -316,7 +316,7 @@ mod dynamic_switch_view_model {
 
 #[elwindui::component(inherits ContentControl)]
 struct DynamicIfChild {
-    body: view! {
+    template: template_view! {
         on_unmount {
             record_unmount("DynamicIfChild");
         }
@@ -332,7 +332,7 @@ struct DynamicIfHost {
     #[bindable]
     vm: std::rc::Rc<DynamicSwitchViewModel>,
 
-    body: view! {
+    template: template_view! {
         VerticalLayout {
             if vm.show_child {
                 DynamicIfChild { }
@@ -369,7 +369,7 @@ fn test_dynamic_if_branch_removal_triggers_unmount() {
 
 #[elwindui::component(inherits ContentControl)]
 struct PlainChild {
-    body: view! {
+    template: template_view! {
         on_unmount {
             record_unmount("PlainChild");
         }
@@ -382,7 +382,7 @@ impl PlainChild {}
 
 #[elwindui::component(inherits ContentControl)]
 struct PlainParent {
-    body: view! {
+    template: template_view! {
         on_unmount {
             record_unmount("PlainParent");
         }
@@ -445,7 +445,7 @@ struct DynamicForChild {
     #[bindable]
     vm: std::rc::Rc<ItemViewModel>,
 
-    body: view! {
+    template: template_view! {
         on_unmount {
             if self.vm().name() == "A" {
                 record_unmount("DynamicForChild:A");
@@ -467,7 +467,7 @@ struct DynamicForHost {
     #[bindable]
     vm: std::rc::Rc<DynamicForViewModel>,
 
-    body: view! {
+    template: template_view! {
         VerticalLayout {
             for item in vm.items {
                 DynamicForChild { vm: item }
@@ -539,7 +539,7 @@ mod dynamic_match_view_model {
 
 #[elwindui::component(inherits ContentControl)]
 struct MatchFirstChild {
-    body: view! {
+    template: template_view! {
         on_unmount {
             record_unmount("MatchFirstChild");
         }
@@ -552,7 +552,7 @@ impl MatchFirstChild {}
 
 #[elwindui::component(inherits ContentControl)]
 struct MatchSecondChild {
-    body: view! {
+    template: template_view! {
         on_unmount {
             record_unmount("MatchSecondChild");
         }
@@ -568,7 +568,7 @@ struct DynamicMatchHost {
     #[bindable]
     vm: std::rc::Rc<DynamicMatchViewModel>,
 
-    body: view! {
+    template: template_view! {
         VerticalLayout {
             match vm.tab {
                 DynamicMatchTab::First => {
@@ -614,7 +614,7 @@ thread_local! {
 
 #[elwindui::component(inherits ContentControl)]
 struct TreeConnectionChild {
-    body: view! {
+    template: template_view! {
         on_unmount {
             use elwindui::core::ui::UIElementExt;
             if self.visual_parent().is_some() || self.parent().is_some() {
@@ -630,7 +630,7 @@ impl TreeConnectionChild {}
 
 #[elwindui::component(inherits ContentControl)]
 struct TreeConnectionParent {
-    body: view! {
+    template: template_view! {
         TreeConnectionChild { }
     },
 }
@@ -663,7 +663,7 @@ thread_local! {
 
 #[elwindui::component(inherits ContentControl)]
 struct AncestorReentrantChild {
-    body: view! {
+    template: template_view! {
         on_unmount {
             record_unmount("Child:start");
             if let Some(parent) = ANCESTOR_PARENT_REF.with(|r| r.borrow().clone()) {
@@ -680,7 +680,7 @@ impl AncestorReentrantChild {}
 
 #[elwindui::component(inherits ContentControl)]
 struct AncestorReentrantParent {
-    body: view! {
+    template: template_view! {
         on_unmount {
             record_unmount("Parent");
         }
@@ -727,7 +727,7 @@ thread_local! {
 
 #[elwindui::component(inherits ContentControl)]
 struct UnmountedBeforeMountComponent {
-    body: view! {
+    template: template_view! {
         on_mount {
             CREATED_MOUNT_COUNT.with(|c| c.set(c.get() + 1));
         }
@@ -774,7 +774,7 @@ thread_local! {
 
 #[elwindui::component(inherits ContentControl)]
 struct IntermediateChildComponent {
-    body: view! {
+    template: template_view! {
         on_unmount {
             record_unmount("Child:start");
             if let Some(parent) = INTERMEDIATE_PARENT_REF.with(|r| r.borrow().clone()) {
@@ -791,7 +791,7 @@ impl IntermediateChildComponent {}
 
 #[elwindui::component(inherits ContentControl)]
 struct IntermediateParentComponent {
-    body: view! {
+    template: template_view! {
         on_mount {
             INTERMEDIATE_PARENT_REF.with(|r| *r.borrow_mut() = Some(this.clone()));
         }
@@ -807,7 +807,7 @@ impl IntermediateParentComponent {}
 
 #[elwindui::component(inherits ContentControl)]
 struct IntermediateGrandParentComponent {
-    body: view! {
+    template: template_view! {
         on_unmount {
             record_unmount("GrandParent");
         }

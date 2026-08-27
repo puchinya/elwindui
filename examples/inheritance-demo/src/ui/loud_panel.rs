@@ -9,7 +9,7 @@ use crate::ui::LabeledPanel;
 
 #[elwindui::component(inherits crate::ui::LabeledPanel)]
 struct LoudPanel {
-    body: view! {
+    template: template_view! {
         LabeledPanel { }
     },
 }

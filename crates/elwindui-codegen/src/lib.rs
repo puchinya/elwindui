@@ -13,6 +13,32 @@ pub use text_style::TEXT_STYLE_FIELDS;
 pub mod theme_frontend;
 pub mod validate;
 
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+/// Stable compile-time token used by the generic `template_view!` property bridge.  This is a
+/// 64-bit FNV-1a-style hash of the field-name literal, calculated during code generation; it is a
+/// code-generation key, not a runtime property lookup.  The generated component implements the
+/// corresponding `TemplateProperty<KEY>` instance and the standalone factory carries the same
+/// literal key in its trait bound.  There is no runtime registry or string lookup.  If two
+/// distinct properties in one target collide, Rust reports the duplicate `TemplateProperty<KEY>`
+/// implementation/associated-type conflict at compile time; the collision is never resolved
+/// silently.
+pub(crate) const fn template_property_key(name: &str) -> u64 {
+    let bytes = name.as_bytes();
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut index = 0;
+    while index < bytes.len() {
+        hash ^= bytes[index] as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+        index += 1;
+    }
+    hash
+}
+
 /// Test-only counterpart to the removed `builtin_modules()` — see `testdata`'s own doc comment.
 /// `pub(crate)` (not `pub`): only `codegen.rs`/`validate.rs`/`component_frontend.rs`'s own
 /// `#[cfg(test)] mod tests` blocks call this, never production code.
@@ -70,7 +96,7 @@ pub(crate) fn test_module(
 
 /// Issue #146 test helper: a registry-dependent generation failure (a same-crate sibling registry
 /// miss, a cross-item `validate::validate` rejection, ...) no longer returns `Err` from
-/// `generate_component_from_item_struct`/`_with_template`/`generate_component_from_item_impl` — it
+/// `generate_component_from_item_struct`/`generate_component_from_item_impl` — it
 /// returns `Ok` carrying a `#[cfg(not(rust_analyzer))]`-gated `compile_error!` alongside the
 /// rust-analyzer shadow (`docs/design/tools/codegen_design.md` §3.2a), so a spurious same-crate
 /// registry-ordering miss under rust-analyzer never blanks out that shadow. Every pre-existing test
@@ -184,14 +210,779 @@ pub fn generate_dsl_enum_from_item_enum(
 /// declaration-order requirement). A `view!` body routinely references
 /// `Window`/`VerticalLayout`/etc. too, but those resolve with no `Module` chained in for them at all —
 /// see `testdata`'s own doc comment on why, and `codegen::emit_external_construction`.
-pub fn generate_component_from_item_struct(
-    base: Option<String>,
-    item_struct: &syn::ItemStruct,
-) -> Result<proc_macro2::TokenStream, String> {
-    generate_component_from_item_struct_with_template(base, None, item_struct)
+/// Low-level expansion used by the public `template_view!` proc macro.
+///
+/// The standalone frontend deliberately only acquires the expected target type here.  Once that
+/// type is known, the generated factory uses the same ControlTemplate lifecycle and the same
+/// compile-time property/notification protocol as component and named templates; there is no
+/// second runtime template representation or textual `templated_parent` detection.
+pub fn generate_template_view_expression(body: &str) -> Result<TokenStream, String> {
+    let (on_mount, on_unmount, on_update, lets, parsed_root) = parser::parse_view_body(body)
+        .map_err(|error| format!("invalid `template_view! {{ ... }}` body: {error}"))?;
+    let validation_view = ast::ViewDef {
+        target: "__standalone_template_view".to_string(),
+        is_template: true,
+        template_instance: false,
+        on_mount: on_mount.clone(),
+        on_unmount: on_unmount.clone(),
+        on_update: on_update.clone(),
+        lets: lets.clone(),
+        root: parsed_root.clone(),
+        implicit_owner: None,
+    };
+    validate_replaceable_template_view(&validation_view)
+        .map_err(|error| format!("invalid `template_view!` body: {error}"))?;
+
+    let from = ast::Module {
+        path: Vec::new(),
+        uses: Vec::new(),
+        items: Vec::new(),
+        is_builtin: false,
+        allows_external_builtins: true,
+    };
+    let modules: Vec<_> = std::iter::once(from.clone())
+        .chain(component_frontend::sibling_component_modules(
+            "__standalone_template_view",
+        ))
+        .chain(component_frontend::sibling_viewmodel_modules())
+        .chain(component_frontend::sibling_store_modules())
+        .chain(component_frontend::sibling_enum_modules())
+        .collect();
+    let table = codegen::build_symbol_table(&modules);
+    let compiled = compile_template_body(
+        &parsed_root,
+        &lets,
+        on_mount.as_ref(),
+        on_unmount.as_ref(),
+        on_update.as_ref(),
+        from,
+        table,
+        quote! { C },
+        HashSet::new(),
+    )?;
+    let factory = emit_standalone_template_factory(&compiled);
+    Ok(quote! {{ #factory }})
 }
 
-/// Generates a component whose `body: view!` is replaceable by a typed Environment template.
+static TEMPLATE_VIEW_FACTORY_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// The semantic result of compiling a template body.  All three template frontends (a component
+/// default, a named `#[control_template]`, and the expression-form `template_view!`) use this
+/// representation before wrapping it in their respective factory/declaration shells.  Keeping
+/// the root, lifecycle, dependency, and lexical-binding output together prevents a frontend from
+/// quietly implementing a second property/dynamic/lifecycle compiler.
+pub(crate) struct CompiledTemplateBody {
+    root: TokenStream,
+    let_statements: TokenStream,
+    refresh: TokenStream,
+    property_bounds: Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
+    writable_properties: BTreeSet<u64>,
+    iterable_properties: BTreeSet<u64>,
+    on_mount: Option<TokenStream>,
+    on_unmount: Option<TokenStream>,
+    on_update: Option<TokenStream>,
+    lifecycle_keys: BTreeSet<u64>,
+    has_deferred_views: bool,
+    requires_parent: bool,
+}
+
+/// Compiles a parsed template body through the shared semantic backend.  The caller is
+/// responsible only for obtaining the target/type context and for wrapping the result in a
+/// `ControlTemplate<C>` declaration.
+pub(crate) fn compile_template_body(
+    body: &ast::ViewBody,
+    lets: &[ast::LetBinding],
+    on_mount: Option<&syn::Block>,
+    on_unmount: Option<&syn::Block>,
+    on_update: Option<&ast::OnUpdateHook>,
+    from: ast::Module,
+    table: codegen::SymbolTable,
+    target_type: TokenStream,
+    bare_parent_fields: HashSet<String>,
+) -> Result<CompiledTemplateBody, String> {
+    let lowered = codegen::lower_template_body(
+        body,
+        lets,
+        on_mount,
+        on_unmount,
+        on_update,
+        &from,
+        &table,
+        target_type.clone(),
+        bare_parent_fields.clone(),
+    )?;
+    let template_parent_ident = format_ident!("__elwindui_template_parent");
+    let on_mount_tokens = on_mount.map(|block| {
+        codegen::emit_template_event_closure_body_for_target_with_fields(
+            &ast::ClosureBody::Block(block.clone()),
+            &[],
+            &template_parent_ident,
+            &lowered.property_bounds,
+            target_type.clone(),
+            bare_parent_fields.clone(),
+        )
+    });
+    let on_unmount_tokens = on_unmount.map(|block| {
+        codegen::emit_template_event_closure_body_for_target_with_fields(
+            &ast::ClosureBody::Block(block.clone()),
+            &[],
+            &template_parent_ident,
+            &lowered.property_bounds,
+            target_type.clone(),
+            bare_parent_fields.clone(),
+        )
+    });
+    let on_update_tokens = on_update.map(|hook| {
+        codegen::emit_template_event_closure_body_for_target_with_fields(
+            &ast::ClosureBody::Block(hook.block.clone()),
+            &[],
+            &template_parent_ident,
+            &lowered.property_bounds,
+            target_type.clone(),
+            bare_parent_fields.clone(),
+        )
+    });
+    let mut lifecycle_keys = BTreeSet::new();
+    if let Some(block) = on_mount {
+        codegen::collect_template_rust_block_property_keys(block, &mut lifecycle_keys);
+    }
+    if let Some(block) = on_unmount {
+        codegen::collect_template_rust_block_property_keys(block, &mut lifecycle_keys);
+    }
+    if let Some(hook) = on_update {
+        codegen::collect_template_rust_block_property_keys(&hook.block, &mut lifecycle_keys);
+        if let Some(fields) = &hook.fields {
+            lifecycle_keys.extend(
+                fields
+                    .iter()
+                    .map(|field| crate::template_property_key(field)),
+            );
+        }
+    }
+    Ok(CompiledTemplateBody {
+        root: lowered.root,
+        let_statements: lowered.let_statements,
+        refresh: lowered.refresh,
+        property_bounds: lowered.property_bounds,
+        writable_properties: lowered.writable_properties,
+        iterable_properties: lowered.iterable_properties,
+        on_mount: on_mount_tokens,
+        on_unmount: on_unmount_tokens,
+        on_update: on_update_tokens,
+        lifecycle_keys,
+        has_deferred_views: lowered.has_deferred_views,
+        requires_parent: lowered.requires_parent,
+    })
+}
+
+/// Emits the property-change subscriptions shared by every typed template factory.  Property
+/// reads are lowered into `TemplateProperty<KEY>` accesses; the corresponding subscription merely
+/// schedules the same refresh closure used by event wiring and dynamic regions.  Keeping this in
+/// the factory layer means the semantic lowerer has no knowledge of how a `ControlTemplate` or a
+/// deferred view owns its cleanup subscription vector.
+fn emit_template_property_subscriptions(
+    target_type: &TokenStream,
+    property_bounds: &Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
+) -> TokenStream {
+    property_bounds
+        .borrow()
+        .keys()
+        .copied()
+        .map(|key| {
+            let weak_parent = format_ident!("__elwindui_template_property_weak_{key}");
+            let refresh_cell = format_ident!("__elwindui_template_property_refresh_cell_{key}");
+            quote! {
+                {
+                    let #weak_parent = std::rc::Rc::downgrade(&__elwindui_template_parent);
+                    let #refresh_cell = std::rc::Rc::clone(&__elwindui_template_refresh_cell);
+                    __subscriptions.borrow_mut().push(
+                        <#target_type as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
+                            &*__elwindui_template_parent,
+                            move || {
+                                if #weak_parent.upgrade().is_some() {
+                                    if let Some(__elwindui_template_refresh_callback) =
+                                        #refresh_cell.borrow().as_ref().cloned()
+                                    {
+                                        __elwindui_template_refresh_callback();
+                                    }
+                                }
+                            },
+                        ),
+                    );
+                }
+            }
+        })
+        .collect()
+}
+
+/// Wraps a compiled semantic template body in a concrete `ControlTemplate<T>` factory.  The
+/// factory shell is intentionally kept separate from [`compile_template_body`]: component and
+/// named-template frontends need only choose their target type and declaration shape, while
+/// construction, binding, dynamic regions, lifecycle hooks, and cleanup are emitted once by the
+/// shared body compiler.
+pub(crate) fn emit_compiled_template_factory(
+    body: &CompiledTemplateBody,
+    target_type: TokenStream,
+) -> TokenStream {
+    // A standalone template whose body never reads a property from the typed parent can still
+    // capture ordinary Rust values.  Keep that value-capturing path on `ControlTemplate`'s
+    // environment-only constructor; a generic function item cannot capture the caller's locals.
+    // Parent-dependent templates use the generic typed factory below, where `_` is resolved by
+    // the expected `ControlTemplate<C>` type at the call site.
+    if target_type.to_string() == "_"
+        && body.property_bounds.borrow().is_empty()
+        && body.iterable_properties.is_empty()
+        && body.lifecycle_keys.is_empty()
+        && body.writable_properties.is_empty()
+        && !body.requires_parent
+    {
+        let root = &body.root;
+        let let_statements = &body.let_statements;
+        let on_mount_hook = body
+            .on_mount
+            .clone()
+            .map(|body| {
+                quote! {
+                    {
+                        let __template_mount_environment = __environment.clone();
+                        let __template_mount_subscriptions = __subscriptions.clone();
+                        elwindui::core::ui::UIElementExt::add_mount_hook(
+                            &*__root,
+                            Box::new(move || {
+                                let __environment = __template_mount_environment.clone();
+                                let __subscriptions = __template_mount_subscriptions.clone();
+                                #body
+                            }),
+                        );
+                    }
+                }
+            })
+            .unwrap_or_default();
+        let on_unmount_hook = body
+            .on_unmount
+            .clone()
+            .map(|body| {
+                quote! {
+                    elwindui::core::ui::UIElementExt::add_unmount_hook(
+                        &*__root,
+                        Box::new(move || {
+                            #body
+                        }),
+                    );
+                }
+            })
+            .unwrap_or_default();
+        return quote! {
+            elwindui::core::ui::ControlTemplate::from_environment(move |__environment| {
+                use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
+                use elwindui::ui::*;
+                let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
+                    Vec::<elwindui::core::reactive::Subscription>::new(),
+                ));
+                #let_statements
+                let __root = #root;
+                #on_mount_hook
+                #on_unmount_hook
+                __root
+            })
+        };
+    }
+
+    let root = &body.root;
+    let let_statements = &body.let_statements;
+    let refresh = &body.refresh;
+    let property_subscriptions =
+        emit_template_property_subscriptions(&target_type, &body.property_bounds);
+    let on_unmount = body.on_unmount.clone();
+    let on_mount_hook = body
+        .on_mount
+        .clone()
+        .map(|body| {
+            let weak_parent = format_ident!("__elwindui_template_mount_weak");
+            let parent = format_ident!("__elwindui_template_parent");
+            quote! {
+                {
+                    let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                    let __template_mount_environment = __environment.clone();
+                    let __template_mount_subscriptions = __subscriptions.clone();
+                    elwindui::core::ui::UIElementExt::add_mount_hook(
+                        &*__root,
+                        Box::new(move || {
+                            if let Some(#parent) = #weak_parent.upgrade() {
+                                let this = #parent.clone();
+                                let __environment = __template_mount_environment.clone();
+                                let __subscriptions = __template_mount_subscriptions.clone();
+                                #body
+                            }
+                        }),
+                    );
+                }
+            }
+        })
+        .unwrap_or_default();
+    let update_subscriptions: TokenStream = if let Some(update_body) = body.on_update.clone() {
+        body.lifecycle_keys
+            .iter()
+            .map(|key| {
+                let weak_parent = format_ident!("__elwindui_template_update_weak_{key}");
+                let parent = format_ident!("__elwindui_template_parent");
+                quote! {
+                    {
+                        let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                        __subscriptions.borrow_mut().push(
+                            <#target_type as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
+                                &*#parent,
+                                move || {
+                                    if let Some(#parent) = #weak_parent.upgrade() {
+                                        let this = #parent.clone();
+                                        #update_body
+                                    }
+                                },
+                            ),
+                        );
+                    }
+                }
+            })
+            .collect()
+    } else {
+        TokenStream::new()
+    };
+    let on_unmount_hook = on_unmount.map(|body| {
+        let weak_parent = format_ident!("__elwindui_template_unmount_weak");
+        let parent = format_ident!("__elwindui_template_parent");
+        quote! {
+            {
+                let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                elwindui::core::ui::UIElementExt::add_unmount_hook(
+                    &*__root,
+                    Box::new(move || {
+                        if let Some(#parent) = #weak_parent.upgrade() {
+                            let this = #parent.clone();
+                            #body
+                        }
+                    }),
+                );
+            }
+        }
+    });
+    let on_unmount_hook = on_unmount_hook.unwrap_or_default();
+    quote! {
+        elwindui::core::ui::ControlTemplate::<#target_type>::new(move |context| {
+            use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
+            use elwindui::ui::*;
+            let __elwindui_template_parent = context.control.clone();
+            let __environment = context.environment.clone();
+            let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
+                Vec::<elwindui::core::reactive::Subscription>::new(),
+            ));
+            let __elwindui_template_refresh_cell = std::rc::Rc::new(
+                std::cell::RefCell::new(None::<std::rc::Rc<dyn Fn()>>),
+            );
+            let __elwindui_template_refresh_parent = __elwindui_template_parent.clone();
+            let __elwindui_template_refresh_environment = __environment.clone();
+            let __elwindui_template_refresh_cell_for_callback =
+                std::rc::Rc::clone(&__elwindui_template_refresh_cell);
+            let this = __elwindui_template_parent.clone();
+            #let_statements
+            let __root = #root;
+            let __elwindui_template_refresh_callback: std::rc::Rc<dyn Fn()> =
+                std::rc::Rc::new(move || {
+                    let __elwindui_template_parent =
+                        __elwindui_template_refresh_parent.clone();
+                    let this = __elwindui_template_parent.clone();
+                    let __environment = __elwindui_template_refresh_environment.clone();
+                    #refresh
+                });
+            *__elwindui_template_refresh_cell_for_callback.borrow_mut() =
+                Some(__elwindui_template_refresh_callback);
+            #property_subscriptions
+            #on_mount_hook
+            #update_subscriptions
+            #on_unmount_hook
+            let __template_subscriptions_for_cleanup = __subscriptions.clone();
+            let __template_target_for_cleanup = __elwindui_template_parent.clone();
+            __template_target_for_cleanup.add_unmount_hook(Box::new(move || {
+                __template_subscriptions_for_cleanup.borrow_mut().clear();
+            }));
+            __root
+        })
+    }
+}
+
+/// Emits a `ViewTemplate` factory for a deferred expression nested inside a ControlTemplate.  The
+/// deferred value keeps the same semantic body backend as its enclosing template; only the outer
+/// lifecycle context changes from `ControlTemplateContext` to `ViewBuildContext`.  The concrete
+/// typed parent is captured at expression-construction time, avoiding any downcast or erased target
+/// lookup when the deferred view is later opened.
+fn emit_view_template_factory(
+    body: &CompiledTemplateBody,
+    target_type: TokenStream,
+    parent: &syn::Ident,
+) -> TokenStream {
+    let root = &body.root;
+    let let_statements = &body.let_statements;
+    let refresh = &body.refresh;
+    let property_subscriptions =
+        emit_template_property_subscriptions(&target_type, &body.property_bounds);
+    let on_mount_hook = body
+        .on_mount
+        .clone()
+        .map(|body| {
+            let weak_parent = format_ident!("__elwindui_deferred_mount_weak");
+            let parent = format_ident!("__elwindui_template_parent");
+            quote! {
+                {
+                    let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                    let __deferred_mount_environment = __environment.clone();
+                    let __deferred_mount_subscriptions = __subscriptions.clone();
+                    elwindui::core::ui::UIElementExt::add_mount_hook(
+                        &*__root,
+                        Box::new(move || {
+                            if let Some(#parent) = #weak_parent.upgrade() {
+                                let this = #parent.clone();
+                                let __environment = __deferred_mount_environment.clone();
+                                let __subscriptions = __deferred_mount_subscriptions.clone();
+                                #body
+                            }
+                        }),
+                    );
+                }
+            }
+        })
+        .unwrap_or_default();
+    let update_subscriptions: TokenStream = if let Some(update_body) = body.on_update.clone() {
+        body.lifecycle_keys
+            .iter()
+            .map(|key| {
+                let weak_parent = format_ident!("__elwindui_deferred_update_weak_{key}");
+                let parent = format_ident!("__elwindui_template_parent");
+                quote! {
+                    {
+                        let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                        __subscriptions.borrow_mut().push(
+                            <#target_type as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
+                                &*#parent,
+                                move || {
+                                    if let Some(#parent) = #weak_parent.upgrade() {
+                                        let this = #parent.clone();
+                                        #update_body
+                                    }
+                                },
+                            ),
+                        );
+                    }
+                }
+            })
+            .collect()
+    } else {
+        TokenStream::new()
+    };
+    let on_unmount_hook = body
+        .on_unmount
+        .clone()
+        .map(|body| {
+            let weak_parent = format_ident!("__elwindui_deferred_unmount_weak");
+            let parent = format_ident!("__elwindui_template_parent");
+            quote! {
+                {
+                    let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                    elwindui::core::ui::UIElementExt::add_unmount_hook(
+                        &*__root,
+                        Box::new(move || {
+                            if let Some(#parent) = #weak_parent.upgrade() {
+                                let this = #parent.clone();
+                                #body
+                            }
+                        }),
+                    );
+                }
+            }
+        })
+        .unwrap_or_default();
+    quote! {
+        {
+            let __deferred_parent_weak = std::rc::Rc::downgrade(&#parent);
+            elwindui::core::ui::ViewTemplate::new(move |context| {
+                context.owner.upgrade()?;
+                let __elwindui_template_parent = __deferred_parent_weak.upgrade()?;
+                let __environment = context.environment.clone();
+                let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
+                    Vec::<elwindui::core::reactive::Subscription>::new(),
+                ));
+                let __elwindui_template_refresh_cell = std::rc::Rc::new(
+                    std::cell::RefCell::new(None::<std::rc::Rc<dyn Fn()>>),
+                );
+                let __elwindui_template_refresh_parent = __elwindui_template_parent.clone();
+                let __elwindui_template_refresh_environment = __environment.clone();
+                let __elwindui_template_refresh_cell_for_callback =
+                    std::rc::Rc::clone(&__elwindui_template_refresh_cell);
+                let this = __elwindui_template_parent.clone();
+                #let_statements
+                let __root = #root;
+                let __elwindui_template_refresh_callback: std::rc::Rc<dyn Fn()> =
+                    std::rc::Rc::new(move || {
+                        let __elwindui_template_parent =
+                            __elwindui_template_refresh_parent.clone();
+                        let this = __elwindui_template_parent.clone();
+                        let __environment = __elwindui_template_refresh_environment.clone();
+                        #refresh
+                    });
+                *__elwindui_template_refresh_cell_for_callback.borrow_mut() =
+                    Some(__elwindui_template_refresh_callback);
+                #property_subscriptions
+                #on_mount_hook
+                #update_subscriptions
+                #on_unmount_hook
+                let __deferred_subscriptions = __subscriptions.clone();
+                elwindui::core::ui::UIElementExt::add_unmount_hook(
+                    &*__root,
+                    Box::new(move || {
+                        __deferred_subscriptions.borrow_mut().clear();
+                    }),
+                );
+                Some(__root)
+            })
+        }
+    }
+}
+
+/// Emits the standalone `template_view!` factory shell.  A template that reads the typed parent
+/// must be represented by a generic function item so Rust can infer `C` from the surrounding
+/// `ControlTemplate<C>` expected type.  A parent-independent template instead uses the capturing
+/// environment constructor, preserving ordinary Rust captures (which function items cannot
+/// close over).  Both shells execute the same [`CompiledTemplateBody`] produced by the shared
+/// backend above.
+fn emit_standalone_template_factory(body: &CompiledTemplateBody) -> TokenStream {
+    let parent_dependent = !body.property_bounds.borrow().is_empty()
+        || !body.iterable_properties.is_empty()
+        || !body.lifecycle_keys.is_empty()
+        || !body.writable_properties.is_empty()
+        || body.has_deferred_views
+        || body.requires_parent;
+    let root = &body.root;
+    let let_statements = &body.let_statements;
+
+    if !parent_dependent {
+        let on_mount_hook = body
+            .on_mount
+            .clone()
+            .map(|body| {
+                quote! {
+                    {
+                        let __template_mount_environment = __environment.clone();
+                        let __template_mount_subscriptions = __subscriptions.clone();
+                        elwindui::core::ui::UIElementExt::add_mount_hook(
+                            &*__root,
+                            Box::new(move || {
+                                let __environment = __template_mount_environment.clone();
+                                let __subscriptions = __template_mount_subscriptions.clone();
+                                #body
+                            }),
+                        );
+                    }
+                }
+            })
+            .unwrap_or_default();
+        let on_unmount_hook = body
+            .on_unmount
+            .clone()
+            .map(|body| {
+                quote! {
+                    elwindui::core::ui::UIElementExt::add_unmount_hook(
+                        &*__root,
+                        Box::new(move || {
+                            #body
+                        }),
+                    );
+                }
+            })
+            .unwrap_or_default();
+        return quote! {
+            elwindui::core::ui::ControlTemplate::from_environment(move |__environment| {
+                use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
+                use elwindui::ui::*;
+                let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
+                    Vec::<elwindui::core::reactive::Subscription>::new(),
+                ));
+                #let_statements
+                let __root = #root;
+                #on_mount_hook
+                #on_unmount_hook
+                __root
+            })
+        };
+    }
+
+    let bounds: Vec<_> = body
+        .property_bounds
+        .borrow()
+        .iter()
+        .map(|(key, expected)| match expected {
+            Some(expected) => quote! {
+                elwindui::core::ui::TemplateProperty<#key, Value = #expected>
+            },
+            None => quote! { elwindui::core::ui::TemplateProperty<#key> },
+        })
+        .collect();
+    let writable_bounds: Vec<_> = body
+        .writable_properties
+        .iter()
+        .map(|key| quote! { elwindui::core::ui::WritableTemplateProperty<#key> })
+        .collect();
+    let template_bounds =
+        bounds
+            .into_iter()
+            .chain(writable_bounds)
+            .fold(TokenStream::new(), |mut tokens, bound| {
+                tokens.extend(quote! { + #bound });
+                tokens
+            });
+    let iterable_bounds: Vec<_> = body
+        .iterable_properties
+        .iter()
+        .map(|key| {
+            quote! {
+                <C as elwindui::core::ui::TemplateProperty<#key>>::Value: IntoIterator,
+                <<C as elwindui::core::ui::TemplateProperty<#key>>::Value as IntoIterator>::Item:
+                    std::fmt::Display
+            }
+        })
+        .collect();
+    let factory_ident = format_ident!(
+        "__elwindui_template_factory_{}",
+        TEMPLATE_VIEW_FACTORY_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let refresh = &body.refresh;
+    let property_subscriptions =
+        emit_template_property_subscriptions(&quote! { C }, &body.property_bounds);
+    let update_subscriptions: TokenStream = if let Some(update_body) = body.on_update.clone() {
+        body.lifecycle_keys
+            .iter()
+            .map(|key| {
+                let weak_parent = format_ident!("__elwindui_template_update_weak_{key}");
+                let parent = format_ident!("__elwindui_template_parent");
+                quote! {
+                    {
+                        let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                        __subscriptions.borrow_mut().push(
+                            <C as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
+                                &*#parent,
+                                move || {
+                                    if let Some(#parent) = #weak_parent.upgrade() {
+                                        let this = #parent.clone();
+                                        #update_body
+                                    }
+                                },
+                            ),
+                        );
+                    }
+                }
+            })
+            .collect()
+    } else {
+        TokenStream::new()
+    };
+    let on_unmount_hook = body
+        .on_unmount
+        .clone()
+        .map(|body| {
+            let weak_parent = format_ident!("__elwindui_template_unmount_weak");
+            let parent = format_ident!("__elwindui_template_parent");
+            quote! {
+                {
+                    let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                    elwindui::core::ui::UIElementExt::add_unmount_hook(
+                        &*__root,
+                        Box::new(move || {
+                            if let Some(#parent) = #weak_parent.upgrade() {
+                                let this = #parent.clone();
+                                #body
+                            }
+                        }),
+                    );
+                }
+            }
+        })
+        .unwrap_or_default();
+    let on_mount_hook = body
+        .on_mount
+        .clone()
+        .map(|body| {
+            let weak_parent = format_ident!("__elwindui_template_mount_weak");
+            let parent = format_ident!("__elwindui_template_parent");
+            quote! {
+                {
+                    let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                    let __template_mount_environment = __environment.clone();
+                    let __template_mount_subscriptions = __subscriptions.clone();
+                    elwindui::core::ui::UIElementExt::add_mount_hook(
+                        &*__root,
+                        Box::new(move || {
+                            if let Some(#parent) = #weak_parent.upgrade() {
+                                let this = #parent.clone();
+                                let __environment = __template_mount_environment.clone();
+                                let __subscriptions = __template_mount_subscriptions.clone();
+                                #body
+                            }
+                        }),
+                    );
+                }
+            }
+        })
+        .unwrap_or_default();
+    quote! {
+        fn #factory_ident<C>(
+            context: elwindui::core::ui::ControlTemplateContext<C>,
+        ) -> std::rc::Rc<dyn elwindui::core::ui::UIElementExt>
+        where
+            C: elwindui::core::ui::ControlExt + 'static #template_bounds,
+            #(#iterable_bounds,)*
+        {
+            use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
+            use elwindui::ui::*;
+            let __elwindui_template_parent = context.control.clone();
+            let __environment = context.environment.clone();
+            let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
+                Vec::<elwindui::core::reactive::Subscription>::new(),
+            ));
+            let __elwindui_template_refresh_cell = std::rc::Rc::new(
+                std::cell::RefCell::new(None::<std::rc::Rc<dyn Fn()>>),
+            );
+            let __elwindui_template_refresh_parent = __elwindui_template_parent.clone();
+            let __elwindui_template_refresh_environment = __environment.clone();
+            let __elwindui_template_refresh_cell_for_callback =
+                std::rc::Rc::clone(&__elwindui_template_refresh_cell);
+            let this = __elwindui_template_parent.clone();
+            #let_statements
+            let __root = #root;
+            let __elwindui_template_refresh_callback: std::rc::Rc<dyn Fn()> =
+                std::rc::Rc::new(move || {
+                    let __elwindui_template_parent =
+                        __elwindui_template_refresh_parent.clone();
+                    let this = __elwindui_template_parent.clone();
+                    let __environment = __elwindui_template_refresh_environment.clone();
+                    #refresh
+                });
+            *__elwindui_template_refresh_cell_for_callback.borrow_mut() =
+                Some(__elwindui_template_refresh_callback);
+            #property_subscriptions
+            #on_mount_hook
+            #update_subscriptions
+            #on_unmount_hook
+            let __template_subscriptions_for_cleanup = __subscriptions.clone();
+            let __template_target_for_cleanup = __elwindui_template_parent.clone();
+            __template_target_for_cleanup.add_unmount_hook(Box::new(move || {
+                __template_subscriptions_for_cleanup.borrow_mut().clear();
+            }));
+            __root
+        }
+
+        elwindui::core::ui::ControlTemplate::new(#factory_ident::<_>)
+    }
+}
+
+/// Generates a component whose `template: template_view!` field declares a typed default
+/// Environment-selectable ControlTemplate.
 ///
 /// Issue #146: splits into an item-local phase (`component_frontend::component_and_view_from_item_struct`
 /// — a malformed `view!`/field attribute is a genuine mistake, reported unconditionally on both
@@ -202,9 +993,8 @@ pub fn generate_component_from_item_struct(
 /// (`rust_analyzer_shadow::build_component_struct_shadow`) is built once the item-local phase
 /// succeeds, entirely independent of the registry-dependent phase's own outcome — see
 /// `docs/design/tools/codegen_design.md` §3.2a.
-pub fn generate_component_from_item_struct_with_template(
+pub fn generate_component_from_item_struct(
     base: Option<String>,
-    template: Option<String>,
     item_struct: &syn::ItemStruct,
 ) -> Result<proc_macro2::TokenStream, String> {
     // Shape errors (a malformed `view!`, a bad field attribute, ...) are reported here, against the
@@ -220,7 +1010,7 @@ pub fn generate_component_from_item_struct_with_template(
         view_def.as_ref(),
     )?;
 
-    match register_component_struct_real(base, template, item_struct, component_def, view_def) {
+    match register_component_struct_real(base, item_struct, component_def, view_def) {
         Ok(()) => Ok(shadow),
         Err(ComponentGenerationFailure::ItemLocal(error)) => Err(error),
         Err(ComponentGenerationFailure::RegistryDependent(error)) => {
@@ -309,28 +1099,27 @@ fn validation_diagnostic_tokens(
         .collect()
 }
 
-/// The registry-dependent half of `generate_component_from_item_struct_with_template` (Issue #146):
-/// template Environment Key resolution, cross-item `validate::validate` (chains in every same-crate
+/// The registry-dependent half of component generation (Issue #146):
+/// typed template-target validation, cross-item `validate::validate` (chains in every same-crate
 /// sibling registry), and — only on success — registration into the same-crate Component registry.
 /// Emits no tokens of its own: the struct half always emits nothing (see this function's own tail
 /// doc comment on why the `impl` half emits the whole type) — the caller's own `shadow` is the only
 /// token output for a `struct` half either way.
 ///
 /// PR #169 review remediation (A1): despite this function's own name, not every failure inside it
-/// is actually registry-dependent — `view_def.is_none()` (a `template = ..` with no `body: view! {
-/// .. }` at all) and `validate_replaceable_template_view`'s own structural checks are decidable
+/// is actually registry-dependent — `view_def.is_none()` and `validate_replaceable_template_view`'s
+/// own structural checks are decidable
 /// from the struct alone, so those stay `ComponentGenerationFailure::ItemLocal`. Only a same-crate
 /// registry lookup (`same_crate_control_target`, `lookup_same_crate_environment_key`, or
 /// `validate::validate`'s own registry-dependent diagnostics) is `RegistryDependent`.
 fn register_component_struct_real(
     base: Option<String>,
-    template: Option<String>,
     item_struct: &syn::ItemStruct,
     component_def: ast::ComponentDef,
     view_def: Option<ast::ViewDef>,
 ) -> Result<(), ComponentGenerationFailure> {
     let name = component_def.name.clone();
-    if let Some(template_name) = &template {
+    if view_def.as_ref().is_some_and(|view| view.is_template) {
         // PR #169 review remediation, round 2 (AD-R2-2): whether this is a Control-target mistake
         // is only genuinely registry-dependent when the base is a same-crate *user* Component
         // (`ControlTargetKnowledge::NeedsSameCrateRegistry`) — `same_crate_control_target` itself
@@ -360,25 +1149,25 @@ fn register_component_struct_real(
                 }
             }
         }
-        if view_def.is_none() {
-            return Err(ComponentGenerationFailure::ItemLocal(format!(
-                "`{name}`: `template = {template_name}` requires a `body: view! {{ .. }}` default template"
-            )));
-        }
         validate_replaceable_template_view(view_def.as_ref().unwrap())
             .map_err(ComponentGenerationFailure::ItemLocal)?;
-        match component_frontend::lookup_same_crate_environment_key(template_name) {
-            None => {
-                return Err(ComponentGenerationFailure::RegistryDependent(format!(
-                    "`{name}`: template Environment Key `{template_name}` is not registered; declare it with #[elwindui::environment_key] before the component"
-                )));
-            }
-            Some((_, value_type)) if !is_control_template_key_value(&value_type, &name) => {
-                return Err(ComponentGenerationFailure::RegistryDependent(format!(
-                    "`{name}`: template Environment Key `{template_name}` must have Value = Option<ControlTemplate<{name}>>, found `{value_type}`"
-                )));
-            }
-            Some(_) => {}
+    } else if view_def
+        .as_ref()
+        .is_some_and(|view| !view.template_instance)
+        && view_def.is_some()
+    {
+        let is_control = match control_target_knowledge(component_def.base.as_deref()) {
+            ControlTargetKnowledge::KnownControl => Some(true),
+            ControlTargetKnowledge::KnownNonControl => Some(false),
+            ControlTargetKnowledge::NeedsSameCrateRegistry => component_def
+                .base
+                .as_deref()
+                .and_then(same_crate_control_target),
+        };
+        if is_control == Some(true) {
+            return Err(ComponentGenerationFailure::ItemLocal(format!(
+                "`{name}`: Control-derived components must declare visual chrome with `template: template_view! {{ ... }}`; `body: view! {{ ... }}` is ordinary component composition"
+            )));
         }
     }
     // Validate here as well as in the `impl` half. Everything except `#[overrides]`-vs-base method
@@ -399,12 +1188,7 @@ fn register_component_struct_real(
         .chain(component_frontend::sibling_enum_modules())
         .collect();
     classify_validate_result(&all_modules)?;
-    component_frontend::register_same_crate_component_with_template(
-        &name,
-        base.as_deref(),
-        template.as_deref(),
-        item_struct,
-    );
+    component_frontend::register_same_crate_component(&name, base.as_deref(), item_struct);
     // The struct half emits nothing on purpose: the paired `#[elwindui::component] impl Name { .. }`
     // generates the whole type. This mirrors `#[elwindui_macros::class]` exactly — there too the
     // `struct` half only stashes what the `impl` half needs (`store_class_args`/`load_class_args`),
@@ -901,7 +1685,7 @@ fn lower_deferred_views_in_element_lets_and_body(
 }
 
 /// Generates the private component instance and typed factory for
-/// `#[elwindui::control_template(target = Target)] struct Name { body: view! { .. } }`.
+/// `#[elwindui::control_template(target = Target)] struct Name { template: template_view! { .. } }`.
 pub fn generate_control_template_from_item_struct(
     target: &syn::Path,
     item_struct: &syn::ItemStruct,
@@ -921,21 +1705,21 @@ pub fn generate_control_template_from_item_struct(
         return Err("ControlTemplate declarations cannot be generic".to_string());
     }
     let syn::Fields::Named(fields) = &item_struct.fields else {
-        return Err("expected a struct with exactly `body: view! { .. }`".to_string());
+        return Err("expected a struct with exactly `template: template_view! { .. }`".to_string());
     };
     let mut fields_iter = fields.named.iter();
     let Some(body) = fields_iter.next() else {
-        return Err("expected `body: view! { .. }`".to_string());
+        return Err("expected `template: template_view! { .. }`".to_string());
     };
     if fields_iter.next().is_some()
-        || body.ident.as_ref().is_none_or(|ident| ident != "body")
+        || body.ident.as_ref().is_none_or(|ident| ident != "template")
         || !matches!(
             &body.ty,
             syn::Type::Macro(mac)
-                if mac.mac.path.segments.last().is_some_and(|segment| segment.ident == "view")
+                if mac.mac.path.segments.last().is_some_and(|segment| segment.ident == "template_view")
         )
     {
-        return Err("expected exactly one field: `body: view! { .. }`".to_string());
+        return Err("expected exactly one field: `template: template_view! { .. }`".to_string());
     }
 
     let (_, authored_view) = component_frontend::component_and_view_from_item_struct(
@@ -945,64 +1729,62 @@ pub fn generate_control_template_from_item_struct(
     validate_replaceable_template_view(
         authored_view
             .as_ref()
-            .ok_or_else(|| "expected `body: view! { .. }`".to_string())?,
+            .ok_or_else(|| "expected `template: template_view! { .. }`".to_string())?,
     )?;
 
     let name = &item_struct.ident;
-    let hidden_name = quote::format_ident!("__ElwinduiControlTemplateInstanceFor{}", name);
-    let body_ty = &body.ty;
-    let hidden_struct: syn::ItemStruct = syn::parse_quote! {
-        struct #hidden_name {
-            #[param]
-            templated_parent: std::rc::Weak<#target>,
-            body: #body_ty,
-        }
+    // Named templates use the same semantic backend as component defaults and the expression-form
+    // `template_view!` frontend.  The public declaration remains a zero-sized marker; its factory
+    // is built directly for the requested target type rather than through a hidden component.
+    let authored_view = authored_view
+        .as_ref()
+        .expect("validated control template must have an authored template view");
+    let from = ast::Module {
+        path: Vec::new(),
+        uses: Vec::new(),
+        items: Vec::new(),
+        is_builtin: false,
+        allows_external_builtins: true,
     };
-    // `ContentControl` gives the private instance a single, ordinary content slot for the authored
-    // root. The instance itself is the template root stored by the target; its content remains an
-    // implementation detail and is unrelated to the target's logical content/presenter channel.
-    //
-    // PR #169 review remediation (A3): the struct half's own return value is captured now — an
-    // earlier revision discarded it here, which (once Issue #146 made the struct half return a
-    // non-empty rust-analyzer shadow instead of always-empty tokens) silently dropped that hidden
-    // Component's own `#[cfg(rust_analyzer)]` struct shadow. Under rust-analyzer, the impl half's own
-    // shadow (`hidden_generated`, built below) would then reference `#hidden_name` as an `impl`
-    // target with no matching `struct #hidden_name` declared anywhere in scope at all.
-    let hidden_struct_generated =
-        generate_component_from_item_struct(Some("ContentControl".to_string()), &hidden_struct)?;
-    let hidden_impl: syn::ItemImpl = syn::parse_quote! { impl #hidden_name {} };
-    let hidden_generated = generate_component_from_item_impl(&hidden_impl)?;
+    let modules: Vec<_> = std::iter::once(from.clone())
+        .chain(component_frontend::sibling_component_modules(
+            &name.to_string(),
+        ))
+        .chain(component_frontend::sibling_viewmodel_modules())
+        .chain(component_frontend::sibling_store_modules())
+        .chain(component_frontend::sibling_enum_modules())
+        .collect();
+    let table = codegen::build_symbol_table(&modules);
+    let compiled = compile_template_body(
+        &authored_view.root,
+        &authored_view.lets,
+        authored_view.on_mount.as_ref(),
+        authored_view.on_unmount.as_ref(),
+        authored_view.on_update.as_ref(),
+        from,
+        table,
+        quote! { #target },
+        HashSet::new(),
+    )?;
+    let template_factory = emit_compiled_template_factory(&compiled, quote! { #target });
 
     let attrs = &item_struct.attrs;
     let vis = &item_struct.vis;
-    // PR #169 review remediation (A3/AD-R6/AD-R7): the real public `TemplateName::template()`
-    // declaration calls `#hidden_name::__new_unmounted`/`.mount(..)`/`.into_node()` — real runtime
-    // lifecycle methods the *generic* Component shadow (`rust_analyzer_shadow::
-    // build_component_impl_shadow`) deliberately never fakes (see that function's own doc comment,
-    // and AD-R6: "do not add runtime-only APIs to generic Component shadows"). So this whole real
-    // declaration is gated to `cfg(not(rust_analyzer))` here, and a dedicated, ControlTemplate-only
-    // rust-analyzer shadow (`rust_analyzer_shadow::build_control_template_shadow`) supplies just the
-    // public `TemplateName`/`TemplateName::template()` name-and-signature surface instead — no hidden
-    // instance construction, no runtime template body.
+    // Keep the rust-analyzer split for the public marker/signature. The real declaration invokes the
+    // shared factory directly; no hidden runtime component or standalone-only owner is emitted.
     let real = rust_analyzer_shadow::gate_real_items_for_rustc(quote::quote! {
         #(#attrs)*
         #vis struct #name;
 
         impl #name {
             pub fn template() -> elwindui::core::ui::ControlTemplate<#target> {
-                elwindui::core::ui::ControlTemplate::new(|context| {
-                    let instance = #hidden_name::__new_unmounted(std::rc::Rc::downgrade(&context.control));
-                    instance.mount(context.environment);
-                    instance.into_node()
-                })
+                #template_factory
             }
         }
     })?;
     let shadow = rust_analyzer_shadow::build_control_template_shadow(item_struct, target)?;
 
     Ok(quote::quote! {
-        #hidden_struct_generated
-        #hidden_generated
         #real
         #shadow
     })
@@ -1079,7 +1861,8 @@ fn same_crate_control_target(name: &str) -> Option<bool> {
     fn visit(name: &str, visited: &mut std::collections::HashSet<String>) -> Option<bool> {
         match name {
             "Control" | "ContentControl" => return Some(true),
-            "UIElement" | "Layout" | "Shape" | "NativeControl" | "Window" => {
+            "UIElement" | "Layout" | "Shape" | "NativeControl" | "Window" | "VerticalLayout"
+            | "HorizontalLayout" | "Grid" | "TextBlock" | "Rectangle" | "Ellipse" => {
                 return Some(false);
             }
             _ => {}
@@ -1093,48 +1876,6 @@ fn same_crate_control_target(name: &str) -> Option<bool> {
     }
 
     visit(name, &mut std::collections::HashSet::new())
-}
-
-fn is_control_template_key_value(value_type: &str, target_name: &str) -> bool {
-    fn last_path_ident(ty: &syn::Type) -> Option<&syn::PathSegment> {
-        let syn::Type::Path(path) = ty else {
-            return None;
-        };
-        path.path.segments.last()
-    }
-
-    let Ok(value_type) = syn::parse_str::<syn::Type>(value_type) else {
-        return false;
-    };
-    let Some(option) = last_path_ident(&value_type) else {
-        return false;
-    };
-    if option.ident != "Option" {
-        return false;
-    }
-    let syn::PathArguments::AngleBracketed(option_args) = &option.arguments else {
-        return false;
-    };
-    let [syn::GenericArgument::Type(template_type)] =
-        option_args.args.iter().collect::<Vec<_>>().as_slice()
-    else {
-        return false;
-    };
-    let Some(template) = last_path_ident(template_type) else {
-        return false;
-    };
-    if template.ident != "ControlTemplate" {
-        return false;
-    }
-    let syn::PathArguments::AngleBracketed(template_args) = &template.arguments else {
-        return false;
-    };
-    let [syn::GenericArgument::Type(target_type)] =
-        template_args.args.iter().collect::<Vec<_>>().as_slice()
-    else {
-        return false;
-    };
-    last_path_ident(target_type).is_some_and(|target| target.ident == target_name)
 }
 
 fn validate_replaceable_template_view(view: &ast::ViewDef) -> Result<(), String> {
@@ -1252,6 +1993,136 @@ fn validate_replaceable_template_view(view: &ast::ViewDef) -> Result<(), String>
 }
 
 #[cfg(test)]
+mod template_view_expression_tests {
+    use super::*;
+
+    #[test]
+    fn standalone_expression_reuses_control_template_presenter_validation() {
+        let error = generate_template_view_expression(
+            r#"
+                VerticalLayout {
+                    ContentPresenter {}
+                    ContentPresenter {}
+                }
+            "#,
+        )
+        .expect_err("a template cannot contain multiple ContentPresenter nodes");
+        assert!(
+            error.contains("multiple") || error.contains("ContentPresenter"),
+            "{error}"
+        );
+
+        let error = generate_template_view_expression(
+            r#"
+                VerticalLayout {
+                    if show_content {
+                        ContentPresenter {}
+                    }
+                }
+            "#,
+        )
+        .expect_err("a dynamic ContentPresenter is not supported");
+        assert!(
+            error.contains("dynamic") || error.contains("ContentPresenter"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn standalone_dynamic_external_host_uses_exported_content_shape_dispatch() {
+        let generated = generate_template_view_expression(
+            r#"
+                ExternalCollectionHost {
+                    if true {
+                        TextBlock { text: "a" }
+                    } else {
+                        TextBlock { text: "b" }
+                    }
+                }
+            "#,
+        )
+        .expect("an unresolved host should defer content-shape selection to its props macro");
+        let generated = generated.to_string();
+        assert!(
+            generated.contains("@ content_shape") || generated.contains("@content_shape"),
+            "{generated}"
+        );
+        assert!(
+            !generated.contains("LayoutExt :: children"),
+            "external dynamic hosts must not default to LayoutExt: {generated}"
+        );
+    }
+
+    #[test]
+    fn standalone_scalar_content_rejects_for_with_a_compile_time_diagnostic() {
+        let generated = generate_template_view_expression(
+            r#"
+                ContentControl {
+                    for item in templated_parent.items {
+                        TextBlock { text: item }
+                    }
+                }
+            "#,
+        )
+        .expect("the scalar-content diagnostic is emitted in the generated expression");
+        let generated = generated.to_string();
+        assert!(
+            generated.contains("for` region cannot be the sole content")
+                || generated.contains("for region cannot be the sole content"),
+            "{generated}"
+        );
+    }
+
+    #[test]
+    fn standalone_template_property_reads_and_writes_use_separate_capabilities() {
+        let key = crate::template_property_key("label");
+        let readable = generate_template_view_expression(
+            r#"
+                TextBlock { text: templated_parent.label }
+            "#,
+        )
+        .expect("a readable template property should generate")
+        .to_string();
+        assert!(
+            readable.contains(&format!("TemplateProperty < {key}u64 >")),
+            "readable access must carry the read capability: {readable}"
+        );
+        assert!(
+            !readable.contains("WritableTemplateProperty"),
+            "a one-way read must not request the write capability: {readable}"
+        );
+
+        let two_way = generate_template_view_expression(
+            r#"
+                TextArea { text <=> templated_parent.label }
+            "#,
+        )
+        .expect("a two-way template property should generate a writable bound")
+        .to_string();
+        assert!(
+            two_way.contains(&format!("WritableTemplateProperty < {key}u64 >")),
+            "two-way access must carry the write capability: {two_way}"
+        );
+
+        let event_write = generate_template_view_expression(
+            r#"
+                TextBlock {
+                    on_tapped: |_event| {
+                        templated_parent.set_label("clicked".to_string());
+                    }
+                }
+            "#,
+        )
+        .expect("an event write should generate a writable bound")
+        .to_string();
+        assert!(
+            event_write.contains(&format!("WritableTemplateProperty < {key}u64 >")),
+            "event writes must carry the write capability: {event_write}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod control_template_tests {
     use super::*;
 
@@ -1266,40 +2137,36 @@ mod control_template_tests {
     }
 
     #[test]
-    fn authoring_generates_a_typed_factory_and_weak_templated_parent() {
+    fn authoring_generates_a_typed_factory_without_hidden_instance() {
         let generated = author(
             r#"
             struct CodegenControlTemplateValidA {
-                body: view! { TextBlock { text: "ok" } },
+                template: template_view! { TextBlock { text: "ok" } },
             }
             "#,
         )
         .expect("valid template should generate");
         assert!(generated.contains("ControlTemplate < Control >"));
-        assert!(generated.contains("Weak < Control >"));
-        assert!(generated.contains("templated_parent"));
+        assert!(generated.contains("ControlTemplate :: < Control > :: new"));
+        assert!(!generated.contains("Weak < Control >"));
+        assert!(!generated.contains("__ElwinduiControlTemplateInstanceFor"));
     }
 
-    /// PR #169 review remediation, T12: `generate_control_template_from_item_struct`'s own output
-    /// contains both cfg branches — a real (`not(rust_analyzer)`) public `TemplateName`/`template()`
-    /// with its real runtime body, and a dedicated rust-analyzer-only (`rust_analyzer`) public
-    /// `TemplateName`/`template()` shadow with only the signature — plus the hidden Component
-    /// struct-half's own `#[cfg(rust_analyzer)]` shadow (A3: an earlier revision discarded that
-    /// struct half's return value, leaving the hidden impl-half's own shadow referencing an
-    /// undeclared type under rust-analyzer). No duplicate public `TemplateName` declaration appears
-    /// within either single cfg branch.
+    /// The named-template frontend keeps separate rustc/rust-analyzer declarations, while its
+    /// runtime branch directly invokes the shared typed template factory.  No hidden component
+    /// instance is synthesized for named templates.
     #[test]
     fn t12_output_contains_real_and_shadow_branches_with_no_discarded_hidden_shadow() {
         let generated = author(
             r#"
             struct CodegenControlTemplateT12 {
-                body: view! { TextBlock { text: "ok" } },
+                template: template_view! { TextBlock { text: "ok" } },
             }
             "#,
         )
         .expect("valid template should generate");
 
-        // Real: gated, with the real runtime body.
+        // Real: gated, with the real shared-factory body.
         assert!(
             generated.contains("cfg (not (rust_analyzer))"),
             "{generated}"
@@ -1309,8 +2176,10 @@ mod control_template_tests {
             "{generated}"
         );
         assert!(
-            generated.contains("__new_unmounted") && generated.contains("into_node"),
-            "the real template() body must still construct/mount the hidden instance: {generated}"
+            generated.contains("ControlTemplate :: < Control > :: new")
+                && !generated.contains("__new_unmounted")
+                && !generated.contains("into_node"),
+            "the real template() body must invoke the shared factory directly: {generated}"
         );
 
         // Shadow: gated, signature-only (no hidden-instance construction).
@@ -1323,15 +2192,10 @@ mod control_template_tests {
              construction: {generated}"
         );
 
-        // A3: the hidden Component struct's own shadow (`struct
-        // __ElwinduiControlTemplateInstanceForCodegenControlTemplateT12 ;`) must survive into the
-        // output, not be silently discarded — otherwise the hidden impl-half's own shadow (below)
-        // references an undeclared type under rust-analyzer.
+        // No hidden Component is part of the unified named-template output.
         assert!(
-            generated
-                .contains("struct __ElwinduiControlTemplateInstanceForCodegenControlTemplateT12"),
-            "the hidden Component struct half's own rust-analyzer shadow must not be discarded: \
-             {generated}"
+            !generated.contains("__ElwinduiControlTemplateInstanceFor"),
+            "named templates must not synthesize a hidden Component: {generated}"
         );
     }
 
@@ -1340,7 +2204,7 @@ mod control_template_tests {
         let id = author(
             r#"
             struct CodegenControlTemplateIdB {
-                body: view! {
+                template: template_view! {
                     #[id("part")]
                     let part = TextBlock { text: "x" };
                     part
@@ -1354,7 +2218,7 @@ mod control_template_tests {
         let multiple = author(
             r#"
             struct CodegenControlTemplateMultipleB {
-                body: view! {
+                template: template_view! {
                     VerticalLayout { ContentPresenter {} ContentPresenter {} }
                 },
             }
@@ -1369,7 +2233,7 @@ mod control_template_tests {
         let dynamic = author(
             r#"
             struct CodegenControlTemplateDynamicB {
-                body: view! {
+                template: template_view! {
                     VerticalLayout { if true { ContentPresenter {} } }
                 },
             }
@@ -1383,98 +2247,19 @@ mod control_template_tests {
     }
 
     #[test]
-    fn template_enabled_default_body_rejects_id() {
-        component_frontend::register_same_crate_environment_key(
-            "codegen_control_template_key_c",
-            "CodegenControlTemplateKeyC",
-            "Option<ControlTemplate<CodegenControlTemplatePanelC>>",
-        )
-        .unwrap();
-        let item: syn::ItemStruct = syn::parse_str(
-            r#"
-            struct CodegenControlTemplatePanelC {
-                body: view! {
-                    #[id("part")]
-                    let part = TextBlock { text: "x" };
-                    part
-                },
-            }
-            "#,
-        )
-        .unwrap();
-        let error = expect_generation_error(generate_component_from_item_struct_with_template(
-            Some("ContentControl".to_string()),
-            Some("codegen_control_template_key_c".to_string()),
-            &item,
-        ));
-        assert!(error.contains("#[id"), "error: {error}");
-    }
-
-    #[test]
-    fn template_environment_key_value_must_match_the_component() {
-        component_frontend::register_same_crate_environment_key(
-            "codegen_control_template_key_mismatch_e",
-            "CodegenControlTemplateKeyMismatchE",
-            "Option<ControlTemplate<AnotherPanel>>",
-        )
-        .unwrap();
-        let item: syn::ItemStruct = syn::parse_str(
-            r#"
-            struct CodegenControlTemplatePanelE {
-                body: view! { TextBlock { text: "x" } },
-            }
-            "#,
-        )
-        .unwrap();
-        let error = expect_generation_error(generate_component_from_item_struct_with_template(
-            Some("ContentControl".to_string()),
-            Some("codegen_control_template_key_mismatch_e".to_string()),
-            &item,
-        ));
-        assert!(
-            error.contains("Option<ControlTemplate<CodegenControlTemplatePanelE>>"),
-            "error: {error}"
-        );
-    }
-
-    #[test]
     fn same_crate_non_control_and_native_control_targets_are_rejected_early() {
-        let target: syn::ItemStruct = syn::parse_str(
-            r#"
-            struct CodegenControlTemplateNotControlD {
-                body: view! { VerticalLayout {} },
-            }
-            "#,
-        )
-        .unwrap();
-        generate_component_from_item_struct(Some("VerticalLayout".to_string()), &target).unwrap();
-
         let template = r#"
             struct CodegenControlTemplateInvalidTargetD {
-                body: view! { TextBlock { text: "x" } },
+                template: template_view! { TextBlock { text: "x" } },
             }
         "#;
-        let non_control = author_for("CodegenControlTemplateNotControlD", template)
+        let non_control = author_for("VerticalLayout", template)
             .expect_err("same-crate non-Control target must be rejected");
         assert!(non_control.contains("not a Control-derived"));
 
         let native = author_for("NativeControl", template)
             .expect_err("NativeControl target must be rejected");
         assert!(native.contains("NativeControl"));
-
-        component_frontend::register_same_crate_environment_key(
-            "codegen_control_template_key_d",
-            "CodegenControlTemplateKeyD",
-            "Option<ControlTemplate<CodegenControlTemplateNotControlD>>",
-        )
-        .unwrap();
-        let component_error =
-            expect_generation_error(generate_component_from_item_struct_with_template(
-                Some("VerticalLayout".to_string()),
-                Some("codegen_control_template_key_d".to_string()),
-                &target,
-            ));
-        assert!(component_error.contains("must inherit Control"));
     }
 }
 
@@ -3020,13 +3805,13 @@ mod user_base_inherits_tests {
     fn derived_from_a_user_component_builds_with_a_qualified_path() {
         declare(
             Some("ContentControl"),
-            r#"struct UbBase { body: view! { TextBlock { text: "x" } }, }"#,
+            r#"struct UbBase { template: template_view! { TextBlock { text: "x" } }, }"#,
         )
         .expect("base struct");
         build(r#"impl UbBase { }"#).expect("base impl");
         declare(
             Some("crate::UbBase"),
-            r#"struct UbDerived { body: view! { UbBase { } }, }"#,
+            r#"struct UbDerived { template: template_view! { UbBase { } }, }"#,
         )
         .expect("derived struct");
         let out = build(r#"impl UbDerived { }"#)
@@ -3047,13 +3832,13 @@ mod user_base_inherits_tests {
     fn derived_from_a_user_component_with_a_bare_base_name_is_rejected() {
         declare(
             Some("ContentControl"),
-            r#"struct UbBareBase { body: view! { TextBlock { text: "x" } }, }"#,
+            r#"struct UbBareBase { template: template_view! { TextBlock { text: "x" } }, }"#,
         )
         .expect("base struct");
         build(r#"impl UbBareBase { }"#).expect("base impl");
         declare(
             Some("UbBareBase"),
-            r#"struct UbBareDerived { body: view! { UbBareBase { } }, }"#,
+            r#"struct UbBareDerived { template: template_view! { UbBareBase { } }, }"#,
         )
         .expect("derived struct");
         let err = expect_generation_error(build(r#"impl UbBareDerived { }"#));
@@ -3069,7 +3854,7 @@ mod user_base_inherits_tests {
     fn derived_from_a_builtin_base_still_emits_the_builtin_path() {
         declare(
             Some("ContentControl"),
-            r#"struct UbBuiltinDerived { body: view! { TextBlock { text: "x" } }, }"#,
+            r#"struct UbBuiltinDerived { template: template_view! { TextBlock { text: "x" } }, }"#,
         )
         .expect("derived struct");
         let out = build(r#"impl UbBuiltinDerived { }"#)

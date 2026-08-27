@@ -1,12 +1,12 @@
-//! `elwindui::ui::Control` — the self-drawn templated-control base, and its local text-style storage.
+//! `elwindui::ui::Control` — the templated-control base, and its local text-style storage.
 
 use super::*;
 
 /// A composable, templated component base (WinUI3's `Control`). `Control` has no public collection
 /// content slot: its visual presentation is owned by the private template-root path. A component
-/// body that inherits `Control` may provide one authored visual root, which is attached through
-/// that path; collection content belongs to `Layout`, while a single logical content slot belongs
-/// to `ContentControl`. `padding` shrinks the area its visual root is arranged into, the
+/// declaring `template: template_view! { ... }` supplies one typed default visual root, which is
+/// attached through that path; caller content remains independent and collection content belongs
+/// to `Layout`, while a single logical content slot belongs to `ContentControl`. `padding` shrinks the area its visual root is arranged into, the
 /// `Control`-level analog of `margin` on an individual element.
 ///
 /// Scope note: this is intentionally minimal for now — `content_horizontal_alignment`/

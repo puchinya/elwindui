@@ -63,14 +63,14 @@ pub fn store(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// `#[elwindui::component(inherits Base, template = environment_key)] struct Name { ..fields..,
-/// body: view! { .. } }` — lets a
+/// `#[elwindui::component(inherits Base)] struct Name { ..fields..,
+/// template: template_view! { .. } }` — lets a
 /// `component`+`view` pair be written as a single ordinary Rust `struct` instead of the DSL text
 /// form's `component Name inherits Base { .. } view Name { .. }` block pair. Ordinary fields become
 /// the component's own `#[param]`/`#[prop]`/etc. fields, exactly as in DSL text; exactly one
-/// field, typed as a `view! { .. }` macro invocation, supplies the view tree.
-/// `template` is optional; when present, its Environment Key selects an
-/// `Option<ControlTemplate<Name>>` once during mount and the `body` is the default template.
+/// field, typed as a `view! { .. }` or `template_view! { .. }` macro invocation, supplies the
+/// ordinary composition or typed default template tree. Environment overrides use the generic
+/// `EnvironmentContext::set_control_template::<Name>(...)` API.
 ///
 /// `Base` is a bare name (`inherits ContentControl`) when inheriting a builtin, or a full
 /// crate-root-qualified path (`inherits crate::ui::LabeledPanel`) when inheriting another
@@ -130,15 +130,24 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
             return quote::quote! { compile_error!(#msg); }.into();
         }
     };
-    match elwindui_codegen::generate_component_from_item_struct_with_template(
-        args.base,
-        args.template,
-        &item_struct,
-    ) {
+    match elwindui_codegen::generate_component_from_item_struct(args.base, &item_struct) {
         Ok(tokens) => tokens.into(),
         Err(e) => {
             let msg = format!("#[elwindui::component]: {e}");
             quote::quote! { compile_error!(#msg); }.into()
+        }
+    }
+}
+
+/// Builds a typed `ControlTemplate<C>` value from the shared view grammar. The target `C` is
+/// inferred from the expected Rust type (for example `set_control_template::<C>(Some(...))`).
+#[proc_macro]
+pub fn template_view(input: TokenStream) -> TokenStream {
+    match elwindui_codegen::generate_template_view_expression(&input.to_string()) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => {
+            let message = format!("template_view!: {error}");
+            quote::quote! { compile_error!(#message); }.into()
         }
     }
 }
@@ -157,7 +166,7 @@ pub fn control_template(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(item_struct) => item_struct,
         Err(error) => {
             let message = format!(
-                "#[elwindui::control_template]: expected `struct Name {{ body: view! {{ .. }} }}`: {error}"
+                "#[elwindui::control_template]: expected `struct Name {{ template: template_view! {{ .. }} }}`: {error}"
             );
             return quote::quote! { compile_error!(#message); }.into();
         }
@@ -274,21 +283,16 @@ pub fn environment_key(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// splits the result back into a bare symbol-table name plus an optional qualifying path (Refs #25).
 struct ComponentArgs {
     base: Option<String>,
-    template: Option<String>,
 }
 
-/// Parses `#[component]` arguments: optional `inherits Path` and optional `template = key`.
+/// Parses `#[component]` arguments: optional `inherits Path`.
 fn parse_component_args(attr: proc_macro2::TokenStream) -> syn::Result<ComponentArgs> {
     use syn::parse::Parser;
     if attr.is_empty() {
-        return Ok(ComponentArgs {
-            base: None,
-            template: None,
-        });
+        return Ok(ComponentArgs { base: None });
     }
     (|input: syn::parse::ParseStream| {
         let mut base = None;
-        let mut template = None;
         while !input.is_empty() {
             let kw: syn::Ident = input.parse()?;
             if kw == "inherits" {
@@ -298,16 +302,14 @@ fn parse_component_args(attr: proc_macro2::TokenStream) -> syn::Result<Component
                 let path: syn::Path = input.parse()?;
                 base = Some(path_to_string(&path));
             } else if kw == "template" {
-                if template.is_some() {
-                    return Err(syn::Error::new(kw.span(), "duplicate `template` argument"));
-                }
-                input.parse::<syn::Token![=]>()?;
-                let key: syn::Ident = input.parse()?;
-                template = Some(key.to_string());
+                return Err(syn::Error::new(
+                    kw.span(),
+                    "`template = <environment_key>` is no longer supported; declare `template: template_view! { ... }` and use EnvironmentContext::set_control_template::<Target>(...) for overrides",
+                ));
             } else {
                 return Err(syn::Error::new(
                     kw.span(),
-                    "expected `inherits <Base>` or `template = <environment_key_name>`",
+                    "expected `inherits <Base>`",
                 ));
             }
             if input.is_empty() {
@@ -315,7 +317,7 @@ fn parse_component_args(attr: proc_macro2::TokenStream) -> syn::Result<Component
             }
             input.parse::<syn::Token![,]>()?;
         }
-        Ok(ComponentArgs { base, template })
+        Ok(ComponentArgs { base })
     })
     .parse2(attr)
 }

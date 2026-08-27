@@ -10,7 +10,7 @@ struct ScalarControlProbe {
     #[prop(default = false)]
     alternate: bool,
 
-    body: view! {
+    template: template_view! {
         if alternate {
             TextBlock { text: "A" }
         } else {

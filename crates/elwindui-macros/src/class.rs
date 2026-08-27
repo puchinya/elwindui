@@ -1458,9 +1458,10 @@ impl PropDecls {
     }
 }
 
-/// Splits the DSL declaration attributes — `#[prop(..)]`, `#[content(..)]`, `#[text_style]` — out of
-/// an item's attribute list. All three are inert markers consumed entirely here; none may survive
-/// into the generated item, since none is a real registered attribute anywhere.
+/// Splits the DSL declaration attributes — `#[prop(..)]`, `#[content(..)]`, `#[text_style]`, and the
+/// class surface markers — out of an item's attribute list.
+/// All are inert markers consumed entirely here; none may survive into the generated item, since
+/// none is a real registered attribute anywhere.
 fn take_prop_decls(attrs: &[syn::Attribute]) -> syn::Result<(PropDecls, Vec<syn::Attribute>)> {
     let mut shape = PropDecls::default();
     let mut rest = Vec::new();
@@ -2173,7 +2174,7 @@ fn build_props_macro(
     let content_shape_entry = shape.content_field().map(|content| {
         quote! {
             (@content_shape $scalar:block, $collection:block) => {
-                $crate::#macro_ident!(@content_shape_into #bare_ident, #content, $scalar, $collection);
+                $crate::#macro_ident!(@content_shape_into #bare_ident, #content, $scalar, $collection)
             };
         }
     });
@@ -2324,10 +2325,10 @@ fn build_props_macro(
                 },
                 quote! {
                     (@content_shape $scalar:block, $collection:block) => {
-                        #parent_macro!(@content_shape $scalar, $collection);
+                        #parent_macro!(@content_shape $scalar, $collection)
                     };
                     (@content_shape_into $origin:ident, $name:ident, $scalar:block, $collection:block) => {
-                        #parent_macro!(@content_shape_into $origin, $name, $scalar, $collection);
+                        #parent_macro!(@content_shape_into $origin, $name, $scalar, $collection)
                     };
                 },
                 quote! {
@@ -3469,7 +3470,10 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     // dependency of its own — it always succeeds from its own single invocation's args alone,
     // regardless of rust-analyzer's expansion order, so nothing extra is needed to make this part
     // reliable.
-    let shape_macro = prop_decls.is_declared().then(|| {
+    // Emit a forwarding shape macro for every derived class, even when it declares no own
+    // properties. Generated `#[component]` classes rely on this surface to preserve inherited
+    // property/content metadata across same-crate component hops.
+    let shape_macro = (prop_decls.is_declared() || args.inherits.is_some()).then(|| {
         let parent = args
             .inherits
             .as_ref()
@@ -4752,10 +4756,15 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         let entry_ident = inherit_macro_ident(&bare_name);
         let skip_ident = inherit_macro_skip_ident(&bare_name);
         let classify_ident = inherit_macro_classify_ident(&bare_name);
+        let props_ident = props_macro_ident(&bare_name);
         let mod_ident = macro_reexport_mod_ident(&bare_name);
         let own_ext_alias_ident_val = own_ext_alias_ident();
         let policy_ident = own_ext_policy_ident(&bare_name);
         let bound_trait_ident = own_ext_bound_trait_ident(&bare_name);
+        let props_reexport = args
+            .inherits
+            .is_some()
+            .then(|| quote! { pub use crate::#props_ident; });
         // Issue #128 remediation (review finding A1): an ordinary/root class also owns a
         // class-interface bridge for its own generated `{ClassName}Ext` — not just `trait_only`
         // interfaces — so a `struct_only` implementor of *this* class's own interface is equally
@@ -5022,6 +5031,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 pub use crate::#skip_ident;
                 pub use crate::#classify_ident;
                 pub use crate::#sealed_ident;
+                #props_reexport
                 #bridge_reexport
                 #own_ext_alias
                 #policy_reexport

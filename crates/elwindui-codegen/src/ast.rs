@@ -385,6 +385,11 @@ pub struct OnUpdateHook {
 #[derive(Debug, Clone)]
 pub struct ViewDef {
     pub target: String,
+    /// `true` when this view is a component-level `template: template_view!` declaration.
+    /// `template_instance` is reserved for the generated private component that materializes a
+    /// selected template factory; it is not public authoring syntax.
+    pub is_template: bool,
+    pub template_instance: bool,
     /// `on_mount { .. }`, run once right after construction (spliced into generated `new()` after
     /// `resync()`). When `Name` inherits a base with its own `view` and `Name` provides its own
     /// `view`, an `on_mount` here may call `base::on_mount()` to chain into the base's block

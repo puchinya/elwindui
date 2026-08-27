@@ -490,7 +490,7 @@ thread_local! {
 
 #[elwindui::component(inherits ContentControl)]
 struct PopupScopeChild {
-    body: view! {
+    template: template_view! {
         on_mount {
             let template = ViewTemplate::new(|ctx| {
                 OBSERVED_SCOPE_THEME.with(|c| {
@@ -498,11 +498,13 @@ struct PopupScopeChild {
                 });
                 Some(VerticalLayout::new() as Rc<dyn UIElementExt>)
             });
-            let target = self.target();
+            let target = elwindui::core::visual_tree::find_all::<TextBlock>(self)
+                .into_iter()
+                .next()
+                .expect("template target TextBlock");
             target.set_context_popup(Some(template));
             LAST_TARGET_BLOCK.with(|c| *c.borrow_mut() = Some(Rc::clone(&target) as Rc<dyn UIElementExt>));
         }
-        #[id("target")]
         let target = TextBlock {
             text: "Context target",
         };
@@ -975,7 +977,7 @@ struct DeferredPopupProbe {
     vm: std::rc::Rc<DeferredPopupViewModel>,
     #[param]
     log: std::rc::Rc<RefCell<Vec<i32>>>,
-    body: view! {
+    template: template_view! {
         on_mount {
             log.borrow_mut().push(vm.selected_item());
         }
@@ -1169,7 +1171,7 @@ thread_local! {
 struct ReactiveDeferredPopupContent {
     #[bindable]
     vm: std::rc::Rc<DeferredPopupViewModel>,
-    body: view! {
+    template: template_view! {
         on_unmount {
             REACTIVE_POPUP_UNMOUNT_COUNT.with(|c| c.set(c.get() + 1));
         }

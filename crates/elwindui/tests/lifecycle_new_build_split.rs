@@ -17,7 +17,7 @@ thread_local! {
 
 #[elwindui::component(inherits ContentControl)]
 struct LifecycleBuildSplitProbe {
-    body: view! {
+    template: template_view! {
         on_mount {
             BUILD_COUNT.with(|c| c.set(c.get() + 1));
         }

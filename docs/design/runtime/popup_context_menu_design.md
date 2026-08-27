@@ -312,7 +312,7 @@ before `codegen::build_symbol_table`/code emission ever run — see step 1's own
    the hidden component by name.
 2. **Weak-owner codegen** (reusing, not duplicating, `ControlTemplate`'s own `templated_parent`
    weak-owner mechanism — see `docs/design/runtime/view_template_design.md` §3's "why `Weak`, never
-   `Rc`" and `is_replaceable_template_body`): the hidden component's generated code treats
+   `Rc`" and `is_template_or_deferred_scope`): the hidden component's generated code treats
    `__view_owner` exactly like `templated_parent` for bindable-owner and Environment-propagation
    purposes (`docs/agents/class-model.md`'s "no second binding system" principle — see also
    `synthesize_external_base_fields`'s explicit `implicit_owner.is_some()` exemption, which stops
@@ -358,7 +358,7 @@ before `codegen::build_symbol_table`/code emission ever run — see step 1's own
 
 Environment propagates from the hidden component into *its own* nested children the same way
 `ControlTemplate`'s replaced body already does (`node.environment_scope`,
-`is_replaceable_template_body` triggered by `implicit_owner.is_some()`) — without this, nested
+`is_template_or_deferred_scope` triggered by `implicit_owner.is_some()`) — without this, nested
 Components inside a declarative popup would silently fall back to `application_environment()`
 instead of inheriting the popup's actual mount-time Environment (including
 `#[environment(popup_dismiss)]`), a correctness gap this design's own implementation found and fixed

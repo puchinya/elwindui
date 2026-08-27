@@ -26,9 +26,15 @@ from ordinary visual primitives; the template frontend shares the ordinary
 TabView/SplitView wrappers, or backend-native public types, and these controls
 do not emit chrome directly from a `render()` override.
 
+The generated class shape of a composed custom control carries its own public
+`#[prop]` and `#[content]` metadata across crate boundaries. Consequently,
+ordinary `view!` callers can use a custom control's typed properties and bare
+children declaratively; computed/state fields remain implementation details and
+are not exposed as writable construction properties.
+
 ## CustomTabView
 
-`CustomTabView` owns an ordered typed `#[content(children)]` list of
+`CustomTabView` owns an ordered typed `#[content(children)] children` list of
 `Rc<CustomTabViewItem>`. Its public properties are:
 
 - `selected_index: usize`, default `0`, TwoWay;

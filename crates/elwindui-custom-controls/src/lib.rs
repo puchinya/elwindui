@@ -4,9 +4,29 @@
 
 extern crate self as elwindui;
 
-pub use elwindui_core as core;
-pub use elwindui_core::ui;
 pub use elwindui_macros::{class, component};
+
+// Keep the core facade shape expected by generated `view!` code while exposing this crate's
+// component property-shape macros alongside the builtin shapes.
+pub mod core {
+    pub use crate::{
+        __elwindui_props_CustomSplitter, __elwindui_props_CustomTabCloseButton,
+        __elwindui_props_CustomTabContentPresenter, __elwindui_props_CustomTabStripPresenter,
+        __elwindui_props_CustomTabView, __elwindui_props_CustomTabViewItem,
+    };
+    pub use elwindui_core::*;
+}
+
+// Generated component property-shape macros address the generated extension trait through the
+// declaring crate's `ui` namespace. Keep the core UI surface intact while making the public custom
+// controls' own property shapes reachable to cross-crate `view!` expansion as well.
+pub mod ui {
+    pub use crate::{
+        CustomSplitter, CustomSplitterExt, CustomTabView, CustomTabViewExt, CustomTabViewItem,
+        CustomTabViewItemExt,
+    };
+    pub use elwindui_core::ui::*;
+}
 
 use core::base::{Point, Rect, Size};
 use core::graphics::IconSource;
@@ -588,10 +608,10 @@ impl CustomTabContentPresenter {
 
 /// A templated tab strip and selected-content host.
 #[elwindui::component(inherits Control)]
-#[content(tab_children)]
+#[content(children)]
 pub struct CustomTabView {
     #[prop(default = Vec::new())]
-    tab_children: Vec<Rc<CustomTabViewItem>>,
+    children: Vec<Rc<CustomTabViewItem>>,
     #[prop(default = 0)]
     #[two_way]
     selected_index: usize,
@@ -640,7 +660,7 @@ pub struct CustomTabView {
             this.set_clip_to_bounds(Some(true));
             this.reconcile_children();
         }
-        on_update(tab_children, template_items, selected_index, tab_strip_position, close_button_presentation) {
+        on_update(children, template_items, selected_index, tab_strip_position, close_button_presentation) {
             this.reconcile_children();
         }
         let tab_strip = CustomTabStripPresenter {
@@ -1083,7 +1103,7 @@ impl CustomTabView {
 
     /// Replaces the concrete list used by declarative and programmatic callers.
     pub fn set_children(&self, children: Vec<Rc<CustomTabViewItem>>) {
-        <Self as CustomTabViewExt>::set_tab_children(self, children);
+        <Self as CustomTabViewExt>::set_children(self, children);
     }
 
     /// Appends one item to the ordered tab list.
@@ -1172,7 +1192,7 @@ impl CustomTabView {
     }
 
     fn children_values(&self) -> Vec<Rc<CustomTabViewItem>> {
-        <Self as CustomTabViewExt>::tab_children(self)
+        <Self as CustomTabViewExt>::children(self)
     }
 
     /// Returns the typed ordered-list surface used by dynamic content composition.

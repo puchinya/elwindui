@@ -30,8 +30,12 @@ Snapshot: 2026-08-28. The public contract is
   override or direct-render architectures.
 - The inherited `ContentControl::content` remains the single logical page slot,
   while the authored `template_view!` root owns the tab header presentation.
-  The former `header_root` implementation bridge is removed; this separation
-  uses the shared typed component-template path delivered by [#188](https://github.com/puchinya/elwindui/pull/188).
+  The two ownership paths use the shared typed component-template path delivered
+  by [#188](https://github.com/puchinya/elwindui/pull/188).
+- The generated class shape forwards own `#[prop]` and `#[content]` metadata
+  across the crate boundary, so a real declarative `view!` can construct
+  `CustomTabView { CustomTabViewItem { ... TextBlock { ... } } }` while
+  preserving the authored item/content `Rc` identities and logical parent.
 - `examples/custom-controls-demo` provides an interactive AppKit sample whose
   window, layout, page content, and custom-control nodes are composed with
   `view!`; `on_mount` supplies the external custom-control property setup and
@@ -40,7 +44,7 @@ Snapshot: 2026-08-28. The public contract is
 
 ## Verification
 
-The focused custom-controls suite passes with 30 tests and no ignored tests.
+The focused custom-controls suite passes with 31 tests and no ignored tests.
 Core, codegen, AppKit-enabled facade, inheritance-demo, workspace build/check,
 and workspace test results are recorded in the PR completion report against
 the final head. Workspace-wide formatter or rust-analyzer diagnostics are

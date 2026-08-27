@@ -19,10 +19,19 @@ draw chrome through `RenderContext`.
 logical page-content property. Its authored `template_view!` is header
 presentation only and is installed through the Control template-root path,
 without replacing the inherited `#[content(content)]` destination or
-introducing a second content property. The component does not use a
-`header_root` workaround.
+introducing a second content property. The template root and the inherited
+logical content slot therefore remain separate ownership paths.
 
-The tab view template is a `Grid` with two rows. The private
+The generated class declaration forwards the component's own `#[prop]` fields
+and `#[content]` designation into the cross-crate class-shape macro. This is
+metadata transport only: `#[computed]`, `#[state]`, and environment fields are
+not exposed as ordinary writable properties, and no runtime property registry
+is introduced. Generated component setters retain their owned Rust field types;
+the shape metadata marks that conversion boundary separately from the borrowed
+string setters of hand-written builtins.
+
+The tab view template is a `Grid` with two rows. Its declarative content field
+is exactly `#[content(children)] children: Vec<Rc<CustomTabViewItem>>`. The private
 `CustomTabStripPresenter` is a `HorizontalLayout` that owns the ordered item
 controls; it retains an ordinary lifecycle-only `body: view!` because it has no
 authored root of its own. The private `CustomTabContentPresenter` owns the visual presentation

@@ -91,3 +91,24 @@ Only `@set`'s `wrap_prop_value` knows how to shape a value into a declared prope
 ## Validation boundary
 
 Publicly observable accepted/rejected forms remain in the specification. Parser representation, token generation, registry layout, shadow expansion, and debugging strategy belong only here.
+
+## Generated component shape forwarding across crate boundaries
+
+When `#[component]` generates a Control-derived class, the component code generator re-emits the
+component's own public `#[prop]` and `#[content(...)]` declarations into the generated class shape.
+The resulting `__elwindui_props_<Name>!` macro is therefore available to a downstream `view!`
+expansion through the defining crate root, including property setters, content-shape queries, event
+and two-way wiring, and resync. This is shape metadata forwarding; it is not runtime reflection or
+a second property system.
+
+The forwarded surface is deliberately limited to public construction/content metadata. Internal
+`#[computed]`, `#[state]`, and `#[environment]` values do not become writable external properties.
+The external DSL still names the generated component through a qualified Rust path, while the
+`#[macro_export]` shape macro is rooted at the defining crate.
+
+`owned` is an internal class-shape flag used only when generated component metadata must preserve an
+owned setter convention, for example `#[prop(owned, title: String)]`. It is not recommended
+user-facing DSL syntax. The generated shape converts an authored string value to the owned `String`
+expected by a generated setter; hand-written builtin declarations retain their existing borrowed
+`String`/`&str` setter convention. Non-String owned values retain their declared type without a
+String-specific conversion. Direct macro tests cover both cases.

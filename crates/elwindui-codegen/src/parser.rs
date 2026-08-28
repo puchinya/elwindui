@@ -264,7 +264,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_element_node(&mut self) -> Result<ElementNode, String> {
-        let type_path = self.parse_ident()?;
+        let type_path = self.parse_type_path()?;
         self.skip_trivia();
         self.expect_char('{')?;
         let (attributes, attached, attribute_shortcuts, children) = self.parse_element_body()?;
@@ -333,6 +333,12 @@ impl<'a> Parser<'a> {
                 self.expect_char(']')?;
                 self.skip_trivia();
                 pending_shortcut = Some((chords, scope));
+            }
+            if pending_shortcut.is_none() && self.looks_like_element_path() {
+                children.push(ChildEntry::Literal(self.parse_element_node()?));
+                self.skip_trivia();
+                self.eat_char(',');
+                continue;
             }
             let ident_start = self.pos;
             let ident = self.parse_ident()?;
@@ -781,12 +787,51 @@ impl<'a> Parser<'a> {
         let save = self.pos;
         let is_type_name = self
             .parse_ident()
-            .map(|ident| ident.chars().next().is_some_and(|c| c.is_uppercase()))
+            .map(|path| path.chars().next().is_some_and(|c| c.is_uppercase()))
             .unwrap_or(false);
         self.skip_trivia();
         let followed_by_brace = self.peek_char() == Some('{');
         self.pos = save;
         is_type_name && followed_by_brace
+    }
+
+    /// The element-body variant of [`looks_like_element`]. A qualified path is allowed in a child
+    /// position, while `parse_view_expr` keeps the bare-name check so Rust enum/struct expressions
+    /// such as `ShapeKind::RoundedRect { .. }` remain expressions rather than being mistaken for
+    /// DSL elements.
+    fn looks_like_element_path(&mut self) -> bool {
+        let save = self.pos;
+        let is_type_name = self
+            .parse_type_path()
+            .map(|path| {
+                path.rsplit("::")
+                    .next()
+                    .and_then(|name| name.chars().next())
+                    .is_some_and(|c| c.is_uppercase())
+            })
+            .unwrap_or(false);
+        self.skip_trivia();
+        let followed_by_brace = self.peek_char() == Some('{');
+        self.pos = save;
+        is_type_name && followed_by_brace
+    }
+
+    /// Parses the type-shaped path that starts a DSL element.  The parser keeps this as text in
+    /// the AST because the same path is later handed to Rust code generation unchanged for a
+    /// qualified external component (`some_crate::Widget`).  Attached-property syntax is still
+    /// parsed separately by `parse_element_body`: it only calls `parse_ident()` for the owner and
+    /// therefore continues to recognize `Grid::row: value` as an attached assignment.
+    fn parse_type_path(&mut self) -> Result<String, String> {
+        let mut path = self.parse_ident()?;
+        loop {
+            self.skip_trivia();
+            if !self.eat_str("::") {
+                break;
+            }
+            path.push_str("::");
+            path.push_str(&self.parse_ident()?);
+        }
+        Ok(path)
     }
 
     fn looks_like_macro_call(&mut self) -> bool {
@@ -1549,6 +1594,18 @@ mod tests {
         assert!(
             matches!(&elem.attributes[0].value, ViewExpr::Path(p) if p == &vec!["doc".to_string()])
         );
+    }
+
+    #[test]
+    fn parses_qualified_external_element_as_a_child() {
+        let (_, _, _, _, root) =
+            parse_view_body("Host { external_widgets::ExternalWidget { title: \"hello\" } }")
+                .expect("qualified external child should parse");
+        let host = literal(&root.children[0]);
+        let ChildEntry::Literal(child) = &host.children[0] else {
+            panic!("qualified child should be a literal element");
+        };
+        assert_eq!(child.type_path, "external_widgets::ExternalWidget");
     }
 
     #[test]

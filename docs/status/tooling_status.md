@@ -1,6 +1,6 @@
 # Tooling status
 
-Snapshot: 2026-08-27. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-08-28. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
 
 | Tool | State | Current capability / gap |
 |---|---|---|
@@ -16,3 +16,13 @@ Snapshot: 2026-08-27. Tool architecture is indexed in [`../design/README.md`](..
 Implemented commands cover launching/locating a process or window, waiting for window state, bringing a window to the front, querying the Accessibility tree, setting supported values, and invoking supported actions. Accessibility permission and foreground restrictions remain environment constraints.
 
 The command catalog and operational precautions belong in [`../agents/appkit.md`](../agents/appkit.md) and [`../../tools/macos-ui-driver/README.md`](../../tools/macos-ui-driver/README.md), not in status.
+
+## External generated-component DSL (#191)
+
+The implementation on the Issue #191 branch accepts qualified external generated-component paths
+in `view!`, keeps the authored type path for construction and extension traits, and resolves the
+`#[macro_export]` props shape at the defining crate root. Ordinary, template, dynamic, event,
+two-way, semantic-brush, and resync lowering share this path-origin decision. A real downstream
+fixture depends on `elwindui` and `elwindui-external-component-fixture` independently and covers
+external properties, collection/scalar content, property resync, and two-way wiring. The dedicated
+prerequisite PR has not yet been opened or merged; PR #184 remains dependent on it.

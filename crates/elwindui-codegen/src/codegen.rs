@@ -239,6 +239,132 @@ pub struct TypeInfo {
     pub is_builtin: bool,
 }
 
+/// The source-level origin of a DSL element type.  Code generation cannot ask Rust's resolver
+/// where an arbitrary imported, unqualified name was defined, so qualified external paths are the
+/// explicit cross-crate boundary (`some_crate::Widget`).  All lowering paths use this same
+/// classification when choosing a construction type, a class-shape macro, or an extension-trait
+/// path; no individual emitter guesses from a control name or a crate-specific table.
+#[derive(Clone)]
+enum DslTypeOrigin {
+    Builtin,
+    Local,
+    ExternalQualified { crate_prefix: syn::Ident },
+    UnresolvedUnqualified,
+}
+
+fn dsl_type_origin(type_path: &str, info: Option<&TypeInfo>) -> DslTypeOrigin {
+    if info.is_some_and(|info| info.is_builtin) {
+        return DslTypeOrigin::Builtin;
+    }
+
+    // A qualified source path is the explicit cross-crate/local boundary.  Do this before
+    // consulting a non-builtin same-crate table entry so a future table entry for a qualified
+    // spelling cannot accidentally turn an authored external path back into a flat local name.
+    if let Ok(path) = syn::parse_str::<syn::Path>(type_path)
+        && path.segments.len() >= 2
+        && let Some(first) = path.segments.first()
+    {
+        return match first.ident.to_string().as_str() {
+            "elwindui" => DslTypeOrigin::Builtin,
+            "crate" | "self" | "super" => DslTypeOrigin::Local,
+            _ => DslTypeOrigin::ExternalQualified {
+                crate_prefix: first.ident.clone(),
+            },
+        };
+    }
+
+    match info {
+        Some(info) if info.is_builtin => DslTypeOrigin::Builtin,
+        Some(_) => DslTypeOrigin::Local,
+        None => DslTypeOrigin::UnresolvedUnqualified,
+    }
+}
+
+fn dsl_type_ident(type_path: &str) -> syn::Ident {
+    let name = type_path.rsplit("::").next().unwrap_or(type_path);
+    format_ident!("{name}")
+}
+
+fn dsl_authored_path(type_path: &str) -> syn::Path {
+    syn::parse_str(type_path).unwrap_or_else(|error| {
+        panic!("DSL element type path `{type_path}` should be valid Rust syntax: {error}")
+    })
+}
+
+/// Resolves the defining crate's exported `__elwindui_props_<Type>!` macro.  `#[macro_export]`
+/// places that macro at the defining crate root, so only the first segment of a qualified Rust
+/// path is retained (`crate_alias::widgets::Thing` -> `crate_alias::__elwindui_props_Thing`).
+fn dsl_props_macro_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
+    let ident = format_ident!("__elwindui_props_{}", dsl_type_ident(type_path));
+    match dsl_type_origin(type_path, info) {
+        DslTypeOrigin::Builtin | DslTypeOrigin::UnresolvedUnqualified => {
+            quote! { elwindui::core::#ident }
+        }
+        DslTypeOrigin::Local => quote! { crate::#ident },
+        DslTypeOrigin::ExternalQualified { crate_prefix } => {
+            quote! { #crate_prefix::#ident }
+        }
+    }
+}
+
+/// Resolves the extension trait associated with a DSL element.  Unlike a props macro, a generated
+/// extension trait lives alongside the authored type, so a qualified external path keeps all of
+/// its intermediate Rust modules (`crate_alias::widgets::ThingExt`).
+fn dsl_ext_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
+    let mut authored = dsl_authored_path(type_path);
+    let ext_ident = format_ident!("{}Ext", dsl_type_ident(type_path));
+    match dsl_type_origin(type_path, info) {
+        DslTypeOrigin::Builtin | DslTypeOrigin::UnresolvedUnqualified => {
+            quote! { elwindui::core::ui::#ext_ident }
+        }
+        DslTypeOrigin::Local => {
+            if type_path.contains("::") {
+                authored
+                    .segments
+                    .last_mut()
+                    .expect("qualified DSL type path has a final segment")
+                    .ident = ext_ident;
+                quote! { #authored }
+            } else {
+                quote! { #ext_ident }
+            }
+        }
+        DslTypeOrigin::ExternalQualified { .. } => {
+            authored
+                .segments
+                .last_mut()
+                .expect("qualified DSL type path has a final segment")
+                .ident = ext_ident;
+            quote! { #authored }
+        }
+    }
+}
+
+/// Resolves the concrete Rust type constructed for a DSL element.  Builtins retain the facade
+/// normalization used by existing `view!` code; local generated components retain their flat
+/// crate-local name; a qualified external component is constructed through exactly the path the
+/// author wrote.
+fn dsl_concrete_type_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
+    let ident = dsl_type_ident(type_path);
+    let authored = dsl_authored_path(type_path);
+    match dsl_type_origin(type_path, info) {
+        DslTypeOrigin::ExternalQualified { .. } => {
+            let authored = dsl_authored_path(type_path);
+            quote! { #authored }
+        }
+        DslTypeOrigin::Builtin | DslTypeOrigin::UnresolvedUnqualified => {
+            quote! { elwindui::ui::#ident }
+        }
+        DslTypeOrigin::Local => {
+            if type_path.contains("::") {
+                quote! { #authored }
+            } else {
+                quote! { #ident }
+            }
+        }
+    }
+}
+
 impl SymbolTable {
     /// Resolves `name` as seen from `from` to its symbol-table key: a type defined locally in
     /// `from` (same real path), or brought into scope by one of `from`'s `use` declarations,
@@ -875,7 +1001,12 @@ pub(crate) fn content_field_knowledge(
         return ContentFieldKnowledge::KnownMissingItemLocal;
     };
     if find_component_and_module(from, base, modules).is_none() {
-        let synthesized = synthesize_external_base_fields(c, base, find_view(from, &c.name));
+        let synthesized = synthesize_external_base_fields(
+            c,
+            base,
+            c.base_path.as_deref(),
+            find_view(from, &c.name),
+        );
         return if synthesized.iter().any(|f| f.name == *name) {
             ContentFieldKnowledge::KnownPresent
         } else {
@@ -909,7 +1040,12 @@ pub(crate) fn resolve_effective_fields<'m>(
         return c.fields.clone();
     };
     let Some((base_module, base_c)) = find_component_and_module(from, base, modules) else {
-        return synthesize_external_base_fields(c, base, find_view(from, &c.name));
+        return synthesize_external_base_fields(
+            c,
+            base,
+            c.base_path.as_deref(),
+            find_view(from, &c.name),
+        );
     };
     let base_fields: Vec<FieldDef> = resolve_effective_fields(base_module, base_c, modules)
         .into_iter()
@@ -975,7 +1111,7 @@ pub(crate) fn resolve_effective_fields<'m>(
 /// example) as the *only* available evidence that `base` declares such a field at all, exactly
 /// mirroring how a bare `ChildEntry::Ref` (`content`) is already accepted structurally with no
 /// `TypeInfo` lookup (`generate_view`'s `PASSTHROUGH_NODE` seeding). Each recovered name is given
-/// `elwindui::core::__elwindui_props_{base}!(@field_type {name})` as its literal `FieldDef::ty` —
+/// the defining base's `__elwindui_props_{Name}!(@field_type {name})` as its literal `FieldDef::ty` —
 /// a type-position macro invocation `generate_view`'s existing `syn::parse_str::<syn::Type>` calls
 /// already handle as an ordinary `syn::Type::Macro` — deferring the actual type (and, for a
 /// nonexistent name, a real `compile_error!`) to `base`'s own shape-macro chain
@@ -987,6 +1123,7 @@ pub(crate) fn resolve_effective_fields<'m>(
 fn synthesize_external_base_fields(
     c: &ComponentDef,
     base: &str,
+    base_path: Option<&str>,
     view: Option<&ViewDef>,
 ) -> Vec<FieldDef> {
     let Some(view) = view else {
@@ -1020,9 +1157,13 @@ fn synthesize_external_base_fields(
     // Deterministic output order — `collect_bare_attribute_value_names` returns a `HashSet`, whose
     // iteration order must not leak into generated constructor-parameter order.
     bare_names.sort();
+    // `base` is only the final symbol-table segment.  Preserve `base_path` when the author wrote
+    // an external/local qualified inherits path so the deferred type query reaches that defining
+    // crate's shape macro root instead of falling back to the builtin crate.
+    let props_macro = dsl_props_macro_path(base_path.unwrap_or(base), None).to_string();
     let mut result = c.fields.clone();
     result.extend(bare_names.into_iter().map(|name| FieldDef {
-        ty: format!("elwindui::core::__elwindui_props_{base}!(@field_type {name})"),
+        ty: format!("{props_macro}!(@field_type {name})"),
         name,
         kind: FieldKind::Param,
         attrs: Vec::new(),
@@ -4393,15 +4534,10 @@ fn generate_view(
     // Property/content lowering is selected by the effective root/base props macro. Local-vs-
     // external resolution only determines where that macro is exported; template presentation is
     // selected solely by the explicit `template: template_view!` authoring slot above.
-    let root_props_macro = format_ident!("__elwindui_props_{}", resolved_root.type_path);
-    let root_props_macro_path = if table
-        .resolve(from, &resolved_root.type_path)
-        .is_none_or(|info| info.is_builtin)
-    {
-        quote! { elwindui::core::#root_props_macro }
-    } else {
-        quote! { crate::#root_props_macro }
-    };
+    let root_props_macro_path = dsl_props_macro_path(
+        &resolved_root.type_path,
+        resolve_context_info(&ctx, from, table, &resolved_root.type_path),
+    );
 
     plan_element(
         &resolved_root,
@@ -4857,16 +4993,10 @@ fn generate_view(
         } else {
             component.base.as_deref()
         } {
-            let ext_ident = format_ident!("{base_name}Ext");
             if let Some(qualified) = immediate_base_qualified_ext_path(component, base_name) {
                 Some(qualified)
-            } else if table
-                .resolve(from, base_name)
-                .is_none_or(|info| info.is_builtin)
-            {
-                Some(quote! { elwindui::ui::#ext_ident })
             } else {
-                Some(quote! { #ext_ident })
+                Some(dsl_ext_path(base_name, table.resolve(from, base_name)))
             }
         } else {
             None
@@ -4907,6 +5037,14 @@ fn generate_view(
                     } else {
                         quote! { self.base.#getter() }
                     }
+                } else if is_composed
+                    && source_component.content_field.as_deref() == Some(name.as_str())
+                {
+                    // A component may expose both its typed generated content getter and an
+                    // erased collection convenience method under the same name. Keep the
+                    // template-property bridge on the generated trait so its associated value
+                    // type remains the authored content type.
+                    quote! { <Self as #target_ext>::#getter(self) }
                 } else {
                     quote! { self.#getter() }
                 };
@@ -4919,6 +5057,10 @@ fn generate_view(
                         } else {
                             quote! { self.base.#setter(value); }
                         }
+                    } else if is_composed
+                        && source_component.content_field.as_deref() == Some(name.as_str())
+                    {
+                        quote! { <Self as #target_ext>::#setter(self, value); }
                     } else {
                         quote! { self.#setter(value); }
                     }
@@ -5083,9 +5225,18 @@ fn generate_view(
             continue;
         }
         let own_field_ident = format_ident!("{}", own_field_name);
+        let own_field_get = if is_composed
+            && source_component.content_field.as_deref() == Some(own_field_name.as_str())
+        {
+            // Keep a generated component's typed content getter distinct from a same-named
+            // erased collection convenience method when initializing its authored view.
+            quote! { <Self as #target_ext>::#own_field_ident(self) }
+        } else {
+            quote! { self.#own_field_ident() }
+        };
         child_construct_stmts.extend(quote! {
             #[allow(unused_variables)]
-            let #own_field_ident = self.#own_field_ident();
+            let #own_field_ident = #own_field_get;
         });
     }
     let mut field_inits = TokenStream::new();
@@ -5475,13 +5626,13 @@ fn generate_view(
         })
         .collect();
     let semantic_brush_query = |node: &PlannedNode, name: &str| {
-        if let Some(info) = table.resolve(from, &node.type_path) {
+        if let Some(info) = resolve_context_info(&ctx, from, table, &node.type_path) {
             let value = is_semantic_brush_property(info, name);
             quote! { #value }
         } else {
-            let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+            let props_macro = dsl_props_macro_path(&node.type_path, None);
             let name = format_ident!("{name}");
-            quote! { elwindui::core::#props_macro!(@is_semantic_brush #name) }
+            quote! { #props_macro!(@is_semantic_brush #name) }
         }
     };
     let semantic_brush_lazy_leaves = collect_lazy_leaves(&plan);
@@ -5579,7 +5730,7 @@ fn generate_view(
             &parent.type_path,
             from,
             table,
-            dynamic_content_props_macro_path(component, &parent.type_path, parent_info),
+            dynamic_content_props_macro_path(&parent.type_path, parent_info),
         );
         let slot_type = match parent_shape {
             Some(EffectiveContentShape::Collection) => {
@@ -5587,7 +5738,7 @@ fn generate_view(
             }
             Some(EffectiveContentShape::External) | None => {
                 let props_macro_path =
-                    dynamic_content_props_macro_path(component, &parent.type_path, parent_info);
+                    dynamic_content_props_macro_path(&parent.type_path, parent_info);
                 quote! {
                     #props_macro_path!(@content_slot_type #item_ext)
                 }
@@ -5697,12 +5848,12 @@ fn generate_view(
                     // `emit_external_construction` uses for an ordinary node, just `construct()`
                     // (bare value, for `Self`'s own `base` field) instead of `new()` (`Rc<Self>`).
                     None => {
-                        let type_ident = format_ident!("{}", node.type_path);
+                        let type_path = dsl_concrete_type_path(&node.type_path, None);
                         let sets = emit_external_attribute_sets(node, &ctx, from, table);
                         construct_stmts.extend(quote! {
                             #[allow(unused_imports)]
                             use elwindui::ui::*;
-                            let #binding = elwindui::ui::#type_ident::construct();
+                            let #binding = #type_path::construct();
                         });
                         child_construct_stmts.extend(quote! {
                             #[allow(unused_imports)]
@@ -5817,9 +5968,8 @@ fn generate_view(
         // struct (see `struct_ident`'s doc comment) — the field's concrete type must be its `Impl`
         // struct, exactly like `concrete_type_ident` resolves for any other reference to it.
         let base_info = table.resolve(from, base_name);
-        let base_construct = qualified_construct_path(component, base_name).unwrap_or_else(|| {
-            composed_construct_path(base_name, base_info.is_some_and(|i| i.is_builtin))
-        });
+        let base_construct = qualified_construct_path(component, base_name)
+            .unwrap_or_else(|| dsl_construct_path(base_name, base_info));
         if base_name == "ContentControl" && base_info.is_some_and(|info| info.is_builtin) {
             field_inits.extend(quote! { base: #base_construct(), });
         } else {
@@ -5970,16 +6120,13 @@ fn generate_view(
                     .any(|(child, _)| child == &node.binding)
             })?;
             let parent_binding = &parent.binding;
-            let parent_ext = format_ident!("{}Ext", parent.type_path);
             let parent_info = table.resolve(from, &parent.type_path);
             let parent_ext_path = if let Some(qualified) =
                 immediate_base_qualified_ext_path(component, &parent.type_path)
             {
                 quote! { #qualified }
-            } else if parent_info.is_none() || parent_info.is_some_and(|i| i.is_builtin) {
-                quote! { elwindui::core::ui::#parent_ext }
             } else {
-                quote! { #parent_ext }
+                dsl_ext_path(&parent.type_path, parent_info)
             };
             let scalar_item_ext = ItemTraitTokens::KnownIdent(format_ident!("UIElementExt"));
             let parent_is_self = (is_shape_composition || is_host_composition)
@@ -6024,7 +6171,7 @@ fn generate_view(
                         &parent.type_path,
                         from,
                         table,
-                        dynamic_content_props_macro_path(component, &parent.type_path, parent_info),
+                        dynamic_content_props_macro_path(&parent.type_path, parent_info),
                     );
                     // The getter `#[content(..)]` names, not always literally `children` (`Dropdown`'s
                     // is `items`, `Menu`'s is `items`) — a local `TypeInfo` names it directly.
@@ -6043,7 +6190,7 @@ fn generate_view(
                     // or collection branch from effective `#[content]` metadata, so external Control
                     // remains scalar without a codegen type-name special case.
                     let props_macro_path =
-                        dynamic_content_props_macro_path(component, &parent.type_path, parent_info);
+                        dynamic_content_props_macro_path(&parent.type_path, parent_info);
                     let item_ext = dynamic_collection_item_trait_for_type_with_props_macro(
                         &parent.type_path,
                         from,
@@ -6551,16 +6698,11 @@ fn generate_view(
         if let Some(qualified) = immediate_base_qualified_path(component, name) {
             return qualified;
         }
-        let ident = format_ident!("{}", name);
         // `info.is_none()` (external, no local `TypeInfo`) treated the same as a known builtin —
         // same rule `concrete_type_ident` already applies, for the same reason (see its own doc
         // comment): every name unresolved here is one, by construction.
         let info = table.resolve(from, name);
-        if info.is_none() || info.is_some_and(|i| i.is_builtin) {
-            quote! { elwindui::ui::#ident }
-        } else {
-            quote! { #ident }
-        }
+        dsl_concrete_type_path(name, info)
     };
     // The literal name (DSL-level, e.g. `"ContentControl"`/`"Rectangle"`/`"Window"`) this
     // component's own generated trait bound (`inherits_path`) is keyed off — the *immediate* base
@@ -6596,6 +6738,51 @@ fn generate_view(
         None => TokenStream::new(),
     };
     let class_methods = emit_class_methods(&component.methods, &source_component.methods);
+    // A composed Rust `#[component]` is also a class declaration. Preserve its own public
+    // property/content shape on the generated `#[class]` struct so a downstream crate can use the
+    // exported `__elwindui_props_<Type>!` macro. This is deliberately limited to shape/template
+    // composition: host composition wraps a backend `Window` façade and does not expose that
+    // façade as a generated component-property surface. Computed/state/environment fields remain
+    // component internals rather than writable external class properties.
+    let generated_class_prop_decls: Vec<TokenStream> =
+        if is_shape_composition || is_inherited_view_composition {
+            source_component
+                .fields
+                .iter()
+                .filter(|field| {
+                    field.kind == FieldKind::Prop
+                        && !(field.initializer.is_none() && field.name.starts_with("on_"))
+                })
+                .map(|field| {
+                    let name = format_ident!("{}", field.name);
+                    let ty: syn::Type = syn::parse_str(&field.ty)
+                        .expect("component property type must parse for class declaration");
+                    let mut flags: Vec<TokenStream> = field
+                        .attrs
+                        .iter()
+                        .filter_map(|attr| match attr {
+                            Attr::Routed => Some(quote! { routed }),
+                            Attr::Onetime => Some(quote! { onetime }),
+                            Attr::TwoWay => Some(quote! { two_way }),
+                            Attr::SemanticBrush => Some(quote! { semantic_brush }),
+                            _ => None,
+                        })
+                        .collect();
+                    flags.insert(0, quote! { owned });
+                    quote! { #[prop(#(#flags,)* #name: #ty)] }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+    let generated_class_content_decl = if is_shape_composition || is_inherited_view_composition {
+        source_component.content_field.as_ref().map(|field| {
+            let field = format_ident!("{}", field);
+            quote! { #[content(#field)] }
+        })
+    } else {
+        None
+    };
     // PR #165 post-final rereview remediation, A9 (§10.2): the implicit-bind-owner counterpart to
     // `property_resync_methods` — `property_resync_methods_for` itself needs no changes at all,
     // since `collect_view_expr_owner_properties`/`view_expr_depends_on`/`emit_resync` only ever
@@ -6940,6 +7127,8 @@ fn generate_view(
             }
 
             #[elwindui::class(inherits = #inherits_path)]
+            #(#generated_class_prop_decls)*
+            #generated_class_content_decl
             pub struct #target {
                 #(#plain_required_names: #plain_required_types,)*
                 #mutable_required_field_decls
@@ -7892,36 +8081,11 @@ fn has_real_dynamic_anchor(plan: &[PlannedNode], target: &syn::Ident) -> bool {
 }
 
 fn template_dynamic_props_macro_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
-    let ident = dynamic_content_props_macro_ident(type_path);
-    if info.is_some_and(|i| i.is_builtin) || type_path.starts_with("elwindui::") {
-        quote! { elwindui::core::#ident }
-    } else if info.is_some() || type_path.starts_with("crate::") {
-        quote! { crate::#ident }
-    } else if !type_path.contains("::") {
-        quote! { elwindui::core::#ident }
-    } else if let Some(prefix) = type_path.split("::").next() {
-        let prefix = format_ident!("{prefix}");
-        quote! { #prefix::#ident }
-    } else {
-        quote! { crate::#ident }
-    }
+    dsl_props_macro_path(type_path, info)
 }
 
 fn template_dynamic_ext_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
-    let name = type_path.rsplit("::").next().unwrap_or(type_path);
-    let ident = format_ident!("{name}Ext");
-    if info.is_some_and(|i| i.is_builtin) || type_path.starts_with("elwindui::") {
-        quote! { elwindui::core::ui::#ident }
-    } else if let Ok(mut path) = syn::parse_str::<syn::Path>(type_path) {
-        if let Some(last) = path.segments.last_mut() {
-            last.ident = ident;
-            quote! { #path }
-        } else {
-            quote! { #ident }
-        }
-    } else {
-        quote! { #ident }
-    }
+    dsl_ext_path(type_path, info)
 }
 
 fn emit_template_dynamic_regions(
@@ -8739,7 +8903,14 @@ fn plan_element_in_scope(
     }
 
     let attributes = node.attributes.clone();
-    let binding = format_ident!("__{}_{}", node.type_path.to_lowercase(), out.len());
+    // Bindings are implementation details and must always be valid Rust identifiers. Qualified
+    // external paths contain `::`, so derive the readable prefix from the final type segment while
+    // retaining the monotonically increasing index for uniqueness.
+    let binding = format_ident!(
+        "__{}_{}",
+        dsl_type_ident(&node.type_path).to_string().to_lowercase(),
+        out.len()
+    );
     // A virtual builtin (`VerticalLayout`/`HorizontalLayout`/`TextBlock`/`Control`/`Grid`/`Shape`)
     // has a real `elwindui_core::ui` struct with real `set_*` setters (`TextBlockImpl::set_text`
     // etc.) just like any hand-written native or composed builtin — it's stored under the exact
@@ -8945,7 +9116,7 @@ fn emit_for_item_wiring(
             }
             if info.is_none() {
                 let name_ident = format_ident!("{name}");
-                let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+                let props_macro = dsl_props_macro_path(&node.type_path, None);
                 let call = match expr {
                     ViewExpr::Closure { params, body } => {
                         emit_on_event_closure_body(body, params, ctx, &self_mode)
@@ -8972,7 +9143,7 @@ fn emit_for_item_wiring(
                         use elwindui::ui::*;
                         let widget = #widget_binding;
                         let __elwindui_for_item_this = std::rc::Rc::clone(&__elwindui_for_item_this);
-                        elwindui::core::#props_macro!(@set widget, #name_ident, move |#(#annotated_params),*| {
+                        #props_macro!(@set widget, #name_ident, move |#(#annotated_params),*| {
                             #call;
                             __elwindui_for_item_this.__refresh_dynamic_regions();
                         });
@@ -9272,14 +9443,8 @@ pub(crate) fn dynamic_collection_item_trait_for_type(
     from: &Module,
     table: &SymbolTable,
 ) -> ItemTraitTokens {
-    let type_name = type_path.rsplit("::").next().unwrap_or(type_path);
-    let props_macro = format_ident!("__elwindui_props_{type_name}");
-    dynamic_collection_item_trait_for_type_with_props_macro(
-        type_path,
-        from,
-        table,
-        quote! { elwindui::core::#props_macro },
-    )
+    let props_macro = dsl_props_macro_path(type_path, table.resolve(from, type_path));
+    dynamic_collection_item_trait_for_type_with_props_macro(type_path, from, table, props_macro)
 }
 
 /// Variant of [`dynamic_collection_item_trait_for_type`] used by the ordinary generated-view
@@ -9322,42 +9487,13 @@ fn dynamic_collection_item_trait_for_type_with_props_macro_template(
     }
 }
 
-fn dynamic_content_props_macro_ident(type_path: &str) -> syn::Ident {
-    let type_name = type_path.rsplit("::").next().unwrap_or(type_path);
-    format_ident!("__elwindui_props_{type_name}")
-}
-
 /// Resolve the props macro used for an unresolved dynamic-content host.  Ordinary generated views
 /// normally encounter unresolved framework types (which live under `elwindui::core`), but an
 /// immediate qualified component base can be a consumer-local type whose `#[macro_export]` props
 /// macro is re-exported at the consumer crate root.  This helper keeps that distinction driven by
 /// path/metadata, never by a control or property name.
-fn dynamic_content_props_macro_path(
-    component: &ComponentDef,
-    type_path: &str,
-    info: Option<&TypeInfo>,
-) -> TokenStream {
-    let ident = dynamic_content_props_macro_ident(type_path);
-    if info.is_some_and(|i| i.is_builtin) || type_path.starts_with("elwindui::") {
-        quote! { elwindui::core::#ident }
-    } else if info.is_some()
-        || type_path.starts_with("crate::")
-        || component.name == type_path
-        || (component.base.as_deref() == Some(type_path)
-            && component
-                .base_path
-                .as_deref()
-                .is_some_and(|path| path.starts_with("crate::")))
-    {
-        quote! { crate::#ident }
-    } else if !type_path.contains("::") {
-        quote! { elwindui::core::#ident }
-    } else if let Some(prefix) = type_path.split("::").next() {
-        let prefix = format_ident!("{prefix}");
-        quote! { #prefix::#ident }
-    } else {
-        quote! { crate::#ident }
-    }
+fn dynamic_content_props_macro_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
+    dsl_props_macro_path(type_path, info)
 }
 
 fn dynamic_collection_item_trait_for_info(info: &TypeInfo) -> syn::Ident {
@@ -10234,8 +10370,7 @@ fn emit_scalar_branch_value(
                 resolve_template_info(from, table, owner_type),
             )
         } else {
-            let ident = format_ident!("__elwindui_props_{owner_type}");
-            quote! { elwindui::core::#ident }
+            dsl_props_macro_path(owner_type, table.resolve(from, owner_type))
         };
         let content = quote! {
             #props_macro!(@children_erased #receiver, [#value]);
@@ -10597,10 +10732,10 @@ fn emit_attached_setters(
             // (matching `@attached_set`'s own `#name` arm pattern), not a string, since the arm
             // is one-per-declared-field rather than taking `field` as data.
             None => {
-                let props_macro = format_ident!("__elwindui_props_{owner}");
+                let props_macro = dsl_props_macro_path(owner, None);
                 let field_ident = format_ident!("{field}");
                 out.extend(quote! {
-                    elwindui::core::#props_macro!(@attached_set #field_ident, #binding, #value_ts);
+                    #props_macro!(@attached_set #field_ident, #binding, #value_ts);
                 });
             }
         }
@@ -11339,7 +11474,7 @@ fn emit_external_construction(
     out: &mut TokenStream,
 ) {
     let binding = &node.binding;
-    let type_ident = format_ident!("{}", node.type_path);
+    let type_path = dsl_concrete_type_path(&node.type_path, None);
     let sets = emit_external_attribute_sets(node, ctx, from, table);
     let binding_ts = quote! { #binding };
     // `Grid::row`/`Grid::column`/... — every real builtin now goes through this construction
@@ -11357,7 +11492,7 @@ fn emit_external_construction(
         // specific traits from. Scoped to this block only.
         #[allow(unused_imports)]
         use elwindui::ui::*;
-        let #binding = elwindui::ui::#type_ident::new();
+        let #binding = #type_path::new();
         #attached
         #sets
     });
@@ -11378,7 +11513,7 @@ fn emit_external_attribute_sets(
     table: &SymbolTable,
 ) -> TokenStream {
     let binding = &node.binding;
-    let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+    let props_macro = dsl_props_macro_path(&node.type_path, None);
     let mut sets = TokenStream::new();
     for attribute in &node.attributes {
         let name = &attribute.name;
@@ -11420,7 +11555,7 @@ fn emit_external_attribute_sets(
                 quote! { #nested_binding.clone() }
             };
             sets.extend(quote! {
-                elwindui::core::#props_macro!(@set #binding, #name_ident, #value);
+                #props_macro!(@set #binding, #name_ident, #value);
             });
             continue;
         }
@@ -11459,7 +11594,7 @@ fn emit_external_attribute_sets(
                 // declared bare `ViewTemplate`, not only `Option<ViewTemplate>`.
                 quote! {
                     elwindui::core::ui::__coerce_deferred_view_assignment_target::<
-                        elwindui::core::#props_macro!(@field_type #name_ident)
+                        #props_macro!(@field_type #name_ident)
                     >(#factory)
                 }
             }
@@ -11490,7 +11625,7 @@ fn emit_external_attribute_sets(
             let environment = semantic_brush_construction_environment(node, ctx);
             sets.extend(quote! {
                 if let ::std::option::Option::Some(__v) = ::std::option::Option::from(#value) {
-                    elwindui::core::#props_macro!(
+                    #props_macro!(
                         @set_with_environment #binding, #name_ident, __v, #environment
                     );
                 }
@@ -11498,7 +11633,7 @@ fn emit_external_attribute_sets(
         } else {
             let environment = semantic_brush_construction_environment(node, ctx);
             sets.extend(quote! {
-                elwindui::core::#props_macro!(
+                #props_macro!(
                     @set_with_environment #binding, #name_ident, #value, #environment
                 );
             });
@@ -11671,12 +11806,15 @@ fn emit_construction(
             .collect();
         if !non_dynamic_children.is_empty() {
             let binding = &node.binding;
-            let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+            let props_macro = dsl_props_macro_path(
+                &node.type_path,
+                resolve_context_info(ctx, from, table, &node.type_path),
+            );
             let items = non_dynamic_children
                 .iter()
                 .map(|(c, _)| quote! { #c.clone() });
             out.extend(quote! {
-                elwindui::core::#props_macro!(@children #binding, [#(#items),*]);
+                #props_macro!(@children #binding, [#(#items),*]);
             });
         }
         return;
@@ -11766,18 +11904,13 @@ fn emit_construction(
                 .as_deref()
                 .expect("composed shape name")
                 .to_string();
-            let props_macro = format_ident!("__elwindui_props_{base_name}");
             let values = node
                 .child_bindings
                 .iter()
                 .filter(|(_, child_ty)| *child_ty != DYNAMIC_CHILD_SLOT_MARKER)
                 .map(|(child, _)| quote! { #child.clone() });
             let base_info = resolve_context_info(ctx, from, table, &base_name);
-            let macro_path = if base_info.is_none() || base_info.is_some_and(|i| i.is_builtin) {
-                quote! { elwindui::core::#props_macro }
-            } else {
-                quote! { crate::#props_macro }
-            };
+            let macro_path = dsl_props_macro_path(&base_name, base_info);
             quote! {
                 #macro_path!(@children #binding, [#(#values),*]);
             }
@@ -11860,12 +11993,7 @@ fn emit_construction(
                     EffectiveContentShape::External => unreachable!(),
                 }
             } else {
-                let props_macro = dynamic_content_props_macro_ident(&node.type_path);
-                let macro_path = if info.is_builtin {
-                    quote! { elwindui::core::#props_macro }
-                } else {
-                    quote! { crate::#props_macro }
-                };
+                let macro_path = dsl_props_macro_path(&node.type_path, Some(info));
                 quote! {
                     #macro_path!(@children #binding, [#(#children),*]);
                 }
@@ -12519,7 +12647,7 @@ fn build_component_optional_setters(
 /// `immediate_base_qualified_path`/`qualified_construct_path`, which only ever fire when `node`
 /// (always the shape-composition root, this function's one call site) is literally `component`'s
 /// own `inherits` base written as a qualified path (Refs #25); every other case falls through to
-/// the existing bare/builtin `composed_construct_path` resolution, unchanged.
+/// the existing bare/builtin `dsl_construct_path` resolution, unchanged.
 fn build_component_value(
     node: &PlannedNode,
     ctx: &ViewCtx,
@@ -12541,11 +12669,11 @@ fn build_component_value(
         // needs a real field list to decide what's required/positional, which — as with every other
         // external path — no longer exists to consult.
         let construct_path = qualified_construct_path(component, &node.type_path)
-            .unwrap_or_else(|| composed_construct_path(&node.type_path, true));
+            .unwrap_or_else(|| dsl_construct_path(&node.type_path, None));
         return quote! { #construct_path() };
     };
     let construct_path = qualified_construct_path(component, &node.type_path)
-        .unwrap_or_else(|| composed_construct_path(&node.type_path, info.is_builtin));
+        .unwrap_or_else(|| dsl_construct_path(&node.type_path, Some(info)));
     let args = build_component_args(node, ctx, from, table, info, plan, true);
     quote! { #construct_path(#(#args),*) }
 }
@@ -13127,40 +13255,15 @@ fn build_virtual_value(
 /// `elwindui::ui::` when `info` says it's a builtin (a consumer-defined component has no such fixed
 /// path, so it stays bare, resolved via the existing flat crate-root convention instead).
 fn concrete_type_ident(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
-    // Every `#[class]`-managed struct — composed, hand-written-native, virtual-builtin, or plain —
-    // now compiles under exactly its own bare DSL name; only the *trait* alongside it (auto-derived
-    // by `#[elwindui::class]`) is `{type_path}Ext`, never something callers here need to know about.
-    let ident = format_ident!("{}", type_path);
-    // A builtin (`is_builtin`) always lives at the fixed `elwindui::ui::..` path (see `TypeInfo::
-    // is_builtin`'s own doc comment) — qualifying it there means callers never need a bare `use` for
-    // it. A consumer-defined component has no such fixed path (codegen doesn't know where the
-    // consumer's build.rs/proc-macro path puts it), so it stays bare, resolved via the existing
-    // flat crate-root convention instead. `info.is_none()` (external, no local `TypeInfo`) is
-    // treated the same as a known builtin — every name `table.resolve` doesn't find locally *is*
-    // one, by construction (see `emit_construction`'s own dispatch: a name is only ever unresolved
-    // here because it's declared entirely outside this compilation's own `#[component]`
-    // AST).
-    if info.is_none() || info.is_some_and(|i| i.is_builtin) {
-        quote! { elwindui::ui::#ident }
-    } else {
-        quote! { #ident }
-    }
+    dsl_concrete_type_path(type_path, info)
 }
 
-/// `"ContentControl"` -> `ContentControl::construct` — the bare-value associated function a
-/// composed component's own struct pairs with (docs/design/runtime/ui_tree_design.md), mirroring
-/// `elwindui::core::ui`'s `Control::construct`/`Shape::construct`/etc. `#[class]`-generated
-/// convention. `is_builtin` mirrors `concrete_type_ident`'s own rule (`TypeInfo::is_builtin`'s doc
-/// comment): a builtin's struct always lives at the fixed `elwindui::ui::X` path, but a
-/// consumer-defined composed component's struct has no such fixed path (it's generated wherever the
-/// consumer put its own source), so it stays bare.
-fn composed_construct_path(name: &str, is_builtin: bool) -> TokenStream {
-    let ident = format_ident!("{}", name);
-    if is_builtin {
-        quote! { elwindui::ui::#ident::construct }
-    } else {
-        quote! { #ident::construct }
-    }
+/// Resolves the `construct` factory through the same type-origin decision as every other
+/// construction path. A qualified external/local component keeps the authored type path; a
+/// builtin or unresolved unqualified name retains the existing facade fallback.
+fn dsl_construct_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
+    let ty = dsl_concrete_type_path(type_path, info);
+    quote! { #ty::construct }
 }
 
 /// Resolves a virtual builtin's core struct path for shape composition.
@@ -13175,7 +13278,7 @@ fn shape_composition_base_type(base: &str) -> TokenStream {
 /// produces for a user-defined base (Refs #25). `None` for every other name (a builtin base,
 /// written bare; a base two or more `inherits` hops up; an ordinary same-crate sibling referenced
 /// as a plain view element) — every call site below falls back to its own existing builtin/bare
-/// resolution (`concrete_type_ident`/`composed_construct_path`/`base_trait_path`'s own "is_builtin"
+/// resolution (`dsl_concrete_type_path`/`dsl_construct_path`/`base_trait_path`'s own origin
 /// rule) in that case, unchanged from before this function existed.
 ///
 /// A free function, not a `generate_view`-local closure: needed both inside `generate_view` itself
@@ -13227,7 +13330,7 @@ fn immediate_base_qualified_ext_path(component: &ComponentDef, name: &str) -> Op
 }
 
 /// `immediate_base_qualified_path`, with the base's own `::construct` factory function appended —
-/// the qualified counterpart to `composed_construct_path`'s bare-name fallback. `None` under the
+/// the qualified counterpart to `dsl_construct_path`'s bare-name fallback. `None` under the
 /// same conditions `immediate_base_qualified_path` returns `None` under.
 fn qualified_construct_path(component: &ComponentDef, name: &str) -> Option<TokenStream> {
     let path = immediate_base_qualified_path(component, name)?;
@@ -13360,7 +13463,7 @@ fn emit_wiring(
             // to be a no-op and is never wrong to call after a user action.
             if info.is_none() {
                 let name_ident = format_ident!("{name}");
-                let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+                let props_macro = dsl_props_macro_path(&node.type_path, None);
                 let call = match expr {
                     ViewExpr::Closure { params, body } => {
                         emit_on_event_closure_body(body, params, ctx, &self_mode)
@@ -13400,7 +13503,7 @@ fn emit_wiring(
                         let widget = #widget_binding;
                         #refresh_capture
                         let this = std::rc::Rc::clone(&this);
-                        elwindui::core::#props_macro!(@set widget, #name_ident, move |#(#annotated_params),*| {
+                        #props_macro!(@set widget, #name_ident, move |#(#annotated_params),*| {
                             #call;
                             #refresh_statement
                         });
@@ -13607,7 +13710,7 @@ fn emit_wiring(
             // construction`'s own identical glob-import rationale.
             None => {
                 let name_ident = format_ident!("{name}");
-                let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+                let props_macro = dsl_props_macro_path(&node.type_path, None);
                 out.extend(quote! {
                     {
                         #[allow(unused, clippy::redundant_clone, unused_imports)]
@@ -13615,7 +13718,7 @@ fn emit_wiring(
                             use elwindui::ui::*;
                             let widget = #widget_binding;
                             let this = std::rc::Rc::clone(&this);
-                            elwindui::core::#props_macro!(@set_on_change #name_ident, widget, #on_change);
+                            #props_macro!(@set_on_change #name_ident, widget, #on_change);
                         }
                     }
                 });
@@ -15021,16 +15124,16 @@ fn emit_resync_with_receiver(
             let environment = semantic_brush_resync_environment(node, ctx);
             let is_text_style = info.is_some_and(|info| info.text_style_fields.contains(name));
             let (set, clear) = if info.is_none() && !is_text_style {
-                let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+                let props_macro = dsl_props_macro_path(&node.type_path, None);
                 let name_ident = format_ident!("{name}");
                 (
                     quote! {
-                        elwindui::core::#props_macro!(
+                        #props_macro!(
                             @set #receiver, #name_ident, __elwindui_semantic_brush
                         );
                     },
                     quote! {
-                        elwindui::core::#props_macro!(@clear #receiver, #name_ident);
+                        #props_macro!(@clear #receiver, #name_ident);
                     },
                 )
             } else {
@@ -15096,7 +15199,7 @@ fn emit_resync_with_receiver(
             // resync value would get wrongly borrowed as if it were `String`-shaped). `@set` already
             // carries the right wrapping decision from the `#[prop]` declaration itself — reuse it
             // here instead of re-deriving anything.
-            let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+            let props_macro = dsl_props_macro_path(&node.type_path, None);
             let name_ident = format_ident!("{name}");
             // A bare reference to one of `synthesize_external_base_fields`'s synthesized fields
             // (`ty.contains('!')` — a type-position macro invocation, never a real Rust type
@@ -15122,7 +15225,7 @@ fn emit_resync_with_receiver(
                 let environment = semantic_brush_resync_environment(node, ctx);
                 out.extend(quote! {
                     if let ::std::option::Option::Some(__v) = ::std::option::Option::from(#value) {
-                        elwindui::core::#props_macro!(
+                        #props_macro!(
                             @set_with_environment #receiver, #name_ident, __v, #environment
                         );
                     }
@@ -15130,7 +15233,7 @@ fn emit_resync_with_receiver(
             } else {
                 let environment = semantic_brush_resync_environment(node, ctx);
                 out.extend(quote! {
-                    elwindui::core::#props_macro!(
+                    #props_macro!(
                         @set_with_environment #receiver, #name_ident, #value, #environment
                     );
                 });
@@ -15899,6 +16002,56 @@ mod tests {
             .chain(crate::test_builtin_modules())
             .collect();
         build_symbol_table(&all)
+    }
+
+    #[test]
+    fn qualified_external_paths_use_authored_type_and_defining_crate_macro_paths() {
+        let type_path = "some_alias::widgets::Thing";
+
+        assert_eq!(
+            dsl_props_macro_path(type_path, None).to_string(),
+            "some_alias :: __elwindui_props_Thing"
+        );
+        assert_eq!(
+            dsl_concrete_type_path(type_path, None).to_string(),
+            "some_alias :: widgets :: Thing"
+        );
+        assert_eq!(
+            dsl_ext_path(type_path, None).to_string(),
+            "some_alias :: widgets :: ThingExt"
+        );
+        assert_eq!(
+            dsl_construct_path(type_path, None).to_string(),
+            "some_alias :: widgets :: Thing :: construct"
+        );
+    }
+
+    #[test]
+    fn local_and_builtin_paths_keep_their_existing_resolution_rules() {
+        assert_eq!(
+            dsl_props_macro_path("crate::widgets::Thing", None).to_string(),
+            "crate :: __elwindui_props_Thing"
+        );
+        assert_eq!(
+            dsl_concrete_type_path("crate::widgets::Thing", None).to_string(),
+            "crate :: widgets :: Thing"
+        );
+        assert_eq!(
+            dsl_ext_path("crate::widgets::Thing", None).to_string(),
+            "crate :: widgets :: ThingExt"
+        );
+        assert_eq!(
+            dsl_props_macro_path("TextBlock", None).to_string(),
+            "elwindui :: core :: __elwindui_props_TextBlock"
+        );
+        assert_eq!(
+            dsl_concrete_type_path("TextBlock", None).to_string(),
+            "elwindui :: ui :: TextBlock"
+        );
+        assert_eq!(
+            dsl_ext_path("TextBlock", None).to_string(),
+            "elwindui :: core :: ui :: TextBlockExt"
+        );
     }
 
     fn minimal_component_def(
@@ -16734,6 +16887,39 @@ struct NotepadWindow {
         );
         let generated = generate_module(&module, &table);
         assert_valid_rust("external_base_bare_attribute_forward", &generated);
+    }
+
+    #[test]
+    fn qualified_external_base_bare_attribute_uses_the_external_shape_macro_root() {
+        let module = crate::test_module(&[(
+            Some("external_widgets::ExternalBase"),
+            r#"
+                struct Wrapper {
+                    body: view! {
+                        value: value
+                    },
+                }
+            "#,
+            None,
+        )])
+        .expect("qualified external base source should parse");
+        let table = build_symbol_table(std::slice::from_ref(&module));
+        let info = table
+            .resolve(&module, "Wrapper")
+            .expect("Wrapper should resolve");
+        let (_, value_ty) = info
+            .param_fields
+            .iter()
+            .find(|(name, _)| name == "value")
+            .expect("value should be synthesized from the qualified external base");
+        let compact_value_ty = value_ty.replace(' ', "");
+        assert!(
+            compact_value_ty.contains("external_widgets::__elwindui_props_ExternalBase!")
+                && compact_value_ty.contains("@field_type"),
+            "qualified external base fields must use the defining crate's shape macro root, got `{value_ty}`"
+        );
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("qualified_external_base_shape_macro", &generated);
     }
 
     #[test]

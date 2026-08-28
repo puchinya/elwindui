@@ -2051,6 +2051,28 @@ mod template_view_expression_tests {
             !generated.contains("LayoutExt :: children"),
             "external dynamic hosts must not default to LayoutExt: {generated}"
         );
+
+        let qualified = generate_template_view_expression(
+            r#"
+                external_widgets::ExternalCollectionHost {
+                    if true {
+                        TextBlock { text: "a" }
+                    } else {
+                        TextBlock { text: "b" }
+                    }
+                }
+            "#,
+        )
+        .expect("qualified external dynamic hosts should use the same resolver");
+        let qualified = qualified.to_string();
+        assert!(
+            qualified.contains("external_widgets :: __elwindui_props_ExternalCollectionHost"),
+            "qualified external dynamic hosts must resolve the props macro at the defining crate root: {qualified}"
+        );
+        assert!(
+            qualified.contains("external_widgets :: ExternalCollectionHost"),
+            "qualified external dynamic hosts must retain the authored construction path: {qualified}"
+        );
     }
 
     #[test]

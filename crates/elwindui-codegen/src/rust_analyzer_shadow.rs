@@ -165,7 +165,7 @@ fn parse_type(ty: &str) -> Result<syn::Type, String> {
 /// rust-analyzer's autoderef-based method resolution can still walk to the ancestor's own methods —
 /// `codegen::immediate_base_qualified_path` is reused unchanged for a same-crate user ancestor's own
 /// fully-qualified path (Refs #25); a bare builtin name resolves through the facade re-export path
-/// every other builtin-referencing generated code already uses (`codegen::composed_construct_path`'s
+/// every other builtin-referencing generated code already uses (`codegen::dsl_concrete_type_path`'s
 /// own `elwindui::ui::#ident` convention).
 ///
 /// Every method body is `unreachable!()` — this type is never actually constructed; see this module's
@@ -264,7 +264,7 @@ pub(crate) fn shadow_vis_tokens(visibility: ShadowVisibility) -> TokenStream {
 /// `codegen::immediate_base_qualified_path` unchanged for a same-crate user ancestor written as a
 /// qualified path (Refs #25); falls back to the facade re-export path (`elwindui::ui::#ident`) every
 /// other generated reference to a bare builtin name already uses
-/// (`codegen::composed_construct_path`'s own convention) otherwise.
+/// (`codegen::dsl_concrete_type_path`'s own convention) otherwise.
 fn base_type_path(component: &ComponentDef, base_name: &str) -> TokenStream {
     if let Some(path) = crate::codegen::immediate_base_qualified_path(component, base_name) {
         return path;

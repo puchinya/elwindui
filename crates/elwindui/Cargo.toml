@@ -42,6 +42,10 @@ elwindui-bridge-fixture-backend = { path = "../elwindui-bridge-fixture-backend" 
 # `{ConcreteName}Ext` compatibility alias — needs crate A as a direct dev-dependency here too, not
 # just transitively through the backend crate.
 elwindui-bridge-fixture-iface = { path = "../elwindui-bridge-fixture-iface" }
+# Issue #191: a real external generated-component crate used by downstream qualified-path DSL
+# regressions. Like the other fixtures above, the dev-dependency cycle is Cargo-supported because
+# it never participates in the facade library build itself.
+elwindui-external-component-fixture = { path = "../elwindui-external-component-fixture" }
 
 [features]
 default = []

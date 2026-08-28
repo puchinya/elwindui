@@ -1326,6 +1326,8 @@ fn props_macro_ident(bare_name: &str) -> Ident {
 /// - `#[prop(two_way, text: String)]` — opts into automatic two-way wiring
 /// - `#[prop(semantic_brush, background: Option<Brush>)]` — accepts `BrushStyle` and resolves it
 ///   against the effective Environment before calling the concrete-brush setter
+/// - `#[prop(owned, title: String)]` — the generated component setter accepts the declared owned
+///   value rather than the borrowed `&str` convention used by hand-written builtin setters
 /// - `#[prop(attached, row: i32 = 0)]` — an attached property (`Grid::row`), which a *child* element
 ///   sets on itself to address its parent. Always needs a default value.
 ///
@@ -1355,6 +1357,7 @@ struct PropDecl {
     onetime: bool,
     two_way: bool,
     semantic_brush: bool,
+    owned: bool,
 }
 
 impl Parse for PropDecl {
@@ -1364,6 +1367,7 @@ impl Parse for PropDecl {
         let mut two_way = false;
         let mut attached = false;
         let mut semantic_brush = false;
+        let mut owned = false;
         // Flags come first and are all bare idents; the property itself is the one `name: Type`
         // pair, so "an ident *not* followed by `:`" is unambiguously a flag.
         loop {
@@ -1408,6 +1412,7 @@ impl Parse for PropDecl {
                     onetime,
                     two_way,
                     semantic_brush,
+                    owned,
                 });
             }
             match ident.to_string().as_str() {
@@ -1416,12 +1421,13 @@ impl Parse for PropDecl {
                 "two_way" => two_way = true,
                 "attached" => attached = true,
                 "semantic_brush" => semantic_brush = true,
+                "owned" => owned = true,
                 other => {
                     return Err(syn::Error::new_spanned(
                         &ident,
                         format!(
                             "#[prop]: unknown flag `{other}` — expected `routed`, `onetime`, \
-                             `two_way`, `attached`, `semantic_brush`, or a `name: Type` property \
+                            `two_way`, `attached`, `semantic_brush`, `owned`, or a `name: Type` property \
                              declaration"
                         ),
                     ));
@@ -1787,7 +1793,11 @@ fn build_props_macro(
                 }
             } else {
                 let setter = format_ident!("set_{}", name);
-                let value = wrap_prop_value(&p.ty, quote! { $value });
+                let value = if p.owned {
+                    wrap_owned_prop_value(&p.ty, quote! { $value })
+                } else {
+                    wrap_prop_value(&p.ty, quote! { $value })
+                };
                 quote! {
                     (@set_from $origin:ident, $recv:expr, #name, $value:expr) => {
                         $recv.#setter(#value);
@@ -2850,6 +2860,18 @@ fn wrap_prop_value(ty: &Type, value: TokenStream2) -> TokenStream2 {
         }
     }
     value
+}
+
+/// Generated `#[component]` setters keep owned field types in their public class trait (for
+/// example, `set_title(&self, String)`), whereas hand-written builtin setters historically accept
+/// borrowed strings (`set_text(&self, &str)`). The internal `#[prop(owned, ..)]` declaration
+/// emitted for a generated component carries that one convention difference across the crate
+/// boundary without changing the established builtin conversion rules.
+fn wrap_owned_prop_value(ty: &Type, value: TokenStream2) -> TokenStream2 {
+    if is_string_type(ty) {
+        return quote! { (#value).to_string() };
+    }
+    wrap_prop_value(ty, value)
 }
 
 /// A single-slot content field's real setter (`build_props_macro`'s `@children_into` single-slot
@@ -5054,6 +5076,55 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         eprintln!("=== #[class] impl {class_name} expansion ===\n{out}\n===");
     }
     out
+}
+
+#[cfg(test)]
+mod generated_component_shape_tests {
+    use super::*;
+
+    #[test]
+    fn owned_shape_metadata_preserves_string_and_non_string_setters() {
+        let string_decl: PropDecl =
+            syn::parse_str("owned, title: String").expect("owned String declaration should parse");
+        assert!(string_decl.owned);
+        let string_shape = PropDecls {
+            props: vec![string_decl],
+            ..PropDecls::default()
+        };
+        let string_macro = build_props_macro("GeneratedOwnedString", &string_shape, None);
+        assert!(
+            string_macro.to_string().contains("to_string"),
+            "owned String shape must clone the authored value before calling set_title: {string_macro}"
+        );
+
+        let count_decl: PropDecl = syn::parse_str("owned, count: usize")
+            .expect("owned non-String declaration should parse");
+        assert!(count_decl.owned);
+        let count_shape = PropDecls {
+            props: vec![count_decl],
+            ..PropDecls::default()
+        };
+        let count_macro = build_props_macro("GeneratedOwnedCount", &count_shape, None);
+        assert!(
+            !count_macro.to_string().contains("to_string"),
+            "owned non-String shape must preserve the declared setter value: {count_macro}"
+        );
+
+        let value = quote! { authored_value };
+        assert_eq!(
+            wrap_owned_prop_value(
+                &syn::parse_str::<Type>("String").expect("String type"),
+                value.clone()
+            )
+            .to_string(),
+            "(authored_value) . to_string ()"
+        );
+        assert_eq!(
+            wrap_owned_prop_value(&syn::parse_str::<Type>("usize").expect("usize type"), value)
+                .to_string(),
+            "authored_value"
+        );
+    }
 }
 
 #[cfg(test)]

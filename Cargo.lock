@@ -186,6 +186,7 @@ dependencies = [
  "elwindui-bridge-fixture-iface",
  "elwindui-core",
  "elwindui-environment-key-fixture",
+ "elwindui-external-component-alias-fixture",
  "elwindui-external-component-fixture",
  "elwindui-i18n",
  "elwindui-macros",
@@ -271,6 +272,13 @@ dependencies = [
 
 [[package]]
 name = "elwindui-environment-key-fixture"
+version = "0.1.0"
+dependencies = [
+ "elwindui",
+]
+
+[[package]]
+name = "elwindui-external-component-alias-fixture"
 version = "0.1.0"
 dependencies = [
  "elwindui",

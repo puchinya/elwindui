@@ -45,15 +45,22 @@ Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 
 ## External generated-component DSL prerequisite (#191)
 
-Qualified external generated-component paths in `view!` are implemented on the dedicated
-prerequisite branch. The shared resolver keeps the authored construction/type path and maps the
-defining crate's `#[macro_export]` props shape to its crate root across ordinary/template/dynamic
-lowering, property/content/event/two-way wiring, and resync. The real two-crate downstream fixture
+Qualified external generated-component paths in `view!` are implemented in the open PR #192
+branch. The shared resolver keeps the authored construction/type path and maps the defining
+crate's `#[macro_export]` props shape to its crate root across ordinary/template/dynamic lowering,
+property/content/event/two-way wiring, and resync. Public external shape membership and setter
+types come from `ComponentPublicShape::writable_fields`; source fields only contribute compatible
+attributes. The external construction ABI currently uses a zero-argument constructor followed by
+public setters/content attachment; required constructor parameters are deferred to follow-up Issue
+#193.
+
+The real two-crate downstream fixture
 `crates/elwindui-external-component-fixture` plus
 `crates/elwindui/tests/external_component_library.rs` covers external properties, collection
-content, inherited scalar content, reactive resync, and two-way wiring. Unqualified imported
-external shorthand is not promised. The prerequisite is not merged yet; PR #184 remains dependent
-on it.
+content, inherited scalar content, reactive resync, two-way wiring, template dynamic `if`/`for`,
+nested module paths, and a Cargo alias. Unqualified imported external shorthand is not promised,
+and no defining-crate `pub mod ui` facade is required. The prerequisite is not merged yet; PR #184
+remains dependent on it.
 
 ## Primary gaps
 

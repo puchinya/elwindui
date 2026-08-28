@@ -1100,6 +1100,171 @@ fn rewrite_crate_segment(tokens: TokenStream2) -> TokenStream2 {
     out
 }
 
+/// The framework crate path as it must appear inside an exported `macro_rules!` body. `core_path()`
+/// is correct for code emitted directly at the current expansion site, but its `crate` result would
+/// resolve to the consumer when it is embedded in a macro that is later invoked cross-crate. Rewrite
+/// that one case to `$crate`; an external component crate keeps the proc-macro-crate-resolved
+/// facade path (including a Cargo alias) intact.
+fn exported_framework_path() -> TokenStream2 {
+    rewrite_crate_segment(core_path())
+}
+
+fn is_elwindui_core_crate() -> bool {
+    use proc_macro_crate::{FoundCrate, crate_name};
+    matches!(crate_name("elwindui-core"), Ok(FoundCrate::Itself))
+}
+
+/// Generated component extension traits are re-exported at the defining crate root. The framework
+/// itself is the one existing exception: its class traits live below `elwindui-core::ui`, so its
+/// exported shape macros retain `$crate::ui::<Name>Ext`. This keeps generated component libraries
+/// independent of a compatibility `pub mod ui` while preserving the established core layout.
+fn exported_own_ext_path(ext_ident: &Ident) -> TokenStream2 {
+    use proc_macro_crate::{FoundCrate, crate_name};
+    match crate_name("elwindui-core") {
+        Ok(FoundCrate::Itself) => quote! { $crate::ui::#ext_ident },
+        _ => quote! { $crate::#ext_ident },
+    }
+}
+
+/// Rewrite a trait path embedded in an exported dynamic-item type. Bare generated-component
+/// extension traits use the defining crate-root ABI; framework `UIElementExt` uses the stable
+/// framework facade; explicitly qualified paths remain authored paths, with only a defining-crate
+/// `crate::` prefix converted to `$crate` for macro expansion.
+fn exported_ext_trait_path(path: &syn::Path, framework_path: &TokenStream2) -> TokenStream2 {
+    let Some(last) = path.segments.last() else {
+        return quote! { #path };
+    };
+    let name = last.ident.to_string();
+    if path.segments.len() == 1 && name == "UIElementExt" {
+        return quote! { #framework_path::ui::UIElementExt };
+    }
+    if path.segments.len() == 1 && name.ends_with("Ext") {
+        return exported_own_ext_path(&last.ident);
+    }
+    if path.segments.first().is_some_and(|segment| {
+        matches!(
+            segment.ident.to_string().as_str(),
+            "crate" | "self" | "super"
+        )
+    }) {
+        return rewrite_crate_segment(quote! { #path });
+    }
+    quote! { #path }
+}
+
+/// Find a concrete item type nested below `Vec`/`Rc`/`ListExt` wrappers. A generated component's
+/// collection can be declared as `Vec<Rc<ExternalItem>>`; unlike a trait-object declaration it has
+/// no `dyn` node for the old implementation to inspect, but its final type segment still gives the
+/// stable `{Name}Ext` item trait required by `DynamicChildSlot`.
+fn concrete_content_item_path(ty: &Type) -> Option<&syn::Path> {
+    match ty {
+        Type::Path(path) => {
+            let segment = path.path.segments.last()?;
+            match &segment.arguments {
+                syn::PathArguments::AngleBracketed(arguments) => {
+                    arguments.args.iter().find_map(|arg| match arg {
+                        syn::GenericArgument::Type(inner) => concrete_content_item_path(inner),
+                        _ => None,
+                    })
+                }
+                syn::PathArguments::None => Some(&path.path),
+                _ => None,
+            }
+        }
+        Type::Reference(reference) => concrete_content_item_path(&reference.elem),
+        _ => None,
+    }
+}
+
+fn concrete_content_item_ext_path(
+    path: &syn::Path,
+    _framework_path: &TokenStream2,
+) -> TokenStream2 {
+    let Some(last) = path.segments.last() else {
+        return quote! { #path };
+    };
+    let ext_ident = format_ident!("{}Ext", last.ident);
+    let local_path = path.segments.len() == 1
+        || path.segments.first().is_some_and(|segment| {
+            matches!(
+                segment.ident.to_string().as_str(),
+                "crate" | "self" | "super"
+            )
+        });
+    if local_path {
+        return exported_own_ext_path(&ext_ident);
+    }
+    let mut external_path = path.clone();
+    if let Some(last) = external_path.segments.last_mut() {
+        last.ident = ext_ident;
+    }
+    quote! { #external_path }
+}
+
+/// The concrete item type stored by a collection-shaped generated component property. Unlike
+/// [`content_item_dyn_type`], this intentionally preserves `ExternalProbeItem` in
+/// `Vec<Rc<ExternalProbeItem>>`: a generated component's `Vec` setter cannot accept an erased
+/// `Rc<dyn ExternalProbeItemExt>` without a runtime downcast. The dynamic slot therefore uses the
+/// exact concrete item type for `Vec` properties, while `ListExt`/`UIElementCollection` retain
+/// their existing trait-object item types.
+fn content_item_type(ty: &Type, framework_path: &TokenStream2) -> TokenStream2 {
+    if quote! { #ty }.to_string().contains("UIElementCollection") {
+        return quote! { dyn #framework_path::ui::UIElementExt };
+    }
+
+    fn collection_item(ty: &Type) -> Option<&Type> {
+        let Type::Path(path) = ty else { return None };
+        let segment = path.path.segments.last()?;
+        let is_collection = matches!(segment.ident.to_string().as_str(), "Vec" | "ListExt");
+        if !is_collection {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return None;
+        };
+        arguments.args.iter().find_map(|argument| match argument {
+            syn::GenericArgument::Type(inner) => Some(inner),
+            _ => None,
+        })
+    }
+
+    fn rc_item(ty: &Type) -> &Type {
+        let Type::Path(path) = ty else { return ty };
+        let Some(segment) = path.path.segments.last() else {
+            return ty;
+        };
+        if segment.ident != "Rc" {
+            return ty;
+        }
+        let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return ty;
+        };
+        arguments
+            .args
+            .iter()
+            .find_map(|argument| match argument {
+                syn::GenericArgument::Type(inner) => Some(inner),
+                _ => None,
+            })
+            .unwrap_or(ty)
+    }
+
+    let Some(item) = collection_item(ty).map(rc_item) else {
+        return content_item_dyn_type(ty, framework_path);
+    };
+    if let Type::TraitObject(trait_object) = item {
+        let bounds = trait_object.bounds.iter().map(|bound| match bound {
+            syn::TypeParamBound::Trait(trait_bound) => {
+                exported_ext_trait_path(&trait_bound.path, framework_path)
+            }
+            _ => rewrite_crate_segment(quote! { #bound }),
+        });
+        quote! { dyn #(#bounds)+* }
+    } else {
+        rewrite_crate_segment(quote! { #item })
+    }
+}
+
 /// The `dyn TraitExt` element type of a content-collection field's declared type — backs
 /// `content_item_dyn_entry`'s `@content_item_dyn` arm. Two shapes, both already used across every
 /// real content-collection property (`elwindui-core::ui`'s own `#[prop(..)]` declarations):
@@ -1119,9 +1284,9 @@ fn rewrite_crate_segment(tokens: TokenStream2) -> TokenStream2 {
 /// whichever crate eventually asks `@content_item_dyn`, so a `crate::`-relative path (as spelled
 /// in the declaring class's own `#[prop(..)]`, resolving against `elwindui-core`) needs `$crate::`
 /// once embedded here.
-fn content_item_dyn_type(ty: &Type) -> TokenStream2 {
+fn content_item_dyn_type(ty: &Type, framework_path: &TokenStream2) -> TokenStream2 {
     if quote! { #ty }.to_string().contains("UIElementCollection") {
-        return quote! { dyn $crate::ui::UIElementExt };
+        return quote! { dyn #framework_path::ui::UIElementExt };
     }
     fn find_trait_object(ty: &Type) -> Option<&syn::TypeTraitObject> {
         match ty {
@@ -1141,18 +1306,27 @@ fn content_item_dyn_type(ty: &Type) -> TokenStream2 {
     }
     match find_trait_object(ty) {
         Some(to) => {
-            let bounds = &to.bounds;
-            let rewritten = rewrite_crate_segment(quote! { #bounds });
-            quote! { dyn #rewritten }
+            let bounds = to.bounds.iter().map(|bound| match bound {
+                syn::TypeParamBound::Trait(trait_bound) => {
+                    exported_ext_trait_path(&trait_bound.path, framework_path)
+                }
+                _ => rewrite_crate_segment(quote! { #bound }),
+            });
+            quote! { dyn #(#bounds)+* }
         }
-        // No `dyn`-wrapped element type found (shouldn't normally happen for a real dynamic-
-        // child-eligible content field) — fall back to the bare declared type itself, `dyn`-
-        // wrapped, so a genuinely wrong declaration still fails to compile with a specific error
-        // rather than this function panicking blind.
-        None => {
-            let rewritten = rewrite_crate_segment(quote! { #ty });
-            quote! { dyn #rewritten }
-        }
+        None => concrete_content_item_path(ty).map_or_else(
+            || {
+                // No item type was recoverable (shouldn't normally happen for a real dynamic-child
+                // eligible content field) — retain the old invalid shape so a genuinely wrong
+                // declaration still fails with a concrete compiler diagnostic.
+                let rewritten = rewrite_crate_segment(quote! { #ty });
+                quote! { dyn #rewritten }
+            },
+            |item_path| {
+                let ext_path = concrete_content_item_ext_path(item_path, framework_path);
+                quote! { dyn #ext_path }
+            },
+        ),
     }
 }
 
@@ -1682,9 +1856,11 @@ fn build_props_macro(
     bare_name: &str,
     shape: &PropDecls,
     parent: Option<(&str, &Type)>,
+    core_shape: bool,
 ) -> TokenStream2 {
     let macro_ident = props_macro_ident(bare_name);
     let bare_ident = format_ident!("{bare_name}");
+    let framework_path = exported_framework_path();
 
     // Only plain scalar properties and `#[routed]` callbacks take part in the `@set` protocol. The
     // rest each need their own emission shape and are deliberately left without an arm here rather
@@ -1785,7 +1961,7 @@ fn build_props_macro(
         .map(|p| {
             let name = &p.name;
             if p.routed {
-                let handler = routed_handler_from_bare_callable(&p.ty);
+                let handler = routed_handler_from_bare_callable(&p.ty, &framework_path);
                 quote! {
                     (@set_from $origin:ident, $recv:expr, #name, $value:expr) => {
                         $crate::#macro_ident!(@routed_from $origin, $recv, #name, #handler);
@@ -1820,15 +1996,15 @@ fn build_props_macro(
             if p.semantic_brush {
                 quote! {
                     (@set_with_environment_from $origin:ident, $recv:expr, #name, $value:expr, $environment:expr) => {
-                        match ::core::convert::Into::<$crate::theme::BrushStyle>::into($value)
+                        match ::core::convert::Into::<#framework_path::theme::BrushStyle>::into($value)
                             .resolve($environment)
                         {
-                            $crate::theme::ResolvedValue::Value(__elwindui_semantic_brush) => {
+                            #framework_path::theme::ResolvedValue::Value(__elwindui_semantic_brush) => {
                                 $crate::#macro_ident!(
                                     @set_from $origin, $recv, #name, __elwindui_semantic_brush
                                 );
                             }
-                            $crate::theme::ResolvedValue::PlatformDefault => {
+                            #framework_path::theme::ResolvedValue::PlatformDefault => {
                                 $crate::#macro_ident!(@clear_from $origin, $recv, #name);
                             }
                         }
@@ -1868,19 +2044,19 @@ fn build_props_macro(
             if *semantic_brush {
                 quote! {
                     (@set_with_environment_from $origin:ident, $recv:expr, #name, $value:expr, $environment:expr) => {
-                        match ::core::convert::Into::<$crate::theme::BrushStyle>::into($value)
+                        match ::core::convert::Into::<#framework_path::theme::BrushStyle>::into($value)
                             .resolve($environment)
                         {
-                            $crate::theme::ResolvedValue::Value(__elwindui_semantic_brush) => {
-                                $crate::ui::UIElementExt::as_text_style_owner(&*($recv))
+                            #framework_path::theme::ResolvedValue::Value(__elwindui_semantic_brush) => {
+                                #framework_path::ui::UIElementExt::as_text_style_owner(&*($recv))
                                     .expect(concat!(
                                         "`", stringify!(#name), "` is declared by #[text_style], \
                                          but the resolved node has no TextStyleOwner"
                                     ))
                                     .#setter(::core::option::Option::Some(__elwindui_semantic_brush));
                             }
-                            $crate::theme::ResolvedValue::PlatformDefault => {
-                                $crate::ui::UIElementExt::as_text_style_owner(&*($recv))
+                            #framework_path::theme::ResolvedValue::PlatformDefault => {
+                                #framework_path::ui::UIElementExt::as_text_style_owner(&*($recv))
                                     .expect(concat!(
                                         "`", stringify!(#name), "` is declared by #[text_style], \
                                          but the resolved node has no TextStyleOwner"
@@ -1894,7 +2070,7 @@ fn build_props_macro(
             } else {
                 quote! {
                     (@set_with_environment_from $origin:ident, $recv:expr, #name, $value:expr, $environment:expr) => {
-                        $crate::ui::UIElementExt::as_text_style_owner(&*($recv))
+                        #framework_path::ui::UIElementExt::as_text_style_owner(&*($recv))
                             .expect(concat!(
                                 "`", stringify!(#name), "` is declared by #[text_style], but the \
                                  resolved node has no TextStyleOwner"
@@ -2028,6 +2204,7 @@ fn build_props_macro(
         .map(|p| {
             let name = &p.name;
             let ext_ident = format_ident!("{}Ext", bare_name);
+            let ext_import = core_shape.then(|| quote! { use $crate::ui::#ext_ident as _; });
             let setter = format_ident!("set_{}", name);
             let body = match attach_kind(&p.ty) {
                 // A live collection (`UIElementCollection`, `ListExt<T>`): append through the
@@ -2035,14 +2212,14 @@ fn build_props_macro(
                 // use, rather than replacing the whole collection.
                 AttachKind::Collection => quote! {
                     $( {
-                        use $crate::ui::#ext_ident as _;
+                        #ext_import
                         $recv.#name().add($child);
                     } )*
                 },
                 // A `Vec<T>` property is replaced wholesale by its setter (`TabView`'s `children`).
                 AttachKind::VecProperty => quote! {
                     {
-                        use $crate::ui::#ext_ident as _;
+                        #ext_import
                         $recv.#setter(::std::vec![$($child),*]);
                     }
                 },
@@ -2061,7 +2238,7 @@ fn build_props_macro(
                 quote! {
                     (@children_into $origin:ident, #name, $recv:expr, [$child:expr]) => {
                         {
-                            use $crate::ui::#ext_ident as _;
+                            #ext_import
                             $recv.#setter(#child);
                         }
                     };
@@ -2085,17 +2262,18 @@ fn build_props_macro(
         .map(|p| {
             let name = &p.name;
             let ext_ident = format_ident!("{}Ext", bare_name);
+            let ext_import = core_shape.then(|| quote! { use $crate::ui::#ext_ident as _; });
             let setter = format_ident!("set_{}", name);
             let body = match attach_kind(&p.ty) {
                 AttachKind::Collection => quote! {
                     $( {
-                        use $crate::ui::#ext_ident as _;
+                        #ext_import
                         $recv.#name().add($child);
                     } )*
                 },
                 AttachKind::VecProperty => quote! {
                     {
-                        use $crate::ui::#ext_ident as _;
+                        #ext_import
                         $recv.#setter(::std::vec![$($child),*]);
                     }
                 },
@@ -2111,7 +2289,7 @@ fn build_props_macro(
                 quote! {
                     (@children_erased_into $origin:ident, #name, $recv:expr, [$child:expr]) => {
                         {
-                            use $crate::ui::#ext_ident as _;
+                            #ext_import
                             $recv.#setter($child);
                         }
                     };
@@ -2153,7 +2331,7 @@ fn build_props_macro(
             let name = &p.name;
             let selected = match attach_kind(&p.ty) {
                 AttachKind::Collection | AttachKind::VecProperty => {
-                    quote! { $crate::ui::DynamicChildSlot<$item> }
+                    quote! { #framework_path::ui::DynamicChildSlot<$item> }
                 }
                 AttachKind::SingleSlot => quote! { () },
             };
@@ -2216,6 +2394,30 @@ fn build_props_macro(
         }
     });
 
+    // `@content_item_type` preserves a concrete `Vec<Rc<T>>` item type for generated component
+    // hosts. Unlike `@content_item_dyn`, this is intentionally not erased to `dyn TExt`: the
+    // generated component's public Vec setter stores the concrete `Rc<T>` and cannot accept an
+    // erased value without a runtime downcast. Framework collection shapes still return their
+    // established trait-object item type through `content_item_type` below.
+    let content_item_type_entry = shape.content_field().map(|content| {
+        quote! {
+            (@content_item_type) => {
+                $crate::#macro_ident!(@content_item_type_into #bare_ident, #content)
+            };
+        }
+    });
+
+    // `@content_dynamic_host` selects the live host expression used by a dynamic region. A
+    // generated Vec-backed component implements `DynamicChildHost<T>` on itself; framework
+    // collection properties instead expose the existing live collection through their getter.
+    let content_dynamic_host_entry = shape.content_field().map(|content| {
+        quote! {
+            (@content_dynamic_host $recv:expr) => {
+                $crate::#macro_ident!(@content_dynamic_host_into #bare_ident, #content, $recv)
+            };
+        }
+    });
+
     // `@content_field_get $recv:expr` calls whichever getter `#[content(..)]` names directly on
     // `$recv` (`Dropdown`'s `items()`, `TabView`'s `children()`, ...) — the shape-macro counterpart
     // `elwindui-codegen`'s `dynamic_region_refresh_method` needs for a *cross-crate* builtin's list-
@@ -2239,9 +2441,49 @@ fn build_props_macro(
         .iter()
         .map(|p| {
             let name = &p.name;
-            let dyn_ty = content_item_dyn_type(&p.ty);
+            let dyn_ty = content_item_dyn_type(&p.ty, &framework_path);
             quote! {
                 (@content_item_dyn_into $origin:ident, #name) => { #dyn_ty };
+            }
+        })
+        .collect();
+    let content_item_type_into_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .map(|p| {
+            let name = &p.name;
+            let item_ty = content_item_type(&p.ty, &framework_path);
+            quote! {
+                (@content_item_type_into $origin:ident, #name) => { #item_ty };
+            }
+        })
+        .collect();
+
+    // A dynamic region needs the actual collection host, not merely its getter: generated
+    // components backed by `Vec<Rc<T>>` expose a framework-owned `DynamicChildHost<T>` adapter on
+    // the component itself, while `ListExt`/`UIElementCollection` fields already return the live
+    // host object from their getter. This query keeps that distinction in the defining class
+    // shape instead of making the consumer guess from an external field type.
+    let content_dynamic_host_into_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .map(|p| {
+            let name = &p.name;
+            let host = match attach_kind(&p.ty) {
+                AttachKind::VecProperty => quote! { $recv },
+                AttachKind::Collection => quote! { $recv.#name() },
+                AttachKind::SingleSlot => quote! {
+                    compile_error!(concat!(
+                        "`",
+                        stringify!($origin),
+                        "` has scalar content; a dynamic collection host is not available"
+                    ));
+                },
+            };
+            quote! {
+                (@content_dynamic_host_into $origin:ident, #name, $recv:expr) => {
+                    #host
+                };
             }
         })
         .collect();
@@ -2565,6 +2807,74 @@ fn build_props_macro(
         },
     };
 
+    let content_item_type_fallback = match parent {
+        Some((parent_bare, parent_ty)) => {
+            let parent_macro =
+                inherit_macro_self_ref_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
+            quote! {
+                (@content_item_type) => {
+                    #parent_macro!(@content_item_type)
+                };
+                (@content_item_type_into $origin:ident, $name:ident) => {
+                    #parent_macro!(@content_item_type_into $origin, $name)
+                };
+            }
+        }
+        None => quote! {
+            (@content_item_type) => {
+                compile_error!(concat!(
+                    "`",
+                    #bare_name,
+                    "` (or any of its ancestors) declares no content-collection property to hold \
+                     a dynamic `for`/`if`/`match` region's children"
+                ))
+            };
+            (@content_item_type_into $origin:ident, $name:ident) => {
+                compile_error!(concat!(
+                    "`",
+                    stringify!($origin),
+                    "`: neither it nor any ancestor declares a `",
+                    stringify!($name),
+                    "` property to hold a dynamic `for`/`if`/`match` region's children"
+                ))
+            };
+        },
+    };
+
+    let content_dynamic_host_fallback = match parent {
+        Some((parent_bare, parent_ty)) => {
+            let parent_macro =
+                inherit_macro_self_ref_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
+            quote! {
+                (@content_dynamic_host $recv:expr) => {
+                    #parent_macro!(@content_dynamic_host $recv)
+                };
+                (@content_dynamic_host_into $origin:ident, $name:ident, $recv:expr) => {
+                    #parent_macro!(@content_dynamic_host_into $origin, $name, $recv)
+                };
+            }
+        }
+        None => quote! {
+            (@content_dynamic_host $recv:expr) => {
+                compile_error!(concat!(
+                    "`",
+                    #bare_name,
+                    "` (or any of its ancestors) declares no content-collection property to hold \
+                     a dynamic `for`/`if`/`match` region's children"
+                ))
+            };
+            (@content_dynamic_host_into $origin:ident, $name:ident, $recv:expr) => {
+                compile_error!(concat!(
+                    "`",
+                    stringify!($origin),
+                    "`: neither it nor any ancestor declares a `",
+                    stringify!($name),
+                    "` property to hold a dynamic `for`/`if`/`match` region's children"
+                ))
+            };
+        },
+    };
+
     // The probes themselves, emitted in item position next to the class.
     let mut probes: Vec<TokenStream2> = Vec::new();
     // Collision probe: only a class that *has* an ancestor emits any — a root class has nothing to
@@ -2645,8 +2955,14 @@ fn build_props_macro(
             #content_item_dyn_entry
             #(#content_item_dyn_into_arms)*
             #content_item_dyn_fallback
+            #content_item_type_entry
+            #(#content_item_type_into_arms)*
+            #content_item_type_fallback
             #content_field_get_entry
             #content_field_get_fallback
+            #content_dynamic_host_entry
+            #(#content_dynamic_host_into_arms)*
+            #content_dynamic_host_fallback
         }
         #(#probes)*
     }
@@ -2675,7 +2991,7 @@ fn build_props_macro(
 /// Both leave the payload parameter's own type unannotated, relying on `@routed_from`'s own
 /// `register_routed_handler::<Payload>` turbofish to pin it down (verified: this inference reaches
 /// through an unannotated closure parameter even across the `Box<dyn Fn>` coercion).
-fn routed_handler_from_bare_callable(ty: &Type) -> TokenStream2 {
+fn routed_handler_from_bare_callable(ty: &Type, framework_path: &TokenStream2) -> TokenStream2 {
     let one_param = matches!(ty, Type::BareFn(f) if f.inputs.len() == 1);
     // `$value` is evaluated exactly once, into `__handler`, *before* the outer `move` closure --
     // not re-spliced as source text directly into the outer closure's body. Splicing `$value`
@@ -2687,7 +3003,7 @@ fn routed_handler_from_bare_callable(ty: &Type) -> TokenStream2 {
         quote! {
             {
                 let __handler = $value;
-                Box::new(move |__payload, _args: &$crate::input::RoutedEventArgs| {
+                Box::new(move |__payload, _args: &#framework_path::input::RoutedEventArgs| {
                     (__handler)(*__payload);
                 })
             }
@@ -2696,7 +3012,7 @@ fn routed_handler_from_bare_callable(ty: &Type) -> TokenStream2 {
         quote! {
             {
                 let __handler = $value;
-                Box::new(move |_payload, _args: &$crate::input::RoutedEventArgs| {
+                Box::new(move |_payload, _args: &#framework_path::input::RoutedEventArgs| {
                     (__handler)();
                 })
             }
@@ -2866,12 +3182,14 @@ fn wrap_prop_value(ty: &Type, value: TokenStream2) -> TokenStream2 {
 /// example, `set_title(&self, String)`), whereas hand-written builtin setters historically accept
 /// borrowed strings (`set_text(&self, &str)`). The internal `#[prop(owned, ..)]` declaration
 /// emitted for a generated component carries that one convention difference across the crate
-/// boundary without changing the established builtin conversion rules.
+/// boundary. Its type is already the actual setter parameter selected by `ComponentPublicShape`,
+/// so it must not inherit the builtin-oriented `wrap_prop_value` conversions for `Vec`, `Option`,
+/// brushes, or trait-object content.
 fn wrap_owned_prop_value(ty: &Type, value: TokenStream2) -> TokenStream2 {
     if is_string_type(ty) {
         return quote! { (#value).to_string() };
     }
-    wrap_prop_value(ty, value)
+    value
 }
 
 /// A single-slot content field's real setter (`build_props_macro`'s `@children_into` single-slot
@@ -3504,6 +3822,7 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
             &class_name.to_string(),
             &prop_decls,
             parent.as_ref().map(|(name, ty)| (name.as_str(), *ty)),
+            is_elwindui_core_crate(),
         )
     });
 
@@ -3682,6 +4001,7 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
             &bare_name,
             &prop_decls,
             parent.as_ref().map(|(name, ty)| (name.as_str(), *ty)),
+            is_elwindui_core_crate(),
         )
     });
 
@@ -5091,7 +5411,7 @@ mod generated_component_shape_tests {
             props: vec![string_decl],
             ..PropDecls::default()
         };
-        let string_macro = build_props_macro("GeneratedOwnedString", &string_shape, None);
+        let string_macro = build_props_macro("GeneratedOwnedString", &string_shape, None, false);
         assert!(
             string_macro.to_string().contains("to_string"),
             "owned String shape must clone the authored value before calling set_title: {string_macro}"
@@ -5104,7 +5424,7 @@ mod generated_component_shape_tests {
             props: vec![count_decl],
             ..PropDecls::default()
         };
-        let count_macro = build_props_macro("GeneratedOwnedCount", &count_shape, None);
+        let count_macro = build_props_macro("GeneratedOwnedCount", &count_shape, None, false);
         assert!(
             !count_macro.to_string().contains("to_string"),
             "owned non-String shape must preserve the declared setter value: {count_macro}"

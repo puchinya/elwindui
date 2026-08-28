@@ -240,6 +240,34 @@ pub trait ListExt<T: ?Sized> {
     fn to_vec(&self) -> Vec<Rc<T>>;
 }
 
+/// The mutation surface a [`DynamicChildSlot`] needs from a generated component's content
+/// collection. Existing framework list implementations use [`ListExt`] directly; generated
+/// components may instead expose an ordinary `Vec<Rc<T>>` property and implement this small
+/// framework-owned adapter by forwarding each operation through their generated storage.
+///
+/// Keeping this boundary in core avoids requiring a component library to manufacture a fake
+/// `ui` namespace or to implement the foreign [`ListExt`] trait for the foreign `Vec` type. The
+/// blanket implementation preserves the existing `ListExt` path unchanged.
+pub trait DynamicChildHost<T: ?Sized> {
+    fn insert(&self, index: usize, item: Rc<T>);
+    fn remove(&self, item: &Rc<T>) -> bool;
+    fn remove_at(&self, index: usize) -> Rc<T>;
+}
+
+impl<T: ?Sized, H: ListExt<T> + ?Sized> DynamicChildHost<T> for H {
+    fn insert(&self, index: usize, item: Rc<T>) {
+        ListExt::insert(self, index, item);
+    }
+
+    fn remove(&self, item: &Rc<T>) -> bool {
+        ListExt::remove(self, item)
+    }
+
+    fn remove_at(&self, index: usize) -> Rc<T> {
+        ListExt::remove_at(self, index)
+    }
+}
+
 /// Backing storage for a [`ListExt`] implementation: an ordered `Rc<T>` list with identity
 /// (`Rc::ptr_eq`) removal, and nothing else.
 ///
@@ -397,9 +425,9 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
             .sum()
     }
 
-    pub fn replace_rc_items<U: 'static>(
+    pub fn replace_rc_items<U: 'static, H: DynamicChildHost<T> + ?Sized>(
         &self,
-        host: &dyn ListExt<T>,
+        host: &H,
         start: usize,
         items: &[Rc<U>],
         render: impl Fn(&Rc<U>) -> DynamicChild<T>,
@@ -426,9 +454,9 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
     /// Rebuilds only this slot for collections that do not provide stable `Rc` identity. Unlike
     /// `replace_rc_items`, no item instance is retained across calls; static siblings and other
     /// dynamic slots remain untouched.
-    pub fn replace_items<U>(
+    pub fn replace_items<U, H: DynamicChildHost<T> + ?Sized>(
         &self,
-        host: &dyn ListExt<T>,
+        host: &H,
         start: usize,
         items: impl IntoIterator<Item = U>,
         render: impl Fn(&U) -> DynamicChild<T>,
@@ -440,7 +468,12 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
         self.replace_at(host, start, Vec::new(), items);
     }
 
-    pub fn replace_children(&self, host: &dyn ListExt<T>, start: usize, children: Vec<Rc<T>>) {
+    pub fn replace_children<H: DynamicChildHost<T> + ?Sized>(
+        &self,
+        host: &H,
+        start: usize,
+        children: Vec<Rc<T>>,
+    ) {
         self.replace_at(
             host,
             start,
@@ -463,9 +496,9 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
         }
     }
 
-    fn replace_at(
+    fn replace_at<H: DynamicChildHost<T> + ?Sized>(
         &self,
-        host: &dyn ListExt<T>,
+        host: &H,
         start: usize,
         keys: Vec<usize>,
         items: Vec<Rc<DynamicChild<T>>>,

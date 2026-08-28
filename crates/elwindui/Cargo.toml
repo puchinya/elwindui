@@ -46,6 +46,9 @@ elwindui-bridge-fixture-iface = { path = "../elwindui-bridge-fixture-iface" }
 # regressions. Like the other fixtures above, the dev-dependency cycle is Cargo-supported because
 # it never participates in the facade library build itself.
 elwindui-external-component-fixture = { path = "../elwindui-external-component-fixture" }
+# The alias is intentional coverage for the external props-macro ABI: the macro path uses the
+# first authored path segment, which may be a Cargo dependency alias rather than the package name.
+external_component_fixture_alias = { package = "elwindui-external-component-alias-fixture", path = "../elwindui-external-component-alias-fixture" }
 
 [features]
 default = []

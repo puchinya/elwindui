@@ -5849,15 +5849,20 @@ fn generate_view(
                     // (bare value, for `Self`'s own `base` field) instead of `new()` (`Rc<Self>`).
                     None => {
                         let type_path = dsl_concrete_type_path(&node.type_path, None);
+                        let ext_path = dsl_ext_path(&node.type_path, None);
                         let sets = emit_external_attribute_sets(node, &ctx, from, table);
                         construct_stmts.extend(quote! {
                             #[allow(unused_imports)]
                             use elwindui::ui::*;
+                            #[allow(unused_imports)]
+                            use #ext_path as _;
                             let #binding = #type_path::construct();
                         });
                         child_construct_stmts.extend(quote! {
                             #[allow(unused_imports)]
                             use elwindui::ui::*;
+                            #[allow(unused_imports)]
+                            use #ext_path as _;
                             let #binding = &self.base;
                             #sets
                         });
@@ -6175,12 +6180,11 @@ fn generate_view(
                     );
                     // The getter `#[content(..)]` names, not always literally `children` (`Dropdown`'s
                     // is `items`, `Menu`'s is `items`) — a local `TypeInfo` names it directly.
-                    let field = info
-                        .content_field
-                        .as_deref()
-                        .expect("collection content must name a field");
-                    let field_ident = format_ident!("{field}");
-                    let host = quote! { #parent_receiver.#field_ident() };
+                    let host = dynamic_collection_host_for_info(
+                        info,
+                        parent_receiver.clone(),
+                        parent_is_self,
+                    );
                     emit_dynamic_node_refresh(&plan, node, &host, &item_ext, &ctx, from, table)
                 }
                 Some(EffectiveContentShape::Scalar) => scalar_body,
@@ -6197,9 +6201,13 @@ fn generate_view(
                         table,
                         props_macro_path.clone(),
                     );
-                    let host = quote! {
-                        #props_macro_path!(@content_field_get #parent_receiver)
-                    };
+                    let host = dynamic_collection_host_query_for_shape(
+                        &parent.type_path,
+                        parent_info,
+                        props_macro_path.clone(),
+                        parent_receiver.clone(),
+                        parent_is_self,
+                    );
                     let collection_body =
                         emit_dynamic_node_refresh(&plan, node, &host, &item_ext, &ctx, from, table);
                     quote! {
@@ -6746,17 +6754,28 @@ fn generate_view(
     // component internals rather than writable external class properties.
     let generated_class_prop_decls: Vec<TokenStream> =
         if is_shape_composition || is_inherited_view_composition {
-            source_component
-                .fields
+            // `ComponentPublicShape::writable_fields` is the single authority for both membership and
+            // setter parameter type. In particular, a deferred `Option<T>` field appears here as `T`,
+            // while required params, computed fields, and private state do not appear as public shape
+            // declarations at all. Join back to the source field only for declaration attributes whose
+            // semantics still matter to the exported class macro (`two_way`, `routed`, etc.).
+            let public_shape =
+                crate::component_frontend::component_public_shape(source_component, Some(view));
+            public_shape
+                .writable_fields
                 .iter()
-                .filter(|field| {
-                    field.kind == FieldKind::Prop
-                        && !(field.initializer.is_none() && field.name.starts_with("on_"))
-                })
-                .map(|field| {
-                    let name = format_ident!("{}", field.name);
-                    let ty: syn::Type = syn::parse_str(&field.ty)
-                        .expect("component property type must parse for class declaration");
+                .filter_map(|(field_name, setter_ty, visibility)| {
+                    if *visibility != crate::component_frontend::ShadowVisibility::Public {
+                        return None;
+                    }
+                    let field = source_component
+                        .fields
+                        .iter()
+                        .find(|field| field.name == *field_name)
+                        .expect("component public shape field must exist in its source component");
+                    let name = format_ident!("{}", field_name);
+                    let ty: syn::Type = syn::parse_str(setter_ty)
+                        .expect("component setter type must parse for class declaration");
                     let mut flags: Vec<TokenStream> = field
                         .attrs
                         .iter()
@@ -6769,7 +6788,7 @@ fn generate_view(
                         })
                         .collect();
                     flags.insert(0, quote! { owned });
-                    quote! { #[prop(#(#flags,)* #name: #ty)] }
+                    Some(quote! { #[prop(#(#flags,)* #name: #ty)] })
                 })
                 .collect()
         } else {
@@ -6780,6 +6799,57 @@ fn generate_view(
             let field = format_ident!("{}", field);
             quote! { #[content(#field)] }
         })
+    } else {
+        None
+    };
+
+    // A generated component whose public content shape is `Vec<Rc<T>>` needs a live mutation host
+    // for dynamic `if`/`for`/`match` regions. Its exported getter returns the typed Vec value (the
+    // ABI promised to downstream DSL users), so it cannot double as the framework's `ListExt`
+    // host. Keep the adapter on the generated component itself and mutate only the backing
+    // `RefCell<Vec<_>>`; going through the public setter here would re-enter the component's own
+    // resync cascade while `DynamicChildSlot` is already reconciling that same range. Framework
+    // builtins do not receive this impl: their backend-owned getters already expose a live
+    // `ListExt` host.
+    let generated_dynamic_host_impl = if is_shape_composition || is_inherited_view_composition {
+        source_component
+            .content_field
+            .as_ref()
+            .and_then(|content| {
+                let field = source_component
+                    .fields
+                    .iter()
+                    .find(|field| field.name == content.as_str())?;
+                let item_ty = vec_content_item_type(&field.ty)?;
+                Some((format_ident!("{content}"), item_ty))
+            })
+            .map(|(field, item_ty)| {
+                quote! {
+                    impl elwindui::core::ui::DynamicChildHost<#item_ty> for #target {
+                        fn insert(&self, index: usize, item: std::rc::Rc<#item_ty>) {
+                            let mut items = self.#field.borrow_mut();
+                            let index = index.min(items.len());
+                            items.insert(index, item);
+                        }
+
+                        fn remove(&self, item: &std::rc::Rc<#item_ty>) -> bool {
+                            let mut items = self.#field.borrow_mut();
+                            let Some(index) = items
+                                .iter()
+                                .position(|candidate| std::rc::Rc::ptr_eq(candidate, item))
+                            else {
+                                return false;
+                            };
+                            items.remove(index);
+                            true
+                        }
+
+                        fn remove_at(&self, index: usize) -> std::rc::Rc<#item_ty> {
+                            self.#field.borrow_mut().remove(index)
+                        }
+                    }
+                }
+            })
     } else {
         None
     };
@@ -7287,6 +7357,7 @@ fn generate_view(
 
             #component_observable_impl
             #template_property_impls
+            #generated_dynamic_host_impl
         }
     } else {
         let mount_helper = quote! {
@@ -7435,6 +7506,7 @@ fn generate_view(
 
             #component_observable_impl
             #template_property_impls
+            #generated_dynamic_host_impl
         }
     }
 }
@@ -8136,12 +8208,8 @@ fn emit_template_dynamic_regions(
                         table,
                         props,
                     );
-                    let field = info
-                        .content_field
-                        .as_deref()
-                        .expect("collection content must name a field");
-                    let field_ident = format_ident!("{field}");
-                    let host = quote! { #parent_receiver.#field_ident() };
+                    let host =
+                        dynamic_collection_host_for_info(info, parent_receiver.clone(), false);
                     emit_dynamic_node_refresh(plan, node, &host, &item_ext, ctx, from, table)
                 }
                 Some(EffectiveContentShape::Scalar) => scalar_body,
@@ -8153,7 +8221,13 @@ fn emit_template_dynamic_regions(
                         table,
                         props.clone(),
                     );
-                    let host = quote! { #props!(@content_field_get #parent_receiver) };
+                    let host = dynamic_collection_host_query_for_shape(
+                        &parent.type_path,
+                        parent_info,
+                        props.clone(),
+                        parent_receiver.clone(),
+                        false,
+                    );
                     let collection =
                         emit_dynamic_node_refresh(plan, node, &host, &item_ext, ctx, from, table);
                     quote! { #props!(@content_shape { #scalar_body }, { #collection }); }
@@ -9117,6 +9191,7 @@ fn emit_for_item_wiring(
             if info.is_none() {
                 let name_ident = format_ident!("{name}");
                 let props_macro = dsl_props_macro_path(&node.type_path, None);
+                let ext_path = dsl_ext_path(&node.type_path, None);
                 let call = match expr {
                     ViewExpr::Closure { params, body } => {
                         emit_on_event_closure_body(body, params, ctx, &self_mode)
@@ -9141,6 +9216,8 @@ fn emit_for_item_wiring(
                     {
                         #[allow(unused_imports)]
                         use elwindui::ui::*;
+                        #[allow(unused_imports)]
+                        use #ext_path as _;
                         let widget = #widget_binding;
                         let __elwindui_for_item_this = std::rc::Rc::clone(&__elwindui_for_item_this);
                         #props_macro!(@set widget, #name_ident, move |#(#annotated_params),*| {
@@ -9435,6 +9512,130 @@ fn dynamic_collection_item_trait_ty(
     dynamic_collection_item_trait_for_type(&parent.type_path, from, table)
 }
 
+/// Returns the concrete item type stored by a generated component's `Vec<Rc<T>>` content field.
+/// This is deliberately parsed from the declaration rather than inferred from a type name: an
+/// external component's exported shape carries the same information through its
+/// `@content_item_type` macro query, while a local generated component still has its source field
+/// type available in `TypeInfo`.
+fn vec_content_item_type(ty: &str) -> Option<TokenStream> {
+    let parsed = syn::parse_str::<syn::Type>(ty).ok()?;
+    let syn::Type::Path(path) = parsed else {
+        return None;
+    };
+    let collection = path.path.segments.last()?;
+    if collection.ident != "Vec" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &collection.arguments else {
+        return None;
+    };
+    let item = arguments.args.iter().find_map(|argument| match argument {
+        syn::GenericArgument::Type(item) => Some(item),
+        _ => None,
+    })?;
+    let item = match item {
+        syn::Type::Path(path) if path.path.segments.last()?.ident == "Rc" => {
+            let rc = path.path.segments.last()?;
+            let syn::PathArguments::AngleBracketed(arguments) = &rc.arguments else {
+                return None;
+            };
+            arguments.args.iter().find_map(|argument| match argument {
+                syn::GenericArgument::Type(item) => Some(item),
+                _ => None,
+            })?
+        }
+        item => item,
+    };
+    Some(quote! { #item })
+}
+
+fn content_field_type(info: &TypeInfo) -> Option<&str> {
+    let field = info.content_field.as_deref()?;
+    info.field_types
+        .get(field)
+        .or_else(|| info.value_field_types.get(field))
+        .map(String::as_str)
+}
+
+fn content_field_is_vec(info: &TypeInfo) -> bool {
+    content_field_type(info).is_some_and(|ty| vec_content_item_type(ty).is_some())
+}
+
+/// Local generated components with a concrete Vec content property need the exact `T` as their
+/// dynamic slot item type. Builtin class shapes retain their established erased `dyn *Ext` item
+/// type because their backend-owned getter returns a live `ListExt` host rather than the backing
+/// Vec. This distinction is structural and does not depend on a component/control name.
+fn dynamic_collection_item_type_for_info(info: &TypeInfo) -> ItemTraitTokens {
+    if !info.is_builtin {
+        if let Some(item) = content_field_type(info).and_then(vec_content_item_type) {
+            return ItemTraitTokens::External(item);
+        }
+    }
+    ItemTraitTokens::KnownIdent(dynamic_collection_item_trait_for_info(info))
+}
+
+fn dynamic_collection_host_for_info(
+    info: &TypeInfo,
+    receiver: TokenStream,
+    receiver_is_self: bool,
+) -> TokenStream {
+    let field = info
+        .content_field
+        .as_deref()
+        .expect("collection content must name a field");
+    let field_ident = format_ident!("{field}");
+    if !info.is_builtin && content_field_is_vec(info) {
+        if receiver_is_self {
+            quote! { #receiver }
+        } else {
+            quote! { #receiver.as_ref() }
+        }
+    } else {
+        quote! { #receiver.#field_ident() }
+    }
+}
+
+/// Shape-macro queries are needed when a component is outside the consumer's symbol table. A
+/// qualified external generated component exports its concrete Vec item and its generated host
+/// adapter; builtin/unresolved names retain the framework collection query. The first path
+/// segment is the only authority here, matching `dsl_props_macro_path`'s crate-root ABI rule.
+fn dynamic_collection_item_query_for_shape(
+    type_path: &str,
+    info: Option<&TypeInfo>,
+    props_macro: TokenStream,
+) -> TokenStream {
+    match dsl_type_origin(type_path, info) {
+        DslTypeOrigin::ExternalQualified { .. } | DslTypeOrigin::Local => {
+            quote! { #props_macro!(@content_item_type) }
+        }
+        DslTypeOrigin::Builtin | DslTypeOrigin::UnresolvedUnqualified => {
+            quote! { #props_macro!(@content_item_dyn) }
+        }
+    }
+}
+
+fn dynamic_collection_host_query_for_shape(
+    type_path: &str,
+    info: Option<&TypeInfo>,
+    props_macro: TokenStream,
+    receiver: TokenStream,
+    receiver_is_self: bool,
+) -> TokenStream {
+    match dsl_type_origin(type_path, info) {
+        DslTypeOrigin::ExternalQualified { .. } | DslTypeOrigin::Local => {
+            let host_receiver = if receiver_is_self {
+                receiver
+            } else {
+                quote! { #receiver.as_ref() }
+            };
+            quote! { #props_macro!(@content_dynamic_host #host_receiver) }
+        }
+        DslTypeOrigin::Builtin | DslTypeOrigin::UnresolvedUnqualified => {
+            quote! { #props_macro!(@content_field_get #receiver) }
+        }
+    }
+}
+
 /// Resolve the collection item trait for a host type using the same effective-content metadata
 /// boundary as ordinary and template dynamic lowering.  External hosts keep the query in their
 /// exported props macro; local hosts derive the trait from the declared collection item type.
@@ -9458,10 +9659,14 @@ pub(crate) fn dynamic_collection_item_trait_for_type_with_props_macro(
     external_props_macro: TokenStream,
 ) -> ItemTraitTokens {
     let Some(info) = table.resolve(from, type_path) else {
-        return ItemTraitTokens::External(quote! { #external_props_macro!(@content_item_dyn) });
+        return ItemTraitTokens::External(dynamic_collection_item_query_for_shape(
+            type_path,
+            None,
+            external_props_macro,
+        ));
     };
     if effective_content_shape(info) == EffectiveContentShape::Collection {
-        ItemTraitTokens::KnownIdent(dynamic_collection_item_trait_for_info(info))
+        dynamic_collection_item_type_for_info(info)
     } else {
         ItemTraitTokens::External(quote! { #external_props_macro!(@content_item_dyn) })
     }
@@ -9478,10 +9683,14 @@ fn dynamic_collection_item_trait_for_type_with_props_macro_template(
     external_props_macro: TokenStream,
 ) -> ItemTraitTokens {
     let Some(info) = resolve_template_info(from, table, type_path) else {
-        return ItemTraitTokens::External(quote! { #external_props_macro!(@content_item_dyn) });
+        return ItemTraitTokens::External(dynamic_collection_item_query_for_shape(
+            type_path,
+            None,
+            external_props_macro,
+        ));
     };
     if effective_content_shape(info) == EffectiveContentShape::Collection {
-        ItemTraitTokens::KnownIdent(dynamic_collection_item_trait_for_info(info))
+        dynamic_collection_item_type_for_info(info)
     } else {
         ItemTraitTokens::External(quote! { #external_props_macro!(@content_item_dyn) })
     }
@@ -11475,6 +11684,7 @@ fn emit_external_construction(
 ) {
     let binding = &node.binding;
     let type_path = dsl_concrete_type_path(&node.type_path, None);
+    let ext_path = dsl_ext_path(&node.type_path, None);
     let sets = emit_external_attribute_sets(node, ctx, from, table);
     let binding_ts = quote! { #binding };
     // `Grid::row`/`Grid::column`/... — every real builtin now goes through this construction
@@ -11492,6 +11702,8 @@ fn emit_external_construction(
         // specific traits from. Scoped to this block only.
         #[allow(unused_imports)]
         use elwindui::ui::*;
+        #[allow(unused_imports)]
+        use #ext_path as _;
         let #binding = #type_path::new();
         #attached
         #sets
@@ -13464,6 +13676,7 @@ fn emit_wiring(
             if info.is_none() {
                 let name_ident = format_ident!("{name}");
                 let props_macro = dsl_props_macro_path(&node.type_path, None);
+                let ext_path = dsl_ext_path(&node.type_path, None);
                 let call = match expr {
                     ViewExpr::Closure { params, body } => {
                         emit_on_event_closure_body(body, params, ctx, &self_mode)
@@ -13500,6 +13713,8 @@ fn emit_wiring(
                     {
                         #[allow(unused_imports)]
                         use elwindui::ui::*;
+                        #[allow(unused_imports)]
+                        use #ext_path as _;
                         let widget = #widget_binding;
                         #refresh_capture
                         let this = std::rc::Rc::clone(&this);
@@ -13711,11 +13926,13 @@ fn emit_wiring(
             None => {
                 let name_ident = format_ident!("{name}");
                 let props_macro = dsl_props_macro_path(&node.type_path, None);
+                let ext_path = dsl_ext_path(&node.type_path, None);
                 out.extend(quote! {
                     {
                         #[allow(unused, clippy::redundant_clone, unused_imports)]
                         {
                             use elwindui::ui::*;
+                            use #ext_path as _;
                             let widget = #widget_binding;
                             let this = std::rc::Rc::clone(&this);
                             #props_macro!(@set_on_change #name_ident, widget, #on_change);
@@ -15023,9 +15240,19 @@ fn emit_resync_with_receiver(
     // `TypeInfo` this function has no ancestor chain to name specific ones from — same glob-import
     // reasoning as `emit_external_construction`'s own `use elwindui::ui::*;`.
     out.extend(if info.is_none() {
+        let ext_trait_use = if node.type_path == DYNAMIC_CHILD_SLOT_MARKER {
+            TokenStream::new()
+        } else {
+            let ext_path = dsl_ext_path(&node.type_path, info);
+            quote! {
+                #[allow(unused_imports)]
+                use #ext_path as _;
+            }
+        };
         quote! {
             #[allow(unused_imports)]
             use elwindui::ui::*;
+            #ext_trait_use
         }
     } else {
         builtin_trait_use(&node.type_path, info)
@@ -16023,6 +16250,42 @@ mod tests {
         assert_eq!(
             dsl_construct_path(type_path, None).to_string(),
             "some_alias :: widgets :: Thing :: construct"
+        );
+    }
+
+    #[test]
+    fn external_vec_content_uses_concrete_item_and_dynamic_host_queries() {
+        let item = vec_content_item_type("Vec<std::rc::Rc<ExternalProbeItem>>")
+            .expect("Vec<Rc<T>> should expose its concrete item type");
+        assert_eq!(item.to_string(), "ExternalProbeItem");
+        assert!(
+            !item.to_string().contains("dyn Vec"),
+            "a concrete Vec content property must not become an invalid dyn Vec type"
+        );
+
+        let props = quote! { some_alias::__elwindui_props_ExternalCollectionHost };
+        let item_query = dynamic_collection_item_query_for_shape(
+            "some_alias::widgets::ExternalCollectionHost",
+            None,
+            props.clone(),
+        )
+        .to_string();
+        assert!(
+            item_query.contains("@ content_item_type"),
+            "qualified external collection items must use the concrete shape query: {item_query}"
+        );
+
+        let host_query = dynamic_collection_host_query_for_shape(
+            "some_alias::widgets::ExternalCollectionHost",
+            None,
+            props,
+            quote! { parent },
+            false,
+        )
+        .to_string();
+        assert!(
+            host_query.contains("@ content_dynamic_host") && host_query.contains("parent . as_ref"),
+            "qualified external collections must use the generated live host adapter: {host_query}"
         );
     }
 

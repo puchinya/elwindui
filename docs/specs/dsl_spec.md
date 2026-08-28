@@ -143,6 +143,16 @@ qualified pathの最終的なRust型解決と可視性は通常のRust compiler�
 proc macroが任意の`use`先crateを推測して外部componentとして扱うことは保証しない。既存のbuiltinおよび
 unresolved unqualified nameのfallback規則は維持する。
 
+外部生成componentの現行construction ABIは、引数なしの`Type::new()`後に公開property setterと
+`#[content(...)]` attachmentを適用する形である。required constructor parameterを持つ外部componentを
+このDSLが自動的にconstructor引数へ組み立てることはまだ保証しない。required constructor shapeの公開は
+[Issue #193](https://github.com/puchinya/elwindui/issues/193)で扱う。
+
+外部生成componentが`#[content]`に具体的な`Vec<Rc<T>>`を公開する場合、`for`/`if`/`match`のdynamic
+contentはその`T`を保持したtyped slotとして再構成される。getterの返す`Vec`を`ListExt`へ見立てたり、
+`dyn Vec<...>`を生成したりしない。live collectionを公開するframework classは従来のcollection getterを
+使う。いずれも判定はcontent metadataと型shapeに基づき、component名やcrate名の特別扱いは行わない。
+
 ---
 
 ## 3. component と view

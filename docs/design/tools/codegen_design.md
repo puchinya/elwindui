@@ -91,6 +91,24 @@ external componentのconstruction/type/extension-trait pathはauthorが書いた
 `some_alias::widgets::Thing`は、型と`ThingExt`には中間moduleを残し、shape macroには
 `some_alias::__elwindui_props_Thing!`を使う。control名や特定crate名によるdispatch tableは持たない。
 
+外部生成componentの公開shapeは、定義crateが公開した`#[prop]`/`#[content]` metadataから構成される。
+own fieldのwritable membershipとsetter parameter typeは`component_public_shape(...).writable_fields`を
+唯一のsourceとし、source `FieldDef`は`two_way`/`routed`/`semantic_brush`などの属性を結合するためだけに
+使う。生成shapeの内部`#[prop(owned, ..)]`はそのABIを伝送するためのclass-shape metadataであり、実際の
+setter parameterが`String`の場合だけ著者値を`.to_string()`へ変換する。他の型にはbuiltin用のborrow/`into`
+fallbackを適用しない。
+
+`Vec<Rc<T>>`をcontentとして公開する生成componentでは、dynamic `if`/`for`/`match`のslot item typeは
+`T`をそのまま保持し、生成component自身がframework-owned `DynamicChildHost<T>`を実装する。getterが返す
+typed `Vec`を`ListExt`として扱ったり、`dyn Vec<...>`へ変換したりしない。framework classのlive collection
+は従来通りgetterと`ListExt`を使う。このcollection shape queryも同じresolver/props macro protocolから
+得られる。
+
+現行の外部component constructionは`Type::new()`と公開setter/content attachmentを組み合わせるzero-argument
+surfaceに限る。required constructor parameterを持つ外部componentのconstructor ABIは、形状を公開する follow-up
+Issue [#193](https://github.com/puchinya/elwindui/issues/193)へ委譲し、このresolverへ暗黙のconstructor推測を
+追加しない。
+
 この境界はmacro processが外部crateの型metadataをregistryへ再構成するものではなく、pathと公開shape macroを
 rustcへ渡すものである。したがって、外部componentのunqualified imported shorthandを自動的に定義crateへ
 解決する機能は含まれない。

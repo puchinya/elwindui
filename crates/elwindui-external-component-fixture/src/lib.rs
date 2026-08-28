@@ -61,12 +61,20 @@ impl ExternalProbeTabs {
     }
 }
 
-// Generated shape macros address each generated component's extension trait through the defining
-// crate's `ui` namespace. This is a normal public export of the component library, not a facade
-// impersonation: the consumer still imports the real `elwindui` and this fixture independently.
-pub mod ui {
-    pub use super::{
-        ExternalProbeItem, ExternalProbeItemExt, ExternalProbeTabs, ExternalProbeTabsExt,
-    };
-    pub use elwindui::ui::*;
+/// A nested-module component used to prove that the exported props macro stays at the defining
+/// crate root while construction and extension-trait paths retain the authored module path.
+pub mod nested {
+    use super::*;
+
+    #[component(inherits Control)]
+    pub struct NestedExternalProbe {
+        #[prop(default = String::new())]
+        label: String,
+        template: template_view! {
+            TextBlock { text: label }
+        },
+    }
+
+    #[component]
+    impl NestedExternalProbe {}
 }

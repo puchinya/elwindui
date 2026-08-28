@@ -84,6 +84,11 @@ Every class also emits a `__elwindui_props_{Name}!` declarative macro carrying i
   keeps generated storage metadata-driven when the declaring class is outside the codegen crate.
 - `@field_type`/`@field_type_from` — expands, in **type position**, to the real Rust type a declared property was given (`elwindui-codegen`'s `resolve_effective_fields`/`synthesize_external_base_fields`, Refs #90: a consumer component that bare-forwards an inherited attribute value from a genuinely external base — `padding: padding` on `#[elwindui::component(inherits Control)]`, dsl_spec.md §3's `ContentControl` pattern — has no local `TypeInfo` to read `padding`'s declared type from, so the synthesized field's own `FieldDef::ty` is instead the literal text `elwindui::core::__elwindui_props_Control!(@field_type padding)`; `generate_view`'s `syn::parse_str::<syn::Type>` already parses an arbitrary type-position macro invocation as an ordinary `syn::Type::Macro`, so this needs no special casing downstream). Same per-property arm/forwarding/terminal-`compile_error!` shape as `@set`, restricted to the same `takes_set_arm`-eligible property set (a routed/attached/collection-content property has no single settable "value type" a struct field could hold).
 - `@content_item_dyn`/`@content_field_get` — cross-crate queries backing dynamic (`for`/`if`/`match`) region reconciliation against a content-collection field with no local `TypeInfo`.
+- `@content_item_type`/`@content_dynamic_host` — generated-component collection queries. A concrete
+  `Vec<Rc<T>>` preserves `T` as the dynamic slot item type and exposes the generated component's
+  `DynamicChildHost<T>` adapter; it must not be erased into `dyn Vec<..>`. Framework-owned live
+  collections continue to use `@content_item_dyn` and their getter. The distinction is derived from
+  the declared content shape, not from a component or crate name.
 - `@assert_undeclared`/`@assert_declared` — compile-time collision/designation probes, emitted in item position next to the class declaration rather than consulted from a use site.
 
 Only `@set`'s `wrap_prop_value` knows how to shape a value into a declared property's real setter; a bare-forwarded field whose own value already carries that exact shape (rather than the bare/literal shape every ordinary call site supplies) is `elwindui-codegen`'s own responsibility to normalize before calling `@set` — see `emit_resync`/`emit_external_attribute_sets`/`build_component_args`'s own `ty.contains('!')` branches in `codegen.rs`.
@@ -103,8 +108,19 @@ a second property system.
 
 The forwarded surface is deliberately limited to public construction/content metadata. Internal
 `#[computed]`, `#[state]`, and `#[environment]` values do not become writable external properties.
-The external DSL still names the generated component through a qualified Rust path, while the
-`#[macro_export]` shape macro is rooted at the defining crate.
+The external DSL still names the generated component through a qualified Rust path. The generated
+extension trait is imported from that authored type path (including any intermediate module), while
+the `#[macro_export]` shape macro is always rooted at the defining crate; no generated shape assumes
+that the defining crate provides a `pub mod ui` compatibility namespace. The stable framework
+support paths used inside the exported shape remain `elwindui::core::ui::...`.
+
+For source-local own fields, `ComponentPublicShape::writable_fields` is the sole authority for
+whether the external class shape contains a writable property and for the setter parameter type.
+The source `FieldDef` is joined only for declaration attributes such as `two_way`, `routed`, and
+semantic-brush behavior. The internal `#[prop(owned, ..)]` marker preserves generated setter
+conventions: only an actual `String` setter parameter receives `.to_string()`; every other actual
+setter type is passed through unchanged. Required constructor parameters are not synthesized by the
+zero-argument external construction path; that constructor ABI is deferred to follow-up Issue #193.
 
 `owned` is an internal class-shape flag used only when generated component metadata must preserve an
 owned setter convention, for example `#[prop(owned, title: String)]`. It is not recommended

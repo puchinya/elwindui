@@ -166,13 +166,38 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// struct ExternalComputedWriteProbe {
 ///     body: view! {
 ///         elwindui_external_component_fixture::ExternalShapeProbe {
-///             computed_value: "illegal"
+///             computed_value: 7
 ///         }
 ///     },
 /// }
 ///
 /// #[component]
 /// impl ExternalComputedWriteProbe {}
+///
+/// fn main() {}
+/// ```
+///
+/// A computed field also cannot be used as an external two-way target, even when the binding
+/// source has the matching `usize` type:
+///
+/// ```compile_fail
+/// use elwindui::component;
+/// use elwindui::ui::VerticalLayout;
+///
+/// #[component(inherits VerticalLayout)]
+/// struct ExternalComputedTwoWayProbe {
+///     #[prop(default = 0)]
+///     value: usize,
+///
+///     body: view! {
+///         elwindui_external_component_fixture::ExternalShapeProbe {
+///             computed_value <=> value
+///         }
+///     },
+/// }
+///
+/// #[component]
+/// impl ExternalComputedTwoWayProbe {}
 ///
 /// fn main() {}
 /// ```

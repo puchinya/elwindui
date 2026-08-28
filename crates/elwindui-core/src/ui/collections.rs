@@ -240,6 +240,40 @@ pub trait ListExt<T: ?Sized> {
     fn to_vec(&self) -> Vec<Rc<T>>;
 }
 
+/// The mutation surface a [`DynamicChildSlot`] needs from a generated component's content
+/// collection. Existing framework list implementations use [`ListExt`] directly; generated
+/// components may instead expose an ordinary `Vec<Rc<T>>` property and implement this small
+/// framework-owned adapter by forwarding each operation through their generated storage.
+///
+/// Keeping this boundary in core avoids requiring a component library to manufacture a fake
+/// `ui` namespace or to implement the foreign [`ListExt`] trait for the foreign `Vec` type. The
+/// blanket implementation preserves the existing `ListExt` path unchanged.
+pub trait DynamicChildHost<T: ?Sized> {
+    fn insert(&self, index: usize, item: Rc<T>);
+    fn remove(&self, item: &Rc<T>) -> bool;
+    fn remove_at(&self, index: usize) -> Rc<T>;
+
+    /// Publishes one completed dynamic collection mutation after all raw operations have settled.
+    ///
+    /// Generated component hosts override this to dispatch their normal property-change cascade;
+    /// ordinary `ListExt` hosts keep the historical behavior through the no-op default.
+    fn commit_dynamic_update(&self) {}
+}
+
+impl<T: ?Sized, H: ListExt<T> + ?Sized> DynamicChildHost<T> for H {
+    fn insert(&self, index: usize, item: Rc<T>) {
+        ListExt::insert(self, index, item);
+    }
+
+    fn remove(&self, item: &Rc<T>) -> bool {
+        ListExt::remove(self, item)
+    }
+
+    fn remove_at(&self, index: usize) -> Rc<T> {
+        ListExt::remove_at(self, index)
+    }
+}
+
 /// Backing storage for a [`ListExt`] implementation: an ordered `Rc<T>` list with identity
 /// (`Rc::ptr_eq`) removal, and nothing else.
 ///
@@ -397,9 +431,9 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
             .sum()
     }
 
-    pub fn replace_rc_items<U: 'static>(
+    pub fn replace_rc_items<U: 'static, H: DynamicChildHost<T> + ?Sized>(
         &self,
-        host: &dyn ListExt<T>,
+        host: &H,
         start: usize,
         items: &[Rc<U>],
         render: impl Fn(&Rc<U>) -> DynamicChild<T>,
@@ -426,9 +460,9 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
     /// Rebuilds only this slot for collections that do not provide stable `Rc` identity. Unlike
     /// `replace_rc_items`, no item instance is retained across calls; static siblings and other
     /// dynamic slots remain untouched.
-    pub fn replace_items<U>(
+    pub fn replace_items<U, H: DynamicChildHost<T> + ?Sized>(
         &self,
-        host: &dyn ListExt<T>,
+        host: &H,
         start: usize,
         items: impl IntoIterator<Item = U>,
         render: impl Fn(&U) -> DynamicChild<T>,
@@ -440,7 +474,12 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
         self.replace_at(host, start, Vec::new(), items);
     }
 
-    pub fn replace_children(&self, host: &dyn ListExt<T>, start: usize, children: Vec<Rc<T>>) {
+    pub fn replace_children<H: DynamicChildHost<T> + ?Sized>(
+        &self,
+        host: &H,
+        start: usize,
+        children: Vec<Rc<T>>,
+    ) {
         self.replace_at(
             host,
             start,
@@ -463,9 +502,9 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
         }
     }
 
-    fn replace_at(
+    fn replace_at<H: DynamicChildHost<T> + ?Sized>(
         &self,
-        host: &dyn ListExt<T>,
+        host: &H,
         start: usize,
         keys: Vec<usize>,
         items: Vec<Rc<DynamicChild<T>>>,
@@ -480,6 +519,11 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
             .iter()
             .flat_map(|item| item.children().cloned())
             .collect();
+        let host_changed = previous_children.len() != next_children.len()
+            || previous_children
+                .iter()
+                .zip(next_children.iter())
+                .any(|(previous, next)| !Rc::ptr_eq(previous, next));
         let shared = previous_children.len().min(next_children.len());
         for index in 0..shared {
             if !Rc::ptr_eq(&previous_children[index], &next_children[index]) {
@@ -499,8 +543,13 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
         {
             host.insert(start + index, Rc::clone(child));
         }
-        *self.keys.borrow_mut() = keys;
-        *self.items.borrow_mut() = items;
+        {
+            *self.keys.borrow_mut() = keys;
+            *self.items.borrow_mut() = items;
+        }
+        if host_changed {
+            host.commit_dynamic_update();
+        }
     }
 }
 
@@ -694,5 +743,63 @@ mod tests {
             4,
             "the range occupies both grouped children"
         );
+    }
+
+    #[test]
+    fn dynamic_child_slot_commits_only_after_a_concrete_change() {
+        struct CountingHost {
+            items: RefCell<Vec<Rc<String>>>,
+            commits: Cell<usize>,
+        }
+
+        impl DynamicChildHost<String> for CountingHost {
+            fn insert(&self, index: usize, item: Rc<String>) {
+                self.items.borrow_mut().insert(index, item);
+            }
+
+            fn remove(&self, item: &Rc<String>) -> bool {
+                let Some(index) = self
+                    .items
+                    .borrow()
+                    .iter()
+                    .position(|current| Rc::ptr_eq(current, item))
+                else {
+                    return false;
+                };
+                self.items.borrow_mut().remove(index);
+                true
+            }
+
+            fn remove_at(&self, index: usize) -> Rc<String> {
+                self.items.borrow_mut().remove(index)
+            }
+
+            fn commit_dynamic_update(&self) {
+                self.commits.set(self.commits.get() + 1);
+            }
+        }
+
+        let slot = DynamicChildSlot::<String>::default();
+        let host = CountingHost {
+            items: RefCell::new(Vec::new()),
+            commits: Cell::new(0),
+        };
+        let item = Rc::new(String::from("stable"));
+
+        slot.replace_rc_items(&host, 0, &[Rc::clone(&item)], |item| {
+            DynamicChild::new(Rc::clone(item))
+        });
+        assert_eq!(host.commits.get(), 1);
+
+        slot.replace_rc_items(&host, 0, &[Rc::clone(&item)], |_| {
+            panic!("an unchanged concrete sequence must not render or commit")
+        });
+        assert_eq!(host.commits.get(), 1);
+
+        let empty: [Rc<String>; 0] = [];
+        slot.replace_rc_items(&host, 0, &empty, |_| {
+            panic!("an empty replacement has no item to render")
+        });
+        assert_eq!(host.commits.get(), 2);
     }
 }

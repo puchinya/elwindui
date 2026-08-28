@@ -43,6 +43,32 @@ Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 
 `control-template-demo`, `controls-demo`, `font-demo`, `graphics-demo`, `inheritance-demo`, `mascot-demo`, `notepad`, `theme-demo`, and `viewmodel-attr-demo` exercise the implemented public surface. A sample demonstrates usage but is not itself normative evidence.
 
+## External generated-component DSL prerequisite (#191)
+
+Qualified external generated-component paths in `view!` are implemented in the open PR #192
+branch. The shared resolver keeps the authored construction/type path and maps the defining
+crate's `#[macro_export]` props shape to its crate root across ordinary/template/dynamic lowering,
+property/content/event/two-way wiring, and resync. Public external shape membership and setter
+types come from `ComponentPublicShape::writable_fields`; source fields only contribute compatible
+attributes. The external construction ABI currently uses a zero-argument constructor followed by
+public setters/content attachment; required constructor parameters are deferred to follow-up Issue
+#193.
+
+Directly-declared generated `Vec<Rc<T>>` content hosts publish one children change after raw
+dynamic reconciliation, after the slot state is final and all temporary borrows are released.
+Computed/template dependents therefore resync from the final collection. Inherited generated
+`Vec<Rc<T>>` content without a redeclaration does not receive that host forwarding in #192; the
+capability boundary is tracked in follow-up Issue #194, with no fake non-reactive bridge or
+class-wide reactivity redesign.
+
+The real two-crate downstream fixture
+`crates/elwindui-external-component-fixture` plus
+`crates/elwindui/tests/external_component_library.rs` covers external properties, collection
+content, inherited scalar content, reactive resync, two-way wiring, template dynamic `if`/`for`,
+nested module paths, and a Cargo alias. Unqualified imported external shorthand is not promised,
+and no defining-crate `pub mod ui` facade is required. The prerequisite is not merged yet; PR #184
+remains dependent on it.
+
 ## Primary gaps
 
 - GTK4 is a stub and mobile backends have no implementation.

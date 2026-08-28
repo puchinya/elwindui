@@ -76,6 +76,47 @@ subscription/setter、または`#[class]`全体のreactive redesignで補完し�
 
 Rust pathそのものの最終的な名前解決は生成後のrustcへ委譲する。別crateの型情報をmacro process内registryへ複製しない。
 
+#### Qualified external component resolution (#191)
+
+DSL elementの型pathは、各emitterが個別に推測せず、共通のtype-origin resolverで一度だけ分類する。
+分類は`Builtin`、`Local`、`ExternalQualified`、`UnresolvedUnqualified`の4種類である。二つ以上のsegmentを
+持つqualified pathでは、`elwindui`をbuiltin、`crate`/`self`/`super`をlocal、それ以外の最初のsegmentを
+external crateまたはCargo aliasとして扱う。裸のunqualified nameは、同一crateのregistryに存在するときだけ
+local、builtin metadataに一致するときはbuiltin、それ以外は既存のbuiltin fallbackを維持する。
+
+このresolverはordinary view、template view、dynamic/template-dynamic regionのconstruction、props shape
+macro、content shape/item、event/two-way wiring、resync、semantic-brush queryへ共通に適用する。qualified
+external componentのconstruction/type/extension-trait pathはauthorが書いたRust pathを保持し、
+`#[macro_export]`された`__elwindui_props_<Type>!`だけは定義crate rootへ写像する。例えば
+`some_alias::widgets::Thing`は、型と`ThingExt`には中間moduleを残し、shape macroには
+`some_alias::__elwindui_props_Thing!`を使う。control名や特定crate名によるdispatch tableは持たない。
+
+外部生成componentの公開shapeは、定義crateが公開した`#[prop]`/`#[content]` metadataから構成される。
+own fieldのwritable membershipとsetter parameter typeは`component_public_shape(...).writable_fields`を
+唯一のsourceとし、source `FieldDef`は`two_way`/`routed`/`semantic_brush`などの属性を結合するためだけに
+使う。生成shapeの内部`#[prop(owned, ..)]`はそのABIを伝送するためのclass-shape metadataであり、実際の
+setter parameterが`String`の場合だけ著者値を`.to_string()`へ変換する。他の型にはbuiltin用のborrow/`into`
+fallbackを適用しない。
+
+`Vec<Rc<T>>`をcontentとして公開する生成componentでは、dynamic `if`/`for`/`match`のslot item typeは
+`T`をそのまま保持し、生成component自身がframework-owned `DynamicChildHost<T>`を実装する。getterが返す
+typed `Vec`を`ListExt`として扱ったり、`dyn Vec<...>`へ変換したりしない。framework classのlive collection
+は従来通りgetterと`ListExt`を使う。このcollection shape queryも同じresolver/props macro protocolから
+得られる。生成componentのhostはraw insert/removeをreconcile中だけ行い、slot stateのborrowを解放した後に
+commit hookを一度だけ呼ぶ。commit hookは通常のcontent setterと同じdependent recompute/property notification
+helperを使うため、computed/template/on_updateのresyncが一つのchildren変更として伝播する。同一の具体的な
+sequenceには通知しない。content fieldを継承するだけのderived componentにはこのhostをforwardせず、#191/#192
+ではそのdynamic shapeをcompile-time boundaryとして扱う。no-op setter/subscriptionで補わない。
+
+現行の外部component constructionは`Type::new()`と公開setter/content attachmentを組み合わせるzero-argument
+surfaceに限る。required constructor parameterを持つ外部componentのconstructor ABIは、形状を公開する follow-up
+Issue [#193](https://github.com/puchinya/elwindui/issues/193)へ委譲し、このresolverへ暗黙のconstructor推測を
+追加しない。
+
+この境界はmacro processが外部crateの型metadataをregistryへ再構成するものではなく、pathと公開shape macroを
+rustcへ渡すものである。したがって、外部componentのunqualified imported shorthandを自動的に定義crateへ
+解決する機能は含まれない。
+
 ### 3.2a rust-analyzerとの二重展開境界(#146)
 
 3.2のsame-crate registryは、「`cargo build`はクレートごとに新規プロセスでコンパイルし、宣言順に一度だけ展開されれば正しく埋まる」という通常rustcの前提の上でのみ機能する。rust-analyzerはワークスペース全体で1つの永続`proc-macro-srv`を使い、マクロ展開をインクリメンタル・オンデマンドに行うため、ソース上は正しい宣言順であってもregistry参照側が先に評価され、幽霊(ghost) diagnosticsを出すことがある(Component struct/impl pair、Theme→same-crate Environment Key参照が代表例)。

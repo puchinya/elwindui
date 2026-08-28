@@ -121,6 +121,42 @@ if let Some(path) = platform::file_dialog::open().await {
 }
 ```
 
+### 外部componentのqualified path
+
+別crateが公開する生成済みcomponentは、`view!`内でcrate-qualifiedな型pathを使って記述できる:
+
+```rust
+elwindui_custom_controls::CustomTabView {
+    elwindui_custom_controls::CustomTabViewItem { header: "Document" }
+}
+```
+
+この形式では、構築に使うRust型pathはauthorが書いたpathそのものを保持する。生成されたDSL shape macroは
+`#[macro_export]`のRust規則に従い、pathの中間moduleではなく最初のcrate/alias segmentのcrate rootから
+解決する(`some_alias::widgets::Thing`なら
+`some_alias::__elwindui_props_Thing!`)。property、`#[content(...)]`、event、two-way、resync、dynamic
+contentも同じpath-origin判定を使う。生成componentが公開するown `#[prop]`/`#[content]` metadataは
+このcross-crate DSL surfaceに含まれるが、`#[computed]`/`#[state]`/`#[environment]`の内部値は外部構築用の
+writable property shapeにはならない。
+
+qualified pathの最終的なRust型解決と可視性は通常のRust compilerに委譲する。裸のunqualified nameについて、
+proc macroが任意の`use`先crateを推測して外部componentとして扱うことは保証しない。既存のbuiltinおよび
+unresolved unqualified nameのfallback規則は維持する。
+
+外部生成componentの現行construction ABIは、引数なしの`Type::new()`後に公開property setterと
+`#[content(...)]` attachmentを適用する形である。required constructor parameterを持つ外部componentを
+このDSLが自動的にconstructor引数へ組み立てることはまだ保証しない。required constructor shapeの公開は
+[Issue #193](https://github.com/puchinya/elwindui/issues/193)で扱う。
+
+外部生成componentが`#[content]`に具体的な`Vec<Rc<T>>`を公開する場合、`for`/`if`/`match`のdynamic
+contentはその`T`を保持したtyped slotとして再構成される。getterの返す`Vec`を`ListExt`へ見立てたり、
+`dyn Vec<...>`を生成したりしない。live collectionを公開するframework classは従来のcollection getterを
+使う。生成componentが直接宣言したこのcontent shapeには、raw collection操作の完了後に通常のproperty
+notificationを一度だけ発行するdynamic hostが生成される。content fieldを継承するだけのderived component
+にはこのhost forwardingを保証しないため、dynamic contentは静的なcapability boundaryとなる。この制限を
+no-op setter/subscriptionやcomponent名・crate名の特別扱いで回避しない。いずれも判定はcontent metadataと
+型shapeに基づく。この継承境界は[follow-up Issue #194](https://github.com/puchinya/elwindui/issues/194)で扱う。
+
 ---
 
 ## 3. component と view

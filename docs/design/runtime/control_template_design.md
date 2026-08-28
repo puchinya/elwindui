@@ -143,3 +143,14 @@ effective collection getter with `DynamicChildSlot`; this applies equally to
 `Layout` and non-`Layout` collection hosts, including external shapes selected
 through exported props metadata. No dynamic template path assumes
 `LayoutExt::children` merely because a node is nested in a template.
+
+For a generated component that directly declares a `Vec<Rc<T>>` content field,
+the generated `DynamicChildHost<T>` mutates storage only while the slot is
+reconciling, then calls the host's single commit hook after all slot borrows are
+released. The hook shares the generated content setter's post-mutation helper:
+dependent computed fields are recomputed and the content property is published
+once. An unchanged concrete sequence does not publish. A derived component
+that only inherits such a field has no generated forwarding host in #191/#192;
+that inherited shape is intentionally outside this implementation boundary and
+is tracked in [follow-up Issue #194](https://github.com/puchinya/elwindui/issues/194).
+It must not be made to work with a fake notification bridge.

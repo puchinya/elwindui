@@ -88,7 +88,9 @@ Every class also emits a `__elwindui_props_{Name}!` declarative macro carrying i
   `Vec<Rc<T>>` preserves `T` as the dynamic slot item type and exposes the generated component's
   `DynamicChildHost<T>` adapter; it must not be erased into `dyn Vec<..>`. Framework-owned live
   collections continue to use `@content_item_dyn` and their getter. The distinction is derived from
-  the declared content shape, not from a component or crate name.
+  the declared content shape, not from a component or crate name. The generated host is currently
+  emitted for a directly-declared content field; inherited-only generated content host forwarding
+  is a separate capability tracked in follow-up Issue #194.
 - `@assert_undeclared`/`@assert_declared` — compile-time collision/designation probes, emitted in item position next to the class declaration rather than consulted from a use site.
 
 Only `@set`'s `wrap_prop_value` knows how to shape a value into a declared property's real setter; a bare-forwarded field whose own value already carries that exact shape (rather than the bare/literal shape every ordinary call site supplies) is `elwindui-codegen`'s own responsibility to normalize before calling `@set` — see `emit_resync`/`emit_external_attribute_sets`/`build_component_args`'s own `ty.contains('!')` branches in `codegen.rs`.

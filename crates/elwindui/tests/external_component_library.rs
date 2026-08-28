@@ -104,6 +104,22 @@ struct ExternalDynamicForTemplateHost {
 #[component]
 impl ExternalDynamicForTemplateHost {}
 
+#[component(inherits VerticalLayout)]
+struct ExternalShapeHost {
+    #[prop(default = Some(String::from("optional")))]
+    optional_value: Option<String>,
+    body: view! {
+        elwindui_external_component_fixture::ExternalShapeProbe {
+            count: 7
+            optional: optional_value
+            deferred: "deferred"
+        }
+    },
+}
+
+#[component]
+impl ExternalShapeHost {}
+
 #[test]
 fn qualified_external_components_preserve_properties_content_and_resync() {
     let host = ExternalControlsHost::new();
@@ -263,4 +279,94 @@ fn qualified_external_template_dynamic_for_replaces_collection_items() {
     assert_eq!(ExternalProbeItemExt::title(&*replacement[0]), "C");
     assert!(!Rc::ptr_eq(&old, &replacement[0]));
     assert!(replacement.iter().all(|item| !Rc::ptr_eq(item, &old)));
+}
+
+#[test]
+fn qualified_external_shape_preserves_scalar_option_and_deferred_setters() {
+    let host = ExternalShapeHost::new();
+    let probe_root = host
+        .visual_children()
+        .into_iter()
+        .next()
+        .expect("external shape probe is attached");
+    let probe = probe_root
+        .as_any()
+        .downcast_ref::<elwindui_external_component_fixture::ExternalShapeProbe>()
+        .expect("external shape path constructs the fixture component");
+
+    assert_eq!(
+        elwindui_external_component_fixture::ExternalShapeProbeExt::count(probe),
+        7
+    );
+    assert_eq!(
+        elwindui_external_component_fixture::ExternalShapeProbeExt::optional(probe),
+        Some(String::from("optional"))
+    );
+    assert_eq!(
+        elwindui_external_component_fixture::ExternalShapeProbeExt::deferred(probe),
+        Some(String::from("deferred"))
+    );
+    assert_eq!(
+        elwindui_external_component_fixture::ExternalShapeProbeExt::computed_value(probe),
+        7
+    );
+}
+
+#[test]
+fn external_dynamic_reconciliation_publishes_one_children_commit_and_updates_dependents() {
+    let host = ExternalDynamicForTemplateHost::new();
+    let root = host
+        .visual_children()
+        .into_iter()
+        .next()
+        .expect("external dynamic template host has one root");
+    let tabs = root
+        .as_any()
+        .downcast_ref::<ExternalProbeTabs>()
+        .expect("template root is the external collection host");
+
+    let children_commits = Rc::new(std::cell::Cell::new(0));
+    let commits = Rc::clone(&children_commits);
+    let _subscription = tabs.subscribe_property_changed(move |property| {
+        if property == elwindui_external_component_fixture::ExternalProbeTabsProperty::children {
+            commits.set(commits.get() + 1);
+        }
+    });
+
+    assert_eq!(ExternalProbeTabsExt::child_count(tabs), 0);
+    assert_eq!(
+        tabs.visual_children()
+            .into_iter()
+            .next()
+            .expect("external tabs template root is attached")
+            .as_any()
+            .downcast_ref::<elwindui::core::ui::TextBlock>()
+            .expect("external tabs template root is TextBlock")
+            .text
+            .borrow()
+            .as_str(),
+        "0"
+    );
+
+    // This reconciliation performs two raw inserts but publishes one completed children update.
+    host.set_labels(vec![String::from("A"), String::from("B")]);
+    assert_eq!(children_commits.get(), 1);
+    assert_eq!(ExternalProbeTabsExt::child_count(tabs), 2);
+    assert_eq!(
+        tabs.visual_children()
+            .into_iter()
+            .next()
+            .expect("external tabs template root is attached")
+            .as_any()
+            .downcast_ref::<elwindui::core::ui::TextBlock>()
+            .expect("external tabs template root is TextBlock")
+            .text
+            .borrow()
+            .as_str(),
+        "2"
+    );
+
+    host.set_labels(vec![String::from("C")]);
+    assert_eq!(children_commits.get(), 2);
+    assert_eq!(ExternalProbeTabsExt::child_count(tabs), 1);
 }

@@ -102,7 +102,11 @@ fallbackを適用しない。
 `T`をそのまま保持し、生成component自身がframework-owned `DynamicChildHost<T>`を実装する。getterが返す
 typed `Vec`を`ListExt`として扱ったり、`dyn Vec<...>`へ変換したりしない。framework classのlive collection
 は従来通りgetterと`ListExt`を使う。このcollection shape queryも同じresolver/props macro protocolから
-得られる。
+得られる。生成componentのhostはraw insert/removeをreconcile中だけ行い、slot stateのborrowを解放した後に
+commit hookを一度だけ呼ぶ。commit hookは通常のcontent setterと同じdependent recompute/property notification
+helperを使うため、computed/template/on_updateのresyncが一つのchildren変更として伝播する。同一の具体的な
+sequenceには通知しない。content fieldを継承するだけのderived componentにはこのhostをforwardせず、#191/#192
+ではそのdynamic shapeをcompile-time boundaryとして扱う。no-op setter/subscriptionで補わない。
 
 現行の外部component constructionは`Type::new()`と公開setter/content attachmentを組み合わせるzero-argument
 surfaceに限る。required constructor parameterを持つ外部componentのconstructor ABIは、形状を公開する follow-up

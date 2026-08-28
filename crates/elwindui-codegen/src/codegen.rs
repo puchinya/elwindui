@@ -4969,15 +4969,36 @@ fn generate_view(
             // dispatch path.
             .is_some_and(|info| info.composed_shape.as_deref() == Some("Control"))
     {
-        // The bridge's writable capability follows effective field metadata, not the target's
-        // own property-notification enum.  Inherited properties are intentionally absent from
-        // the derived component's local storage/enum because the value lives in `base`, but their
-        // generated base setter is still a real writable template surface.
-        let writable_property_names: HashSet<String> = component
+        // The bridge's writable capability follows the generated public shape and the actual
+        // setter value type, not merely effective `Prop`/`State` membership.  In particular, a
+        // deferred `Option<T>` field has a normal DSL setter taking `T`, while its readable
+        // template-property value remains `Option<T>`; it must not receive a writable
+        // `TemplateProperty` implementation whose `Self::Value` cannot be passed to that setter.
+        // Private state is likewise absent from the external public shape. Inherited generated
+        // properties remain eligible through their real inherited `Prop` field type.
+        let own_writable_property_types: HashMap<String, String> = own_field_shape
+            .writable_fields
+            .iter()
+            .filter(|(_, _, visibility)| {
+                *visibility == crate::component_frontend::ShadowVisibility::Public
+            })
+            .map(|(name, ty, _)| (name.clone(), ty.clone()))
+            .collect();
+        let writable_property_types: HashMap<String, String> = component
             .fields
             .iter()
-            .filter(|field| matches!(field.kind, FieldKind::Prop | FieldKind::State))
-            .map(|field| field.name.clone())
+            .filter_map(|field| {
+                if declared_own_field_names.contains(field.name.as_str()) {
+                    own_writable_property_types
+                        .get(&field.name)
+                        .cloned()
+                        .map(|ty| (field.name.clone(), ty))
+                } else if field.kind == FieldKind::Prop {
+                    Some((field.name.clone(), field.ty.clone()))
+                } else {
+                    None
+                }
+            })
             .collect();
         let notified_property_names: HashSet<String> = component_property_variants
             .iter()
@@ -5048,7 +5069,12 @@ fn generate_view(
                 } else {
                     quote! { self.#getter() }
                 };
-                let setter_available = writable_property_names.contains(&name);
+                let setter_available = writable_property_types
+                    .get(&name)
+                    .and_then(|setter_ty| syn::parse_str::<syn::Type>(setter_ty).ok())
+                    .is_some_and(|setter_ty| {
+                        quote!(#setter_ty).to_string() == quote!(#ty).to_string()
+                    });
                 let setter_body = if setter_available {
                     let setter = format_ident!("set_{name}");
                     if inherited_owner.is_some() {
@@ -5258,6 +5284,46 @@ fn generate_view(
     // from them automatically, so there's no separate signature-only list to maintain here anymore.
     let mut own_class_methods = TokenStream::new();
 
+    // A generated Vec-backed content property has two mutation entry points: its public generated
+    // setter and the raw operations used by `DynamicChildSlot`. Keep their post-mutation behavior
+    // in one helper so both paths recompute the same dependent fields and publish exactly one
+    // property-change event after the collection is coherent.
+    let generated_content_commit_field = source_component.content_field.clone().filter(|content| {
+        component_property_variants
+            .iter()
+            .any(|property| property.to_string() == *content)
+    });
+    let generated_content_commit_method = generated_content_commit_field
+        .as_ref()
+        .map(|content| format_ident!("__commit_{}_changed", content));
+    let generated_content_commit_helper = generated_content_commit_field
+        .as_ref()
+        .zip(generated_content_commit_method.as_ref())
+        .map(|(content, method)| {
+            let property = format_ident!("{content}");
+            let recompute_calls: Vec<TokenStream> = own_dependents_of
+                .get(content)
+                .into_iter()
+                .flatten()
+                .map(|dep| {
+                    let recompute = format_ident!("recompute_{dep}");
+                    let property = format_ident!("{dep}");
+                    quote! {
+                        self.#recompute();
+                        self.on_property_changed(#component_property_enum::#property);
+                    }
+                })
+                .collect();
+            mark_inherent(quote! {
+                #[doc(hidden)]
+                fn #method(&self) {
+                    #(#recompute_calls)*
+                    self.on_property_changed(#component_property_enum::#property);
+                }
+            })
+        })
+        .unwrap_or_default();
+
     let component_property_api = mark_inherent(quote! {
         pub fn subscribe_property_changed(
             &self,
@@ -5391,18 +5457,26 @@ fn generate_view(
         } else {
             quote! { *self.#name.borrow_mut() = value; }
         };
+        let post_mutation = generated_content_commit_field
+            .as_ref()
+            .zip(generated_content_commit_method.as_ref())
+            .filter(|(content, _)| content.as_str() == name.to_string())
+            .map(|(_, method)| quote! { self.#method(); })
+            .unwrap_or_else(|| {
+                quote! { self.on_property_changed(#component_property_enum::#name); }
+            });
         if is_composed {
             own_class_methods.extend(quote! {
                 fn #set_name(&self, value: #ty) {
                     #set_body
-                    self.on_property_changed(#component_property_enum::#name);
+                    #post_mutation
                 }
             });
         } else {
             named_accessors.extend(quote! {
                 pub fn #set_name(&self, value: #ty) {
                     #set_body
-                    self.on_property_changed(#component_property_enum::#name);
+                    #post_mutation
                 }
             });
         }
@@ -5446,13 +5520,23 @@ fn generate_view(
                 }
             })
             .collect();
+        let post_mutation = generated_content_commit_field
+            .as_ref()
+            .zip(generated_content_commit_method.as_ref())
+            .filter(|(content, _)| content.as_str() == name.to_string())
+            .map(|(_, method)| quote! { self.#method(); })
+            .unwrap_or_else(|| {
+                quote! {
+                    #(#recompute_calls)*
+                    self.on_property_changed(#component_property_enum::#name);
+                }
+            });
         if field.kind == FieldKind::State {
             named_accessors.extend(quote! {
                 fn #name(&self) -> #ty { #get_body }
                 fn #set_name(&self, value: #ty) {
                     #set_body
-                    #(#recompute_calls)*
-                    self.on_property_changed(#component_property_enum::#name);
+                    #post_mutation
                 }
             });
         } else if is_composed {
@@ -5460,8 +5544,7 @@ fn generate_view(
                 fn #name(&self) -> #ty { #get_body }
                 fn #set_name(&self, value: #ty) {
                     #set_body
-                    #(#recompute_calls)*
-                    self.on_property_changed(#component_property_enum::#name);
+                    #post_mutation
                 }
             });
         } else {
@@ -5469,8 +5552,7 @@ fn generate_view(
                 pub fn #name(&self) -> #ty { #get_body }
                 pub fn #set_name(&self, value: #ty) {
                     #set_body
-                    #(#recompute_calls)*
-                    self.on_property_changed(#component_property_enum::#name);
+                    #post_mutation
                 }
             });
         }
@@ -6807,10 +6889,11 @@ fn generate_view(
     // for dynamic `if`/`for`/`match` regions. Its exported getter returns the typed Vec value (the
     // ABI promised to downstream DSL users), so it cannot double as the framework's `ListExt`
     // host. Keep the adapter on the generated component itself and mutate only the backing
-    // `RefCell<Vec<_>>`; going through the public setter here would re-enter the component's own
-    // resync cascade while `DynamicChildSlot` is already reconciling that same range. Framework
-    // builtins do not receive this impl: their backend-owned getters already expose a live
-    // `ListExt` host.
+    // `RefCell<Vec<_>>`; going through the public setter for each raw operation would re-enter the
+    // component's own resync cascade while `DynamicChildSlot` is already reconciling that same
+    // range. The final `commit_dynamic_update` hook publishes the normal property-change cascade
+    // once the range is coherent. Framework builtins do not receive this impl: their backend-owned
+    // getters already expose a live `ListExt` host.
     let generated_dynamic_host_impl = if is_shape_composition || is_inherited_view_composition {
         source_component
             .content_field
@@ -6824,6 +6907,16 @@ fn generate_view(
                 Some((format_ident!("{content}"), item_ty))
             })
             .map(|(field, item_ty)| {
+                let commit_dynamic_update = generated_content_commit_method
+                    .as_ref()
+                    .map(|method| {
+                        quote! {
+                            fn commit_dynamic_update(&self) {
+                                self.#method();
+                            }
+                        }
+                    })
+                    .unwrap_or_default();
                 quote! {
                     impl elwindui::core::ui::DynamicChildHost<#item_ty> for #target {
                         fn insert(&self, index: usize, item: std::rc::Rc<#item_ty>) {
@@ -6847,6 +6940,8 @@ fn generate_view(
                         fn remove_at(&self, index: usize) -> std::rc::Rc<#item_ty> {
                             self.#field.borrow_mut().remove(index)
                         }
+
+                        #commit_dynamic_update
                     }
                 }
             })
@@ -7338,6 +7433,7 @@ fn generate_view(
 
                 #own_class_methods
                 #component_property_api
+                #generated_content_commit_helper
                 #resync_method
                 #property_resync_methods
                 #component_property_resync_methods

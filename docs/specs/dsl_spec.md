@@ -151,7 +151,11 @@ unresolved unqualified nameのfallback規則は維持する。
 外部生成componentが`#[content]`に具体的な`Vec<Rc<T>>`を公開する場合、`for`/`if`/`match`のdynamic
 contentはその`T`を保持したtyped slotとして再構成される。getterの返す`Vec`を`ListExt`へ見立てたり、
 `dyn Vec<...>`を生成したりしない。live collectionを公開するframework classは従来のcollection getterを
-使う。いずれも判定はcontent metadataと型shapeに基づき、component名やcrate名の特別扱いは行わない。
+使う。生成componentが直接宣言したこのcontent shapeには、raw collection操作の完了後に通常のproperty
+notificationを一度だけ発行するdynamic hostが生成される。content fieldを継承するだけのderived component
+にはこのhost forwardingを保証しないため、dynamic contentは静的なcapability boundaryとなる。この制限を
+no-op setter/subscriptionやcomponent名・crate名の特別扱いで回避しない。いずれも判定はcontent metadataと
+型shapeに基づく。この継承境界は[follow-up Issue #194](https://github.com/puchinya/elwindui/issues/194)で扱う。
 
 ---
 

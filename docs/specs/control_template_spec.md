@@ -122,6 +122,16 @@ collection-content implementation, not a special template host category, and
 non-`Layout` controls may provide either shape through their `#[content(...)]`
 metadata.
 
+For a generated component that directly declares a `Vec<Rc<T>>` content field,
+the generated dynamic-child host batches the raw collection operations and
+publishes one completed `children` property change after the slot is coherent.
+That notification follows the same computed-property, observer, and template
+resynchronization path as the component's normal setter. Inherited generated
+`Vec<Rc<T>>` content does not acquire a forwarding host in #191/#192; dynamic
+reconciliation for that shape is a compile-time boundary and does not use a
+fake setter or no-op subscription. Framework-class reactive collection support
+is deferred to [follow-up Issue #194](https://github.com/puchinya/elwindui/issues/194).
+
 ## 4. Core API and Environment lookup
 
 The existing typed values remain:

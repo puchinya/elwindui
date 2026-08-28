@@ -155,6 +155,81 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// }
 /// ```
 ///
+/// External generated-component shapes keep their writable surface at the defining crate. A
+/// computed field is readable, but it is not an external construction property:
+///
+/// ```compile_fail
+/// use elwindui::component;
+/// use elwindui::ui::VerticalLayout;
+///
+/// #[component(inherits VerticalLayout)]
+/// struct ExternalComputedWriteProbe {
+///     body: view! {
+///         elwindui_external_component_fixture::ExternalShapeProbe {
+///             computed_value: "illegal"
+///         }
+///     },
+/// }
+///
+/// #[component]
+/// impl ExternalComputedWriteProbe {}
+///
+/// fn main() {}
+/// ```
+///
+/// Private state is likewise not writable through a qualified external component path:
+///
+/// ```compile_fail
+/// use elwindui::component;
+/// use elwindui::ui::VerticalLayout;
+///
+/// #[component(inherits VerticalLayout)]
+/// struct ExternalStateWriteProbe {
+///     body: view! {
+///         elwindui_external_component_fixture::ExternalShapeProbe {
+///             private_state: "illegal"
+///         }
+///     },
+/// }
+///
+/// #[component]
+/// impl ExternalStateWriteProbe {}
+///
+/// fn main() {}
+/// ```
+///
+/// Inherited generated `Vec<Rc<T>>` content is a separate capability boundary: the current
+/// dynamic-child host is generated for content declared directly by the target component. An
+/// inherited external content owner therefore fails statically until that capability is addressed
+/// by [follow-up Issue #194](https://github.com/puchinya/elwindui/issues/194); no non-reactive
+/// forwarding bridge is synthesized:
+///
+/// ```compile_fail
+/// use elwindui::{component, template_view};
+/// use elwindui::ui::Control;
+///
+/// #[component(inherits Control)]
+/// struct InheritedExternalVecContentProbe {
+///     #[prop(default = Vec::new())]
+///     labels: Vec<String>,
+///
+///     template: template_view! {
+///         elwindui_external_component_fixture::DerivedExternalTabs {
+///             for label in labels {
+///                 elwindui_external_component_fixture::ExternalProbeItem {
+///                     title: label
+///                 }
+///             }
+///         }
+///     },
+/// }
+///
+/// #[component]
+/// impl InheritedExternalVecContentProbe {}
+///
+/// fn main() {}
+/// ```
+///
 /// A deferred view (`view! { .. }` written as an attribute value, e.g. `context_popup: view! {
 /// .. }`) may only be assigned to a property declared `ViewTemplate`/`Option<ViewTemplate>` — on a
 /// same-crate `#[elwindui::component]`-declared type this is caught by static DSL validation, but

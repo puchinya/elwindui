@@ -54,6 +54,13 @@ attributes. The external construction ABI currently uses a zero-argument constru
 public setters/content attachment; required constructor parameters are deferred to follow-up Issue
 #193.
 
+Directly-declared generated `Vec<Rc<T>>` content hosts publish one children change after raw
+dynamic reconciliation, after the slot state is final and all temporary borrows are released.
+Computed/template dependents therefore resync from the final collection. Inherited generated
+`Vec<Rc<T>>` content without a redeclaration does not receive that host forwarding in #192; the
+capability boundary is tracked in follow-up Issue #194, with no fake non-reactive bridge or
+class-wide reactivity redesign.
+
 The real two-crate downstream fixture
 `crates/elwindui-external-component-fixture` plus
 `crates/elwindui/tests/external_component_library.rs` covers external properties, collection

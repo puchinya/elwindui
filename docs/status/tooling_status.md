@@ -27,5 +27,10 @@ and resync lowering share this path-origin decision. The real downstream fixture
 collection/scalar content, property resync, two-way wiring, template dynamic `if`/`for`, nested
 module paths, and a Cargo alias. The current zero-argument-plus-setters/content construction ABI
 does not cover required constructor parameters; that work is tracked in follow-up Issue #193.
+Directly-declared generated `Vec<Rc<T>>` content hosts now separate raw slot mutation from one
+post-reconciliation property-change commit, so computed/template dependents observe the final
+collection state. A derived component that only inherits the `#[content]` declaration does not
+receive that generated host forwarding in #192; this capability boundary is tracked in follow-up
+Issue #194 and is not replaced with a fake reactive bridge.
 Unqualified imported shorthand and a defining-crate `pub mod ui` facade are not required. PR #192
 is not merged yet; PR #184 remains dependent on it.

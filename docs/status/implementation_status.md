@@ -74,6 +74,14 @@ defining-crate `pub mod ui` facade is required. PR #192 is merged into the base;
 `Vec<Rc<T>>` content forwarding remains the separate follow-up Issue #194 and is intentionally not
 changed by PR #195.
 
+Current limitation for the approved unique-name scope: generated-component compile-time shape
+identity is basename-based within a crate. Multiple generated components with the same basename in
+different modules are not promised when they participate in shape resolution. This is an ElwindUI
+compile-time ABI/registry limitation, not a fundamental Rust limitation; the path-aware registry and
+#192/#193 shape-ABI redesign is tracked in [follow-up Issue #196](https://github.com/puchinya/elwindui/issues/196).
+This does not make the implemented #193 unique-name local/external, nested-path, Cargo-alias, or
+effective-inheritance scope incomplete.
+
 ## Primary gaps
 
 - GTK4 is a stub and mobile backends have no implementation.

@@ -141,15 +141,11 @@ fn new_macro_accepts_inherited_required_bindable() {
     ));
 }
 
-// AppKit native Window operations must run on the main thread. Keep this as a
-// compile-time consumer check here; the existing native Window integration
-// harness owns the main-thread runtime coverage.
+// Compile/type-shape coverage only. AppKit Window creation is not executed from an ordinary Rust
+// test worker; the codegen semantic expansion test and Windows main-thread test own behavior proof.
 #[allow(dead_code)]
 fn new_macro_constructs_builtin_window_with_named_property() {
-    let window = elwindui::new!(Window(title: "Text"));
-    elwindui::core::ui::WindowExt::show(&*window);
-    elwindui::core::ui::WindowExt::hide(&*window);
-    elwindui::core::ui::WindowExt::close(&*window);
+    let _window = elwindui::new!(Window(title: "Text"));
 }
 
 /// This is intentionally a normal consumer shape: `elwindui` and the external generated

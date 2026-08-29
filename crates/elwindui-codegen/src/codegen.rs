@@ -17719,6 +17719,30 @@ mod tests {
     }
 
     #[test]
+    fn builtin_window_named_title_uses_property_abi() {
+        let target: syn::Path = syn::parse_str("Window").expect("Window path should parse");
+        let generated = generate_new_expression(
+            &target,
+            &[(format_ident!("title"), syn::parse_quote!("Text"))],
+        )
+        .expect("builtin Window construction should generate")
+        .to_string();
+
+        assert!(
+            generated.contains("elwindui :: ui :: Window :: new"),
+            "builtin Window construction must be emitted: {generated}"
+        );
+        assert!(
+            generated.contains("elwindui :: core :: __elwindui_props_Window ! (@ set"),
+            "named Window properties must use the existing property ABI: {generated}"
+        );
+        assert!(
+            generated.contains("title , \"Text\""),
+            "the title named value must be present in the property assignment: {generated}"
+        );
+    }
+
+    #[test]
     fn constructor_abi_has_only_named_property_protocol() {
         let shape = build_effective_constructor_shape(
             &[],

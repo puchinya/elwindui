@@ -148,6 +148,21 @@ writable `Prop`の値だけを受け取り、bare childrenや`children`引数を
 writable `Prop`として存在する場合は、他のPropと同じ初期property ABIで格納する。`view!`のbare childは従来通り
 `@children` protocolで処理し、constructor専用のcontent conversionやcontent argument macroを追加しない。
 
+#### Generated-component basename identity boundary (C1 follow-up)
+
+現在のsame-crate component identityは`same_crate_components()`の
+`(compiling_crate_key(), bare component name)` keyと`registered_component_parts(...)`のbare-name
+lookupに依存する。qualified external shape ABIもbasename-derivedな
+`__elwindui_props_<Type>!`/`__elwindui_ctor_<Type>!`を使うため、異なるRust moduleに同じbasenameの
+generated componentを複数定義した場合のshape resolutionは現時点で保証しない。これはRustの一般的な
+制約ではなく、ElwindUIのcompile-time ABI/registry limitationである。
+
+このpath identity問題はstruct/impl registration、sibling reconstruction、`SymbolTable`、#192の
+property/content shape ABI、#193のconstructor shape ABI、rust-analyzerのpersistent proc-macro server、
+qualified same-crate/cross-crate path、Cargo aliasを一貫して扱う設計が必要であり、
+[follow-up Issue #196](https://github.com/puchinya/elwindui/issues/196)へ延期する。PR #195のfinal review
+remediationでは、#192/#193のhidden ABIやregistryを部分的にmodule-scopedへ変更しない。
+
 ### 3.2a rust-analyzerとの二重展開境界(#146)
 
 3.2のsame-crate registryは、「`cargo build`はクレートごとに新規プロセスでコンパイルし、宣言順に一度だけ展開されれば正しく埋まる」という通常rustcの前提の上でのみ機能する。rust-analyzerはワークスペース全体で1つの永続`proc-macro-srv`を使い、マクロ展開をインクリメンタル・オンデマンドに行うため、ソース上は正しい宣言順であってもregistry参照側が先に評価され、幽霊(ghost) diagnosticsを出すことがある(Component struct/impl pair、Theme→same-crate Environment Key参照が代表例)。

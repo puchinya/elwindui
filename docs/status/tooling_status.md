@@ -39,3 +39,10 @@ receive that generated host forwarding in #192; this capability boundary is trac
 Issue #194 and is not replaced with a fake reactive bridge. Unqualified imported shorthand and a
 defining-crate `pub mod ui` facade are not required. The inherited `Vec<Rc<T>>` content forwarding
 boundary remains follow-up Issue #194; #194 is intentionally outside PR #195.
+
+The current generated-component shape identity is basename-based within a crate: the same-crate
+registry and the hidden #192/#193 shape macros do not yet provide a path-aware identity for distinct
+components with the same basename in different modules. This is a current ElwindUI compile-time
+ABI/registry limitation, not a fundamental Rust limitation, and is tracked from requirements/design
+in [follow-up Issue #196](https://github.com/puchinya/elwindui/issues/196). PR #195 deliberately does
+not partially redesign that registry or either hidden shape ABI.

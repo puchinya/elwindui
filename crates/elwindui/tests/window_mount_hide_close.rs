@@ -199,6 +199,12 @@ fn winui3_show_hide_show_builds_once_and_close_cascades_unmount() {
     UNMOUNT_EVENTS.with(|events| events.borrow_mut().clear());
 
     elwindui::application::run(|| {
+        // A5: prove the builtin named property is applied through the real property ABI on the
+        // backend's application/main thread.
+        let builtin_window = elwindui::new!(Window(title: "Text"));
+        assert_eq!(WindowExt::title(&*builtin_window), "Text");
+        builtin_window.close();
+
         // Part 1: close before show
         let window1: Rc<MountHideCloseWindow> =
             elwindui::new!(MountHideCloseWindow(subtitle: "w1".to_string()));

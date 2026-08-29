@@ -179,6 +179,16 @@ notificationを一度だけ発行するdynamic hostが生成される。content 
 no-op setter/subscriptionやcomponent名・crate名の特別扱いで回避しない。いずれも判定はcontent metadataと
 型shapeに基づく。この継承境界は[follow-up Issue #194](https://github.com/puchinya/elwindui/issues/194)で扱う。
 
+#### 生成componentのbasename identity境界（Issue #193 / C1 follow-up）
+
+現在のElwindUIでは、同一crate内のgenerated component registryとhidden shape ABIのcompile-time
+identityがcomponentのRust basenameに基づく。そのため、異なるmoduleに同じbasenameを持つgenerated
+componentを複数定義し、それらをshape resolutionへ参加させることは現時点では保証しない。これはRustの
+一般的な制約ではなく、ElwindUIの現在のcompile-time ABI/registry limitationであり、path-awareな
+generated-component identityとshape ABIの設計を[follow-up Issue #196](https://github.com/puchinya/elwindui/issues/196)
+でrequirements/designから扱う。unique-nameのsame-crate component、qualified external component、nested
+module path、Cargo alias、およびeffective inheritanceの既存の保証はこの制限によって弱められない。
+
 ---
 
 ## 3. component と view

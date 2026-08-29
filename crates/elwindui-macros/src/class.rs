@@ -1856,7 +1856,6 @@ fn build_props_macro(
     bare_name: &str,
     shape: &PropDecls,
     parent: Option<(&str, &Type)>,
-    content_type: Option<&Type>,
     core_shape: bool,
 ) -> TokenStream2 {
     let macro_ident = props_macro_ident(bare_name);
@@ -2254,82 +2253,6 @@ fn build_props_macro(
         })
         .collect();
 
-    // A generated component may keep a required `#[content]` field out of `#[prop(..)]` because
-    // it is immutable after construction.  `content_type` is supplied by `expand_struct` from the
-    // generated class field in that case; ordinary builtin content fields continue to use the
-    // declaration already present in `shape.props`.  This is the constructor-only counterpart to
-    // `@children`: it materializes the exact declared value before `Self` exists, while the normal
-    // protocol above remains the post-construction attach path.
-    let constructor_content_prop = shape.content_field().and_then(|content| {
-        shape
-            .props
-            .iter()
-            .find(|prop| prop.name == *content)
-            .map(|prop| (&prop.name, &prop.ty))
-            .or_else(|| content_type.map(|ty| (content, ty)))
-    });
-    let constructor_content_value_into_arms = constructor_content_prop
-        .map(|(name, ty)| {
-            let body = match attach_kind(ty) {
-                AttachKind::Collection => quote! {
-                    compile_error!(concat!(
-                        "`",
-                        stringify!($origin),
-                        "` uses a live collection content property that cannot be supplied as a constructor value"
-                    ));
-                },
-                AttachKind::VecProperty => quote! {
-                    ::std::vec![$($child),*]
-                },
-                AttachKind::SingleSlot => {
-                    let child = single_slot_child_value(ty, quote! { $child });
-                    quote! {
-                        #child
-                    }
-                }
-            };
-            let arity_error = match attach_kind(ty) {
-                AttachKind::SingleSlot => quote! {
-                    compile_error!(concat!(
-                        "`",
-                        stringify!($origin),
-                        "` requires exactly one constructor content child"
-                    ));
-                },
-                AttachKind::Collection => quote! {
-                    compile_error!(concat!(
-                        "`",
-                        stringify!($origin),
-                        " uses a live collection content property that cannot be supplied as a constructor value"
-                    ));
-                },
-                AttachKind::VecProperty => quote! {
-                    ::std::vec![$($child),*]
-                },
-            };
-            let one_child_arm = matches!(attach_kind(ty), AttachKind::SingleSlot).then(|| {
-                quote! {
-                    (@constructor_content_value_into $origin:ident, #name, [$child:expr]) => {
-                        #body
-                    };
-                }
-            });
-            quote! {
-                #one_child_arm
-                (@constructor_content_value_into $origin:ident, #name, [$($child:expr),* $(,)?]) => {
-                    #arity_error
-                };
-            }
-        })
-        .unwrap_or_default();
-    let constructor_content_declared_arm = constructor_content_prop
-        .filter(|(name, _)| !shape.props.iter().any(|prop| prop.name == **name))
-        .map(|(name, _)| {
-            quote! {
-                (@assert_declared $origin:ident, #name) => {};
-            }
-        });
-
     // Already-erased children cannot call the normal single-slot conversion helper (`Self: Sized`)
     // through a trait object. This parallel hidden protocol keeps the same metadata-selected
     // destination while assigning an existing `Rc<dyn TraitExt>` directly.
@@ -2426,13 +2349,6 @@ fn build_props_macro(
         quote! {
             (@children $recv:expr, [$($child:expr),* $(,)?]) => {
                 $crate::#macro_ident!(@children_into #bare_ident, #content, $recv, [$($child),*]);
-            };
-        }
-    });
-    let constructor_content_value_entry = shape.content_field().map(|content| {
-        quote! {
-            (@constructor_content_value [$($child:expr),* $(,)?]) => {
-                $crate::#macro_ident!(@constructor_content_value_into #bare_ident, #content, [$($child),*]);
             };
         }
     });
@@ -2595,7 +2511,6 @@ fn build_props_macro(
         assert_fallback,
         declared_fallback,
         children_fallback,
-        constructor_content_value_fallback,
         children_erased_fallback,
         content_shape_fallback,
         content_slot_type_fallback,
@@ -2650,14 +2565,6 @@ fn build_props_macro(
                     };
                     (@children_into $origin:ident, $name:ident, $recv:expr, [$($child:expr),* $(,)?]) => {
                         #parent_macro!(@children_into $origin, $name, $recv, [$($child),*]);
-                    };
-                },
-                quote! {
-                    (@constructor_content_value [$($child:expr),* $(,)?]) => {
-                        #parent_macro!(@constructor_content_value [$($child),*]);
-                    };
-                    (@constructor_content_value_into $origin:ident, $name:ident, [$($child:expr),* $(,)?]) => {
-                        #parent_macro!(@constructor_content_value_into $origin, $name, [$($child),*]);
                     };
                 },
                 quote! {
@@ -2780,22 +2687,6 @@ fn build_props_macro(
                         "`: neither it nor any ancestor declares a `",
                         stringify!($name),
                         "` property"
-                    ));
-                };
-            },
-            quote! {
-                (@constructor_content_value [$($child:expr),* $(,)?]) => {
-                    compile_error!(
-                        "cannot resolve the effective #[content(..)] constructor value for this element"
-                    );
-                };
-                (@constructor_content_value_into $origin:ident, $name:ident, [$($child:expr),* $(,)?]) => {
-                    compile_error!(concat!(
-                        "#[content(",
-                        stringify!($name),
-                        ")] on `",
-                        stringify!($origin),
-                        " has no declared constructor content type"
                     ));
                 };
             },
@@ -3048,14 +2939,10 @@ fn build_props_macro(
             #(#assert_arms)*
             #assert_fallback
             #(#declared_arms)*
-            #constructor_content_declared_arm
             #declared_fallback
             #children_entry
             #(#children_into_arms)*
             #children_fallback
-            #constructor_content_value_entry
-            #constructor_content_value_into_arms
-            #constructor_content_value_fallback
             #children_erased_entry
             #(#children_erased_into_arms)*
             #children_erased_fallback
@@ -3931,20 +3818,10 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
             .inherits
             .as_ref()
             .and_then(|ty| last_segment_name(ty).map(|name| (name, ty)));
-        let content_type = prop_decls.content_field().and_then(|content| {
-            existing_fields.iter().find_map(|field| {
-                field
-                    .ident
-                    .as_ref()
-                    .is_some_and(|ident| ident == content)
-                    .then_some(&field.ty)
-            })
-        });
         build_props_macro(
             &class_name.to_string(),
             &prop_decls,
             parent.as_ref().map(|(name, ty)| (name.as_str(), *ty)),
-            content_type,
             is_elwindui_core_crate(),
         )
     });
@@ -4124,7 +4001,6 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
             &bare_name,
             &prop_decls,
             parent.as_ref().map(|(name, ty)| (name.as_str(), *ty)),
-            None,
             is_elwindui_core_crate(),
         )
     });
@@ -5535,8 +5411,7 @@ mod generated_component_shape_tests {
             props: vec![string_decl],
             ..PropDecls::default()
         };
-        let string_macro =
-            build_props_macro("GeneratedOwnedString", &string_shape, None, None, false);
+        let string_macro = build_props_macro("GeneratedOwnedString", &string_shape, None, false);
         assert!(
             string_macro.to_string().contains("to_string"),
             "owned String shape must clone the authored value before calling set_title: {string_macro}"
@@ -5549,7 +5424,7 @@ mod generated_component_shape_tests {
             props: vec![count_decl],
             ..PropDecls::default()
         };
-        let count_macro = build_props_macro("GeneratedOwnedCount", &count_shape, None, None, false);
+        let count_macro = build_props_macro("GeneratedOwnedCount", &count_shape, None, false);
         assert!(
             !count_macro.to_string().contains("to_string"),
             "owned non-String shape must preserve the declared setter value: {count_macro}"

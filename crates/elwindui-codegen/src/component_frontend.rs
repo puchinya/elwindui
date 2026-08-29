@@ -320,7 +320,7 @@ pub(crate) enum ShadowVisibility {
 /// Issue #146 / PR #169 review remediation (A2): the source-local constructor/getter/setter surface
 /// one `#[elwindui::component]` struct's own fields alone (no ancestor/effective-field resolution,
 /// no cross-item lookup) determine — shared by `codegen::generate_component`'s own view-less real
-/// generation, the own-field constructor/deferred portion of `codegen::generate_view`'s real
+/// generation, the own-field constructor/defaulted portion of `codegen::generate_view`'s real
 /// `has_view` generation, and every rust-analyzer Component struct shadow
 /// (`rust_analyzer_shadow::build_component_struct_shadow`), so all three can never independently
 /// drift. See [`component_public_shape`]'s own doc comment for the exact per-`FieldKind` rule.

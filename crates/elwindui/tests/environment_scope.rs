@@ -268,7 +268,7 @@ fn an_if_directly_inside_environment_scope_is_scope_aware() {
         .set::<EnvironmentScopeLocale>("en-US".to_string());
     IF_IN_SCOPE_LOCALE.with(|c| *c.borrow_mut() = String::new());
 
-    let _parent = EnvironmentScopeIfParent::new(true);
+    let _parent = elwindui::new!(EnvironmentScopeIfParent(show_child: true));
 
     assert_eq!(
         IF_IN_SCOPE_LOCALE.with(|c| c.borrow().clone()),

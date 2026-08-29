@@ -132,7 +132,7 @@ impl OnUpdateProbe {}
 fn on_update_fires_after_prop_change_but_not_on_initial_construction() {
     ON_UPDATE_COUNT.with(|c| c.set(0));
 
-    let probe = OnUpdateProbe::new("hello".to_string());
+    let probe = elwindui::new!(OnUpdateProbe(label: "hello".to_string()));
     assert_eq!(
         ON_UPDATE_COUNT.with(|c| c.get()),
         0,

@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use elwindui::component;
-use elwindui::core::ui::{ContentControlExt, UIElementExt as _};
+use elwindui::core::ui::{ContentControlExt, UIElementExt as _, WindowExt};
 use elwindui_external_component_fixture::{
     ExternalProbeItem, ExternalProbeItemExt, ExternalProbeTabs, ExternalProbeTabsExt,
     RequiredExternalCardExt,
@@ -31,9 +31,125 @@ struct LocalNewProbe {
 #[component]
 impl LocalNewProbe {}
 
+#[component(inherits VerticalLayout)]
+struct LocalInheritedNewBase {
+    #[param]
+    id: String,
+    #[param(default = String::from("base-default"))]
+    base_mode: String,
+    #[prop]
+    title: String,
+    body: view! {
+        #[id("rendered")]
+        let rendered = TextBlock { text: format!("{id}:{title}") };
+
+        rendered
+    },
+}
+
+#[component]
+impl LocalInheritedNewBase {}
+
+#[component(inherits crate::LocalInheritedNewBase)]
+struct LocalInheritedNewDerived {
+    #[param(default = false)]
+    compact: bool,
+    #[prop]
+    subtitle: String,
+}
+
+#[component]
+impl LocalInheritedNewDerived {}
+
+#[elwindui::viewmodel]
+mod local_inherited_new_model {
+    struct LocalInheritedNewModel {
+        #[observable(default = String::new())]
+        value: String,
+    }
+}
+
+#[component(inherits VerticalLayout)]
+struct LocalInheritedBindableBase {
+    #[bindable]
+    model: Rc<LocalInheritedNewModel>,
+    body: view! {
+        TextBlock { text: model.value }
+    },
+}
+
+#[component]
+impl LocalInheritedBindableBase {}
+
+#[component(inherits crate::LocalInheritedBindableBase)]
+struct LocalInheritedBindableDerived {}
+
+#[component]
+impl LocalInheritedBindableDerived {}
+
+#[test]
+fn new_macro_constructs_local_component_with_own_fields() {
+    let value = elwindui::new!(LocalNewProbe(
+        required: "required",
+        optional_param: Some("optional-param"),
+        fixed: 9,
+        optional: None,
+        label: "label",
+    ));
+
+    assert_eq!(LocalNewProbeExt::required(&*value), "required");
+    assert_eq!(
+        LocalNewProbeExt::optional_param(&*value),
+        Some(String::from("optional-param"))
+    );
+    assert_eq!(LocalNewProbeExt::fixed(&*value), 9);
+    assert_eq!(LocalNewProbeExt::optional(&*value), None);
+    assert_eq!(LocalNewProbeExt::label(&*value), "label");
+}
+
+#[test]
+fn new_macro_constructs_local_component_with_effective_inherited_shape() {
+    let value = elwindui::new!(LocalInheritedNewDerived(
+        subtitle: "sub",
+        title: "title",
+        compact: true,
+        id: "id",
+    ));
+
+    assert_eq!(LocalInheritedNewBaseExt::id(&value.base), "id");
+    assert_eq!(
+        LocalInheritedNewBaseExt::base_mode(&value.base),
+        "base-default"
+    );
+    assert_eq!(LocalInheritedNewBaseExt::title(&value.base), "title");
+    assert!(LocalInheritedNewDerivedExt::compact(&*value));
+    assert_eq!(LocalInheritedNewDerivedExt::subtitle(&*value), "sub");
+    assert_eq!(value.base.rendered().text.borrow().as_str(), "id:title");
+
+    LocalInheritedNewBaseExt::set_title(&value.base, String::from("updated"));
+    assert_eq!(LocalInheritedNewBaseExt::title(&value.base), "updated");
+}
+
+#[test]
+fn new_macro_accepts_inherited_required_bindable() {
+    let model = LocalInheritedNewModel::new();
+    let value = elwindui::new!(LocalInheritedBindableDerived(model: Rc::clone(&model)));
+
+    assert!(Rc::ptr_eq(
+        &LocalInheritedBindableBaseExt::model(&value.base),
+        &model
+    ));
+}
+
+// AppKit native Window operations must run on the main thread. Keep this as a
+// compile-time consumer check here; the existing native Window integration
+// harness owns the main-thread runtime coverage.
 #[allow(dead_code)]
-fn new_macro_preserves_builtin_window_construction() {
-    let _window = elwindui::new!(Window());
+fn new_macro_constructs_builtin_window_with_named_property() {
+    let window = elwindui::new!(Window(title: "Text"));
+    elwindui::core::ui::WindowExt::show(&*window);
+    elwindui::core::ui::WindowExt::hide(&*window);
+    elwindui::core::ui::WindowExt::close(&*window);
 }
 
 /// This is intentionally a normal consumer shape: `elwindui` and the external generated

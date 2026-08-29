@@ -17,18 +17,18 @@ Implemented commands cover launching/locating a process or window, waiting for w
 
 The command catalog and operational precautions belong in [`../agents/appkit.md`](../agents/appkit.md) and [`../../tools/macos-ui-driver/README.md`](../../tools/macos-ui-driver/README.md), not in status.
 
-## External generated-component DSL (#191)
+## External generated-component DSL (#191/#193/#194)
 
-The open PR #192 branch accepts qualified external generated-component paths in `view!`, keeps the
-authored type path for construction and extension traits, and resolves the `#[macro_export]` props
-shape at the defining crate root. Ordinary, template, dynamic, event, two-way, semantic-brush,
-and resync lowering share this path-origin decision. The real downstream fixture depends on
-`elwindui` and `elwindui-external-component-fixture` independently and covers external properties,
-collection/scalar content, property resync, two-way wiring, template dynamic `if`/`for`, nested
-module paths, and a Cargo alias.
+Merged PR #192 provides qualified external generated-component paths in `view!`, keeps the authored
+type path for construction and extension traits, and resolves the `#[macro_export]` props shape at
+the defining crate root. Ordinary, template, dynamic, event, two-way, semantic-brush, and resync
+lowering share this path-origin decision. The real downstream fixture depends on `elwindui` and
+`elwindui-external-component-fixture` independently and covers external properties, collection/scalar
+content, property resync, two-way wiring, template dynamic `if`/`for`, nested module paths, and a
+Cargo alias.
 
-Issue #193's named construction surface is implemented in the working tree: `elwindui::new!` routes
-local, builtin, and qualified external generated components through one construction planner. Required
+Issue #193's named construction surface is implemented by PR #195: `elwindui::new!` routes local,
+builtin, and qualified external generated components through one construction planner. Required
 `#[param]`/`#[bindable]`, defaulted `#[param(default = ...)]`, ordinary mutable Props, full `Option`
 storage, pre-mount initial values, external root constructor ABI macros, exact diagnostics, and the
 required-before-mount-before-runtime-resync order are covered by focused codegen and downstream tests.
@@ -36,7 +36,6 @@ Directly-declared generated `Vec<Rc<T>>` content hosts now separate raw slot mut
 post-reconciliation property-change commit, so computed/template dependents observe the final
 collection state. A derived component that only inherits the `#[content]` declaration does not
 receive that generated host forwarding in #192; this capability boundary is tracked in follow-up
-Issue #194 and is not replaced with a fake reactive bridge.
-Unqualified imported shorthand and a defining-crate `pub mod ui` facade are not required. PR #192
-is not merged yet; PR #184 remains dependent on it. The inherited `Vec<Rc<T>>` content forwarding
-boundary remains follow-up Issue #194.
+Issue #194 and is not replaced with a fake reactive bridge. Unqualified imported shorthand and a
+defining-crate `pub mod ui` facade are not required. The inherited `Vec<Rc<T>>` content forwarding
+boundary remains follow-up Issue #194; #194 is intentionally outside PR #195.

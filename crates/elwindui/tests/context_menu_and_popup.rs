@@ -1017,13 +1017,16 @@ struct OwnerWithDeferredPopup {
 impl OwnerWithDeferredPopup {}
 
 /// Issue #162 T7: the owner's *current* value (not a mount-time snapshot) is observed at
-/// popup-open time — `vm.selected_item` is changed after `OwnerWithDeferredPopup::new(..)` but
+/// popup-open time — `vm.selected_item` is changed after `new!(OwnerWithDeferredPopup(..))` but
 /// before the popup opens, and the built popup content must observe the new value.
 #[test]
 fn declarative_context_popup_reads_current_owner_value_at_open_time() {
     let vm = DeferredPopupViewModel::new();
     let log = Rc::new(RefCell::new(Vec::new()));
-    let owner = OwnerWithDeferredPopup::new(vm.clone(), Rc::clone(&log));
+    let owner = elwindui::new!(OwnerWithDeferredPopup(
+        vm: vm.clone(),
+        log: Rc::clone(&log),
+    ));
 
     vm.set_selected_item(2);
 
@@ -1069,7 +1072,10 @@ fn declarative_context_popup_reads_current_owner_value_at_open_time() {
 fn declarative_context_popup_builds_a_fresh_instance_on_every_open() {
     let vm = DeferredPopupViewModel::new();
     let log = Rc::new(RefCell::new(Vec::new()));
-    let owner = OwnerWithDeferredPopup::new(vm.clone(), Rc::clone(&log));
+    let owner = elwindui::new!(OwnerWithDeferredPopup(
+        vm: vm.clone(),
+        log: Rc::clone(&log),
+    ));
     let target_dyn: Rc<dyn UIElementExt> = owner.target();
 
     let open_once = |value: i32, log: &Rc<RefCell<Vec<i32>>>| {
@@ -1118,7 +1124,10 @@ fn declarative_context_popup_builds_a_fresh_instance_on_every_open() {
 fn declarative_context_popup_returns_none_when_lexical_owner_is_dropped() {
     let vm = DeferredPopupViewModel::new();
     let log = Rc::new(RefCell::new(Vec::new()));
-    let owner = OwnerWithDeferredPopup::new(vm.clone(), Rc::clone(&log));
+    let owner = elwindui::new!(OwnerWithDeferredPopup(
+        vm: vm.clone(),
+        log: Rc::clone(&log),
+    ));
     // `target_dyn` keeps the *target element* (and its `context_popup: Option<ViewTemplate>`)
     // alive independently of `owner` itself — exactly the ownership shape a real popup-target
     // element has relative to the Component that declared it.
@@ -1214,7 +1223,7 @@ impl OwnerWithReactiveDeferredPopup {}
 #[test]
 fn declarative_context_popup_live_updates_while_open() {
     let vm = DeferredPopupViewModel::new();
-    let owner = OwnerWithReactiveDeferredPopup::new(vm.clone());
+    let owner = elwindui::new!(OwnerWithReactiveDeferredPopup(vm: vm.clone()));
     let target_dyn: Rc<dyn UIElementExt> = owner.target();
 
     let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
@@ -1258,7 +1267,7 @@ fn declarative_context_popup_content_is_releasable_after_close() {
     REACTIVE_POPUP_UNMOUNT_COUNT.with(|c| c.set(0));
 
     let vm = DeferredPopupViewModel::new();
-    let owner = OwnerWithReactiveDeferredPopup::new(vm.clone());
+    let owner = elwindui::new!(OwnerWithReactiveDeferredPopup(vm: vm.clone()));
     let target_dyn: Rc<dyn UIElementExt> = owner.target();
 
     let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
@@ -1456,7 +1465,7 @@ impl A2DirectDeferredHookOwner {}
 #[test]
 fn declarative_context_popup_direct_on_mount_and_on_unmount_resolve_the_enclosing_owner_field() {
     let log = Rc::new(RefCell::new(Vec::new()));
-    let owner = A2DirectDeferredHookOwner::new(log.clone());
+    let owner = elwindui::new!(A2DirectDeferredHookOwner(log: log.clone()));
     let target_dyn: Rc<dyn UIElementExt> = owner.target();
 
     let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
@@ -1539,7 +1548,7 @@ impl A2DirectDeferredLocalShadowOwner {}
 #[test]
 fn declarative_context_popup_direct_on_mount_local_let_shadows_the_enclosing_owner_field() {
     let log = Rc::new(RefCell::new(Vec::new()));
-    let owner = A2DirectDeferredLocalShadowOwner::new(log.clone());
+    let owner = elwindui::new!(A2DirectDeferredLocalShadowOwner(log: log.clone()));
     let target_dyn: Rc<dyn UIElementExt> = owner.target();
 
     let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
@@ -1681,7 +1690,7 @@ fn declarative_context_popup_direct_lexical_scope_stack_matches_rust_scoping() {
     A2_SCOPE_STACK_FREE_FUNCTION_LOG.with(|l| l.borrow_mut().clear());
 
     let log = Rc::new(RefCell::new(Vec::new()));
-    let owner = A2LexicalScopeStackOwner::new(log.clone());
+    let owner = elwindui::new!(A2LexicalScopeStackOwner(log: log.clone()));
     let target_dyn: Rc<dyn UIElementExt> = owner.target();
 
     let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
@@ -1765,7 +1774,7 @@ fn declarative_context_popup_direct_lexical_scope_stack_matches_rust_scoping() {
 #[test]
 fn declarative_context_popup_direct_event_closure_param_shadows_the_enclosing_owner_field() {
     let log = Rc::new(RefCell::new(Vec::new()));
-    let owner = A2DirectDeferredHookOwner::new(log.clone());
+    let owner = elwindui::new!(A2DirectDeferredHookOwner(log: log.clone()));
     let target_dyn: Rc<dyn UIElementExt> = owner.target();
 
     let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
@@ -1859,7 +1868,7 @@ impl A2DirectDeferredOnUpdateOwner {}
 #[test]
 fn declarative_context_popup_direct_on_update_compiles_and_resolves_the_enclosing_owner_field() {
     let log = Rc::new(RefCell::new(Vec::new()));
-    let owner = A2DirectDeferredOnUpdateOwner::new(log.clone());
+    let owner = elwindui::new!(A2DirectDeferredOnUpdateOwner(log: log.clone()));
     let target_dyn: Rc<dyn UIElementExt> = owner.target();
 
     let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
@@ -2134,7 +2143,7 @@ impl A2LocalShadowWriteOwner {}
 #[test]
 fn declarative_context_popup_event_closure_local_shadow_assignment_does_not_write_outer_state() {
     let log = Rc::new(RefCell::new(Vec::new()));
-    let owner = A2LocalShadowWriteOwner::new(log.clone());
+    let owner = elwindui::new!(A2LocalShadowWriteOwner(log: log.clone()));
     assert!(!owner.selected());
     let target_dyn: Rc<dyn UIElementExt> = owner.target();
 
@@ -2234,7 +2243,7 @@ impl T28DirectQualifiedOwner {}
 fn declarative_context_popup_direct_qualified_source_path_live_updates_while_open() {
     let vm = T28Vm::new();
     vm.set_label("before".to_string());
-    let owner = T28DirectQualifiedOwner::new(vm.clone());
+    let owner = elwindui::new!(T28DirectQualifiedOwner(vm: vm.clone()));
     let target_dyn: Rc<dyn UIElementExt> = owner.target();
 
     let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
@@ -2489,7 +2498,7 @@ struct T31DirectActionOwner {
 impl T31DirectActionOwner {}
 
 fn t31_type_checked_construction_and_drop(vm: Rc<T31Vm>) {
-    let owner = T31DirectActionOwner::new(vm);
+    let owner = elwindui::new!(T31DirectActionOwner(vm: vm));
     drop(owner);
 }
 
@@ -2533,7 +2542,7 @@ struct T32DirectTwoWayOwner {
 impl T32DirectTwoWayOwner {}
 
 fn t32_type_checked_construction_and_drop(vm: Rc<T32Vm>) {
-    let owner = T32DirectTwoWayOwner::new(vm);
+    let owner = elwindui::new!(T32DirectTwoWayOwner(vm: vm));
     drop(owner);
 }
 
@@ -2551,7 +2560,7 @@ fn declarative_context_popup_direct_two_way_bindable_path_type_checks() {
 fn declarative_context_popup_direct_qualified_source_subscription_releases_after_close() {
     let vm = T28Vm::new();
     vm.set_label("before".to_string());
-    let owner = T28DirectQualifiedOwner::new(vm.clone());
+    let owner = elwindui::new!(T28DirectQualifiedOwner(vm: vm.clone()));
     let target_dyn: Rc<dyn UIElementExt> = owner.target();
 
     let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
@@ -2647,7 +2656,7 @@ fn declarative_context_popup_nested_direct_qualified_source_path_live_updates_wh
  {
     let vm = T34RuntimeVm::new();
     vm.set_label("before".to_string());
-    let owner = T34RuntimeNestedOwner::new(vm.clone());
+    let owner = elwindui::new!(T34RuntimeNestedOwner(vm: vm.clone()));
     let target_dyn: Rc<dyn UIElementExt> = owner.target();
 
     let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));

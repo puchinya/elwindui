@@ -302,7 +302,7 @@ fn standalone_template_view_uses_typed_templated_parent() {
     let template: ControlTemplate<TemplateProbe> = template_view! {
         TextBlock { text: templated_parent.label }
     };
-    let probe = TemplateProbe::new("initial".to_string());
+    let probe = elwindui::new!(TemplateProbe(label: "initial".to_string()));
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
         environment: EnvironmentContext::root(),
@@ -361,7 +361,7 @@ fn standalone_template_view_supports_deferred_view_values_through_shared_backend
             }
         }
     };
-    let probe = TemplateProbe::new("parent".to_string());
+    let probe = elwindui::new!(TemplateProbe(label: "parent".to_string()));
     let environment = EnvironmentContext::root();
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
@@ -762,7 +762,7 @@ fn standalone_template_view_supports_template_local_let_references() {
         let heading = TextBlock { text: templated_parent.label };
         VerticalLayout { heading }
     };
-    let probe = TemplateProbe::new("let-value".to_string());
+    let probe = elwindui::new!(TemplateProbe(label: "let-value".to_string()));
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
         environment: EnvironmentContext::root(),
@@ -792,7 +792,7 @@ fn standalone_template_view_constructs_user_component_with_required_property() {
     let template: ControlTemplate<TemplateProbe> = template_view! {
         RequiredLabelChild { label: templated_parent.label }
     };
-    let probe = TemplateProbe::new("child".to_string());
+    let probe = elwindui::new!(TemplateProbe(label: "child".to_string()));
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
         environment: EnvironmentContext::root(),
@@ -855,7 +855,7 @@ fn standalone_template_view_event_closure_can_update_templated_parent() {
             },
         }
     };
-    let probe = TemplateProbe::new("initial".to_string());
+    let probe = elwindui::new!(TemplateProbe(label: "initial".to_string()));
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
         environment: EnvironmentContext::root(),
@@ -875,7 +875,7 @@ fn standalone_template_view_event_closure_can_update_templated_parent() {
 
 #[test]
 fn named_control_template_uses_the_shared_event_backend() {
-    let probe = TemplateProbe::new("initial".to_string());
+    let probe = elwindui::new!(TemplateProbe(label: "initial".to_string()));
     let root = NamedTemplateProbe::template().__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
         environment: EnvironmentContext::root(),
@@ -924,7 +924,7 @@ fn inherited_writable_template_property_delegates_to_base() {
 #[test]
 fn component_default_template_event_closure_uses_shared_backend() {
     use elwindui::core::ui::UIElementExt as _;
-    let probe = DefaultEventTemplateProbe::new("initial".to_string());
+    let probe = elwindui::new!(DefaultEventTemplateProbe(label: "initial".to_string()));
     let root = probe.visual_children()[0].clone();
     let routed_args = elwindui::core::input::RoutedEventArgs::default();
     elwindui::core::ui::dispatch_routed(
@@ -968,7 +968,7 @@ fn standalone_template_view_lifecycle_hooks_run_once() {
 #[test]
 fn component_default_template_view_on_update_uses_shared_lifecycle_subscription() {
     STANDALONE_UPDATE_COUNT.with(|count| count.set(0));
-    let probe = UpdateLifecycleTemplateProbe::new("initial".to_string());
+    let probe = elwindui::new!(UpdateLifecycleTemplateProbe(label: "initial".to_string()));
     assert_eq!(STANDALONE_UPDATE_COUNT.with(Cell::get), 0);
     probe.set_label("updated".to_string());
     assert_eq!(STANDALONE_UPDATE_COUNT.with(Cell::get), 1);
@@ -1005,7 +1005,8 @@ fn standalone_template_view_on_update_uses_shared_lifecycle_subscription() {
         }
     };
 
-    let probe = UpdateLifecycleTemplateProbe::__new_unmounted("initial".to_string());
+    let probe = UpdateLifecycleTemplateProbe::__new_unmounted();
+    probe.__set_initial_prop_label("initial".to_string());
     use elwindui::core::ui::ControlExt as _;
     probe.__prepare_template_presentation();
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {

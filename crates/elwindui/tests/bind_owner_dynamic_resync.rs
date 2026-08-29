@@ -93,7 +93,7 @@ impl BindOwnerToggleHost {}
 #[test]
 fn bind_owner_driven_if_condition_switches_on_property_change() {
     let vm = ToggleViewModel::new();
-    let host = BindOwnerToggleHost::new(Rc::clone(&vm));
+    let host = elwindui::new!(BindOwnerToggleHost(vm: Rc::clone(&vm)));
 
     assert_eq!(
         THEN_MOUNTS.with(|c| c.get()),

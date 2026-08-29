@@ -172,6 +172,6 @@ impl ThemeDemoWindow {}
 fn main() {
     select_default();
     let vm = ThemeDemoViewModel::new();
-    let window = ThemeDemoWindow::new(vm);
+    let window = elwindui::new!(ThemeDemoWindow(vm: vm));
     window.show();
 }

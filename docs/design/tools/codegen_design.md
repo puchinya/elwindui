@@ -105,8 +105,9 @@ typed `Vec`を`ListExt`として扱ったり、`dyn Vec<...>`へ変換したり�
 得られる。生成componentのhostはraw insert/removeをreconcile中だけ行い、slot stateのborrowを解放した後に
 commit hookを一度だけ呼ぶ。commit hookは通常のcontent setterと同じdependent recompute/property notification
 helperを使うため、computed/template/on_updateのresyncが一つのchildren変更として伝播する。同一の具体的な
-sequenceには通知しない。content fieldを継承するだけのderived componentにはこのhostをforwardせず、#191/#192
-ではそのdynamic shapeをcompile-time boundaryとして扱う。no-op setter/subscriptionで補わない。
+sequenceには通知しない。content fieldを継承するだけのderived componentにはこのhostをforwardせず、merged PR #192
+ではそのdynamic shapeをcompile-time boundaryとして扱う。no-op setter/subscriptionで補わない。継承Vec contentの
+host forwardingはfollow-up Issue #194の範囲であり、PR #195では変更しない。
 
 外部生成componentのnamed constructionは`elwindui::new!`と、定義crate rootへ`#[macro_export]`される
 `__elwindui_ctor_<Type>!` ABI macroを組み合わせる。resolverはconstructor shapeを推測せず、定義側の
@@ -138,6 +139,14 @@ Option fieldも宣言されたOption型のまま扱う。builtinは従来の`Typ
 この境界はmacro processが外部crateの型metadataをregistryへ再構成するものではなく、pathと公開shape macroを
 rustcへ渡すものである。したがって、外部componentのunqualified imported shorthandを自動的に定義crateへ
 解決する機能は含まれない。
+
+#### Constructor/content ABI boundary (#193 review remediation)
+
+`#[content(field)]`は`view!`内のbare childを通常のproperty/content protocolへ振り分けるためのmetadataであり、
+constructor categoryではない。`elwindui::new!`はnamed `Param`/`Bindable`、defaulted `Param`、および公開された
+writable `Prop`の値だけを受け取り、bare childrenや`children`引数を受け取らない。named content valueが通常の
+writable `Prop`として存在する場合は、他のPropと同じ初期property ABIで格納する。`view!`のbare childは従来通り
+`@children` protocolで処理し、constructor専用のcontent conversionやcontent argument macroを追加しない。
 
 ### 3.2a rust-analyzerとの二重展開境界(#146)
 
@@ -175,7 +184,7 @@ Environment Key/ViewModel/Store/DSL enumのdefining expansion(`#[elwindui::envir
 
 `lib.rs`の`ComponentGenerationFailure`は`ItemLocal(String)`/`RegistryDependent(String)`(struct/impl半分それぞれの個別チェック——`same_crate_control_target`、`lookup_same_crate_environment_key`、struct-before-impl registry miss、base qualified-path解決——は元々1診断1発行siteなのでそのまま)に加えて、`Classified(Vec<ValidationDiagnostic>)`を持つ(round 2、AD-R2-3)。`classify_validate_result`は`validate_classified`の結果を**折り畳まずそのまま**この`Classified`に包んで返し、呼び出し元(`generate_component_from_item_struct_with_template`/`generate_component_from_item_impl`)は`validation_diagnostic_tokens`で診断ごとに個別ゲートする——`ItemLocal`は無条件の生成`compile_error!`、`RegistryDependent`は`#[cfg(not(rust_analyzer))]`付きの`compile_error!`——を shadow と並べて`Ok(..)`で返す。1回の`validate_classified`呼び出しでitem-localとregistry依存の両方が同時に出た場合でも、どちらも欠落・混同されずそれぞれ正しくgateされ、shadowも破棄されない(旧実装は「1件でもitem-localがあれば全体を無条件`Err`」という worst-case への折り畳みだったため、shadowごと失われていた)。
 
-`ComponentPublicShape`(`component_frontend.rs`)は、own field単位のconstructor/getter/setter surfaceに加えて`constructor_return: ComponentConstructorReturn`(`SelfValue`/`RcSelf`)を持つ(round 2、AD-R2-4/B1是正)——view-lessなComponentのreal `new(..)`(`codegen::generate_component`)はbare `Self`を返し、`has_view`なComponent(`codegen::generate_view`)は常に`std::rc::Rc<Self>`を返すという実際の非対称性を、`view.is_some()`から機械的に導出する。rust-analyzer struct shadow(`build_component_struct_shadow`)はこの`constructor_return`を直接読み、`new(..)`の戻り値型を独自に再判定しない。`component_public_shape`はさらに、`has_view`な(`view: Some(..)`な)Componentの own `on_*`-named no-initializer fieldを`#[routed]`callbackとしてconstructor/accessor surfaceから除外する(round 2、AD-R2-5)。現在のown field分類はrequired `#[param]`/`#[bindable]`を`constructor_params`へ、default付きParamを`defaulted_params`へ、通常Propを`writable_fields`へ分ける。Propの`Option<T>`は宣言型のまま扱い、旧来のdeferred Option分類を行わない——real generatorとshadowはこの同じ分類結果を共有し、互いに独立して食い違うことがない。
+`ComponentPublicShape`(`component_frontend.rs`)は、own field単位のconstructor/getter/setter surfaceに加えて`constructor_return: ComponentConstructorReturn`(`SelfValue`/`RcSelf`)を持つ(round 2、AD-R2-4/B1是正)——view-lessなComponentのreal `new(..)`(`codegen::generate_component`)はbare `Self`を返し、`has_view`なComponent(`codegen::generate_view`)は常に`std::rc::Rc<Self>`を返すという実際の非対称性を、`view.is_some()`から機械的に導出する。rust-analyzer struct shadow(`build_component_struct_shadow`)はこの`constructor_return`を直接読み、`new(..)`の戻り値型を独自に再判定しない。`component_public_shape`はさらに、`has_view`な(`view: Some(..)`な)Componentの own `on_*`-named no-initializer fieldを`#[routed]`callbackとしてconstructor/accessor surfaceから除外する(round 2、AD-R2-5)。現在のown field分類はrequired `#[param]`/`#[bindable]`を`constructor_params`へ、default付きParamを`defaulted_params`へ、通常Propを`writable_fields`へ分ける。Propの`Option<T>`は宣言型のまま扱い、Optionであることを理由にconstructorへ昇格させたり別の遅延分類を行ったりしない——real generatorとshadowはこの同じ分類結果を共有し、互いに独立して食い違うことがない。
 
 **`component_public_shape`はsource-localのみを入力として受け取る(PR #169レビュー是正、round 3、A2/AD-R3-2)。** `component: &ComponentDef`引数は、そのComponentの`struct`宣言が文字通り書いた自分自身のfieldのみを持つ、un-flattenedな`ComponentDef`でなければならない——`codegen::resolve_effective_fields`/`info.effective_fields`が返す、ancestorのfieldまで再帰的に合成された「有効field列」を絶対に渡してはならない。Round 2時点では、`codegen::generate_view`の呼び出し元(`Item::Component`のdispatch arm)が構築する*synthetic*な`ComponentDef`(`fields: info.effective_fields.clone()`)がそのままshapeへ渡っており、ancestorのfieldをこのComponent自身のfieldであるかのように分類してしまう構造的な誤りがあった——本来`component_public_shape`はsource-localな分類器としてのみ設計されている(この節の冒頭、および`component_public_shape`自身のdoc commentが元々明言していた契約)。Round 3で是正: `codegen.rs`の`generate_component`/`generate_view`はどちらも2つの`ComponentDef`を明示的に別引数として受け取る——文字通りのsource(`source_component`、`Item::Component(c) => { .. }`のdispatch armが持つ元の`c`をそのまま渡す)と、ancestor合成済みのeffective(`c`/`component`、これまで通りsynthetic)。`component_public_shape(source_component, Some(view))`は必ず前者から呼ぶ。own-field API membership(constructor/defaulted/readable/writable/`on_*`除外/constructor_return)はshapeが単独の真実源であり続けるが、inherited fieldのforwarding・storage・parameter-slicing(`forward_param_names`/`base_param_count`/`is_inherited_view_composition`等)は一切shapeを経由せず、これまで通りeffectiveな`component`/`c`から直接組み立てる——`source_component.fields`に無い名前(=inherited)は、`generate_view`のis_param_eligible等の継承forwarding判定へフォールバックする、という明示的な境界を持つ。`generate_component`(view-less)も同じ境界を`declared_own_field_names`(`source_component.fields`由来)で持つ。
 

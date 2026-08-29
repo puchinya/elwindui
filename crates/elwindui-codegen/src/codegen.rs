@@ -376,174 +376,161 @@ fn new_constructor_value(ty: &syn::Type, expr: &syn::Expr) -> TokenStream {
     generated_constructor_value(ty, value)
 }
 
-fn is_known_builtin_new_type(name: &str) -> bool {
-    matches!(
-        name,
-        "Button"
-            | "CheckBox"
-            | "ChildList"
-            | "ContentControl"
-            | "ContentPresenter"
-            | "ContextMenuPresenter"
-            | "ContextMenuService"
-            | "Control"
-            | "ControlTemplate"
-            | "ControlTemplateContext"
-            | "ControlTemplateEnvironment"
-            | "Dropdown"
-            | "DropdownItem"
-            | "DynamicChild"
-            | "DynamicChildSlot"
-            | "Ellipse"
-            | "Grid"
-            | "HorizontalLayout"
-            | "IconElement"
-            | "IconSourceElement"
-            | "Image"
-            | "Layout"
-            | "Menu"
-            | "MenuBar"
-            | "MenuBarItem"
-            | "MenuItem"
-            | "NativeControl"
-            | "PasswordBox"
-            | "PopupDismissAction"
-            | "PopupDismissActionKey"
-            | "PopupRequest"
-            | "RadioButton"
-            | "Rectangle"
-            | "ResolvedContextTarget"
-            | "ScrollView"
-            | "Shape"
-            | "Slider"
-            | "TabView"
-            | "TabViewItem"
-            | "TextArea"
-            | "TextBlock"
-            | "TextBox"
-            | "ToggleSwitch"
-            | "UIElement"
-            | "UIElementCollection"
-            | "UIElementVisualCollection"
-            | "VerticalLayout"
-            | "ViewBuildContext"
-            | "ViewTemplate"
-            | "Window"
-    )
-}
-
-fn new_path_origin(
-    target: &syn::Path,
-    type_name: &str,
-    is_registered_local: bool,
-) -> DslTypeOrigin {
-    if target.segments.len() == 1 && target.leading_colon.is_none() {
-        if is_registered_local {
-            DslTypeOrigin::Local
-        } else if is_known_builtin_new_type(type_name) {
-            DslTypeOrigin::Builtin
-        } else {
-            DslTypeOrigin::UnresolvedUnqualified
-        }
-    } else {
-        let first = target
-            .segments
-            .first()
-            .expect("a constructor target path must have one segment");
-        match first.ident.to_string().as_str() {
-            "elwindui" => DslTypeOrigin::Builtin,
-            "crate" | "self" | "super" => DslTypeOrigin::Local,
-            _ => DslTypeOrigin::ExternalQualified {
-                crate_prefix: first.ident.clone(),
-            },
-        }
-    }
-}
-
 fn new_local_expression(
     target: &syn::Path,
-    component: &ComponentDef,
+    source_component: &ComponentDef,
     view: Option<&ViewDef>,
+    info: &TypeInfo,
     args: &[(syn::Ident, syn::Expr)],
 ) -> Result<TokenStream, String> {
-    let shape = crate::component_frontend::component_public_shape(component, view);
+    // `ComponentPublicShape` intentionally sees only the literal source declaration.  Effective
+    // inherited fields come from the same `TypeInfo`/resolver result used by normal generation;
+    // this function only uses the source shape to decide membership for fields owned by this
+    // component.  In particular, do not pass `info.effective_fields` into the shape helper.
+    let own_shape = crate::component_frontend::component_public_shape(source_component, view);
+    let own_field_names: HashSet<&str> = source_component
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    let own_required: HashSet<&str> = own_shape
+        .constructor_params
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let own_defaulted: HashSet<&str> = own_shape
+        .defaulted_params
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let own_writable: HashSet<&str> = own_shape
+        .writable_fields
+        .iter()
+        .map(|(name, _, _)| name.as_str())
+        .collect();
+
+    // A direct shape-composition component forwards inherited fields into its composed base rather
+    // than exposing them as parameters of its own generated `new`.  This is the same slicing that
+    // `generate_view` applies to `ctor_param_names`; all other generated component forms expose the
+    // effective required field order from `TypeInfo::param_fields` unchanged.
+    let inherited_shape_fields: HashSet<&str> = if view.is_some() && info.composed_shape.is_some() {
+        info.effective_fields
+            .iter()
+            .filter(|field| !own_field_names.contains(field.name.as_str()))
+            .map(|field| field.name.as_str())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let inherited_composed_fields: HashSet<&str> = if info.composed_shape.is_some() {
+        info.effective_fields
+            .iter()
+            .filter(|field| !own_field_names.contains(field.name.as_str()))
+            .map(|field| field.name.as_str())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let required_fields: Vec<(String, String)> = info
+        .param_fields
+        .iter()
+        .filter(|(name, _)| {
+            !inherited_shape_fields.contains(name.as_str())
+                && (!own_field_names.contains(name.as_str())
+                    || own_required.contains(name.as_str()))
+        })
+        .cloned()
+        .collect();
+    let defaulted_fields: Vec<(String, String)> = info
+        .defaulted_param_fields
+        .iter()
+        .filter(|(name, _)| {
+            !inherited_composed_fields.contains(name.as_str())
+                && (!own_field_names.contains(name.as_str())
+                    || own_defaulted.contains(name.as_str()))
+        })
+        .cloned()
+        .collect();
+    let writable_props: Vec<(String, String, bool)> = info
+        .effective_fields
+        .iter()
+        .filter(|field| {
+            field.kind == FieldKind::Prop
+                && !crate::attr_frontend::is_event_schema_field(field)
+                && (!own_field_names.contains(field.name.as_str())
+                    || own_writable.contains(field.name.as_str()))
+        })
+        .map(|field| {
+            // Only a Prop declared by this generated component has a hidden Created-state
+            // setter on the target itself. Inherited Props are forwarded through the generated
+            // class hierarchy and must use their declaring owner's public setter.
+            let hidden_setter = own_field_names.contains(field.name.as_str())
+                && !inherited_shape_fields.contains(field.name.as_str());
+            (field.name.clone(), field.ty.clone(), hidden_setter)
+        })
+        .collect();
+    let accepted_names: HashSet<&str> = required_fields
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .chain(defaulted_fields.iter().map(|(name, _)| name.as_str()))
+        .chain(writable_props.iter().map(|(name, _, _)| name.as_str()))
+        .collect();
+    let non_writable_names: HashSet<&str> = info
+        .effective_fields
+        .iter()
+        .filter(|field| !accepted_names.contains(field.name.as_str()))
+        .map(|field| field.name.as_str())
+        .collect();
     let supplied: HashMap<String, &syn::Expr> = args
         .iter()
         .map(|(name, value)| (name.to_string(), value))
         .collect();
-    let required: HashMap<&str, &str> = shape
-        .constructor_params
-        .iter()
-        .map(|(name, ty)| (name.as_str(), ty.as_str()))
-        .collect();
-    let defaulted: HashMap<&str, &str> = shape
-        .defaulted_params
-        .iter()
-        .map(|(name, ty)| (name.as_str(), ty.as_str()))
-        .collect();
-    let writable_props: HashMap<&str, &str> = shape
-        .writable_fields
-        .iter()
-        .filter(|(_, _, visibility)| {
-            matches!(
-                visibility,
-                crate::component_frontend::ShadowVisibility::Public
-            )
-        })
-        .filter_map(|(name, ty, _)| {
-            component
-                .fields
-                .iter()
-                .find(|field| field.name == *name && field.kind == FieldKind::Prop)
-                .map(|_| (name.as_str(), ty.as_str()))
-        })
-        .collect();
 
     for (name, _) in args {
         let name = name.to_string();
-        if required.contains_key(name.as_str())
-            || defaulted.contains_key(name.as_str())
-            || writable_props.contains_key(name.as_str())
-        {
+        if accepted_names.contains(name.as_str()) {
             continue;
         }
-        if component.fields.iter().any(|field| field.name == name) {
+        if non_writable_names.contains(name.as_str()) {
             return Err(format!(
                 "field '{name}' is not writable by new! on '{}'",
-                component.name
+                source_component.name
             ));
         }
         return Err(format!(
             "unknown constructor field '{name}' on '{}'",
-            component.name
+            source_component.name
         ));
     }
-    if let Some(missing) = shape
-        .constructor_params
+    if let Some(missing) = required_fields
         .iter()
         .find(|(name, _)| !supplied.contains_key(name))
         .map(|(name, _)| name)
     {
         return Err(format!(
             "missing required constructor field '{missing}' for '{}'",
-            component.name
+            source_component.name
         ));
     }
 
     let concrete = if target.segments.len() == 1 {
-        let ident = dsl_type_ident(&component.name);
+        let ident = dsl_type_ident(&source_component.name);
         quote! { #ident }
     } else {
         quote! { #target }
     };
-    let required_values = shape.constructor_params.iter().map(|(name, ty)| {
+    let required_values = required_fields.iter().map(|(name, ty)| {
         let expr = supplied
             .get(name)
             .expect("required constructor value was checked above");
         let ty: syn::Type = syn::parse_str(ty).expect("constructor field type must parse");
         new_constructor_value(&ty, expr)
     });
-    let construct = match shape.constructor_return {
+    let construct = match if info.has_view {
+        crate::component_frontend::ComponentConstructorReturn::RcSelf
+    } else {
+        crate::component_frontend::ComponentConstructorReturn::SelfValue
+    } {
         crate::component_frontend::ComponentConstructorReturn::SelfValue => {
             quote! { #concrete::new(#(#required_values),*) }
         }
@@ -552,46 +539,48 @@ fn new_local_expression(
         }
     };
     let value = format_ident!("__elwindui_new_value");
-    let defaulted_sets = shape.defaulted_params.iter().filter_map(|(name, ty)| {
+    let defaulted_sets = defaulted_fields.iter().filter_map(|(name, ty)| {
         let expr = supplied.get(name)?;
         let ty: syn::Type = syn::parse_str(ty).expect("constructor field type must parse");
         let setter = format_ident!("__set_initial_param_{name}");
         let value_tokens = new_constructor_value(&ty, expr);
         Some(quote! { #value.#setter(#value_tokens); })
     });
-    let prop_sets = shape
-        .writable_fields
+    let needs_ext_import = writable_props
         .iter()
-        .filter_map(|(name, _, visibility)| {
-            if !matches!(
-                visibility,
-                crate::component_frontend::ShadowVisibility::Public
-            ) {
-                return None;
-            }
-            let field = component
-                .fields
-                .iter()
-                .find(|field| field.name == *name && field.kind == FieldKind::Prop)?;
+        .any(|(name, _, hidden_setter)| supplied.contains_key(name) && !hidden_setter);
+    let prop_sets = writable_props
+        .iter()
+        .filter_map(|(name, ty, hidden_setter)| {
             let expr = supplied.get(name)?;
-            let ty: syn::Type = syn::parse_str(&field.ty).expect("property field type must parse");
-            let setter = format_ident!("__set_initial_prop_{name}");
+            let ty: syn::Type = syn::parse_str(ty).expect("property field type must parse");
+            let setter = if *hidden_setter {
+                format_ident!("__set_initial_prop_{name}")
+            } else {
+                format_ident!("set_{name}")
+            };
             let value_tokens = generated_prop_initial_value(&ty, quote! { #expr });
             Some(quote! { #value.#setter(#value_tokens); })
         });
-    let mount = matches!(
-        shape.constructor_return,
-        crate::component_frontend::ComponentConstructorReturn::RcSelf
-    )
-    .then(|| {
+    let mount = info.has_view.then(|| {
         quote! {
             #concrete::__mount(
-                &#value,
-                elwindui::core::environment::application_environment(),
-            );
+            &#value,
+            elwindui::core::environment::application_environment(),
+        );
         }
     });
+    let ext_path = dsl_ext_path(&target.to_token_stream().to_string(), Some(info));
+    let ext_import = if needs_ext_import {
+        quote! {
+            #[allow(unused_imports)]
+            use #ext_path as _;
+        }
+    } else {
+        TokenStream::new()
+    };
     Ok(quote! {{
+        #ext_import
         let #value = #construct;
         #(#defaulted_sets)*
         #(#prop_sets)*
@@ -632,7 +621,7 @@ fn new_external_expression(target: &syn::Path, args: &[(syn::Ident, syn::Expr)])
     let value = format_ident!("__elwindui_new_value");
     let environment = format_ident!("__elwindui_new_environment");
     quote! {{
-        let #value = #ctor_macro!(@new #target, props = [#(#props_for_new),*], children = []);
+        let #value = #ctor_macro!(@new #target, props = [#(#props_for_new),*]);
         let #environment = elwindui::core::environment::application_environment();
         #ctor_macro!(@new_initial_params #value, props = [#(#props_for_params),*], environment = #environment);
         #ctor_macro!(@new_initial_props #value, props = [#(#props_for_props),*], environment = #environment);
@@ -683,19 +672,31 @@ pub fn generate_new_expression(
             return Err(format!("duplicate constructor field '{name}'"));
         }
     }
-    let registered = crate::component_frontend::registered_component_parts(&type_name);
-    match new_path_origin(target, &type_name, registered.is_some()) {
+    // `new!` has no lexical module context of its own, so reconstruct the same-crate sibling
+    // modules and ask the existing symbol table for the effective target metadata.  The shared
+    // origin classifier remains the only policy for deciding local/builtin/external routing.
+    let sibling_modules = crate::component_frontend::sibling_component_modules("");
+    let table = build_symbol_table(&sibling_modules);
+    let info = table.resolve_unqualified(&type_name);
+    match dsl_type_origin(&target.to_token_stream().to_string(), info) {
         DslTypeOrigin::Local => {
-            let (component, view) = registered.ok_or_else(|| {
-                format!("local generated component '{type_name}' is not registered")
+            let (source_component, view) = crate::component_frontend::registered_component_parts(
+                &type_name,
+            )
+            .ok_or_else(|| format!("local generated component '{type_name}' is not registered"))?;
+            let info = info.ok_or_else(|| {
+                format!("local generated component '{type_name}' has no effective symbol metadata")
             })?;
-            new_local_expression(target, &component, view.as_ref(), args)
+            new_local_expression(target, &source_component, view.as_ref(), info, args)
         }
         DslTypeOrigin::Builtin => Ok(new_builtin_expression(type_name.as_str(), args)),
         DslTypeOrigin::ExternalQualified { .. } => Ok(new_external_expression(target, args)),
-        DslTypeOrigin::UnresolvedUnqualified => Err(format!(
-            "unqualified type '{type_name}' is not a known builtin or same-crate generated component; qualify an external generated component path in new!"
-        )),
+        // A bare name that is absent from the same-crate registry remains on the historical
+        // builtin/facade path.  Rust/macro resolution is responsible for rejecting an unknown name;
+        // this branch must never guess an arbitrary external crate.
+        DslTypeOrigin::UnresolvedUnqualified => {
+            Ok(new_builtin_expression(type_name.as_str(), args))
+        }
     }
 }
 
@@ -708,8 +709,8 @@ struct EffectiveConstructorField {
 }
 
 /// The one internal constructor ABI description used by both real constructor emitters and the
-/// exported external-constructor macro.  `ComponentPublicShape` remains the source-local authority
-/// for required/deferred/readable/writable/return classification; this shape is assembled only after
+/// exported external-constructor macro. `ComponentPublicShape` remains the source-local authority
+/// for required/defaulted/readable/writable/return classification; this shape is assembled only after
 /// the emitter has produced its exact effective `new` parameter list (including inherited/composed
 /// handling), so the exported ABI cannot drift from the signature rustc actually sees.
 #[derive(Clone)]
@@ -718,8 +719,6 @@ struct EffectiveConstructorShape {
     defaulted_params: Vec<EffectiveConstructorField>,
     props: Vec<EffectiveConstructorField>,
     constructor_return: crate::component_frontend::ComponentConstructorReturn,
-    content_field: Option<syn::Ident>,
-    content_param: Option<syn::Ident>,
     writable_after_construct: HashSet<String>,
     /// Fields known to the defining crate but absent from the constructor/defaulted/Prop surface.
     /// External `new!` calls use this list to distinguish a non-writable field from an unknown name
@@ -733,7 +732,6 @@ fn build_effective_constructor_shape(
     defaulted_params: Vec<EffectiveConstructorField>,
     props: Vec<EffectiveConstructorField>,
     constructor_return: crate::component_frontend::ComponentConstructorReturn,
-    content_field: Option<&str>,
     non_writable_fields: Vec<String>,
 ) -> EffectiveConstructorShape {
     debug_assert_eq!(
@@ -757,8 +755,6 @@ fn build_effective_constructor_shape(
         defaulted_params,
         props,
         constructor_return,
-        content_field: content_field.map(|name| format_ident!("{}", name)),
-        content_param: None,
         writable_after_construct,
         non_writable_fields,
     }
@@ -863,77 +859,15 @@ fn constructor_vec_item(ty: &syn::Type) -> Option<&syn::Type> {
     })
 }
 
-/// Converts a freshly constructed child for a generated content field whose declared value is an
-/// erased class trait.  The defining crate knows the exact trait bound even when the consumer has
-/// no local `TypeInfo`, so the same `into_<class>_node()` convention used by `#[class]`'s content
-/// protocol can be emitted into the constructor ABI.
-fn constructor_content_child_value(ty: &syn::Type, value: TokenStream) -> TokenStream {
-    let syn::Type::Path(path) = ty else {
-        return value;
-    };
-    let Some(segment) = path.path.segments.last() else {
-        return value;
-    };
-    if segment.ident != "Rc" {
-        return value;
-    }
-    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        return value;
-    };
-    let Some(ty) = arguments.args.iter().find_map(|argument| match argument {
-        syn::GenericArgument::Type(ty) => Some(ty),
-        _ => None,
-    }) else {
-        return value;
-    };
-    let syn::Type::TraitObject(trait_object) = ty else {
-        return value;
-    };
-    let Some(trait_segment) = trait_object.bounds.iter().find_map(|bound| match bound {
-        syn::TypeParamBound::Trait(bound) => bound.path.segments.last(),
-        _ => None,
-    }) else {
-        return value;
-    };
-    let method = format_ident!(
-        "into_{}_node",
-        constructor_to_snake_case(&trait_segment.ident.to_string())
-    );
-    quote! { (#value).#method() }
-}
-
-/// Matches the `#[class]`-generated upcast method spelling used by the constructor content ABI.
-fn constructor_to_snake_case(name: &str) -> String {
-    let chars: Vec<char> = name.chars().collect();
-    let mut out = String::new();
-    for (index, &ch) in chars.iter().enumerate() {
-        if ch.is_uppercase() {
-            let previous_is_lower = index > 0 && chars[index - 1].is_lowercase();
-            let previous_is_upper_and_next_is_lower = index > 0
-                && chars[index - 1].is_uppercase()
-                && index + 1 < chars.len()
-                && chars[index + 1].is_lowercase();
-            if index > 0 && (previous_is_lower || previous_is_upper_and_next_is_lower) {
-                out.push('_');
-            }
-            out.extend(ch.to_lowercase());
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-/// Emits the defining-crate-root constructor ABI macro for one generated component.  The macro
-/// receives a name-addressed property list and a separate bare-children list, resolves each
-/// required field itself, and calls the real `new` in its exact declaration order.  Initial
-/// non-constructor assignments are routed through the defining crate's existing props-shape macro;
-/// constructor-consumed fields are deliberately no-ops there, preventing a second setter call.
+/// Emits the defining-crate-root constructor ABI macro for one generated component. The macro
+/// receives a name-addressed property list, resolves each required field itself, and calls the
+/// real `new` in its exact declaration order. Initial non-constructor assignments are routed
+/// through the defining crate's existing props-shape macro; constructor-consumed fields are
+/// deliberately no-ops there, preventing a second setter call.
 fn build_constructor_macro(
     type_name: &str,
     shape: &EffectiveConstructorShape,
     props_macro: Option<TokenStream>,
-    content_macro: Option<TokenStream>,
 ) -> TokenStream {
     let macro_ident = format_ident!("__elwindui_ctor_{type_name}");
     let return_name = match shape.constructor_return {
@@ -949,12 +883,7 @@ fn build_constructor_macro(
         .iter()
         .map(|param| {
             let helper = format_ident!("__ctor_arg_{}", param.name);
-            quote! {
-                $crate::#macro_ident!(
-                    @#helper props = [$($props)*],
-                    children = [$($children),*]
-                )
-            }
+            quote! { $crate::#macro_ident!(@#helper props = [$($props)*]) }
         })
         .collect();
 
@@ -969,54 +898,54 @@ fn build_constructor_macro(
             .map(|inner| {
                 let converted_inner = generated_constructor_value(inner, quote! { $some_value });
                 quote! {
-                    (@#helper props = [(#name_literal => Some($some_value:expr)), $($rest:tt)*], children = [$($children:expr),*]) => { Some(#converted_inner) };
-                    (@#helper props = [(#name_literal => Some($some_value:expr))], children = [$($children:expr),*]) => { Some(#converted_inner) };
-                    (@#helper props = [(#name => Some($some_value:expr)), $($rest:tt)*], children = [$($children:expr),*]) => { Some(#converted_inner) };
-                    (@#helper props = [(#name => Some($some_value:expr))], children = [$($children:expr),*]) => { Some(#converted_inner) };
+                    (@#helper props = [(#name_literal => Some($some_value:expr)), $($rest:tt)*]) => { Some(#converted_inner) };
+                    (@#helper props = [(#name_literal => Some($some_value:expr))]) => { Some(#converted_inner) };
+                    (@#helper props = [(#name => Some($some_value:expr)), $($rest:tt)*]) => { Some(#converted_inner) };
+                    (@#helper props = [(#name => Some($some_value:expr))]) => { Some(#converted_inner) };
                 }
             })
             .unwrap_or_default();
         let missing = format!("missing required constructor field `{name}` for `{type_name}`");
         ctor_arg_arms.extend(quote! {
-            (@#helper props = [(#name_literal => @typed $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => { $value };
-            (@#helper props = [(#name_literal => @typed $value:expr)], children = [$($children:expr),*]) => { $value };
-            (@#helper props = [(#name_literal => None), $($rest:tt)*], children = [$($children:expr),*]) => { None };
-            (@#helper props = [(#name_literal => None)], children = [$($children:expr),*]) => { None };
+            (@#helper props = [(#name_literal => @typed $value:expr), $($rest:tt)*]) => { $value };
+            (@#helper props = [(#name_literal => @typed $value:expr)]) => { $value };
+            (@#helper props = [(#name_literal => None), $($rest:tt)*]) => { None };
+            (@#helper props = [(#name_literal => None)]) => { None };
             #option_some_arms
-            (@#helper props = [(#name_literal => $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => { #converted };
-            (@#helper props = [(#name_literal => $value:expr)], children = [$($children:expr),*]) => { #converted };
-            (@#helper props = [($other:literal => @typed $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => {
-                $crate::#macro_ident!(@#helper props = [$($rest)*], children = [$($children),*])
+            (@#helper props = [(#name_literal => $value:expr), $($rest:tt)*]) => { #converted };
+            (@#helper props = [(#name_literal => $value:expr)]) => { #converted };
+            (@#helper props = [($other:literal => @typed $value:expr), $($rest:tt)*]) => {
+                $crate::#macro_ident!(@#helper props = [$($rest)*])
             };
-            (@#helper props = [($other:literal => @typed $value:expr)], children = [$($children:expr),*]) => {
-                $crate::#macro_ident!(@#helper props = [], children = [$($children),*])
+            (@#helper props = [($other:literal => @typed $value:expr)]) => {
+                $crate::#macro_ident!(@#helper props = [])
             };
-            (@#helper props = [($other:literal => $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => {
-                $crate::#macro_ident!(@#helper props = [$($rest)*], children = [$($children),*])
+            (@#helper props = [($other:literal => $value:expr), $($rest:tt)*]) => {
+                $crate::#macro_ident!(@#helper props = [$($rest)*])
             };
-            (@#helper props = [($other:literal => $value:expr)], children = [$($children:expr),*]) => {
-                $crate::#macro_ident!(@#helper props = [], children = [$($children),*])
+            (@#helper props = [($other:literal => $value:expr)]) => {
+                $crate::#macro_ident!(@#helper props = [])
             };
-            (@#helper props = [(#name => @typed $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => { $value };
-            (@#helper props = [(#name => @typed $value:expr)], children = [$($children:expr),*]) => { $value };
-            (@#helper props = [(#name => None), $($rest:tt)*], children = [$($children:expr),*]) => { None };
-            (@#helper props = [(#name => None)], children = [$($children:expr),*]) => { None };
+            (@#helper props = [(#name => @typed $value:expr), $($rest:tt)*]) => { $value };
+            (@#helper props = [(#name => @typed $value:expr)]) => { $value };
+            (@#helper props = [(#name => None), $($rest:tt)*]) => { None };
+            (@#helper props = [(#name => None)]) => { None };
             #option_some_arms
-            (@#helper props = [(#name => $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => { #converted };
-            (@#helper props = [(#name => $value:expr)], children = [$($children:expr),*]) => { #converted };
-            (@#helper props = [($other:ident => @typed $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => {
-                $crate::#macro_ident!(@#helper props = [$($rest)*], children = [$($children),*])
+            (@#helper props = [(#name => $value:expr), $($rest:tt)*]) => { #converted };
+            (@#helper props = [(#name => $value:expr)]) => { #converted };
+            (@#helper props = [($other:ident => @typed $value:expr), $($rest:tt)*]) => {
+                $crate::#macro_ident!(@#helper props = [$($rest)*])
             };
-            (@#helper props = [($other:ident => @typed $value:expr)], children = [$($children:expr),*]) => {
-                $crate::#macro_ident!(@#helper props = [], children = [$($children),*])
+            (@#helper props = [($other:ident => @typed $value:expr)]) => {
+                $crate::#macro_ident!(@#helper props = [])
             };
-            (@#helper props = [($other:ident => $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => {
-                $crate::#macro_ident!(@#helper props = [$($rest)*], children = [$($children),*])
+            (@#helper props = [($other:ident => $value:expr), $($rest:tt)*]) => {
+                $crate::#macro_ident!(@#helper props = [$($rest)*])
             };
-            (@#helper props = [($other:ident => $value:expr)], children = [$($children:expr),*]) => {
-                $crate::#macro_ident!(@#helper props = [], children = [$($children),*])
+            (@#helper props = [($other:ident => $value:expr)]) => {
+                $crate::#macro_ident!(@#helper props = [])
             };
-            (@#helper props = [], children = [$($children:expr),*]) => {
+            (@#helper props = []) => {
                 compile_error!(#missing)
             };
         });
@@ -1095,57 +1024,6 @@ fn build_constructor_macro(
         };
     };
 
-    let content_arg = if let Some(content) = &shape.content_param {
-        let converted = shape
-            .params
-            .iter()
-            .find(|param| &param.name == content)
-            .map(|param| generated_constructor_value(&param.ty, quote! { $value }))
-            .expect("content parameter must be present in constructor parameters");
-        let name = content;
-        let missing = format!("missing required content for `{type_name}`");
-        let content_fallback = match &props_macro {
-            Some(props_macro) => quote! {
-                #props_macro!(@constructor_content_value [$($children),*])
-            },
-            None => quote! {
-                compile_error!(#missing)
-            },
-        };
-        quote! {
-            (@ctor_arg_content props = [(#name => None), $($rest:tt)*]) => { None };
-            (@ctor_arg_content props = [(#name => None)]) => { None };
-            (@ctor_arg_content props = [(#name => $value:expr), $($rest:tt)*]) => { #converted };
-            (@ctor_arg_content props = [(#name => $value:expr)]) => { #converted };
-            (@ctor_arg_content props = [($other:ident => $value:expr), $($rest:tt)*]) => {
-                $crate::#macro_ident!(@ctor_arg_content props = [$($rest)*])
-            };
-            (@ctor_arg_content props = [($other:ident => $value:expr)]) => {
-                $crate::#macro_ident!(@ctor_arg_content props = [])
-            };
-            (@ctor_arg_content props = []) => {
-                #content_fallback
-            };
-        }
-    } else {
-        TokenStream::new()
-    };
-
-    let initial_skip_arms: TokenStream = shape
-        .params
-        .iter()
-        .map(|param| {
-            // Use a call-site identifier for the matcher. The argument name is captured from
-            // the consumer's generated \`props = [(name => value)]\` list; retaining the source
-            // span from the defining crate makes a literal \`macro_rules!\` matcher fail across
-            // the crate boundary even though the spelling is identical.
-            let name = format_ident!("{}", param.name);
-            quote! {
-                (@initial_typed $recv:expr, #name, $value:expr, $environment:expr) => {};
-                (@initial_one $recv:expr, #name, $value:expr, $environment:expr) => {};
-            }
-        })
-        .collect();
     let mut initial_field_arms = TokenStream::new();
     for (field, is_param) in shape
         .defaulted_params
@@ -1413,113 +1291,6 @@ fn build_constructor_macro(
             }
         })
         .collect();
-    let initial_delegate = match &props_macro {
-        Some(props_macro) => quote! {
-            #props_macro!(@set_with_environment $recv, $name, $value, $environment);
-        },
-        None => quote! {
-            compile_error!(concat!(
-                "`",
-                stringify!($name),
-                "` is not an externally writable property of `",
-                #type_name,
-                "`"
-            ));
-        },
-    };
-    let initial_typed_unknown = match &props_macro {
-        Some(props_macro) => quote! {
-            (@initial_typed $recv:expr, $name:ident, $value:expr, $environment:expr) => {
-                #props_macro!(@set_with_environment $recv, $name, $value, $environment);
-            };
-        },
-        None => quote! {
-            (@initial_typed $recv:expr, $name:ident, $value:expr, $environment:expr) => {
-                compile_error!(concat!(
-                    "field ",
-                    stringify!($name),
-                    " is not an externally writable property of ",
-                    #type_name
-                ));
-            };
-        },
-    };
-    let initial_children_delegate = match content_macro.as_ref().or(props_macro.as_ref()) {
-        Some(props_macro) => quote! {
-            #props_macro!(@children $recv, [$($child),*]);
-        },
-        None => quote! {
-            compile_error!(concat!(
-                "`",
-                #type_name,
-                "` has no exported content setter"
-            ));
-        },
-    };
-    let initial_children_arms = if let Some(content) = &shape.content_field {
-        if let Some(field) = shape.props.iter().find(|field| field.name == *content) {
-            if field.hidden_setter {
-                let setter = format_ident!("__set_initial_prop_{}", field.name);
-                if constructor_vec_item(&field.ty).is_some() {
-                    quote! {
-                        (@initial_children $recv:expr, children = []) => {};
-                        (@initial_children $recv:expr, children = [$($child:expr),+ $(,)?]) => {{
-                            $recv.#setter(::std::vec![$($child),*]);
-                        }};
-                    }
-                } else {
-                    let field_ty = &field.ty;
-                    let field_type_string = quote! { #field_ty }.to_string();
-                    if field_type_string.contains("UIElementCollection")
-                        || field_type_string.contains("ListExt<")
-                    {
-                        quote! {
-                            (@initial_children $recv:expr, children = []) => {};
-                            (@initial_children $recv:expr, children = [$($child:expr),+ $(,)?]) => {{
-                                #initial_children_delegate
-                            }};
-                        }
-                    } else {
-                        let child = constructor_content_child_value(&field.ty, quote! { $child });
-                        quote! {
-                            (@initial_children $recv:expr, children = []) => {};
-                            (@initial_children $recv:expr, children = [$child:expr]) => {{
-                                $recv.#setter(#child);
-                            }};
-                            (@initial_children $recv:expr, children = [$($child:expr),+ $(,)?]) => {
-                                compile_error!(concat!(
-                                    "`",
-                                    #type_name,
-                                    "` takes exactly one content child"
-                                ));
-                            };
-                        }
-                    }
-                }
-            } else {
-                quote! {
-                    (@initial_children $recv:expr, children = []) => {};
-                    (@initial_children $recv:expr, children = [$($child:expr),+ $(,)?]) => {{
-                        #initial_children_delegate
-                    }};
-                }
-            }
-        } else {
-            quote! {
-                (@initial_children $recv:expr, children = []) => {};
-                (@initial_children $recv:expr, children = [$($child:expr),+ $(,)?]) => {{
-                    #initial_children_delegate
-                }};
-            }
-        }
-    } else {
-        quote! {
-            (@initial_children $recv:expr, children = []) => {};
-            (@initial_children $recv:expr, children = [$($child:expr),+ $(,)?]) => {{
-                #initial_children_delegate
-            }};
-        }
-    };
     let mut resync_fixed_arms = TokenStream::new();
     for field in shape.params.iter().chain(shape.defaulted_params.iter()) {
         let name = format_ident!("{}", field.name);
@@ -1660,7 +1431,7 @@ fn build_constructor_macro(
         #[macro_export]
         #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
             macro_rules! #macro_ident {
-            (@new $target:path, props = [$($props:tt)*], children = [$($children:expr),* $(,)?]) => {{
+            (@new $target:path, props = [$($props:tt)*]) => {{
                 $crate::#macro_ident!(@validate_new props = [$($props)*]);
                 <$target>::#new_method(
                     #(#ctor_args),*
@@ -1670,7 +1441,6 @@ fn build_constructor_macro(
             #ctor_arg_arms
             #new_validation_arms
             #new_validation_fallback
-            #content_arg
             #initial_field_arms
             #initial_named_required_arms
             #initial_named_unknown
@@ -1679,21 +1449,6 @@ fn build_constructor_macro(
             #new_initial_lookup_arms
             #new_initial_dispatchers
             #new_initial_unknown
-            (@initial_set $recv:expr, props = [$($props:tt)*], children = [$($children:expr),* $(,)?], environment = $environment:expr) => {{
-                $crate::#macro_ident!(@initial_props $recv, props = [$($props)*], environment = $environment);
-                $crate::#macro_ident!(@initial_children $recv, children = [$($children),*]);
-            }};
-            (@initial_props $recv:expr, props = [$(($name:ident => $value:expr)),* $(,)?], environment = $environment:expr) => {{
-                $(
-                    $crate::#macro_ident!(@initial_one $recv, $name, $value, $environment);
-                )*
-            }};
-            #initial_skip_arms
-            #initial_typed_unknown
-            (@initial_one $recv:expr, $name:ident, $value:expr, $environment:expr) => {
-                #initial_delegate
-            };
-            #initial_children_arms
             #resync_fixed_arms
             #resync_prop_arms
             #resync_fallback
@@ -5023,11 +4778,10 @@ fn generate_component(
         defaulted_params,
         props,
         own_field_shape.constructor_return,
-        source_component.content_field.as_deref(),
         non_writable_fields,
     );
     let constructor_macro =
-        build_constructor_macro(&struct_name.to_string(), &constructor_shape, None, None);
+        build_constructor_macro(&struct_name.to_string(), &constructor_shape, None);
     quote! {
         #[allow(non_camel_case_types)]
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5324,7 +5078,8 @@ fn generate_view(
         .fields
         .iter()
         .filter(|f| {
-            (!is_shape_composition || source_field_names.contains(f.name.as_str()))
+            (!(is_shape_composition || is_inherited_view_composition)
+                || source_field_names.contains(f.name.as_str()))
                 && f.kind == FieldKind::Prop
                 && matches!(f.initializer, Some(Initializer::Expr(_)))
         })
@@ -5333,7 +5088,8 @@ fn generate_view(
         .fields
         .iter()
         .filter(|f| {
-            (!is_shape_composition || source_field_names.contains(f.name.as_str()))
+            (!(is_shape_composition || is_inherited_view_composition)
+                || source_field_names.contains(f.name.as_str()))
                 && f.kind == FieldKind::Param
                 && matches!(f.initializer, Some(Initializer::Expr(_)))
         })
@@ -5342,7 +5098,8 @@ fn generate_view(
         .fields
         .iter()
         .filter(|f| {
-            (!is_shape_composition || source_field_names.contains(f.name.as_str()))
+            (!(is_shape_composition || is_inherited_view_composition)
+                || source_field_names.contains(f.name.as_str()))
                 && f.kind == FieldKind::State
                 && matches!(f.initializer, Some(Initializer::Expr(_)))
         })
@@ -5362,7 +5119,8 @@ fn generate_view(
         .fields
         .iter()
         .filter(|f| {
-            (!is_shape_composition || source_field_names.contains(f.name.as_str()))
+            (!(is_shape_composition || is_inherited_view_composition)
+                || source_field_names.contains(f.name.as_str()))
                 && f.kind == FieldKind::Computed
                 && matches!(f.initializer, Some(Initializer::Expr(_)))
         })
@@ -5374,7 +5132,8 @@ fn generate_view(
         .fields
         .iter()
         .filter(|f| {
-            (!is_shape_composition || source_field_names.contains(f.name.as_str()))
+            (!(is_shape_composition || is_inherited_view_composition)
+                || source_field_names.contains(f.name.as_str()))
                 && f.kind == FieldKind::Environment
         })
         .collect();
@@ -5418,7 +5177,8 @@ fn generate_view(
     // for a `#[computed]` field to read sensibly top-to-bottom); this doesn't topologically sort.
     let mut own_default_construct_stmts = TokenStream::new();
     for f in component.fields.iter().filter(|f| {
-        (!is_shape_composition || source_field_names.contains(f.name.as_str()))
+        (!(is_shape_composition || is_inherited_view_composition)
+            || source_field_names.contains(f.name.as_str()))
             && matches!(f.initializer, Some(Initializer::Expr(_)))
             && matches!(
                 f.kind,
@@ -5547,6 +5307,22 @@ fn generate_view(
     } else {
         HashSet::new()
     };
+    // A component that inherits an already-composed user component without declaring its own view
+    // reuses that component's concrete base value. Its effective fields remain visible for
+    // constructor ordering and type resolution, but the inherited component owns their storage,
+    // accessors, and property notifications. Only fields literally declared by this component may
+    // be emitted again here; otherwise a derived class would duplicate methods such as `title`/
+    // `set_title` that its parent trait already provides.
+    let inherited_view_field_names: HashSet<String> = if is_inherited_view_composition {
+        component
+            .fields
+            .iter()
+            .filter(|f| !declared_own_field_names.contains(f.name.as_str()))
+            .map(|f| f.name.clone())
+            .collect()
+    } else {
+        HashSet::new()
+    };
     // Event-schema fields are excluded because a `#[routed]` field (`UIElement`'s own
     // `on_tapped`/`on_pointer_pressed`/... — inherited by every component through
     // `resolve_effective_fields`, not just ones that declare it directly, e.g. `Button.on_click`) is
@@ -5639,14 +5415,22 @@ fn generate_view(
     let is_reserved_weak_owner = |f: &&FieldDef| {
         matches!(f.name.as_str(), "templated_parent" | "__view_owner") && is_weak_type(&f.ty)
     };
-    let bind_owners: Vec<syn::Ident> = component
-        .fields
-        .iter()
-        .filter(|f| {
-            f.attrs.iter().any(|a| matches!(a, Attr::Bindable)) || is_reserved_weak_owner(f)
-        })
-        .map(|f| format_ident!("{}", f.name))
-        .collect();
+    // An inherited-view component reuses the immediate base's already-generated view verbatim.
+    // The base owns that view's bindable subscriptions and resync methods; copying the effective
+    // base fields into this component's bind-owner list would make the derived `__build_view()` emit
+    // callbacks that reference child storage which deliberately lives only on `self.base`.
+    let bind_owners: Vec<syn::Ident> = if is_inherited_view_composition {
+        Vec::new()
+    } else {
+        component
+            .fields
+            .iter()
+            .filter(|f| {
+                f.attrs.iter().any(|a| matches!(a, Attr::Bindable)) || is_reserved_weak_owner(f)
+            })
+            .map(|f| format_ident!("{}", f.name))
+            .collect()
+    };
     ctx.bindable_owners = bind_owners.iter().map(ToString::to_string).collect();
     ctx.weak_bindable_owners = component
         .fields
@@ -5665,18 +5449,21 @@ fn generate_view(
     // Excludes any name already resolvable as a real own field/bind owner of *this* Component (an
     // actual own field of the same name always wins — mirrors `path_owner_value_tokens`'s own
     // `ctx.own_fields` check).
-    let implicit_bind_owners: Vec<syn::Ident> = ctx
-        .implicit_owner
-        .as_ref()
-        .map(|implicit| {
-            implicit
-                .bindable_fields
-                .iter()
-                .filter(|name| !ctx.own_fields.contains_key(name.as_str()))
-                .map(|name| format_ident!("{}", name))
-                .collect()
-        })
-        .unwrap_or_default();
+    let implicit_bind_owners: Vec<syn::Ident> = if is_inherited_view_composition {
+        Vec::new()
+    } else {
+        ctx.implicit_owner
+            .as_ref()
+            .map(|implicit| {
+                implicit
+                    .bindable_fields
+                    .iter()
+                    .filter(|name| !ctx.own_fields.contains_key(name.as_str()))
+                    .map(|name| format_ident!("{}", name))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     // `templated_parent` (`ControlTemplate`) triggers this for its own, narrower reason (a
     // "selected once by an already-mounted target, before `Self` exists" lifecycle). A hidden
     // Component lowered from a `ViewExpr::DeferredView` (`view.implicit_owner`, Issue #162) needs
@@ -6532,7 +6319,9 @@ fn generate_view(
     // §5.1's post-construction setter convention), so this reads `self.base.<name>.borrow()
     // .clone()`, not a plain `.clone()` (unlike a DSL-composed base's own accessor method).
     for (name, ty) in param_names.iter().zip(param_types.iter()) {
-        if inherited_shape_field_names.contains(&name.to_string()) {
+        if inherited_shape_field_names.contains(&name.to_string())
+            || inherited_view_field_names.contains(&name.to_string())
+        {
             continue;
         }
         let is_forwarded = !own_struct_param_names.contains(name);
@@ -8402,11 +8191,12 @@ fn generate_view(
 
     // Build the exported constructor ABI only after `ctor_param_names`/`ctor_param_types` have
     // been derived from the exact effective generation path above.  The source-local shape still
-    // owns the required/deferred/writable classification for fields declared by this component;
+    // owns the required/defaulted/writable classification for fields declared by this component;
     // inherited Prop fields are added here only as the real effective generator already exposes
     // them through the generated class hierarchy.
     let hidden_initial_field = |field: &FieldDef| {
-        !is_shape_composition || source_field_names.contains(field.name.as_str())
+        !(is_shape_composition || is_inherited_view_composition)
+            || source_field_names.contains(field.name.as_str())
     };
     let defaulted_params: Vec<EffectiveConstructorField> = component
         .fields
@@ -8415,6 +8205,8 @@ fn generate_view(
             field.kind == FieldKind::Param
                 && matches!(field.initializer, Some(Initializer::Expr(_)))
                 && !crate::attr_frontend::is_event_schema_field(field)
+                && (!(is_shape_composition || is_inherited_view_composition)
+                    || source_field_names.contains(field.name.as_str()))
         })
         .map(|field| EffectiveConstructorField {
             name: format_ident!("{}", field.name),
@@ -8442,32 +8234,16 @@ fn generate_view(
     );
     let props_ident = format_ident!("__elwindui_props_{target_name}");
     let generated_props_macro = is_composed.then(|| quote! { $crate::#props_ident });
-    let content_delegate_macro = generated_props_macro.clone().or_else(|| {
-        source_component
-            .base_path
-            .as_deref()
-            .or(source_component.base.as_deref())
-            .map(|base| dsl_props_macro_path(base, resolve_context_info(&ctx, from, table, base)))
-    });
-    let constructor_content_field = table
-        .resolve(from, &target_name)
-        .and_then(|info| info.content_field.clone())
-        .or_else(|| source_component.content_field.clone());
     let constructor_shape = build_effective_constructor_shape(
         &ctor_param_names,
         &ctor_param_types,
         defaulted_params,
         props,
         own_field_shape.constructor_return,
-        constructor_content_field.as_deref(),
         non_writable_fields,
     );
-    let constructor_macro = build_constructor_macro(
-        &target_name,
-        &constructor_shape,
-        generated_props_macro,
-        content_delegate_macro,
-    );
+    let constructor_macro =
+        build_constructor_macro(&target_name, &constructor_shape, generated_props_macro);
 
     let generated = if is_composed {
         let unmount_hook_attach = (!is_host_composition).then(|| {
@@ -8540,6 +8316,27 @@ fn generate_view(
             ) {
                 <Self as #target_ext>::mount(self, environment);
             }
+        });
+        // `__new_unmounted` deliberately skips the class macro's `on_constructed` hook chain so
+        // constructor ABI callers can apply initial Params/Props before mounting.  A component
+        // that reuses a generated component's inherited view still has to mount that concrete
+        // base first, however; ordinary `new()` has already done so through the hook chain.  Keep
+        // the check structural and idempotent so both paths share one lifecycle implementation.
+        let inherited_base_mount = is_inherited_view_composition.then(|| {
+            quote! {
+                if self.base.__elwindui_is_created() {
+                    self.base.mount(environment.clone());
+                }
+            }
+        });
+        let lifecycle_state_helper = is_composed.then(|| {
+            mark_inherent(quote! {
+                #[doc(hidden)]
+                pub fn __elwindui_is_created(&self) -> bool {
+                    self.__lifecycle_state.get()
+                        == elwindui::core::ui::ComponentLifecycleState::Created
+                }
+            })
         });
         quote! {
             #[allow(non_camel_case_types)]
@@ -8638,6 +8435,7 @@ fn generate_view(
                     if self.__lifecycle_state.get() != elwindui::core::ui::ComponentLifecycleState::Created {
                         panic!("mount: component is already mounted or unmounted");
                     }
+                    #inherited_base_mount
                     self.__mount_environment
                         .set(environment.clone())
                         .expect("mount: component is already mounted");
@@ -8705,6 +8503,7 @@ fn generate_view(
                 #shadow_hooks
                 #on_unmount_method
                 #mount_helper
+                #lifecycle_state_helper
             }
 
             #component_observable_impl
@@ -13087,22 +12886,26 @@ fn emit_external_construction(
                         #ctor_macro!(@initial_named #binding, #name_literal, #value, #environment);
                     }
                 }
-            });
-        let initial_children = quote! {
-            #ctor_macro!(@initial_children #binding, children = [#(#non_dynamic_children),*]);
+        });
+        let initial_children = if non_dynamic_children.is_empty() {
+            TokenStream::new()
+        } else {
+            quote! {
+                #props_macro!(@children #binding, [#(#non_dynamic_children),*]);
+            }
         };
         // The external ABI constructs view-bearing generated components through
         // `__new_unmounted`; mount must happen only after required parameters, defaulted Params,
-        // authored Props, and bare content have all been initialized.
+        // authored Props and property/content operations have all been initialized.
         let mount_environment = quote! { (*#environment).clone() };
         let constructor_value = quote! {
-            #ctor_macro!(@new #type_path, props = [#(#props)*], children = [#(#non_dynamic_children),*])
+            #ctor_macro!(@new #type_path, props = [#(#props)*])
         };
         let external_generated = quote! {
             // A qualified external generated component owns the constructor ABI and the
-            // constructor-consumed/content shape. The macro returns the exact `new` result; the
-            // second protocol applies only non-constructor writable values and non-consumed
-            // children through that same defining-crate shape.
+            // constructor shape. The macro returns the exact `new` result; the second protocol
+            // applies optional Props and content through the defining crate's property/content
+            // shape.
             #[allow(unused_imports)]
             use elwindui::ui::*;
             #[allow(unused_imports)]
@@ -14288,7 +14091,13 @@ fn build_local_content_initial_setter(
         });
     }
     let field_type_string = quote! { #field_type }.to_string();
-    if field_type_string.contains("UIElementCollection") || field_type_string.contains("ListExt<") {
+    let compact_field_type_string = field_type_string
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    if compact_field_type_string.contains("UIElementCollection")
+        || compact_field_type_string.contains("ListExt<")
+    {
         return None;
     }
     if children.len() != 1 {
@@ -14347,7 +14156,13 @@ fn local_content_initial_setter_applies(node: &PlannedNode, info: &TypeInfo) -> 
         return true;
     }
     let field_type_string = quote! { #field_type }.to_string();
-    if field_type_string.contains("UIElementCollection") || field_type_string.contains("ListExt<") {
+    let compact_field_type_string = field_type_string
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    if compact_field_type_string.contains("UIElementCollection")
+        || compact_field_type_string.contains("ListExt<")
+    {
         return false;
     }
     true
@@ -17162,6 +16977,15 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                             };
                         }
                     }
+                    // Fixed Params and other readable own fields are stored directly on the
+                    // component. In a post-construction expression, read them through the generated
+                    // value getter so non-Copy values (notably `Rc<dyn UIElementExt>`) are cloned
+                    // instead of being moved out of `&self`. Construction mode still returns the
+                    // bare local above, where moving the constructor input is intentional.
+                    if let EmitMode::WithSelf(self_tok) = mode {
+                        let ident = format_ident!("{}", only);
+                        return quote! { #self_tok.#ident() };
+                    }
                     return mode.owner_tokens(only);
                 }
                 if ctx.template_parent.is_some() && ctx.template_bare_parent_fields.contains(only) {
@@ -17861,6 +17685,51 @@ mod tests {
             dsl_ext_path("TextBlock", None).to_string(),
             "elwindui :: core :: ui :: TextBlockExt"
         );
+    }
+
+    #[test]
+    fn new_origin_uses_shared_policy_and_keeps_bare_builtin_fallback() {
+        assert!(matches!(
+            dsl_type_origin("crate::widgets::Thing", None),
+            DslTypeOrigin::Local
+        ));
+        assert!(matches!(
+            dsl_type_origin("some_alias::widgets::Thing", None),
+            DslTypeOrigin::ExternalQualified { .. }
+        ));
+        assert!(matches!(
+            dsl_type_origin("Window", None),
+            DslTypeOrigin::UnresolvedUnqualified
+        ));
+
+        // `Window` is intentionally absent from the test registry here. The shared origin policy
+        // still preserves the historical builtin/facade fallback without a hardcoded type list.
+        let target: syn::Path = syn::parse_str("Window").expect("Window path should parse");
+        let generated = generate_new_expression(
+            &target,
+            &[(format_ident!("title"), syn::parse_quote!("Text"))],
+        )
+        .expect("bare builtin fallback should generate");
+        let generated = generated.to_string();
+        assert!(
+            generated.contains("elwindui :: ui :: Window :: new"),
+            "{generated}"
+        );
+        assert!(!generated.contains("__elwindui_ctor_Window"), "{generated}");
+    }
+
+    #[test]
+    fn constructor_abi_has_only_named_property_protocol() {
+        let shape = build_effective_constructor_shape(
+            &[],
+            &[],
+            Vec::new(),
+            Vec::new(),
+            crate::component_frontend::ComponentConstructorReturn::RcSelf,
+            Vec::new(),
+        );
+        let generated = build_constructor_macro("Thing", &shape, None).to_string();
+        assert!(!generated.contains("children"), "{generated}");
     }
 
     fn minimal_component_def(

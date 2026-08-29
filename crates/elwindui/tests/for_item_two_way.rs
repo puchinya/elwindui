@@ -47,7 +47,7 @@ struct ForItemTwoWayHost {
 impl ForItemTwoWayHost {}
 
 fn type_checked_construction_and_drop(rows: Rc<RowsViewModel>) {
-    let host = ForItemTwoWayHost::new(Rc::clone(&rows));
+    let host = elwindui::new!(ForItemTwoWayHost(vm: Rc::clone(&rows)));
     drop(host);
 }
 

@@ -205,7 +205,7 @@ fn environment_template_is_built_once_resyncs_and_presents_logical_content() {
     );
     environment.set_control_template::<ControlTemplateTestPanel>(Some(capturing));
 
-    let panel = ControlTemplateTestPanel::new("custom".to_string());
+    let panel = elwindui::new!(ControlTemplateTestPanel(label: "custom".to_string()));
     assert_eq!(executions.get(), 1);
     assert_eq!(DEFAULT_TEMPLATE_MOUNTS.with(Cell::get), 0);
     assert_eq!(TARGET_MOUNTS.with(Cell::get), 1);
@@ -251,7 +251,7 @@ fn environment_template_is_built_once_resyncs_and_presents_logical_content() {
         mounted_values_before_environment_change,
         "changing the Environment slot must not re-template an already-mounted panel"
     );
-    let default_panel = ControlTemplateTestPanel::new("default".to_string());
+    let default_panel = elwindui::new!(ControlTemplateTestPanel(label: "default".to_string()));
     assert_eq!(DEFAULT_TEMPLATE_MOUNTS.with(Cell::get), 1);
     assert_eq!(TARGET_MOUNTS.with(Cell::get), 2);
     assert_eq!(text_values(default_panel.as_ref()), vec!["default"]);

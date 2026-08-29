@@ -806,6 +806,6 @@ impl ControlsDemoWindow {}
 #[elwindui::main]
 fn main() {
     let vm = ControlsDemoViewModel::new();
-    let window = ControlsDemoWindow::new(vm);
+    let window = elwindui::new!(ControlsDemoWindow(vm: vm));
     window.show();
 }

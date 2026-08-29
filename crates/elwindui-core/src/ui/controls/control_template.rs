@@ -107,7 +107,7 @@ pub struct ControlTemplateContext<C: ControlExt + 'static> {
 /// fn invalid(_: ControlTemplate<String>) {}
 /// ```
 pub struct ControlTemplate<C: ControlExt + 'static> {
-    // Shares its boxed-closure storage with `ViewTemplate` (see `crate::ui::view_template`), but
+    // Shares its boxed-closure storage with `ViewFactory` (see `crate::ui::view_factory`), but
     // `ControlTemplate`'s contract is that a factory always produces a root — building is
     // infallible from callers' perspective, so `__build` unwraps the shared `Option`-returning
     // storage rather than exposing it.

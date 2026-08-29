@@ -52,7 +52,7 @@ ElwindUI のコンテキストメニューおよびポップアップ基盤は�
 - **Presentation**:
   - `ContextMenuPresentation::Native`: `Menu` / `MenuItem` のセマンティックモデルを Backend のネイティブメニュー（`NSMenu` / `MenuFlyout`）に渡して表示。
   - `ContextMenuPresentation::Custom`: 標準 `Menu` モデルを `ContextMenuPresenter` により通常 UIElement ツリーとして構築し、`PopupSurface` 上で表示。
-  - `context_popup`: 任意の UIElement を生成する `ViewTemplate`（汎用 deferred View factory 型、`docs/design/runtime/view_template_design.md`）を、ターゲットの有効な `EnvironmentContext` から `derive()` した popup 専用コンテキストで評価し、`PopupSurface` 上で表示。
+  - `context_popup`: 任意の UIElement を生成する `ViewFactory`（汎用 deferred View factory 型、`docs/design/runtime/view_factory_design.md`）を、ターゲットの有効な `EnvironmentContext` から `derive()` した popup 専用コンテキストで評価し、`PopupSurface` 上で表示。
   - `MenuItem.icon`(`IconSource`、規範仕様: [UI Specification §9 Menu](../../specs/ui_spec.md)、値型設計: [Icon Source Design](icon_source_design.md)): 同じ `MenuItem.icon` が presentation mode に関わらず表示される。
     - `Native`: `MenuItem.icon` を backend のネイティブ icon slot（`NSMenuItem.image` / `MenuFlyoutItem.Icon`）に渡す。`SystemIcon` は OS/toolkit のネイティブシステムアイコンとして表示する。
     - `Custom`: `ContextMenuPresenter` が構築する行に既存の `elwindui::ui::Image` コントロールを leading icon slot として配置する。`IconSource::Image` はそのまま `Image.source` に設定し、`IconSource::System` は Core 内部の canonical monochrome vector fallback（`system_icon_vector`）を経由して `Image.source` に設定する——backend native icon をこの UIElement ツリーへ注入しない。
@@ -188,9 +188,9 @@ Core 座標系は **Top-Left (0, 0), +x: right, +y: down** に統一される。
 
 ## 6. Lifecycle & Environment Inheritance
 
-`context_popup` の内容は、ターゲット要素の mount 時点ではなく、**表示要求（open）が発生した時点**で構築される。`ViewTemplate::build`（`docs/design/runtime/view_template_design.md`）は owner を `Weak` としてのみ捕捉し、owner が既に解放されていれば（factory クロージャを一切呼ばずに）`None` を返す — その場合 popup は表示されない（`ContextMenuService::open_custom_popup` も `Option<Rc<dyn PopupSurfaceHandle>>` を返す）。
+`context_popup` の内容は、ターゲット要素の mount 時点ではなく、**表示要求（open）が発生した時点**で構築される。`ViewFactory::build`（`docs/design/runtime/view_factory_design.md`）は owner を `Weak` としてのみ捕捉し、owner が既に解放されていれば（factory クロージャを一切呼ばずに）`None` を返す — その場合 popup は表示されない（`ContextMenuService::open_custom_popup` も `Option<Rc<dyn PopupSurfaceHandle>>` を返す）。
 
-`ContextMenuService::open_custom_popup` は、owner の有効な `EnvironmentContext` から `derive()` した popup 専用の `EnvironmentContext` を作る。この派生コンテキストに `PopupDismissAction`（`crate::ui::popup::PopupDismissActionKey`）を設定してから `ViewTemplate::build` に渡す。owner 自身の Environment は変更しない。`PopupDismissActionKey` は `open_custom_popup` のみが設定するフレームワーク管理値であり、DSL 側（`EnvironmentScope`/`#[elwindui::theme]`）からは書き込めない——`#[environment(popup_dismiss)]` による読み取りのみが可能（`component_frontend::lookup_environment_key` は読み取り専用の resolver、`lookup_writable_environment_key` は `popup_dismiss` を含まない、`docs/specs/dsl_spec.md` §4/§13 参照）。ただの「上書き可能な通常の Environment 値」ではない点に注意。
+`ContextMenuService::open_custom_popup` は、owner の有効な `EnvironmentContext` から `derive()` した popup 専用の `EnvironmentContext` を作る。この派生コンテキストに `PopupDismissAction`（`crate::ui::popup::PopupDismissActionKey`）を設定してから `ViewFactory::build` に渡す。owner 自身の Environment は変更しない。`PopupDismissActionKey` は `open_custom_popup` のみが設定するフレームワーク管理値であり、DSL 側（`EnvironmentScope`/`#[elwindui::theme]`）からは書き込めない——`#[environment(popup_dismiss)]` による読み取りのみが可能（`component_frontend::lookup_environment_key` は読み取り専用の resolver、`lookup_writable_environment_key` は `popup_dismiss` を含まない、`docs/specs/dsl_spec.md` §4/§13 参照）。ただの「上書き可能な通常の Environment 値」ではない点に注意。
 
 `PopupDismissAction` は内部で `PopupDismissState`（`Building` → `Open(Weak<PopupSurfaceHandle>)` / `Dismissed`、`open_custom_popup` に private）という状態を持つ。これは build/mount 中（ネイティブサーフェスがまだ存在しない段階、将来 #162 の生成 Component root の `on_mount` を含む）に dismiss が呼ばれるケースを正しく扱うために必要——単純な weak-handle-slot だけでは、`show_popup` が返る前に dismiss された場合、そのリクエストが握りつぶされてしまう。
 
@@ -211,8 +211,8 @@ Capture effective EnvironmentContext from owner, then derive() a popup-scoped En
 Install PopupDismissAction into the popup-scoped EnvironmentContext (PopupDismissState::Building)
    │
    ▼
-ViewTemplate::build(ViewBuildContext { owner: Weak<owner>, environment: popup-scoped })
-   │  -> None if owner already dropped (enforced by ViewTemplate::build itself, factory never runs):
+ViewFactory::build(ViewBuildContext { owner: Weak<owner>, environment: popup-scoped })
+   │  -> None if owner already dropped (enforced by ViewFactory::build itself, factory never runs):
    │     abort, nothing shown, nothing to unmount
    ▼
 [content built; PopupDismissAction may already have been called during this step]
@@ -287,10 +287,10 @@ post-dismiss notification whose toolkit only reports the dismissal *after* chang
 require the native popup to still be visible/open while it runs.
 
 **Declarative `context_popup: view! { .. }` DSL** (Issue [#162](https://github.com/puchinya/elwindui/issues/162),
-split from [#161](https://github.com/puchinya/elwindui/issues/161), which owns the `ViewTemplate`
+split from [#161](https://github.com/puchinya/elwindui/issues/161), which owns the `ViewFactory`
 runtime/backend foundation this design revision describes) is implemented. A `context_popup`
 attribute may now be assigned a bare `view! { .. }` block — the same grammar/AST/codegen pipeline a
-normal Component body uses — instead of an ordinary `ViewTemplate`-typed expression. It desugars
+normal Component body uses — instead of an ordinary `ViewFactory`-typed expression. It desugars
 entirely at macro-expansion time, so no new *runtime* binding system is introduced — but the desugar
 itself runs in the middle of the pipeline, not before it: `validate::validate` runs first, against the
 *original*, unlowered `ViewExpr::DeferredView` node (so it can validate bare names against the
@@ -302,7 +302,7 @@ before `codegen::build_symbol_table`/code emission ever run — see step 1's own
    after `validate::validate` and before `codegen::build_symbol_table`): every `view! { .. }` block
    found in `context_popup` position is extracted into its own hidden, framework-synthesized
    `ComponentDef`/`ViewDef` pair — `ContentControl`-based, named
-   `__ElwinduiViewTemplateInstanceFor<Owner>_<ordinal>` — carrying exactly one synthetic field,
+   `__ElwinduiViewFactoryInstanceFor<Owner>_<ordinal>` — carrying exactly one synthetic field,
    `#[param] __view_owner: Weak<Owner>` (`ViewDef::implicit_owner = Some(ImplicitOwnerDef {
    field_name: "__view_owner", readable_fields, writable_fields, reactive_fields, bindable_fields
    })` — PR #165 final/post-final rereview remediation, A2/A8/A9: an explicit schema, computed once
@@ -311,7 +311,7 @@ before `codegen::build_symbol_table`/code emission ever run — see step 1's own
    `context_popup` attribute value is replaced with a `ViewExpr::DeferredView` marker referencing
    the hidden component by name.
 2. **Weak-owner codegen** (reusing, not duplicating, `ControlTemplate`'s own `templated_parent`
-   weak-owner mechanism — see `docs/design/runtime/view_template_design.md` §3's "why `Weak`, never
+   weak-owner mechanism — see `docs/design/runtime/view_factory_design.md` §3's "why `Weak`, never
    `Rc`" and `is_template_or_deferred_scope`): the hidden component's generated code treats
    `__view_owner` exactly like `templated_parent` for bindable-owner and Environment-propagation
    purposes (`docs/agents/class-model.md`'s "no second binding system" principle — see also
@@ -319,8 +319,8 @@ before `codegen::build_symbol_table`/code emission ever run — see step 1's own
    bare names resolved against the *enclosing* Component's own scope from being mistaken for
    unresolved external-builtin-base fields needing synthesis).
 3. **Factory emission**: the `context_popup` site emits
-   `ViewTemplate::new(move |ctx| { .. })` (`docs/design/runtime/view_template_design.md` §2 — the
-   same `ViewTemplate` every other deferred-view-typed field already uses). The closure recovers a
+   `ViewFactory::new(move |ctx| { .. })` (`docs/design/runtime/view_factory_design.md` §2 — the
+   same `ViewFactory` every other deferred-view-typed field already uses). The closure recovers a
    weak reference to the *lexical owner* (`DeferredViewExpr::lexical_owner` — always the original
    source Component, at any nesting depth, PR #165 review remediation A3) one of two ways, chosen at
    the point this factory expression is emitted, not by the hidden component's own shape:
@@ -341,7 +341,7 @@ before `codegen::build_symbol_table`/code emission ever run — see step 1's own
 
    Either way, the recovered weak reference returns `None` immediately if that owner has already
    been dropped, and otherwise constructs a **fresh hidden-component instance on every popup open**
-   (`__ElwinduiViewTemplateInstanceFor<Owner>_<ordinal>::__new_unmounted(owner_weak)`, then
+   (`__ElwinduiViewFactoryInstanceFor<Owner>_<ordinal>::__new_unmounted(owner_weak)`, then
    `mount(ctx.environment)`) — so bare names inside the `view! { .. }` block resolve directly against
    the enclosing Component's own schema-listed fields/state/params/computed/environment values and
    `#[bindable]`-owner-qualified paths (`ImplicitOwnerDef`'s `readable_fields`/`bindable_fields` —
@@ -364,10 +364,10 @@ instead of inheriting the popup's actual mount-time Environment (including
 `#[environment(popup_dismiss)]`), a correctness gap this design's own implementation found and fixed
 in the same generalized mechanism rather than a `context_popup`-specific special case.
 
-Today, popup content may still be authored via the low-level `ViewTemplate::new(|ctx| ...)` API
-directly when full manual control is wanted — see `docs/design/runtime/view_template_design.md` §4
+Today, popup content may still be authored via the low-level `ViewFactory::new(|ctx| ...)` API
+directly when full manual control is wanted — see `docs/design/runtime/view_factory_design.md` §4
 for exactly what that low-level API does and does not guarantee. Both forms share the same
-`ViewTemplate` runtime primitive, but they are not equivalent: the low-level API is just a raw
+`ViewFactory` runtime primitive, but they are not equivalent: the low-level API is just a raw
 closure the author fills in by hand, with no help resolving or capturing an outer owner correctly
 (it is entirely possible to hand-write one that captures a stale value or an accidental strong
 `Rc`). The declarative `context_popup: view! { .. }` sugar additionally provides, at compile time,
@@ -377,7 +377,7 @@ capture (never an accidental strong reference), and the same binding/dependency-
 closure API cannot enforce on its own.
 
 **Owner-`Window`-close interaction**: closing the owner `Window` while one of its declarative (or
-manually-authored `ViewTemplate`) popups is still open must close that popup — and run its
+manually-authored `ViewFactory`) popups is still open must close that popup — and run its
 `unmount_subtree` teardown — *before* the Window's own content unmounts, not leave it to be
 orphaned by the native surface disappearing out from under it. `Window::unmount_override`
 (`docs/design/runtime/component_lifecycle_design.md`'s "Window mount_override/unmount_override

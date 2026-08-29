@@ -420,7 +420,7 @@ pub struct ViewDef {
     /// `component_frontend.rs`'s hidden-Component construction helper) sets this. Unlike
     /// `ControlTemplate<C>`'s `templated_parent` (always explicit-qualification-only, never a
     /// bare-name fallback), this is exactly the "implicit bare fallback" half of `codegen.rs`'s
-    /// generalized weak-owner mechanism — docs/design/runtime/view_template_design.md §3. PR #165
+    /// generalized weak-owner mechanism — docs/design/runtime/view_factory_design.md §3. PR #165
     /// final rereview remediation, A2: this used to be a bare `Option<String>` field name, which let
     /// *any* unshadowed bare Rust name (not just an actual source-Component field) fall back to a
     /// `__view_owner.<name>()` getter call — see `ImplicitOwnerDef`'s own doc comment for why that
@@ -650,12 +650,12 @@ pub enum ViewExpr {
     /// `ClosureBody::Element`, just not behind a `|params|`.
     Element(Box<ElementNode>),
     /// `context_popup: view! { .. }` — a nested `view!` macro body, deferred to a
-    /// `elwindui::core::ui::ViewTemplate` built lazily (popup-open time, not owner-mount time), not
+    /// `elwindui::core::ui::ViewFactory` built lazily (popup-open time, not owner-mount time), not
     /// evaluated where it's declared. Only valid where the target field's declared type is
-    /// `ViewTemplate`/`Option<ViewTemplate>` (`validate.rs`); lowered by an internal pre-emission
+    /// `ViewFactory`/`Option<ViewFactory>` (`validate.rs`); lowered by an internal pre-emission
     /// pass (`lib.rs`) into a synthetic hidden `Component` (`inherits ContentControl`, one synthetic
     /// `#[param] __view_owner: Weak<OuterComponent>` field) reusing the ordinary Component codegen
-    /// pipeline — see docs/design/runtime/view_template_design.md §3, Issue #162. `context_popup` is
+    /// pipeline — see docs/design/runtime/view_factory_design.md §3, Issue #162. `context_popup` is
     /// merely the first public property that consumes this general deferred-View expression form;
     /// this is not a `context_popup`-specific AST variant.
     DeferredView(Box<DeferredViewExpr>),
@@ -681,15 +681,15 @@ pub struct DeferredViewBody {
 pub struct DeferredViewExpr {
     pub body: DeferredViewBody,
     /// The deterministic generated hidden-Component type name this deferred body lowers to
-    /// (`__ElwinduiViewTemplateInstanceFor<OuterComponent>_<ordinal>`). `None` until the lowering
+    /// (`__ElwinduiViewFactoryInstanceFor<OuterComponent>_<ordinal>`). `None` until the lowering
     /// pass (`lib.rs`) fills it in; always `Some` by the time `codegen.rs` emits the
-    /// `ViewTemplate::new(..)` factory referencing it.
+    /// `ViewFactory::new(..)` factory referencing it.
     pub hidden_component: Option<String>,
     /// The **source** lexical owner type name — the real, DSL-author-visible Component whose
     /// `view! { .. }` body this `DeferredView` was originally written inside, no matter how many
     /// levels of nested `context_popup: view! { .. }` separate it from that Component today. This
     /// is what `hidden_component`'s own generated struct's `__view_owner: Weak<..>` field is typed
-    /// against (`component_frontend::hidden_view_template_component`), so it is also what
+    /// against (`component_frontend::hidden_view_factory_component`), so it is also what
     /// `codegen.rs`'s `emit_deferred_view_value` must recover a `Weak<..>` of at the *point this
     /// factory expression is emitted* — which is **not** necessarily `ctx.target` (the concrete
     /// type currently being code-generated): for a `DeferredView` nested inside another

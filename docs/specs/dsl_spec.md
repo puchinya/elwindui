@@ -761,7 +761,7 @@ VisualStateManagerは対象外である。
 
 ### `view! { .. }`を属性値とする糖衣構文(deferred view、Issue #162)
 
-`ViewTemplate`または`Option<ViewTemplate>`型のフィールド(現時点では`context_popup`のみ、`docs/specs/ui_spec.md`参照——実際にどちらの型で受けるかは宣言側が決め、代入側は宣言された型を`elwindui::core::ui::DeferredViewAssignmentTarget::from_view_template`経由で型主導に変換する)には、通常の式の代わりに裸の`view! { .. }`ブロックを直接書ける。これは新しい構築時ではなく**評価が遅延される**View — 実際に構築されるのは、そのフィールドの用途が定める「開かれた」時点(`context_popup`ならpopupが開かれた瞬間)である。
+`ViewFactory`または`Option<ViewFactory>`型のフィールド(現時点では`context_popup`のみ、`docs/specs/ui_spec.md`参照——実際にどちらの型で受けるかは宣言側が決め、代入側は宣言された型を`elwindui::core::ui::DeferredViewAssignmentTarget::from_view_factory`経由で型主導に変換する)には、通常の式の代わりに裸の`view! { .. }`ブロックを直接書ける。これは新しい構築時ではなく**評価が遅延される**View — 実際に構築されるのは、そのフィールドの用途が定める「開かれた」時点(`context_popup`ならpopupが開かれた瞬間)である。
 
 ```rust
 #[elwindui::component]
@@ -792,7 +792,7 @@ struct DocumentTabs {
   - enclosing Component自身の書込み可能な(`prop`/`state`の)field/state値への代入——生成されたsetterへ経路付けられる。
   - 上記のいずれにも該当しない裸の名前(モジュール定数、`None`、通常の自由関数呼び出しなど)は、通常のRustの名前としてそのまま残る。
   - enclosing Component自身の**任意のメソッド**が暗黙に`self`扱いされるわけではない——ブロック内で明示的な`self`を書いた場合、それは(ブロックがlowerされる)隠しComponent自身を指す、通常のRustの`self`のままである。
-- 評価(構築)は宣言時点ではなく、そのフィールドの用途が定める時点で行われ、その時点でのenclosing Componentの現在値を読む。enclosing Componentが既に解放されている場合は何も構築されず、フィールドの実行時型(`ViewTemplate`)が`None`相当を返す。
+ - 評価(構築)は宣言時点ではなく、そのフィールドの用途が定める時点で行われ、その時点でのenclosing Componentの現在値を読む。enclosing Componentが既に解放されている場合は何も構築されず、フィールドの実行時型(`ViewFactory`)が`None`相当を返す。
 - **ライブ更新**: ブロックが実際に開かれて(popupなら表示されて)いる間、上記のenclosing Component自身のfield/state/computed/environment値、および`#[bindable]` ownerを経由した値は、通常のComponent自身の`view!`本体が持つのと同じ購読・resync規則(`PropertyChanged`)に従ってライブ更新される——ブロックが閉じられれば、対応する購読も解放される。
 - 生成コードはmacro展開時にこのブロックを独立した隠しComponent/View pairへlowerし、既存の`view!`構築pipelineへ委譲する——実行時に新しい束縛機構は導入しない。詳細は`docs/design/tools/codegen_design.md`§3.35、`docs/design/runtime/popup_context_menu_design.md`の該当節を参照。
 
@@ -1379,7 +1379,7 @@ impl SaveButton {}
 34. `#[environment(name)]` の `name` が、解決可能な `#[elwindui::environment_key]` 定義または組み込みEnvironment Key名(Semantic Style Key、`theme_environment_spec.md`§7、または`popup_dismiss`、同spec§2)を持たない → エラー。bare識別子(同一crate内解決または組み込みKey fallback)の場合はコード生成時の`compile_error!`。完全修飾クレートパス(Issue #129、クレート境界を越えた解決)の場合は、生成コードが実際にコンパイルされた時点の`rustc`自身の「マクロが見つからない」エラー——proc-macro展開からは他クレートが何をエクスポートしているか分からないため、`elwindui-codegen`側の早期検査は原理的に行えない(`docs/design/tools/environment_key_macro_design.md`参照)。
 35. `EnvironmentScope { key: value .. }` の `key` が、解決可能な `#[elwindui::environment_key]` 定義または**書き込み可能な**組み込みEnvironment Key名(Semantic Style Key、`theme_environment_spec.md`§7——ルール34の読み取り専用集合とは別で、`popup_dismiss`を含まない。4章「`#[environment(name)]`」の書き込み側解決規則を参照)を持たない、または `value` の型がそのKeyの `Value` 型と一致しない → エラー(5章「`EnvironmentScope`」参照)。名前解決エラーの検出方式(コード生成時`compile_error!` vs 実コンパイル時`rustc`エラー)はルール34と同じ、bare/完全修飾の別で決まる。`value`の型不一致はどちらの形式でも常に通常の`rustc`型エラー。`popup_dismiss`を`EnvironmentScope`で上書きしようとした場合は、書き込み可能な集合に含まれないため、bare識別子の「未解決」と同じコード生成時`compile_error!`となる。
 36. `#[elwindui::theme] struct Name { #[theme(value = ..)] field: Type, .. }` の `field` の識別子が、解決可能な `#[elwindui::environment_key]` 定義または**書き込み可能な**組み込みsemantic Key名を持たない → コード生成時エラー(`docs/specs/theme_environment_spec.md`§2/§3/§4/§7参照。ルール35の`EnvironmentScope`と同じ書き込み側解決規則——`#[environment(name)]`の読み取り側解決規則とは異なり、`popup_dismiss`は含まない)
-37. `view! { .. }`(deferred view、本章「`view! { .. }`を属性値とする糖衣構文」参照)が代入されるフィールドが`ViewTemplate`/`Option<ViewTemplate>`型でない、または`TwoWay`/`once!(..)`で代入されている → エラー(deferred viewはOneWayの一方向構築のみ許可する。書き戻し先が存在せず、`once!`のような構築時一回評価とも意味的に異なる——実際の評価は宣言時ではなく用途が定める時点まで遅延される)
+ 37. `view! { .. }`(deferred view、本章「`view! { .. }`を属性値とする糖衣構文」参照)が代入されるフィールドが`ViewFactory`/`Option<ViewFactory>`型でない、または`TwoWay`/`once!(..)`で代入されている → エラー(deferred viewはOneWayの一方向構築のみ許可する。書き戻し先が存在せず、`once!`のような構築時一回評価とも意味的に異なる——実際の評価は宣言時ではなく用途が定める時点まで遅延される)
 38. `mount_override`/`unmount_override`という名前の`fn`をユーザーが`#[overrides]`(またはそれ以外の形)で定義している → エラー(`docs/design/runtime/component_lifecycle_design.md`§4i参照。この2つはWindowのバックエンド実装がフレームワーク内部のライフサイクルフックへ接続するために予約された名前であり、DSL作者向けのライフサイクルフックではない——同じ目的には`on_mount`/`on_unmount`を使う)
 39. `elwindui::new!(Type(...))`のnamed constructionで、引数が`name: expr`形式でない、同じfieldを重複指定する、requiredな`#[param]`/`#[bindable]`を省略する、未知fieldまたはwritableでないfieldを指定する → 静的エラー。引数は通常のRust式として扱うが、診断対象のfield shapeを先に検証するため、重複fieldの検出はその式を評価する前に行う。位置引数、`=`形式、children/dynamic/binding構文は許可しない。
 

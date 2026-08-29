@@ -643,7 +643,7 @@ impl<'a> Parser<'a> {
         // second, narrower grammar. Checked before the generic macro-call/`syn::Expr` fallbacks
         // below (`looks_like_macro_call` would otherwise swallow `view!{..}`'s tokens as an opaque
         // `syn::Expr::Macro`, losing its structure entirely) — see docs/design/runtime/
-        // view_template_design.md §3, Issue #162.
+        // view_factory_design.md §3, Issue #162.
         if self.eat_keyword_bang("view") {
             self.skip_trivia();
             self.expect_char('{')?;

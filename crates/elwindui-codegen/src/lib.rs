@@ -609,12 +609,12 @@ pub(crate) fn emit_compiled_template_factory(
     }
 }
 
-/// Emits a `ViewTemplate` factory for a deferred expression nested inside a ControlTemplate.  The
+/// Emits a `ViewFactory` factory for a deferred expression nested inside a ControlTemplate.  The
 /// deferred value keeps the same semantic body backend as its enclosing template; only the outer
 /// lifecycle context changes from `ControlTemplateContext` to `ViewBuildContext`.  The concrete
 /// typed parent is captured at expression-construction time, avoiding any downcast or erased target
 /// lookup when the deferred view is later opened.
-fn emit_view_template_factory(
+fn emit_view_factory(
     body: &CompiledTemplateBody,
     target_type: TokenStream,
     parent: &syn::Ident,
@@ -702,7 +702,7 @@ fn emit_view_template_factory(
     quote! {
         {
             let __deferred_parent_weak = std::rc::Rc::downgrade(&#parent);
-            elwindui::core::ui::ViewTemplate::new(move |context| {
+            elwindui::core::ui::ViewFactory::new(move |context| {
                 context.owner.upgrade()?;
                 let __elwindui_template_parent = __deferred_parent_weak.upgrade()?;
                 let __environment = context.environment.clone();
@@ -1350,7 +1350,7 @@ fn generate_component_impl_real(
 /// Issue #162 §3.5/§4.6: finds `outer_component_name`'s own `Item::View` in `module` (if any) and
 /// lowers every `ViewExpr::DeferredView` reachable from it, appending one synthetic hidden
 /// `Item::Component`/`Item::View` pair per deferred view found (`component_frontend::
-/// hidden_view_template_component`) directly into `module.items`. A no-op when `module` has no
+/// hidden_view_factory_component`) directly into `module.items`. A no-op when `module` has no
 /// matching view (a `view`-less component can't contain a `context_popup: view! { .. }` at all).
 ///
 /// `implicit_owner_schema` is `codegen::implicit_owner_schema`'s output for `outer_component_name`,
@@ -1592,7 +1592,7 @@ fn lower_deferred_views_in_expr(
         ast::ViewExpr::DeferredView(deferred) => {
             *ordinal += 1;
             let hidden_name =
-                format!("__ElwinduiViewTemplateInstanceFor{owner_type_name}_{ordinal}");
+                format!("__ElwinduiViewFactoryInstanceFor{owner_type_name}_{ordinal}");
             lower_deferred_views_in_element_lets_and_body(
                 &mut deferred.body.lets,
                 &mut deferred.body.root,
@@ -1601,13 +1601,12 @@ fn lower_deferred_views_in_expr(
                 ordinal,
                 new_items,
             );
-            let (hidden_component, hidden_view) =
-                component_frontend::hidden_view_template_component(
-                    &hidden_name,
-                    owner_type_name,
-                    implicit_owner_schema,
-                    &deferred.body,
-                );
+            let (hidden_component, hidden_view) = component_frontend::hidden_view_factory_component(
+                &hidden_name,
+                owner_type_name,
+                implicit_owner_schema,
+                &deferred.body,
+            );
             new_items.push(ast::Item::Component(hidden_component));
             new_items.push(ast::Item::View(hidden_view));
             deferred.hidden_component = Some(hidden_name);

@@ -7,7 +7,7 @@ use crate::environment::{EnvironmentContext, EnvironmentKey};
 use crate::focus::FocusTracker;
 use crate::ui::{
     HorizontalLayoutExt, IconElementExt, IconSourceElementExt, LayoutExt, MenuExt, TextBlockExt,
-    TextStyleOwner, UIElementExt, ViewBuildContext, ViewTemplate, unmount_subtree,
+    TextStyleOwner, UIElementExt, ViewBuildContext, ViewFactory, unmount_subtree,
 };
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
@@ -81,7 +81,7 @@ impl ContextRequest {
 /// A callback that closes the popup that installed it, invoked from within a
 /// `context_popup: view! { .. }` subtree. Not part of [`ViewBuildContext`] — installed only into
 /// the popup-scoped Environment derived by [`ContextMenuService::open_custom_popup`], via
-/// [`PopupDismissActionKey`], so [`ViewTemplate`] itself stays popup-agnostic.
+/// [`PopupDismissActionKey`], so [`ViewFactory`] itself stays popup-agnostic.
 ///
 /// Ownership graph (no strong cycle back to the popup content that holds this value): popup content
 /// → its Environment → this `PopupDismissAction` → `open_custom_popup`'s private
@@ -111,7 +111,7 @@ impl PopupDismissAction {
 
 /// Private state machine backing a single [`ContextMenuService::open_custom_popup`] call's
 /// [`PopupDismissAction`], distinguishing "not shown yet" from "shown" from "already dismissed" so a
-/// dismiss request arriving before a native surface exists (during `ViewTemplate::build`, i.e. a
+/// dismiss request arriving before a native surface exists (during `ViewFactory::build`, i.e. a
 /// generated Component's own `on_mount` once #162 lands) is captured rather than silently lost. Not
 /// part of any public type — `PopupDismissAction`'s own public shape stays a plain `Fn()` callback;
 /// nothing outside `open_custom_popup` ever sees this enum.
@@ -147,7 +147,7 @@ pub enum ResolvedContextDefinition {
         presentation: ContextMenuPresentation,
     },
     /// A custom UIElement popup template.
-    Popup { template: ViewTemplate },
+    Popup { template: ViewFactory },
 }
 
 /// An element and its resolved context menu/popup definition.
@@ -347,7 +347,7 @@ impl ContextMenuService {
     /// anything in any of these cases:
     ///
     /// - `template` declines to build (e.g. `owner` has already been dropped by the time this is
-    ///   called — enforced by `ViewTemplate::build` itself);
+    ///   called — enforced by `ViewFactory::build` itself);
     /// - the built content calls the installed `PopupDismissAction` during its own build/mount
     ///   (e.g. from a Component's `on_mount`, before a native surface exists) — the built content is
     ///   unmounted and the popup is never shown, rather than the dismiss request being silently lost;
@@ -356,7 +356,7 @@ impl ContextMenuService {
     pub fn open_custom_popup(
         host: &dyn PopupHost,
         owner: &Rc<dyn UIElementExt>,
-        template: &ViewTemplate,
+        template: &ViewFactory,
         anchor: &PopupAnchor,
         environment: EnvironmentContext,
         work_area: Rect,
@@ -900,7 +900,7 @@ mod tests {
     #[test]
     fn resolve_target_own_context_popup() {
         let node = VerticalLayout::new();
-        let template = ViewTemplate::new(|_ctx| {
+        let template = ViewFactory::new(|_ctx| {
             let layout = VerticalLayout::new();
             let label = TextBlock::new();
             layout
@@ -923,7 +923,7 @@ mod tests {
     fn open_custom_popup_measures_and_displays_on_host() {
         let host = FakePopupHost::new();
         let owner: Rc<dyn UIElementExt> = VerticalLayout::new();
-        let template = ViewTemplate::new(|_ctx| {
+        let template = ViewFactory::new(|_ctx| {
             let block = TextBlock::new();
             block.set_width(120.0);
             block.set_height(80.0);
@@ -971,7 +971,7 @@ mod tests {
         // upgrade), independent of which `Rc<dyn UIElementExt>` is passed as `owner` here.
         let host = FakePopupHost::new();
         let owner: Rc<dyn UIElementExt> = VerticalLayout::new();
-        let template = ViewTemplate::new(|_ctx| None);
+        let template = ViewFactory::new(|_ctx| None);
 
         let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
         let work_area = Rect {
@@ -1212,7 +1212,7 @@ mod tests {
         let captured_env: Rc<RefCell<Option<EnvironmentContext>>> = Rc::new(RefCell::new(None));
         let captured_clone = Rc::clone(&captured_env);
 
-        let template = ViewTemplate::new(move |ctx| {
+        let template = ViewFactory::new(move |ctx| {
             *captured_clone.borrow_mut() = Some(ctx.environment.clone());
             let b = TextBlock::new();
             Some(b as Rc<dyn UIElementExt>)
@@ -1253,7 +1253,7 @@ mod tests {
 
         let captured_env: Rc<RefCell<Option<EnvironmentContext>>> = Rc::new(RefCell::new(None));
         let captured_clone = Rc::clone(&captured_env);
-        let template = ViewTemplate::new(move |ctx| {
+        let template = ViewFactory::new(move |ctx| {
             *captured_clone.borrow_mut() = Some(ctx.environment.clone());
             Some(TextBlock::new() as Rc<dyn UIElementExt>)
         });
@@ -1296,7 +1296,7 @@ mod tests {
 
         let captured_dismiss: Rc<RefCell<Option<PopupDismissAction>>> = Rc::new(RefCell::new(None));
         let captured_clone = Rc::clone(&captured_dismiss);
-        let template = ViewTemplate::new(move |ctx| {
+        let template = ViewFactory::new(move |ctx| {
             *captured_clone.borrow_mut() = ctx.environment.get::<PopupDismissActionKey>();
             Some(TextBlock::new() as Rc<dyn UIElementExt>)
         });
@@ -1347,7 +1347,7 @@ mod tests {
         let host = FakePopupHost::new();
         let owner: Rc<dyn UIElementExt> = VerticalLayout::new();
 
-        let template = ViewTemplate::new(|_ctx| {
+        let template = ViewFactory::new(|_ctx| {
             let layout = VerticalLayout::new();
             let button = TextBlock::new();
             let button_dyn: Rc<dyn UIElementExt> = Rc::clone(&button) as Rc<dyn UIElementExt>;
@@ -1423,7 +1423,7 @@ mod tests {
         let observed_during_hook: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
         let observed_clone = Rc::clone(&observed_during_hook);
 
-        let template = ViewTemplate::new(move |_ctx| {
+        let template = ViewFactory::new(move |_ctx| {
             let root: Rc<dyn UIElementExt> = TextBlock::new();
             let observed_for_hook = Rc::clone(&observed_clone);
             let root_for_hook = Rc::clone(&root);
@@ -1477,7 +1477,7 @@ mod tests {
     fn open_custom_popup_dismiss_during_show_popup_is_not_lost_or_reopened() {
         // Distinct from `open_custom_popup_dismiss_during_build_prevents_the_popup_from_showing`:
         // here `dismiss()` fires from *inside* `host.show_popup` itself (a backend's native "show"
-        // call can dispatch reentrantly), i.e. after `ViewTemplate::build` already returned and
+        // call can dispatch reentrantly), i.e. after `ViewFactory::build` already returned and
         // `PopupDismissState` is still `Building` (the state doesn't move to `Open` until
         // `open_custom_popup` gets control back with the real handle). Before the fix this window
         // let the dismiss request get silently overwritten by the unconditional post-show `Open`
@@ -1525,7 +1525,7 @@ mod tests {
 
         let weak_content: Rc<RefCell<Option<Weak<dyn UIElementExt>>>> = Rc::new(RefCell::new(None));
         let weak_clone = Rc::clone(&weak_content);
-        let template = ViewTemplate::new(move |_ctx| {
+        let template = ViewFactory::new(move |_ctx| {
             let root: Rc<dyn UIElementExt> = TextBlock::new();
             *weak_clone.borrow_mut() = Some(Rc::downgrade(&root));
             Some(root)
@@ -1572,7 +1572,7 @@ mod tests {
     #[test]
     fn open_custom_popup_dismiss_during_build_prevents_the_popup_from_showing() {
         // Simulates a generated declarative Component's `on_mount { dismiss(); }` (#162) calling the
-        // popup_dismiss action synchronously from *inside* `ViewTemplate::build` — before any native
+        // popup_dismiss action synchronously from *inside* `ViewFactory::build` — before any native
         // surface exists. The popup must never be shown at all (not shown-then-immediately-closed),
         // and the already-built content must still be unmounted exactly once.
         let host = FakePopupHost::new();
@@ -1581,7 +1581,7 @@ mod tests {
         let unmount_count = Rc::new(Cell::new(0));
         let unmount_count_for_hook = Rc::clone(&unmount_count);
 
-        let template = ViewTemplate::new(move |ctx| {
+        let template = ViewFactory::new(move |ctx| {
             let root: Rc<dyn UIElementExt> = TextBlock::new();
             let count_for_hook = Rc::clone(&unmount_count_for_hook);
             root.add_unmount_hook(Box::new(move || {
@@ -1638,7 +1638,7 @@ mod tests {
 
         let unmount_count = Rc::new(Cell::new(0));
         let unmount_count_for_hook = Rc::clone(&unmount_count);
-        let template = ViewTemplate::new(move |_ctx| {
+        let template = ViewFactory::new(move |_ctx| {
             let root: Rc<dyn UIElementExt> = TextBlock::new();
             let count_for_hook = Rc::clone(&unmount_count_for_hook);
             root.add_unmount_hook(Box::new(move || {
@@ -1739,7 +1739,7 @@ mod tests {
         let owner: Rc<dyn UIElementExt> = VerticalLayout::new();
         let weak_content: Rc<RefCell<Option<Weak<dyn UIElementExt>>>> = Rc::new(RefCell::new(None));
         let weak_clone = Rc::clone(&weak_content);
-        let template = ViewTemplate::new(move |_ctx| {
+        let template = ViewFactory::new(move |_ctx| {
             let root: Rc<dyn UIElementExt> = TextBlock::new();
             *weak_clone.borrow_mut() = Some(Rc::downgrade(&root));
             Some(root)

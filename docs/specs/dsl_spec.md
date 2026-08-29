@@ -143,10 +143,32 @@ qualified pathの最終的なRust型解決と可視性は通常のRust compiler�
 proc macroが任意の`use`先crateを推測して外部componentとして扱うことは保証しない。既存のbuiltinおよび
 unresolved unqualified nameのfallback規則は維持する。
 
-外部生成componentの現行construction ABIは、引数なしの`Type::new()`後に公開property setterと
-`#[content(...)]` attachmentを適用する形である。required constructor parameterを持つ外部componentを
-このDSLが自動的にconstructor引数へ組み立てることはまだ保証しない。required constructor shapeの公開は
-[Issue #193](https://github.com/puchinya/elwindui/issues/193)で扱う。
+外部生成componentのnamed constructionは`elwindui::new!`が担当する。`new!(Type(...))`の括弧内は
+フィールド名と通常のRust式によるnamed argumentだけで構成し、引数の記述順は宣言順でなくてよい。
+`#[param]`で初期化式を持たないfieldはrequiredな固定constructor input、
+`#[param(default = expr)]`はoptionalな固定constructor inputとなる。`#[bindable]`もrequiredな
+固定owner identityとして同じconstructor shapeに含まれる。一方、通常の`#[prop]`はconstructor inputへ
+昇格せず、初期値を持つ場合も持たない場合もruntime-mutableな公開propertyのままである。
+
+`new!`の初期化は、required Param/Bindable、内部のunmounted construction、defaulted Param、named
+Prop/contentの初期値、mountの順に行われる。Paramの初期値とconstruction-timeのProp/content値はmount前に
+内部setterで格納され、通常のproperty notification・resync・ユーザーcallbackを発火しない。mount後の
+Prop setterは通常のruntime mutationとして通知と依存viewのresyncを行う。Propの型は宣言型そのものを使い、
+`Option<T>`を`T`へ縮めたり、Prop-backed contentをconstructor Paramへ変換したりしない。
+
+qualifiedな外部生成componentでは、定義crateが公開するhidden constructor ABI macroへ型pathの最初の
+crate/alias segmentを通じて接続する。裸のunqualified nameを任意の外部crateへ推測して接続することはない。
+例えば次のように書ける:
+
+```rust
+let card = elwindui::new!(some_alias::widgets::Card(
+    count: 12000,
+    title: "売上".to_string(),
+));
+```
+
+required fieldの欠落、未知field、getter-only/computed/stateなど書き込み不可field、重複fieldは静的エラー
+となる。位置引数、`=`形式、children/dynamic/binding構文は`new!`では許可しない。
 
 外部生成componentが`#[content]`に具体的な`Vec<Rc<T>>`を公開する場合、`for`/`if`/`match`のdynamic
 contentはその`T`を保持したtyped slotとして再構成される。getterの返す`Vec`を`ListExt`へ見立てたり、
@@ -207,14 +229,17 @@ impl VolumeControl {}
 
 **呼び出し側:**
 
-`view!`の中で`Card { title: "売上", value: 12000 }`と書くDSL要素構築の糖衣構文は、`view!`の**外**にある通常のRustコード(例えば`main`関数)からは使えない——生成された`Card`は普通のRust structであり、フィールドが`pub`公開されるとは限らないため、`view!`外からは`#[param]`/初期値を持たない`#[prop]`をコンストラクタ引数の順で渡す通常の関連関数`Card::new(..)`を呼ぶ:
+`view!`の中では`Card { title: "売上", value: 12000 }`というDSL要素構築の糖衣構文を使えるが、
+`view!`の外にある通常のRustコード(例えば`main`関数)では`elwindui::new!(Card(...))`を使う。
+生成された`Card`は普通のRust structであり、フィールド自体が`pub`公開されるとは限らないため、公開
+constructor shapeを名前付きで利用する:
 
 ```rust
 #[elwindui::component(inherits VerticalLayout)]
 struct Card {
-    #[prop]
+    #[param]
     title: String,
-    #[prop]
+    #[param]
     value: i32,
 
     body: view! {
@@ -226,7 +251,10 @@ struct Card {
 #[elwindui::component]
 impl Card {}
 
-let sales_card = Card::new("売上".to_string(), 12000);
+let sales_card = elwindui::new!(Card(
+    value: 12000,
+    title: "売上".to_string(),
+));
 ```
 
 - インスタンス命名は専用記号を使わず、Rustの `let` 束縛をそのまま使う
@@ -423,7 +451,10 @@ component の各フィールドには、実体化時に固定されるか実行�
 
 ### `#[param]`:実体化時に固定
 
-`#[param]`フィールドの初期化式には**静的評価式**のみを書ける。
+`#[param]`フィールドの初期化式には**静的評価式**のみを書ける。初期化式を持たない
+`#[param]`は`new!`で必ず名前付き値を渡すrequired inputになる。`#[param(default = expr)]`は
+名前付き値を省略できるoptional inputで、`expr`が定義側の初期値になる。いずれも構築後は固定され、
+通常の公開setterは生成されない。
 
 **許可される要素:**
 
@@ -441,12 +472,9 @@ component の各フィールドには、実体化時に固定されるか実行�
 
 ### `#[prop]`(既定):実行時に読み書き可能
 
-**`#[prop]`フィールドへのアクセスは、コード生成器が自動生成する`pub fn <field>(&self) -> T`(getter)/`pub fn set_<field>(&self, value: T)`(setter)を通じて行う**——フィールド自体は`struct`上に公開されず、この2メソッドが外部・内部を問わず唯一のアクセス経路になる。setterは値を書き換えるだけでなく、そのcomponent専用の型付き通知(`{Component}Property`、viewmodelの`PropertyChanged`と同じ設計、§9参照)を発火し、依存する`view`の該当箇所・依存する`#[computed]`フィールドだけを再同期する。
+**`#[prop]`フィールドへのアクセスは、コード生成器が自動生成する`pub fn <field>(&self) -> T`(getter)/`pub fn set_<field>(&self, value: T)`(setter)を通じて行う**——フィールド自体は`struct`上に公開されず、この2メソッドが外部・内部を問わず唯一のアクセス経路になる。`#[prop]`はviewの有無やdefault値の有無に関わらずconstructor inputにはならず、初期値がない場合は`Default::default()`で初期化される。`new!`ではPropへ任意のnamed initial valueを渡せるが、これはmount前の初期格納であり、通常setterによるruntime mutationとは区別される。
 
-setterが生成されるかどうかは、**そのcomponentが`view`を持つかどうか**で分かれる:
-
-- **`view`を持つcomponent**(`body: view! { .. }`フィールドがある)では、`#[prop]`フィールドはdefault値の有無に関わらず**常に**getter+setterの両方を持つ——default値の無い必須フィールド(`new(..)`のコンストラクタ引数)であっても、実体化後にsetterで書き換えられる
-- **`view`を持たないcomponent**(データ定義のみ)では、再同期すべき`view`が無いぶん簡略化されており、default値を持つフィールド(`#[prop(default = expr)]`)または`Option<T>`型のフィールドだけがsetterを持つ。default値の無い必須の非`Option`フィールドはgetterのみになる(`#[param]`と同じ形)
+Propのsetterは値を書き換えるだけでなく、そのcomponent専用の型付き通知(`{Component}Property`、viewmodelの`PropertyChanged`と同じ設計、§9参照)を発火し、依存する`view`の該当箇所・依存する`#[computed]`フィールドだけを再同期する。宣言型が`Option<T>`ならgetter/setterも`Option<T>`を受け取り、`Some`/`None`を含むstorage全体を扱う。`Option`を理由に`T`のsetterやconstructor parameterへ変換しない。
 
 ### `#[state]`:component専用の非公開状態
 
@@ -1343,6 +1371,7 @@ impl SaveButton {}
 36. `#[elwindui::theme] struct Name { #[theme(value = ..)] field: Type, .. }` の `field` の識別子が、解決可能な `#[elwindui::environment_key]` 定義または**書き込み可能な**組み込みsemantic Key名を持たない → コード生成時エラー(`docs/specs/theme_environment_spec.md`§2/§3/§4/§7参照。ルール35の`EnvironmentScope`と同じ書き込み側解決規則——`#[environment(name)]`の読み取り側解決規則とは異なり、`popup_dismiss`は含まない)
 37. `view! { .. }`(deferred view、本章「`view! { .. }`を属性値とする糖衣構文」参照)が代入されるフィールドが`ViewTemplate`/`Option<ViewTemplate>`型でない、または`TwoWay`/`once!(..)`で代入されている → エラー(deferred viewはOneWayの一方向構築のみ許可する。書き戻し先が存在せず、`once!`のような構築時一回評価とも意味的に異なる——実際の評価は宣言時ではなく用途が定める時点まで遅延される)
 38. `mount_override`/`unmount_override`という名前の`fn`をユーザーが`#[overrides]`(またはそれ以外の形)で定義している → エラー(`docs/design/runtime/component_lifecycle_design.md`§4i参照。この2つはWindowのバックエンド実装がフレームワーク内部のライフサイクルフックへ接続するために予約された名前であり、DSL作者向けのライフサイクルフックではない——同じ目的には`on_mount`/`on_unmount`を使う)
+39. `elwindui::new!(Type(...))`のnamed constructionで、引数が`name: expr`形式でない、同じfieldを重複指定する、requiredな`#[param]`/`#[bindable]`を省略する、未知fieldまたはwritableでないfieldを指定する → 静的エラー。引数は通常のRust式として扱うが、診断対象のfield shapeを先に検証するため、重複fieldの検出はその式を評価する前に行う。位置引数、`=`形式、children/dynamic/binding構文は許可しない。
 
 ---
 

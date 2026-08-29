@@ -64,8 +64,8 @@ impl ExternalProbeTabs {
 }
 
 /// An external component whose public shape deliberately exercises each generated property
-/// category used by downstream DSL construction. `deferred` is an unreferenced `Option<String>`:
-/// it is stored as `Option<String>` but its generated setter accepts the inner `String`.
+/// category used by downstream DSL construction. Its `deferred` field is an unreferenced
+/// `Option<String>` Prop with full Option storage/getter/setter semantics.
 #[component(inherits Control)]
 pub struct ExternalShapeProbe {
     #[prop(default = 0)]
@@ -85,6 +85,59 @@ pub struct ExternalShapeProbe {
 
 #[component]
 impl ExternalShapeProbe {}
+
+/// An external component whose constructor contains required values in declaration order while
+/// still exposing a required mutable `Prop` after construction.
+#[component(inherits Control)]
+pub struct RequiredExternalCard {
+    #[param]
+    title: String,
+    #[param]
+    count: usize,
+    #[param]
+    optional: Option<String>,
+    #[param(default = 5)]
+    fixed: usize,
+    #[param(default = None)]
+    defaulted_optional: Option<String>,
+    #[prop(default = String::from("none"))]
+    optional_fallback: String,
+    #[prop]
+    mutable_label: String,
+    template: template_view! {
+        VerticalLayout {
+            TextBlock { text: title }
+            match optional {
+                None => {
+                    TextBlock { text: "optional absent" }
+                }
+                Some(_) => {
+                    TextBlock { text: "optional present" }
+                }
+            }
+            TextBlock { text: mutable_label }
+        }
+    },
+}
+
+#[component]
+impl RequiredExternalCard {}
+
+/// An external component whose bare Vec content is a normal mutable Prop. Bare content is supplied
+/// through the constructor ABI's pre-mount initialization protocol, but it is not a constructor
+/// parameter (the public contract keeps Prop-backed content out of the fixed constructor).
+#[component(inherits Control)]
+#[content(children)]
+pub struct RequiredExternalTabs {
+    #[prop]
+    children: Vec<Rc<ExternalProbeItem>>,
+    template: template_view! {
+        TextBlock { text: "required external tabs" }
+    },
+}
+
+#[component]
+impl RequiredExternalTabs {}
 
 /// A generated Vec-backed content owner used by the inherited-content capability probe.
 #[component(inherits Control)]
@@ -118,7 +171,7 @@ pub mod nested {
 
     #[component(inherits Control)]
     pub struct NestedExternalProbe {
-        #[prop(default = String::new())]
+        #[param]
         label: String,
         template: template_view! {
             TextBlock { text: label }

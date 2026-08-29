@@ -8,7 +8,33 @@ use elwindui::component;
 use elwindui::core::ui::{ContentControlExt, UIElementExt as _};
 use elwindui_external_component_fixture::{
     ExternalProbeItem, ExternalProbeItemExt, ExternalProbeTabs, ExternalProbeTabsExt,
+    RequiredExternalCardExt,
 };
+
+#[component(inherits VerticalLayout)]
+struct LocalNewProbe {
+    #[param]
+    required: String,
+    #[param]
+    optional_param: Option<String>,
+    #[param(default = 3)]
+    fixed: usize,
+    #[prop]
+    optional: Option<String>,
+    #[prop(default = String::from("default"))]
+    label: String,
+    body: view! {
+        TextBlock { text: required }
+    },
+}
+
+#[component]
+impl LocalNewProbe {}
+
+#[allow(dead_code)]
+fn new_macro_preserves_builtin_window_construction() {
+    let _window = elwindui::new!(Window());
+}
 
 /// This is intentionally a normal consumer shape: `elwindui` and the external generated
 /// component crate are separate dependencies, and the DSL uses the external crate-qualified path
@@ -108,17 +134,96 @@ impl ExternalDynamicForTemplateHost {}
 struct ExternalShapeHost {
     #[prop(default = Some(String::from("optional")))]
     optional_value: Option<String>,
+    #[prop(default = Some(String::from("deferred")))]
+    deferred_value: Option<String>,
     body: view! {
         elwindui_external_component_fixture::ExternalShapeProbe {
             count: 7
             optional: optional_value
-            deferred: "deferred"
+            deferred: deferred_value
         }
     },
 }
 
 #[component]
 impl ExternalShapeHost {}
+
+#[test]
+fn new_macro_constructs_external_generated_component_with_named_fields() {
+    let title_calls = Rc::new(std::cell::Cell::new(0));
+    let fallback_calls = Rc::new(std::cell::Cell::new(0));
+    let title_calls_for_expr = Rc::clone(&title_calls);
+    let fallback_calls_for_expr = Rc::clone(&fallback_calls);
+    let card = elwindui::new!(elwindui_external_component_fixture::RequiredExternalCard(
+        mutable_label: "mutable",
+        optional_fallback: {
+            fallback_calls_for_expr.set(fallback_calls_for_expr.get() + 1);
+            String::from("fallback")
+        },
+        optional: Some("optional"),
+        count: 7,
+        fixed: 9,
+        defaulted_optional: Some("defaulted"),
+        title: {
+            title_calls_for_expr.set(title_calls_for_expr.get() + 1);
+            String::from("title")
+        },
+    ));
+
+    assert_eq!(title_calls.get(), 1);
+    assert_eq!(fallback_calls.get(), 1);
+    assert_eq!(RequiredExternalCardExt::title(&*card), "title");
+    assert_eq!(RequiredExternalCardExt::count(&*card), 7);
+    assert_eq!(RequiredExternalCardExt::fixed(&*card), 9);
+    assert_eq!(
+        RequiredExternalCardExt::defaulted_optional(&*card),
+        Some(String::from("defaulted"))
+    );
+    assert_eq!(
+        RequiredExternalCardExt::optional(&*card),
+        Some(String::from("optional"))
+    );
+    assert_eq!(
+        RequiredExternalCardExt::optional_fallback(&*card),
+        "fallback"
+    );
+    assert_eq!(RequiredExternalCardExt::mutable_label(&*card), "mutable");
+
+    let defaulted_card = elwindui::new!(elwindui_external_component_fixture::RequiredExternalCard(
+        title: "defaulted",
+        count: 1,
+        optional: None,
+    ));
+    assert_eq!(RequiredExternalCardExt::fixed(&*defaulted_card), 5);
+    assert_eq!(
+        RequiredExternalCardExt::defaulted_optional(&*defaulted_card),
+        None
+    );
+}
+
+#[test]
+fn new_macro_constructs_same_crate_generated_component_and_mounts_it() {
+    let probe = elwindui::new!(LocalNewProbe(
+        label: "label",
+        optional: Some(String::from("optional")),
+        optional_param: Some("parameter"),
+        fixed: 9,
+        required: "required",
+    ));
+
+    assert_eq!(LocalNewProbeExt::required(&*probe), "required");
+    assert_eq!(
+        LocalNewProbeExt::optional_param(&*probe),
+        Some(String::from("parameter"))
+    );
+    assert_eq!(LocalNewProbeExt::fixed(&*probe), 9);
+    assert_eq!(
+        LocalNewProbeExt::optional(&*probe),
+        Some(String::from("optional"))
+    );
+    assert_eq!(LocalNewProbeExt::label(&*probe), "label");
+    assert_eq!(probe.visual_children().len(), 1);
+}
 
 #[test]
 fn qualified_external_components_preserve_properties_content_and_resync() {
@@ -253,6 +358,25 @@ fn cargo_alias_external_component_uses_defining_crate_shape() {
 }
 
 #[test]
+fn new_macro_constructs_cargo_aliased_external_component() {
+    let item = elwindui::new!(external_component_fixture_alias::AliasedExternalProbe(
+        label: "new alias"
+    ));
+    let text = item
+        .visual_children()
+        .into_iter()
+        .next()
+        .expect("aliased component template root is attached")
+        .as_any()
+        .downcast_ref::<elwindui::core::ui::TextBlock>()
+        .expect("aliased component template root is TextBlock")
+        .text
+        .borrow()
+        .to_string();
+    assert_eq!(text, "new alias");
+}
+
+#[test]
 fn qualified_external_template_dynamic_for_replaces_collection_items() {
     let host = ExternalDynamicForTemplateHost::new();
     let root = host
@@ -282,7 +406,7 @@ fn qualified_external_template_dynamic_for_replaces_collection_items() {
 }
 
 #[test]
-fn qualified_external_shape_preserves_scalar_option_and_deferred_setters() {
+fn qualified_external_shape_preserves_scalar_and_option_props() {
     let host = ExternalShapeHost::new();
     let probe_root = host
         .visual_children()

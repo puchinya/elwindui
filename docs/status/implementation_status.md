@@ -1,6 +1,6 @@
 # ElwindUI implementation status
 
-Snapshot: 2026-08-27. Desired behavior is defined by [`../specs/README.md`](../specs/README.md).
+Snapshot: 2026-08-29. Desired behavior is defined by [`../specs/README.md`](../specs/README.md).
 
 Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 
@@ -8,7 +8,7 @@ Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 
 | Area | State | Current evidence / gap |
 |---|---|---|
-| Component frontend and `view!` DSL | ✅ | proc-macro frontend, parser, metadata-driven scalar/collection `#[content]` validation and lowering, and code generation are in workspace tests |
+| Component frontend and `view!` DSL | ✅ | proc-macro frontend, parser, metadata-driven scalar/collection `#[content]` validation and lowering, named `elwindui::new!` construction planning, and code generation are in workspace tests |
 | ControlTemplate | 🚧 | typed standalone `template_view!` values, component `template: template_view!` defaults, exact-type `EnvironmentContext::set_control_template::<C>(Some/None)` mount-time selection, retained named `#[control_template]`, typed/reactive `templated_parent` when the target exports the corresponding capability, and one shared semantic planner/emitter (ordinary `view!` plus default/named/standalone templates) for construction, property/content, event/two-way, lifecycle, dynamic regions, `EnvironmentScope`, deferred views, let/reference, semantic Brush, ownership, cleanup, and `ContentPresenter`/ContentControl logical-Visual separation are implemented and tested ([#187](https://github.com/puchinya/elwindui/issues/187)); property-free templates accept any valid `ControlExt` target, while typed property paths require generated `TemplateProperty<KEY>`/`WritableTemplateProperty<KEY>` bridges and raw framework/class-managed property bridges are not guaranteed; runtime re-template/per-instance template/TemplatePart/VisualState remain out of scope |
 | `param` / `prop` / `state` / `computed` / `bindable` | ✅ | generated storage, notifications, and dependency refresh are used by examples |
 | Once / OneWay / TwoWay binding | ✅ | component and ViewModel examples exercise generated paths |
@@ -43,16 +43,19 @@ Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 
 `control-template-demo`, `controls-demo`, `font-demo`, `graphics-demo`, `inheritance-demo`, `mascot-demo`, `notepad`, `theme-demo`, and `viewmodel-attr-demo` exercise the implemented public surface. A sample demonstrates usage but is not itself normative evidence.
 
-## External generated-component DSL prerequisite (#191)
+## External generated-component DSL (#191/#193)
 
 Qualified external generated-component paths in `view!` are implemented in the open PR #192
 branch. The shared resolver keeps the authored construction/type path and maps the defining
 crate's `#[macro_export]` props shape to its crate root across ordinary/template/dynamic lowering,
 property/content/event/two-way wiring, and resync. Public external shape membership and setter
 types come from `ComponentPublicShape::writable_fields`; source fields only contribute compatible
-attributes. The external construction ABI currently uses a zero-argument constructor followed by
-public setters/content attachment; required constructor parameters are deferred to follow-up Issue
-#193.
+attributes. Issue #193's `elwindui::new!` named construction is implemented: required
+`#[param]`/`#[bindable]`, defaulted Params, ordinary mutable Props/content, full `Option` shape,
+pre-mount initial setters, defining-crate-root constructor ABI macros, fixed-field resync rules,
+and duplicate/unknown/non-writable/missing diagnostics are covered by focused codegen and
+downstream tests. Initialization follows required construction, unmounted setup, defaulted
+Params, initial Props/content, mount, and only then runtime binding/resync.
 
 Directly-declared generated `Vec<Rc<T>>` content hosts publish one children change after raw
 dynamic reconciliation, after the slot state is final and all temporary borrows are released.
@@ -65,9 +68,10 @@ The real two-crate downstream fixture
 `crates/elwindui-external-component-fixture` plus
 `crates/elwindui/tests/external_component_library.rs` covers external properties, collection
 content, inherited scalar content, reactive resync, two-way wiring, template dynamic `if`/`for`,
-nested module paths, and a Cargo alias. Unqualified imported external shorthand is not promised,
-and no defining-crate `pub mod ui` facade is required. The prerequisite is not merged yet; PR #184
-remains dependent on it.
+named local/external construction, defaulted and required constructor inputs, Option Props, nested
+module paths, and a Cargo alias. Unqualified imported external shorthand is not promised, and no
+defining-crate `pub mod ui` facade is required. PR #192 is not merged yet; PR #184 remains
+dependent on it.
 
 ## Primary gaps
 

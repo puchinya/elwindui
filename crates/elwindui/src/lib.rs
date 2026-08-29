@@ -19,7 +19,7 @@ pub use elwindui_i18n as i18n;
 /// `match`/`if let` exhaustiveness checking a DSL-text `enum` always got — see
 /// `elwindui_macros::dsl_enum`'s own doc comment.
 pub use elwindui_macros::{
-    class, component, control_template, dsl_enum, environment_key, main, store, template_view,
+    class, component, control_template, dsl_enum, environment_key, main, new, store, template_view,
     theme, viewmodel,
 };
 /// SVG loading (`load_svg_file`/`load_svg_bytes`/`load_svg_str`, `SvgLoader`) — backends never

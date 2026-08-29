@@ -173,8 +173,7 @@ fn parse_type(ty: &str) -> Result<syn::Type, String> {
 /// come from [`component_public_shape`], shared with `codegen::generate_component`'s real (view-less)
 /// generation and `codegen::generate_view`'s own real `has_view` generation. `view` is `component`'s
 /// own `ViewDef` when it has one — `None` for a view-less component — and drives the same
-/// referenced-vs-unreferenced own `Option<T>` deferral decision real generation makes (PR #169
-/// review, AD-R3/AD-R4).
+/// required/defaulted Param and full-typed Prop classification real generation makes.
 pub(crate) fn build_component_struct_shadow(
     base: Option<&str>,
     item_struct: &syn::ItemStruct,
@@ -570,10 +569,10 @@ mod tests {
         );
     }
 
-    /// T2 (deferred `Option<T>` surface): a deferred own field gets a getter returning the full
-    /// `Option<T>` and a setter taking the bare inner `T`, and is excluded from the constructor.
+    /// T2: a required `Option<T>` Param remains a named constructor input and has no public setter;
+    /// an ordinary Prop keeps its full `Option<T>` setter surface.
     #[test]
-    fn struct_shadow_handles_deferred_option_param_and_state_and_prop_fields() {
+    fn struct_shadow_handles_required_option_param_and_state_and_prop_fields() {
         let mut component = demo_component(None);
         component.fields.push(FieldDef {
             name: "padding".to_string(),
@@ -602,6 +601,7 @@ mod tests {
                 vm: std::rc::Rc<ShadowDemoViewModel>,
                 #[environment(layout_spacing)]
                 layout_spacing: f32,
+                #[param]
                 padding: Option<f32>,
                 #[state]
                 active: bool,
@@ -613,13 +613,20 @@ mod tests {
             .expect("struct shadow should build");
         parses_as_items(&shadow);
         let s = shadow.to_string();
-        // Deferred: no ctor param, getter returns Option<f32>, setter takes bare f32.
+        // Required Param: constructor input, getter returns the declared Option<f32>, no public
+        // runtime setter.
         assert!(
-            !s.contains("padding : Option"),
-            "padding must not be a ctor param: {s}"
+            s.contains("pub fn new (vm : std :: rc :: Rc < ShadowDemoViewModel > , padding : Option < f32 > ,) -> Self"),
+            "padding must be a ctor param: {s}"
         );
-        assert!(s.contains("fn padding (& self) -> Option < f32 >"), "{s}");
-        assert!(s.contains("fn set_padding (& self , value : f32)"), "{s}");
+        assert!(
+            s.contains("pub fn padding (& self) -> Option < f32 >"),
+            "{s}"
+        );
+        assert!(
+            !s.contains("set_padding"),
+            "required Params have no public setter: {s}"
+        );
         // State: private getter/setter (no `pub`).
         assert!(s.contains("fn active (& self) -> bool"), "{s}");
         assert!(s.contains("fn set_active (& self , value : bool)"), "{s}");

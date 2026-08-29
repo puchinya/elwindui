@@ -33,13 +33,14 @@ pub struct SymbolTable {
 #[derive(Clone)]
 pub struct TypeInfo {
     pub fields: HashMap<String, FieldKind>,
-    /// Every no-initializer field, `#[param]` or plain `prop` alike (kind-agnostic — see
-    /// `build_symbol_table`'s own comment on why), in declaration order — the positional argument
-    /// list `Target::new(...)` expects. Used to construct a nested user-defined component from an
-    /// `ElementNode` (e.g. a `render_content` closure's `DocumentView { doc: doc }` body). Despite
-    /// the name, a member can still get a real `set_<name>` setter and stay externally updatable —
-    /// see `is_settable_field`, consulted by `emit_resync`'s own param-skip guard.
+    /// Required fixed construction inputs (`#[param]`/`#[bindable]` without a default), in
+    /// declaration order. Ordinary Props are intentionally absent: they are runtime-mutable
+    /// properties with implicit or explicit defaults, never positional constructor inputs.
     pub param_fields: Vec<(String, String)>,
+    /// Defaulted fixed construction inputs (`#[param(default = ...)]`) in declaration order.
+    /// They are not public constructor arguments, but the generated constructor ABI can apply a
+    /// named pre-mount override through the component's hidden initialization setter.
+    pub defaulted_param_fields: Vec<(String, String)>,
     /// Names of `#[param] #[two_way]` fields — a builtin shape's opt-in to automatic two-way
     /// wiring (see `emit_wiring`'s generic two-way rule). Empty for ordinary user components.
     pub two_way_fields: HashSet<String>,
@@ -307,6 +308,1403 @@ fn dsl_props_macro_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream
     }
 }
 
+/// Resolves the defining crate's exported constructor-shape macro.  Unlike the props-shape
+/// protocol, this is deliberately present only for an authored qualified external path: local
+/// generated components use the same-crate registry, while builtin and unresolved-unqualified
+/// construction keep their existing builtin fallback. The macro itself is exported at the defining
+/// crate root, so a nested authored path retains only its first crate/alias segment here.
+fn dsl_ctor_macro_path(type_path: &str, info: Option<&TypeInfo>) -> Option<TokenStream> {
+    let ident = format_ident!("__elwindui_ctor_{}", dsl_type_ident(type_path));
+    match dsl_type_origin(type_path, info) {
+        DslTypeOrigin::ExternalQualified { crate_prefix } => Some(quote! { #crate_prefix::#ident }),
+        DslTypeOrigin::Builtin | DslTypeOrigin::Local | DslTypeOrigin::UnresolvedUnqualified => {
+            None
+        }
+    }
+}
+
+fn new_expr_is_none(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Path(path) if path.qself.is_none() && path.path.is_ident("None"))
+}
+
+fn new_expr_is_some(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Call(call) if matches!(
+        call.func.as_ref(),
+        syn::Expr::Path(path) if path.qself.is_none() && path.path.is_ident("Some")
+    ))
+}
+
+fn new_expr_is_typed_option_value(expr: &syn::Expr) -> bool {
+    new_expr_is_none(expr)
+        || new_expr_is_some(expr)
+        || matches!(
+            expr,
+            syn::Expr::Path(_)
+                | syn::Expr::Call(_)
+                | syn::Expr::MethodCall(_)
+                | syn::Expr::Struct(_)
+                | syn::Expr::Macro(_)
+                | syn::Expr::Cast(_)
+                | syn::Expr::Block(_)
+                | syn::Expr::If(_)
+                | syn::Expr::Match(_)
+        )
+}
+
+fn new_constructor_value(ty: &syn::Type, expr: &syn::Expr) -> TokenStream {
+    let value = quote! { #expr };
+    if let Some(inner) = constructor_option_inner(ty) {
+        if new_expr_is_none(expr) {
+            return value;
+        }
+        if let syn::Expr::Call(call) = expr
+            && matches!(
+                call.func.as_ref(),
+                syn::Expr::Path(path)
+                    if path.qself.is_none() && path.path.is_ident("Some")
+            )
+            && call.args.len() == 1
+        {
+            let inner_expr = &call.args[0];
+            let inner_value = generated_constructor_value(inner, quote! { #inner_expr });
+            return quote! { Some(#inner_value) };
+        }
+        if new_expr_is_typed_option_value(expr) {
+            return value;
+        }
+    }
+    generated_constructor_value(ty, value)
+}
+
+fn is_known_builtin_new_type(name: &str) -> bool {
+    matches!(
+        name,
+        "Button"
+            | "CheckBox"
+            | "ChildList"
+            | "ContentControl"
+            | "ContentPresenter"
+            | "ContextMenuPresenter"
+            | "ContextMenuService"
+            | "Control"
+            | "ControlTemplate"
+            | "ControlTemplateContext"
+            | "ControlTemplateEnvironment"
+            | "Dropdown"
+            | "DropdownItem"
+            | "DynamicChild"
+            | "DynamicChildSlot"
+            | "Ellipse"
+            | "Grid"
+            | "HorizontalLayout"
+            | "IconElement"
+            | "IconSourceElement"
+            | "Image"
+            | "Layout"
+            | "Menu"
+            | "MenuBar"
+            | "MenuBarItem"
+            | "MenuItem"
+            | "NativeControl"
+            | "PasswordBox"
+            | "PopupDismissAction"
+            | "PopupDismissActionKey"
+            | "PopupRequest"
+            | "RadioButton"
+            | "Rectangle"
+            | "ResolvedContextTarget"
+            | "ScrollView"
+            | "Shape"
+            | "Slider"
+            | "TabView"
+            | "TabViewItem"
+            | "TextArea"
+            | "TextBlock"
+            | "TextBox"
+            | "ToggleSwitch"
+            | "UIElement"
+            | "UIElementCollection"
+            | "UIElementVisualCollection"
+            | "VerticalLayout"
+            | "ViewBuildContext"
+            | "ViewTemplate"
+            | "Window"
+    )
+}
+
+fn new_path_origin(
+    target: &syn::Path,
+    type_name: &str,
+    is_registered_local: bool,
+) -> DslTypeOrigin {
+    if target.segments.len() == 1 && target.leading_colon.is_none() {
+        if is_registered_local {
+            DslTypeOrigin::Local
+        } else if is_known_builtin_new_type(type_name) {
+            DslTypeOrigin::Builtin
+        } else {
+            DslTypeOrigin::UnresolvedUnqualified
+        }
+    } else {
+        let first = target
+            .segments
+            .first()
+            .expect("a constructor target path must have one segment");
+        match first.ident.to_string().as_str() {
+            "elwindui" => DslTypeOrigin::Builtin,
+            "crate" | "self" | "super" => DslTypeOrigin::Local,
+            _ => DslTypeOrigin::ExternalQualified {
+                crate_prefix: first.ident.clone(),
+            },
+        }
+    }
+}
+
+fn new_local_expression(
+    target: &syn::Path,
+    component: &ComponentDef,
+    view: Option<&ViewDef>,
+    args: &[(syn::Ident, syn::Expr)],
+) -> Result<TokenStream, String> {
+    let shape = crate::component_frontend::component_public_shape(component, view);
+    let supplied: HashMap<String, &syn::Expr> = args
+        .iter()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect();
+    let required: HashMap<&str, &str> = shape
+        .constructor_params
+        .iter()
+        .map(|(name, ty)| (name.as_str(), ty.as_str()))
+        .collect();
+    let defaulted: HashMap<&str, &str> = shape
+        .defaulted_params
+        .iter()
+        .map(|(name, ty)| (name.as_str(), ty.as_str()))
+        .collect();
+    let writable_props: HashMap<&str, &str> = shape
+        .writable_fields
+        .iter()
+        .filter(|(_, _, visibility)| {
+            matches!(
+                visibility,
+                crate::component_frontend::ShadowVisibility::Public
+            )
+        })
+        .filter_map(|(name, ty, _)| {
+            component
+                .fields
+                .iter()
+                .find(|field| field.name == *name && field.kind == FieldKind::Prop)
+                .map(|_| (name.as_str(), ty.as_str()))
+        })
+        .collect();
+
+    for (name, _) in args {
+        let name = name.to_string();
+        if required.contains_key(name.as_str())
+            || defaulted.contains_key(name.as_str())
+            || writable_props.contains_key(name.as_str())
+        {
+            continue;
+        }
+        if component.fields.iter().any(|field| field.name == name) {
+            return Err(format!(
+                "field '{name}' is not writable by new! on '{}'",
+                component.name
+            ));
+        }
+        return Err(format!(
+            "unknown constructor field '{name}' on '{}'",
+            component.name
+        ));
+    }
+    if let Some(missing) = shape
+        .constructor_params
+        .iter()
+        .find(|(name, _)| !supplied.contains_key(name))
+        .map(|(name, _)| name)
+    {
+        return Err(format!(
+            "missing required constructor field '{missing}' for '{}'",
+            component.name
+        ));
+    }
+
+    let concrete = if target.segments.len() == 1 {
+        let ident = dsl_type_ident(&component.name);
+        quote! { #ident }
+    } else {
+        quote! { #target }
+    };
+    let required_values = shape.constructor_params.iter().map(|(name, ty)| {
+        let expr = supplied
+            .get(name)
+            .expect("required constructor value was checked above");
+        let ty: syn::Type = syn::parse_str(ty).expect("constructor field type must parse");
+        new_constructor_value(&ty, expr)
+    });
+    let construct = match shape.constructor_return {
+        crate::component_frontend::ComponentConstructorReturn::SelfValue => {
+            quote! { #concrete::new(#(#required_values),*) }
+        }
+        crate::component_frontend::ComponentConstructorReturn::RcSelf => {
+            quote! { #concrete::__new_unmounted(#(#required_values),*) }
+        }
+    };
+    let value = format_ident!("__elwindui_new_value");
+    let defaulted_sets = shape.defaulted_params.iter().filter_map(|(name, ty)| {
+        let expr = supplied.get(name)?;
+        let ty: syn::Type = syn::parse_str(ty).expect("constructor field type must parse");
+        let setter = format_ident!("__set_initial_param_{name}");
+        let value_tokens = new_constructor_value(&ty, expr);
+        Some(quote! { #value.#setter(#value_tokens); })
+    });
+    let prop_sets = shape
+        .writable_fields
+        .iter()
+        .filter_map(|(name, _, visibility)| {
+            if !matches!(
+                visibility,
+                crate::component_frontend::ShadowVisibility::Public
+            ) {
+                return None;
+            }
+            let field = component
+                .fields
+                .iter()
+                .find(|field| field.name == *name && field.kind == FieldKind::Prop)?;
+            let expr = supplied.get(name)?;
+            let ty: syn::Type = syn::parse_str(&field.ty).expect("property field type must parse");
+            let setter = format_ident!("__set_initial_prop_{name}");
+            let value_tokens = generated_prop_initial_value(&ty, quote! { #expr });
+            Some(quote! { #value.#setter(#value_tokens); })
+        });
+    let mount = matches!(
+        shape.constructor_return,
+        crate::component_frontend::ComponentConstructorReturn::RcSelf
+    )
+    .then(|| {
+        quote! {
+            #concrete::__mount(
+                &#value,
+                elwindui::core::environment::application_environment(),
+            );
+        }
+    });
+    Ok(quote! {{
+        let #value = #construct;
+        #(#defaulted_sets)*
+        #(#prop_sets)*
+        #mount
+        #value
+    }})
+}
+
+fn new_external_expression(target: &syn::Path, args: &[(syn::Ident, syn::Expr)]) -> TokenStream {
+    let type_name = target
+        .segments
+        .last()
+        .expect("a constructor target path must have one segment")
+        .ident
+        .to_string();
+    let macro_ident = format_ident!("__elwindui_ctor_{type_name}");
+    let first = target
+        .segments
+        .first()
+        .expect("a constructor target path must have one segment")
+        .ident
+        .clone();
+    let ctor_macro = if target.leading_colon.is_some() {
+        quote! { ::#first::#macro_ident }
+    } else {
+        quote! { #first::#macro_ident }
+    };
+    let props: Vec<_> = args
+        .iter()
+        .map(|(name, value)| {
+            let name = syn::LitStr::new(&name.to_string(), name.span());
+            quote! { (#name => #value) }
+        })
+        .collect();
+    let props_for_new = props.clone();
+    let props_for_params = props.clone();
+    let props_for_props = props.clone();
+    let value = format_ident!("__elwindui_new_value");
+    let environment = format_ident!("__elwindui_new_environment");
+    quote! {{
+        let #value = #ctor_macro!(@new #target, props = [#(#props_for_new),*], children = []);
+        let #environment = elwindui::core::environment::application_environment();
+        #ctor_macro!(@new_initial_params #value, props = [#(#props_for_params),*], environment = #environment);
+        #ctor_macro!(@new_initial_props #value, props = [#(#props_for_props),*], environment = #environment);
+        #ctor_macro!(@mount #value, #environment);
+        #value
+    }}
+}
+
+fn new_builtin_expression(type_name: &str, args: &[(syn::Ident, syn::Expr)]) -> TokenStream {
+    let type_ident = format_ident!("{type_name}");
+    let props_macro = format_ident!("__elwindui_props_{type_name}");
+    let value = format_ident!("__elwindui_new_value");
+    let setters = args.iter().map(|(name, expr)| {
+        quote! {
+            elwindui::core::#props_macro!(@set #value, #name, #expr);
+        }
+    });
+    quote! {{
+        let #value = elwindui::ui::#type_ident::new();
+        #(#setters)*
+        #value
+    }}
+}
+
+pub fn generate_new_expression(
+    target: &syn::Path,
+    args: &[(syn::Ident, syn::Expr)],
+) -> Result<TokenStream, String> {
+    if target.segments.is_empty() {
+        return Err("new! requires a non-empty type path".into());
+    }
+    if target
+        .segments
+        .iter()
+        .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
+    {
+        return Err("new! does not accept generic type arguments".into());
+    }
+    let type_name = target
+        .segments
+        .last()
+        .expect("non-empty constructor target path")
+        .ident
+        .to_string();
+    let mut seen = HashSet::new();
+    for (name, _) in args {
+        if !seen.insert(name.to_string()) {
+            return Err(format!("duplicate constructor field '{name}'"));
+        }
+    }
+    let registered = crate::component_frontend::registered_component_parts(&type_name);
+    match new_path_origin(target, &type_name, registered.is_some()) {
+        DslTypeOrigin::Local => {
+            let (component, view) = registered.ok_or_else(|| {
+                format!("local generated component '{type_name}' is not registered")
+            })?;
+            new_local_expression(target, &component, view.as_ref(), args)
+        }
+        DslTypeOrigin::Builtin => Ok(new_builtin_expression(type_name.as_str(), args)),
+        DslTypeOrigin::ExternalQualified { .. } => Ok(new_external_expression(target, args)),
+        DslTypeOrigin::UnresolvedUnqualified => Err(format!(
+            "unqualified type '{type_name}' is not a known builtin or same-crate generated component; qualify an external generated component path in new!"
+        )),
+    }
+}
+
+/// One exact positional parameter of the generated component's real `new` signature.
+#[derive(Clone)]
+struct EffectiveConstructorField {
+    name: syn::Ident,
+    ty: syn::Type,
+    hidden_setter: bool,
+}
+
+/// The one internal constructor ABI description used by both real constructor emitters and the
+/// exported external-constructor macro.  `ComponentPublicShape` remains the source-local authority
+/// for required/deferred/readable/writable/return classification; this shape is assembled only after
+/// the emitter has produced its exact effective `new` parameter list (including inherited/composed
+/// handling), so the exported ABI cannot drift from the signature rustc actually sees.
+#[derive(Clone)]
+struct EffectiveConstructorShape {
+    params: Vec<EffectiveConstructorField>,
+    defaulted_params: Vec<EffectiveConstructorField>,
+    props: Vec<EffectiveConstructorField>,
+    constructor_return: crate::component_frontend::ComponentConstructorReturn,
+    content_field: Option<syn::Ident>,
+    content_param: Option<syn::Ident>,
+    writable_after_construct: HashSet<String>,
+    /// Fields known to the defining crate but absent from the constructor/defaulted/Prop surface.
+    /// External `new!` calls use this list to distinguish a non-writable field from an unknown name
+    /// without exposing general runtime metadata across the crate boundary.
+    non_writable_fields: Vec<String>,
+}
+
+fn build_effective_constructor_shape(
+    param_names: &[syn::Ident],
+    param_types: &[syn::Type],
+    defaulted_params: Vec<EffectiveConstructorField>,
+    props: Vec<EffectiveConstructorField>,
+    constructor_return: crate::component_frontend::ComponentConstructorReturn,
+    content_field: Option<&str>,
+    non_writable_fields: Vec<String>,
+) -> EffectiveConstructorShape {
+    debug_assert_eq!(
+        param_names.len(),
+        param_types.len(),
+        "constructor name/type lists must be parallel"
+    );
+    let params = param_names
+        .iter()
+        .cloned()
+        .zip(param_types.iter().cloned())
+        .map(|(name, ty)| EffectiveConstructorField {
+            name,
+            ty,
+            hidden_setter: false,
+        })
+        .collect::<Vec<_>>();
+    let writable_after_construct = props.iter().map(|field| field.name.to_string()).collect();
+    EffectiveConstructorShape {
+        params,
+        defaulted_params,
+        props,
+        constructor_return,
+        content_field: content_field.map(|name| format_ident!("{}", name)),
+        content_param: None,
+        writable_after_construct,
+        non_writable_fields,
+    }
+}
+
+fn non_writable_constructor_field_names(
+    fields: &[FieldDef],
+    params: &[syn::Ident],
+    defaulted_params: &[EffectiveConstructorField],
+    props: &[EffectiveConstructorField],
+) -> Vec<String> {
+    let mut accepted = params
+        .iter()
+        .map(ToString::to_string)
+        .chain(defaulted_params.iter().map(|field| field.name.to_string()))
+        .chain(props.iter().map(|field| field.name.to_string()))
+        .collect::<HashSet<_>>();
+    fields
+        .iter()
+        .filter(|field| !accepted.remove(&field.name))
+        .map(|field| field.name.clone())
+        .collect()
+}
+
+fn constructor_type_last_ident(ty: &syn::Type) -> Option<&syn::Ident> {
+    match ty {
+        syn::Type::Path(path) if path.qself.is_none() => {
+            path.path.segments.last().map(|s| &s.ident)
+        }
+        _ => None,
+    }
+}
+
+fn constructor_option_inner(ty: &syn::Type) -> Option<&syn::Type> {
+    if constructor_type_last_ident(ty).is_none_or(|ident| ident != "Option") {
+        return None;
+    }
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    arguments.args.iter().find_map(|argument| match argument {
+        syn::GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    })
+}
+
+/// Converts one DSL-side constructor value using the same generated-component conventions as the
+/// in-crate argument builder: owned `String`, `Vec` array literals, and inner values for
+/// `Option<T>`.  The exported macro has a separate literal `None` arm, so an explicit `None` stays
+/// an omitted-value marker for a required `Option<T>` rather than becoming `Some(None)`.
+fn generated_constructor_value(ty: &syn::Type, value: TokenStream) -> TokenStream {
+    let (target, is_option) = match constructor_option_inner(ty) {
+        Some(inner) => (inner, true),
+        None => (ty, false),
+    };
+    let value = if constructor_type_last_ident(target).is_some_and(|ident| ident == "String") {
+        quote! { (#value).to_string() }
+    } else if constructor_type_last_ident(target).is_some_and(|ident| ident == "Vec") {
+        quote! { (#value).to_vec() }
+    } else {
+        value
+    };
+    if is_option {
+        quote! { Some(#value) }
+    } else {
+        value
+    }
+}
+
+/// Converts a `new!` initial value for an ordinary Prop.  Unlike a constructor Param, a Prop's
+/// declared type is the setter type itself: in particular `Option<T>` remains an `Option<T>` and a
+/// caller-provided `None`/`Some(..)` is never wrapped in another `Some`.  String/Vec literals keep
+/// the same ergonomic conversions as the existing DSL setter path.
+fn generated_prop_initial_value(ty: &syn::Type, value: TokenStream) -> TokenStream {
+    if constructor_type_last_ident(ty).is_some_and(|ident| ident == "String") {
+        quote! { (#value).to_string() }
+    } else if constructor_type_last_ident(ty).is_some_and(|ident| ident == "Vec") {
+        quote! { (#value).to_vec() }
+    } else {
+        value
+    }
+}
+
+fn constructor_vec_item(ty: &syn::Type) -> Option<&syn::Type> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if segment.ident != "Vec" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    arguments.args.iter().find_map(|argument| match argument {
+        syn::GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    })
+}
+
+/// Converts a freshly constructed child for a generated content field whose declared value is an
+/// erased class trait.  The defining crate knows the exact trait bound even when the consumer has
+/// no local `TypeInfo`, so the same `into_<class>_node()` convention used by `#[class]`'s content
+/// protocol can be emitted into the constructor ABI.
+fn constructor_content_child_value(ty: &syn::Type, value: TokenStream) -> TokenStream {
+    let syn::Type::Path(path) = ty else {
+        return value;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return value;
+    };
+    if segment.ident != "Rc" {
+        return value;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return value;
+    };
+    let Some(ty) = arguments.args.iter().find_map(|argument| match argument {
+        syn::GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    }) else {
+        return value;
+    };
+    let syn::Type::TraitObject(trait_object) = ty else {
+        return value;
+    };
+    let Some(trait_segment) = trait_object.bounds.iter().find_map(|bound| match bound {
+        syn::TypeParamBound::Trait(bound) => bound.path.segments.last(),
+        _ => None,
+    }) else {
+        return value;
+    };
+    let method = format_ident!(
+        "into_{}_node",
+        constructor_to_snake_case(&trait_segment.ident.to_string())
+    );
+    quote! { (#value).#method() }
+}
+
+/// Matches the `#[class]`-generated upcast method spelling used by the constructor content ABI.
+fn constructor_to_snake_case(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::new();
+    for (index, &ch) in chars.iter().enumerate() {
+        if ch.is_uppercase() {
+            let previous_is_lower = index > 0 && chars[index - 1].is_lowercase();
+            let previous_is_upper_and_next_is_lower = index > 0
+                && chars[index - 1].is_uppercase()
+                && index + 1 < chars.len()
+                && chars[index + 1].is_lowercase();
+            if index > 0 && (previous_is_lower || previous_is_upper_and_next_is_lower) {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Emits the defining-crate-root constructor ABI macro for one generated component.  The macro
+/// receives a name-addressed property list and a separate bare-children list, resolves each
+/// required field itself, and calls the real `new` in its exact declaration order.  Initial
+/// non-constructor assignments are routed through the defining crate's existing props-shape macro;
+/// constructor-consumed fields are deliberately no-ops there, preventing a second setter call.
+fn build_constructor_macro(
+    type_name: &str,
+    shape: &EffectiveConstructorShape,
+    props_macro: Option<TokenStream>,
+    content_macro: Option<TokenStream>,
+) -> TokenStream {
+    let macro_ident = format_ident!("__elwindui_ctor_{type_name}");
+    let return_name = match shape.constructor_return {
+        crate::component_frontend::ComponentConstructorReturn::SelfValue => "Self",
+        crate::component_frontend::ComponentConstructorReturn::RcSelf => "Rc<Self>",
+    };
+    let return_doc = format!(
+        "External constructor ABI for `{type_name}`; returns the real `new` result ({return_name})."
+    );
+
+    let ctor_args: Vec<TokenStream> = shape
+        .params
+        .iter()
+        .map(|param| {
+            let helper = format_ident!("__ctor_arg_{}", param.name);
+            quote! {
+                $crate::#macro_ident!(
+                    @#helper props = [$($props)*],
+                    children = [$($children),*]
+                )
+            }
+        })
+        .collect();
+
+    let mut ctor_arg_arms = TokenStream::new();
+    for param in &shape.params {
+        let helper = format_ident!("__ctor_arg_{}", param.name);
+        let name = &param.name;
+        let name_literal =
+            syn::LitStr::new(&param.name.to_string(), proc_macro2::Span::call_site());
+        let converted = generated_constructor_value(&param.ty, quote! { $value });
+        let option_some_arms = constructor_option_inner(&param.ty)
+            .map(|inner| {
+                let converted_inner = generated_constructor_value(inner, quote! { $some_value });
+                quote! {
+                    (@#helper props = [(#name_literal => Some($some_value:expr)), $($rest:tt)*], children = [$($children:expr),*]) => { Some(#converted_inner) };
+                    (@#helper props = [(#name_literal => Some($some_value:expr))], children = [$($children:expr),*]) => { Some(#converted_inner) };
+                    (@#helper props = [(#name => Some($some_value:expr)), $($rest:tt)*], children = [$($children:expr),*]) => { Some(#converted_inner) };
+                    (@#helper props = [(#name => Some($some_value:expr))], children = [$($children:expr),*]) => { Some(#converted_inner) };
+                }
+            })
+            .unwrap_or_default();
+        let missing = format!("missing required constructor field `{name}` for `{type_name}`");
+        ctor_arg_arms.extend(quote! {
+            (@#helper props = [(#name_literal => @typed $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => { $value };
+            (@#helper props = [(#name_literal => @typed $value:expr)], children = [$($children:expr),*]) => { $value };
+            (@#helper props = [(#name_literal => None), $($rest:tt)*], children = [$($children:expr),*]) => { None };
+            (@#helper props = [(#name_literal => None)], children = [$($children:expr),*]) => { None };
+            #option_some_arms
+            (@#helper props = [(#name_literal => $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => { #converted };
+            (@#helper props = [(#name_literal => $value:expr)], children = [$($children:expr),*]) => { #converted };
+            (@#helper props = [($other:literal => @typed $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => {
+                $crate::#macro_ident!(@#helper props = [$($rest)*], children = [$($children),*])
+            };
+            (@#helper props = [($other:literal => @typed $value:expr)], children = [$($children:expr),*]) => {
+                $crate::#macro_ident!(@#helper props = [], children = [$($children),*])
+            };
+            (@#helper props = [($other:literal => $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => {
+                $crate::#macro_ident!(@#helper props = [$($rest)*], children = [$($children),*])
+            };
+            (@#helper props = [($other:literal => $value:expr)], children = [$($children:expr),*]) => {
+                $crate::#macro_ident!(@#helper props = [], children = [$($children),*])
+            };
+            (@#helper props = [(#name => @typed $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => { $value };
+            (@#helper props = [(#name => @typed $value:expr)], children = [$($children:expr),*]) => { $value };
+            (@#helper props = [(#name => None), $($rest:tt)*], children = [$($children:expr),*]) => { None };
+            (@#helper props = [(#name => None)], children = [$($children:expr),*]) => { None };
+            #option_some_arms
+            (@#helper props = [(#name => $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => { #converted };
+            (@#helper props = [(#name => $value:expr)], children = [$($children:expr),*]) => { #converted };
+            (@#helper props = [($other:ident => @typed $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => {
+                $crate::#macro_ident!(@#helper props = [$($rest)*], children = [$($children),*])
+            };
+            (@#helper props = [($other:ident => @typed $value:expr)], children = [$($children:expr),*]) => {
+                $crate::#macro_ident!(@#helper props = [], children = [$($children),*])
+            };
+            (@#helper props = [($other:ident => $value:expr), $($rest:tt)*], children = [$($children:expr),*]) => {
+                $crate::#macro_ident!(@#helper props = [$($rest)*], children = [$($children),*])
+            };
+            (@#helper props = [($other:ident => $value:expr)], children = [$($children:expr),*]) => {
+                $crate::#macro_ident!(@#helper props = [], children = [$($children),*])
+            };
+            (@#helper props = [], children = [$($children:expr),*]) => {
+                compile_error!(#missing)
+            };
+        });
+    }
+
+    // Validate every named argument before `@new` evaluates any constructor expression.  The
+    // external path has no source-local `ComponentPublicShape` at the call site, so this small
+    // defining-crate ABI protocol is what preserves exact unknown/non-writable diagnostics without
+    // exporting reflection metadata or silently dropping a misspelled field.
+    let mut new_validation_arms = TokenStream::new();
+    for field in shape
+        .params
+        .iter()
+        .chain(shape.defaulted_params.iter())
+        .chain(shape.props.iter())
+    {
+        let name_literal =
+            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
+        new_validation_arms.extend(quote! {
+            (@validate_new props = [(#name_literal => @typed $value:expr), $($rest:tt)*]) => {
+                $crate::#macro_ident!(@validate_new props = [$($rest)*]);
+            };
+            (@validate_new props = [(#name_literal => @typed $value:expr)]) => {};
+            (@validate_new props = [(#name_literal => $value:expr), $($rest:tt)*]) => {
+                $crate::#macro_ident!(@validate_new props = [$($rest)*]);
+            };
+            (@validate_new props = [(#name_literal => $value:expr)]) => {};
+        });
+    }
+    for name in &shape.non_writable_fields {
+        let name_literal = syn::LitStr::new(name, proc_macro2::Span::call_site());
+        new_validation_arms.extend(quote! {
+            (@validate_new props = [(#name_literal => @typed $value:expr), $($rest:tt)*]) => {
+                compile_error!(concat!(
+                    "field `", #name_literal, "` is not writable by new! on `", #type_name, "`"
+                ));
+            };
+            (@validate_new props = [(#name_literal => @typed $value:expr)]) => {
+                compile_error!(concat!(
+                    "field `", #name_literal, "` is not writable by new! on `", #type_name, "`"
+                ));
+            };
+            (@validate_new props = [(#name_literal => $value:expr), $($rest:tt)*]) => {
+                compile_error!(concat!(
+                    "field `", #name_literal, "` is not writable by new! on `", #type_name, "`"
+                ));
+            };
+            (@validate_new props = [(#name_literal => $value:expr)]) => {
+                compile_error!(concat!(
+                    "field `", #name_literal, "` is not writable by new! on `", #type_name, "`"
+                ));
+            };
+        });
+    }
+    let new_validation_fallback = quote! {
+        (@validate_new props = []) => {};
+        (@validate_new props = [($name:literal => @typed $value:expr), $($rest:tt)*]) => {
+            compile_error!(concat!(
+                "unknown constructor field `", $name, "` on `", #type_name, "`"
+            ));
+        };
+        (@validate_new props = [($name:literal => @typed $value:expr)]) => {
+            compile_error!(concat!(
+                "unknown constructor field `", $name, "` on `", #type_name, "`"
+            ));
+        };
+        (@validate_new props = [($name:literal => $value:expr), $($rest:tt)*]) => {
+            compile_error!(concat!(
+                "unknown constructor field `", $name, "` on `", #type_name, "`"
+            ));
+        };
+        (@validate_new props = [($name:literal => $value:expr)]) => {
+            compile_error!(concat!(
+                "unknown constructor field `", $name, "` on `", #type_name, "`"
+            ));
+        };
+    };
+
+    let content_arg = if let Some(content) = &shape.content_param {
+        let converted = shape
+            .params
+            .iter()
+            .find(|param| &param.name == content)
+            .map(|param| generated_constructor_value(&param.ty, quote! { $value }))
+            .expect("content parameter must be present in constructor parameters");
+        let name = content;
+        let missing = format!("missing required content for `{type_name}`");
+        let content_fallback = match &props_macro {
+            Some(props_macro) => quote! {
+                #props_macro!(@constructor_content_value [$($children),*])
+            },
+            None => quote! {
+                compile_error!(#missing)
+            },
+        };
+        quote! {
+            (@ctor_arg_content props = [(#name => None), $($rest:tt)*]) => { None };
+            (@ctor_arg_content props = [(#name => None)]) => { None };
+            (@ctor_arg_content props = [(#name => $value:expr), $($rest:tt)*]) => { #converted };
+            (@ctor_arg_content props = [(#name => $value:expr)]) => { #converted };
+            (@ctor_arg_content props = [($other:ident => $value:expr), $($rest:tt)*]) => {
+                $crate::#macro_ident!(@ctor_arg_content props = [$($rest)*])
+            };
+            (@ctor_arg_content props = [($other:ident => $value:expr)]) => {
+                $crate::#macro_ident!(@ctor_arg_content props = [])
+            };
+            (@ctor_arg_content props = []) => {
+                #content_fallback
+            };
+        }
+    } else {
+        TokenStream::new()
+    };
+
+    let initial_skip_arms: TokenStream = shape
+        .params
+        .iter()
+        .map(|param| {
+            // Use a call-site identifier for the matcher. The argument name is captured from
+            // the consumer's generated \`props = [(name => value)]\` list; retaining the source
+            // span from the defining crate makes a literal \`macro_rules!\` matcher fail across
+            // the crate boundary even though the spelling is identical.
+            let name = format_ident!("{}", param.name);
+            quote! {
+                (@initial_typed $recv:expr, #name, $value:expr, $environment:expr) => {};
+                (@initial_one $recv:expr, #name, $value:expr, $environment:expr) => {};
+            }
+        })
+        .collect();
+    let mut initial_field_arms = TokenStream::new();
+    for (field, is_param) in shape
+        .defaulted_params
+        .iter()
+        .map(|field| (field, true))
+        .chain(shape.props.iter().map(|field| (field, false)))
+    {
+        let name = format_ident!("{}", field.name);
+        let name_literal =
+            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
+        let converted = generated_constructor_value(&field.ty, quote! { $value });
+        let setter_name = if is_param {
+            format_ident!("__set_initial_param_{}", field.name)
+        } else {
+            format_ident!("__set_initial_prop_{}", field.name)
+        };
+        let set_value = if field.hidden_setter {
+            quote! { $recv.#setter_name(#converted); }
+        } else {
+            match &props_macro {
+                Some(props_macro) => quote! {
+                    #props_macro!(@set_with_environment $recv, #name, #converted, $environment);
+                },
+                None => quote! {
+                    compile_error!(concat!(
+                        "field ",
+                        stringify!($name),
+                        " is not an externally writable property of ",
+                        #type_name
+                    ));
+                },
+            }
+        };
+        let set_none = if field.hidden_setter {
+            quote! { $recv.#setter_name(None); }
+        } else {
+            match &props_macro {
+                Some(props_macro) => quote! {
+                    #props_macro!(@set_with_environment $recv, #name, None, $environment);
+                },
+                None => quote! {
+                    compile_error!(concat!(
+                        "field ",
+                        stringify!($name),
+                        " is not an externally writable property of ",
+                        #type_name
+                    ));
+                },
+            }
+        };
+        let set_typed = if field.hidden_setter {
+            quote! { $recv.#setter_name($value); }
+        } else {
+            match &props_macro {
+                Some(props_macro) => quote! {
+                    #props_macro!(@set_with_environment $recv, #name, $value, $environment);
+                },
+                None => quote! {
+                    compile_error!(concat!(
+                        "field ",
+                        stringify!($name),
+                        " is not an externally writable property of ",
+                        #type_name
+                    ));
+                },
+            }
+        };
+        initial_field_arms.extend(quote! {
+            (@initial_named_typed $recv:expr, #name_literal, $value:expr, $environment:expr) => {
+                #set_typed
+            };
+            (@initial_named $recv:expr, #name_literal, None, $environment:expr) => { #set_none };
+            (@initial_named $recv:expr, #name_literal, $value:expr, $environment:expr) => { #set_value };
+            (@initial_typed $recv:expr, #name, $value:expr, $environment:expr) => {
+                #set_typed
+            };
+            (@initial_one $recv:expr, #name, None, $environment:expr) => { #set_none };
+            (@initial_one $recv:expr, #name, $value:expr, $environment:expr) => { #set_value };
+        });
+    }
+    let mut new_initial_field_arms = TokenStream::new();
+    for field in &shape.defaulted_params {
+        let name_literal =
+            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
+        let converted = generated_constructor_value(&field.ty, quote! { $value });
+        let setter = format_ident!("__set_initial_param_{}", field.name);
+        let option_some_arms = constructor_option_inner(&field.ty)
+            .map(|inner| {
+                let converted_inner = generated_constructor_value(inner, quote! { $some_value });
+                quote! {
+                    (@new_initial $recv:expr, #name_literal, Some($some_value:expr), $environment:expr) => {
+                        $recv.#setter(Some(#converted_inner));
+                    };
+                }
+            })
+            .unwrap_or_default();
+        new_initial_field_arms.extend(quote! {
+            (@new_initial $recv:expr, #name_literal, None, $environment:expr) => {
+                $recv.#setter(None);
+            };
+            #option_some_arms
+            (@new_initial $recv:expr, #name_literal, $value:expr, $environment:expr) => {
+                $recv.#setter(#converted);
+            };
+        });
+    }
+    for field in &shape.props {
+        let name = format_ident!("{}", field.name);
+        let name_literal =
+            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
+        let converted = if field.hidden_setter {
+            generated_prop_initial_value(&field.ty, quote! { $value })
+        } else {
+            quote! { $value }
+        };
+        let set_value = if field.hidden_setter {
+            let setter = format_ident!("__set_initial_prop_{}", field.name);
+            quote! { $recv.#setter(#converted); }
+        } else {
+            match &props_macro {
+                Some(props_macro) => quote! {
+                    #props_macro!(@set_with_environment $recv, #name, $value, $environment);
+                },
+                None => quote! {
+                    compile_error!(concat!(
+                        "field '", #name_literal,
+                        "' is not an externally writable property of '", #type_name, "'"
+                    ));
+                },
+            }
+        };
+        let set_none = if field.hidden_setter {
+            let setter = format_ident!("__set_initial_prop_{}", field.name);
+            quote! { $recv.#setter(None); }
+        } else {
+            match &props_macro {
+                Some(props_macro) => quote! {
+                    #props_macro!(@set_with_environment $recv, #name, None, $environment);
+                },
+                None => quote! {
+                    compile_error!(concat!(
+                        "field '", #name_literal,
+                        "' is not an externally writable property of '", #type_name, "'"
+                    ));
+                },
+            }
+        };
+        new_initial_field_arms.extend(quote! {
+            (@new_initial $recv:expr, #name_literal, None, $environment:expr) => {
+                #set_none
+            };
+            (@new_initial $recv:expr, #name_literal, $value:expr, $environment:expr) => {
+                #set_value
+            };
+        });
+    }
+    let new_initial_required_arms: TokenStream = shape
+        .params
+        .iter()
+        .map(|param| {
+            let name_literal =
+                syn::LitStr::new(&param.name.to_string(), proc_macro2::Span::call_site());
+            quote! {
+                (@new_initial $recv:expr, #name_literal, $value:expr, $environment:expr) => {};
+            }
+        })
+        .collect();
+    let mut new_initial_lookup_arms = TokenStream::new();
+    let mut new_initial_param_calls = TokenStream::new();
+    for field in &shape.defaulted_params {
+        let helper = format_ident!("__new_initial_param_{}", field.name);
+        let name_literal =
+            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
+        let option_some_lookup_arms = constructor_option_inner(&field.ty)
+            .map(|_| {
+                quote! {
+                    (@#helper $recv:expr, props = [(#name_literal => Some($some_value:expr)), $($rest:tt)*], environment = $environment:expr) => {
+                        $crate::#macro_ident!(@new_initial $recv, #name_literal, Some($some_value), $environment);
+                    };
+                    (@#helper $recv:expr, props = [(#name_literal => Some($some_value:expr))], environment = $environment:expr) => {
+                        $crate::#macro_ident!(@new_initial $recv, #name_literal, Some($some_value), $environment);
+                    };
+                }
+            })
+            .unwrap_or_default();
+        new_initial_lookup_arms.extend(quote! {
+            #option_some_lookup_arms
+            (@#helper $recv:expr, props = [(#name_literal => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
+                $crate::#macro_ident!(@new_initial $recv, #name_literal, $value, $environment);
+            };
+            (@#helper $recv:expr, props = [(#name_literal => $value:expr)], environment = $environment:expr) => {
+                $crate::#macro_ident!(@new_initial $recv, #name_literal, $value, $environment);
+            };
+            (@#helper $recv:expr, props = [($other:literal => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
+                $crate::#macro_ident!(@#helper $recv, props = [$($rest)*], environment = $environment);
+            };
+            (@#helper $recv:expr, props = [($other:literal => $value:expr)], environment = $environment:expr) => {};
+            (@#helper $recv:expr, props = [], environment = $environment:expr) => {};
+        });
+        new_initial_param_calls.extend(quote! {
+            $crate::#macro_ident!(@#helper $recv, props = [$($props)*], environment = $environment);
+        });
+    }
+    let mut new_initial_prop_calls = TokenStream::new();
+    for field in &shape.props {
+        let helper = format_ident!("__new_initial_prop_{}", field.name);
+        let name_literal =
+            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
+        new_initial_lookup_arms.extend(quote! {
+            (@#helper $recv:expr, props = [(#name_literal => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
+                $crate::#macro_ident!(@new_initial $recv, #name_literal, $value, $environment);
+            };
+            (@#helper $recv:expr, props = [(#name_literal => $value:expr)], environment = $environment:expr) => {
+                $crate::#macro_ident!(@new_initial $recv, #name_literal, $value, $environment);
+            };
+            (@#helper $recv:expr, props = [($other:literal => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
+                $crate::#macro_ident!(@#helper $recv, props = [$($rest)*], environment = $environment);
+            };
+            (@#helper $recv:expr, props = [($other:literal => $value:expr)], environment = $environment:expr) => {};
+            (@#helper $recv:expr, props = [], environment = $environment:expr) => {};
+        });
+        new_initial_prop_calls.extend(quote! {
+            $crate::#macro_ident!(@#helper $recv, props = [$($props)*], environment = $environment);
+        });
+    }
+    let new_initial_dispatchers = quote! {
+        (@new_initial_params $recv:expr, props = [$($props:tt)*], environment = $environment:expr) => {{
+            #new_initial_param_calls
+        }};
+        (@new_initial_props $recv:expr, props = [$($props:tt)*], environment = $environment:expr) => {{
+            #new_initial_prop_calls
+        }};
+    };
+    let new_initial_unknown = quote! {
+        (@new_initial $recv:expr, $name:literal, $value:expr, $environment:expr) => {
+            compile_error!(concat!(
+                "field '", $name, "' is not an externally writable property of '",
+                #type_name, "'"
+            ));
+        };
+    };
+    let initial_named_unknown = quote! {
+        (@initial_named_typed $recv:expr, $name:literal, $value:expr, $environment:expr) => {
+            compile_error!(concat!(
+                "field `", $name, "` is not an externally writable property of `",
+                #type_name, "`"
+            ));
+        };
+        (@initial_named $recv:expr, $name:literal, $value:expr, $environment:expr) => {
+            compile_error!(concat!(
+                "field `", $name, "` is not an externally writable property of `",
+                #type_name, "`"
+            ));
+        };
+    };
+    let initial_named_required_arms: TokenStream = shape
+        .params
+        .iter()
+        .map(|param| {
+            let name_literal =
+                syn::LitStr::new(&param.name.to_string(), proc_macro2::Span::call_site());
+            quote! {
+                (@initial_named_typed $recv:expr, #name_literal, $value:expr, $environment:expr) => {};
+                (@initial_named $recv:expr, #name_literal, $value:expr, $environment:expr) => {};
+            }
+        })
+        .collect();
+    let initial_delegate = match &props_macro {
+        Some(props_macro) => quote! {
+            #props_macro!(@set_with_environment $recv, $name, $value, $environment);
+        },
+        None => quote! {
+            compile_error!(concat!(
+                "`",
+                stringify!($name),
+                "` is not an externally writable property of `",
+                #type_name,
+                "`"
+            ));
+        },
+    };
+    let initial_typed_unknown = match &props_macro {
+        Some(props_macro) => quote! {
+            (@initial_typed $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                #props_macro!(@set_with_environment $recv, $name, $value, $environment);
+            };
+        },
+        None => quote! {
+            (@initial_typed $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                compile_error!(concat!(
+                    "field ",
+                    stringify!($name),
+                    " is not an externally writable property of ",
+                    #type_name
+                ));
+            };
+        },
+    };
+    let initial_children_delegate = match content_macro.as_ref().or(props_macro.as_ref()) {
+        Some(props_macro) => quote! {
+            #props_macro!(@children $recv, [$($child),*]);
+        },
+        None => quote! {
+            compile_error!(concat!(
+                "`",
+                #type_name,
+                "` has no exported content setter"
+            ));
+        },
+    };
+    let initial_children_arms = if let Some(content) = &shape.content_field {
+        if let Some(field) = shape.props.iter().find(|field| field.name == *content) {
+            if field.hidden_setter {
+                let setter = format_ident!("__set_initial_prop_{}", field.name);
+                if constructor_vec_item(&field.ty).is_some() {
+                    quote! {
+                        (@initial_children $recv:expr, children = []) => {};
+                        (@initial_children $recv:expr, children = [$($child:expr),+ $(,)?]) => {{
+                            $recv.#setter(::std::vec![$($child),*]);
+                        }};
+                    }
+                } else {
+                    let field_ty = &field.ty;
+                    let field_type_string = quote! { #field_ty }.to_string();
+                    if field_type_string.contains("UIElementCollection")
+                        || field_type_string.contains("ListExt<")
+                    {
+                        quote! {
+                            (@initial_children $recv:expr, children = []) => {};
+                            (@initial_children $recv:expr, children = [$($child:expr),+ $(,)?]) => {{
+                                #initial_children_delegate
+                            }};
+                        }
+                    } else {
+                        let child = constructor_content_child_value(&field.ty, quote! { $child });
+                        quote! {
+                            (@initial_children $recv:expr, children = []) => {};
+                            (@initial_children $recv:expr, children = [$child:expr]) => {{
+                                $recv.#setter(#child);
+                            }};
+                            (@initial_children $recv:expr, children = [$($child:expr),+ $(,)?]) => {
+                                compile_error!(concat!(
+                                    "`",
+                                    #type_name,
+                                    "` takes exactly one content child"
+                                ));
+                            };
+                        }
+                    }
+                }
+            } else {
+                quote! {
+                    (@initial_children $recv:expr, children = []) => {};
+                    (@initial_children $recv:expr, children = [$($child:expr),+ $(,)?]) => {{
+                        #initial_children_delegate
+                    }};
+                }
+            }
+        } else {
+            quote! {
+                (@initial_children $recv:expr, children = []) => {};
+                (@initial_children $recv:expr, children = [$($child:expr),+ $(,)?]) => {{
+                    #initial_children_delegate
+                }};
+            }
+        }
+    } else {
+        quote! {
+            (@initial_children $recv:expr, children = []) => {};
+            (@initial_children $recv:expr, children = [$($child:expr),+ $(,)?]) => {{
+                #initial_children_delegate
+            }};
+        }
+    };
+    let mut resync_fixed_arms = TokenStream::new();
+    for field in shape.params.iter().chain(shape.defaulted_params.iter()) {
+        let name = format_ident!("{}", field.name);
+        let name_literal =
+            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
+        let message = format!(
+            "{type_name}.{name} is a fixed constructor field and cannot be updated reactively"
+        );
+        resync_fixed_arms.extend(quote! {
+            (@resync_named $recv:expr, #name_literal, $value:expr, $environment:expr, reactive = true) => {
+                compile_error!(#message);
+            };
+            (@resync_named $recv:expr, #name_literal, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_set $recv:expr, #name, $value:expr, $environment:expr, reactive = true) => {
+                compile_error!(#message);
+            };
+            (@resync_set $recv:expr, #name, $value:expr, $environment:expr, reactive = false) => {};
+        });
+    }
+    let mut resync_prop_arms = TokenStream::new();
+    for field in &shape.props {
+        let name = format_ident!("{}", field.name);
+        let name_literal =
+            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
+        let setter = format_ident!("set_{}", field.name);
+        let set = if field.hidden_setter {
+            quote! { $recv.#setter($value); }
+        } else {
+            match &props_macro {
+                Some(props_macro) => quote! {
+                    #props_macro!(@set_with_environment $recv, #name, $value, $environment);
+                },
+                None => quote! {
+                    compile_error!(concat!(
+                        "field ",
+                        stringify!($name),
+                        " is not an externally writable property of ",
+                        #type_name
+                    ));
+                },
+            }
+        };
+        resync_prop_arms.extend(quote! {
+            (@resync_named $recv:expr, #name_literal, $value:expr, $environment:expr, reactive = true) => {
+                #set
+            };
+            (@resync_named $recv:expr, #name_literal, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_set $recv:expr, #name, $value:expr, $environment:expr, reactive = true) => {
+                #set
+            };
+            (@resync_set $recv:expr, #name, $value:expr, $environment:expr, reactive = false) => {};
+        });
+    }
+    let resync_fallback = match &props_macro {
+        Some(props_macro) => quote! {
+            (@resync_named $recv:expr, $name:literal, $value:expr, $environment:expr, reactive = true) => {
+                compile_error!(concat!(
+                    "field `", $name, "` is not an externally writable property of `",
+                    #type_name, "`"
+                ));
+            };
+            (@resync_named $recv:expr, $name:literal, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_set $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = true) => {
+                #props_macro!(@set_with_environment $recv, $name, $value, $environment);
+            };
+            (@resync_set $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = false) => {};
+        },
+        None => quote! {
+            (@resync_named $recv:expr, $name:literal, $value:expr, $environment:expr, reactive = true) => {
+                compile_error!(concat!(
+                    "field `", $name, "` is not an externally writable property of `",
+                    #type_name, "`"
+                ));
+            };
+            (@resync_named $recv:expr, $name:literal, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_set $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = true) => {
+                compile_error!(concat!(
+                    "field ",
+                    stringify!($name),
+                    " is not an externally writable property of ",
+                    #type_name
+                ));
+            };
+            (@resync_set $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = false) => {};
+        },
+    };
+    let mut semantic_brush_named_arms = TokenStream::new();
+    for field in shape.params.iter().chain(shape.defaulted_params.iter()) {
+        let name_literal =
+            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
+        semantic_brush_named_arms.extend(quote! {
+            (@is_semantic_brush_named #name_literal) => { false };
+        });
+    }
+    for field in &shape.props {
+        let name = format_ident!("{}", field.name);
+        let name_literal =
+            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
+        let value = match &props_macro {
+            Some(props_macro) => quote! { #props_macro!(@is_semantic_brush #name) },
+            None => quote! { false },
+        };
+        semantic_brush_named_arms.extend(quote! {
+            (@is_semantic_brush_named #name_literal) => { #value };
+        });
+    }
+    let semantic_brush_named_fallback = quote! {
+        (@is_semantic_brush_named $name:literal) => { false };
+    };
+    let writable_arms: TokenStream = shape
+        .writable_after_construct
+        .iter()
+        .map(|name| {
+            let name = format_ident!("{name}");
+            quote! { (@writable_after_construct #name) => { true }; }
+        })
+        .collect();
+    let new_method = match shape.constructor_return {
+        crate::component_frontend::ComponentConstructorReturn::SelfValue => format_ident!("new"),
+        crate::component_frontend::ComponentConstructorReturn::RcSelf => {
+            format_ident!("__new_unmounted")
+        }
+    };
+    let mount_arm = match shape.constructor_return {
+        crate::component_frontend::ComponentConstructorReturn::SelfValue => quote! {
+            (@mount $recv:expr, $environment:expr) => {};
+        },
+        crate::component_frontend::ComponentConstructorReturn::RcSelf => quote! {
+            (@mount $recv:expr, $environment:expr) => {
+                $recv.__mount($environment);
+            };
+        },
+    };
+
+    quote! {
+        #[doc(hidden)]
+        #[doc = #return_doc]
+        #[macro_export]
+        #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+            macro_rules! #macro_ident {
+            (@new $target:path, props = [$($props:tt)*], children = [$($children:expr),* $(,)?]) => {{
+                $crate::#macro_ident!(@validate_new props = [$($props)*]);
+                <$target>::#new_method(
+                    #(#ctor_args),*
+                )
+            }};
+            #mount_arm
+            #ctor_arg_arms
+            #new_validation_arms
+            #new_validation_fallback
+            #content_arg
+            #initial_field_arms
+            #initial_named_required_arms
+            #initial_named_unknown
+            #new_initial_field_arms
+            #new_initial_required_arms
+            #new_initial_lookup_arms
+            #new_initial_dispatchers
+            #new_initial_unknown
+            (@initial_set $recv:expr, props = [$($props:tt)*], children = [$($children:expr),* $(,)?], environment = $environment:expr) => {{
+                $crate::#macro_ident!(@initial_props $recv, props = [$($props)*], environment = $environment);
+                $crate::#macro_ident!(@initial_children $recv, children = [$($children),*]);
+            }};
+            (@initial_props $recv:expr, props = [$(($name:ident => $value:expr)),* $(,)?], environment = $environment:expr) => {{
+                $(
+                    $crate::#macro_ident!(@initial_one $recv, $name, $value, $environment);
+                )*
+            }};
+            #initial_skip_arms
+            #initial_typed_unknown
+            (@initial_one $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                #initial_delegate
+            };
+            #initial_children_arms
+            #resync_fixed_arms
+            #resync_prop_arms
+            #resync_fallback
+            #semantic_brush_named_arms
+            #semantic_brush_named_fallback
+            #writable_arms
+            (@writable_after_construct $name:ident) => { false };
+        }
+    }
+}
+
 /// Resolves the extension trait associated with a DSL element.  Unlike a props macro, a generated
 /// extension trait lives alongside the authored type, so a qualified external path keeps all of
 /// its intermediate Rust modules (`crate_alias::widgets::ThingExt`).
@@ -570,32 +1968,23 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                         .filter(|field| field.kind != FieldKind::State)
                         .map(|f| (f.name.clone(), f.kind))
                         .collect();
-                    // Kind-agnostic (not `f.kind == FieldKind::Param`): now that the builtin shape source is gone,
-                    // own fields are plain (unattributed) `prop`s rather than `#[param]` (their
-                    // backing Rust types are all zero-arg-constructed with post-construction
-                    // `set_<field>` setters regardless — docs/design/runtime/ui_tree_design.md — so
-                    // `#[param]` fields remain fixed at instantiation, so this
-                    // must select construction-time fields the same way `generate_view`'s own
-                    // `param_names` already does (`f.initializer.is_none()`, kind-independent) for
-                    // caller/callee agreement (`base_param_count`, `build_component_args`/
-                    // `build_component_setters`/`build_component_optional_setters`, validate.rs's
-                    // `check_element_value`). `on_*`-named fields are excluded explicitly — they're
-                    // event callbacks routed entirely through `emit_wiring`/`emit_resync` (which
-                    // already key off this exact same `on_` name prefix, not `FieldKind`), never
-                    // construction-time values, and never had a matching `set_on_<x>` on
-                    // hand-written natives (only `register_routed_handler` for `#[routed]` ones).
-                    // `#[environment(name)]` fields are excluded too, for a different reason than
-                    // `on_*`: they also have no initializer, but are resolved from the ambient
-                    // `EnvironmentContext` at construction (`docs/design/runtime/
-                    // theme_environment_design.md`'s "Environment" section), never supplied by a
-                    // caller — `f.kind`-based here since (unlike `on_*`) there is no name convention
-                    // to key off instead.
+                    // Only Param/Bindable fields are constructor inputs.  Event schema fields are
+                    // kept out of the constructor and ordinary Props are never promoted to it.
                     let param_fields = effective_fields
                         .iter()
                         .filter(|f| {
-                            f.initializer.is_none()
-                                && !f.name.starts_with("on_")
-                                && f.kind != FieldKind::Environment
+                            f.kind == FieldKind::Param
+                                && f.initializer.is_none()
+                                && !crate::attr_frontend::is_event_schema_field(f)
+                        })
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect();
+                    let defaulted_param_fields = effective_fields
+                        .iter()
+                        .filter(|f| {
+                            f.kind == FieldKind::Param
+                                && matches!(f.initializer, Some(Initializer::Expr(_)))
+                                && !crate::attr_frontend::is_event_schema_field(f)
                         })
                         .map(|f| (f.name.clone(), f.ty.clone()))
                         .collect();
@@ -643,7 +2032,11 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                         .collect();
                     let field_types = effective_fields
                         .iter()
-                        .filter(|f| f.initializer.is_none() && f.kind != FieldKind::Environment)
+                        .filter(|f| {
+                            f.kind != FieldKind::Environment
+                                && f.kind != FieldKind::Attached
+                                && (f.initializer.is_none() || f.kind == FieldKind::Prop)
+                        })
                         .map(|f| (f.name.clone(), f.ty.clone()))
                         .collect();
                     let attached_field_types = effective_fields
@@ -660,6 +2053,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                         TypeInfo {
                             fields: field_kinds,
                             param_fields,
+                            defaulted_param_fields,
                             two_way_fields,
                             routed_fields,
                             text_style_fields,
@@ -745,6 +2139,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                         TypeInfo {
                             fields: field_kinds,
                             param_fields,
+                            defaulted_param_fields: Vec::new(),
                             two_way_fields,
                             routed_fields,
                             text_style_fields: HashSet::new(),
@@ -816,6 +2211,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                         TypeInfo {
                             fields: field_kinds,
                             param_fields,
+                            defaulted_param_fields: Vec::new(),
                             two_way_fields,
                             routed_fields,
                             text_style_fields: HashSet::new(),
@@ -1719,166 +3115,6 @@ fn collect_template_parent_field_names_in_rust_block(
         }
     }
     Collector { names }.visit_block(block);
-}
-
-/// Whether `view`'s element tree references `name` *anywhere at all* — broader than
-/// `view_references_bare_name`'s own notion (a *literal* same-name forward, `padding: padding`):
-/// this also counts `name` appearing as a sub-expression identifier within a larger computed value
-/// (e.g. `Rectangle`'s own `kind: ShapeKind::RoundedRect { corner_radius: corner_radius.unwrap_or
-/// (0.0) }` — `corner_radius` is not a *bare* forward there, but its value is still read eagerly,
-/// before `Self` exists). Used exclusively to decide whether a field's value is needed at
-/// construction time (docs/design/runtime/ui_tree_design.md's post-construction setter convention, Phase
-/// 2's `is_deferred_field`/`generate_view`'s `is_deferred_own_field`) — deliberately *not* used by
-/// `resolve_effective_fields`'s own inherited-field-forwarding decision, which specifically wants
-/// the narrower "literal forward" notion (a field only *contributing* to some other computed value
-/// isn't being forwarded unchanged, so shouldn't be silently treated as inherited).
-pub(crate) fn view_references_name_anywhere(view: &ViewDef, name: &str) -> bool {
-    view.lets
-        .iter()
-        .any(|l| element_references_name_anywhere(&l.element, name))
-        || view
-            .root
-            .attributes
-            .iter()
-            .any(|attribute| view_expr_references_name_anywhere(&attribute.value, name))
-        || view
-            .root
-            .attached
-            .iter()
-            .any(|(_, _, expr)| view_expr_references_name_anywhere(expr, name))
-        || view
-            .root
-            .children
-            .iter()
-            .any(|child| child_references_name_anywhere(child, name))
-}
-
-fn element_references_name_anywhere(node: &ElementNode, name: &str) -> bool {
-    if node
-        .attributes
-        .iter()
-        .any(|attribute| view_expr_references_name_anywhere(&attribute.value, name))
-    {
-        return true;
-    }
-    if node
-        .attached
-        .iter()
-        .any(|(_, _, expr)| view_expr_references_name_anywhere(expr, name))
-    {
-        return true;
-    }
-    node.children
-        .iter()
-        .any(|child| child_references_name_anywhere(child, name))
-}
-
-fn child_references_name_anywhere(child: &ChildEntry, name: &str) -> bool {
-    match child {
-        ChildEntry::Literal(element) => element_references_name_anywhere(element, name),
-        ChildEntry::Ref(binding) => binding == name,
-        ChildEntry::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            view_expr_references_name_anywhere(condition, name)
-                || then_branch
-                    .iter()
-                    .any(|child| child_references_name_anywhere(child, name))
-                || else_branch
-                    .iter()
-                    .any(|child| child_references_name_anywhere(child, name))
-        }
-        ChildEntry::Match { value, arms } => {
-            view_expr_references_name_anywhere(value, name)
-                || arms.iter().any(|arm| {
-                    arm.body
-                        .iter()
-                        .any(|child| child_references_name_anywhere(child, name))
-                })
-        }
-        ChildEntry::For {
-            collection, body, ..
-        } => {
-            view_expr_references_name_anywhere(collection, name)
-                || body
-                    .iter()
-                    .any(|child| child_references_name_anywhere(child, name))
-        }
-    }
-}
-
-fn view_expr_references_name_anywhere(expr: &ViewExpr, name: &str) -> bool {
-    match expr {
-        ViewExpr::Path(path) => path.iter().any(|seg| seg == name),
-        ViewExpr::Element(elem) => element_references_name_anywhere(elem, name),
-        ViewExpr::Closure {
-            body: ClosureBody::Element(elem),
-            ..
-        } => element_references_name_anywhere(elem, name),
-        ViewExpr::Closure {
-            body: ClosureBody::Expr(e),
-            ..
-        } => view_expr_references_name_anywhere(e, name),
-        ViewExpr::Closure {
-            body: ClosureBody::Block(block),
-            ..
-        } => block_references_ident(block, name),
-        ViewExpr::TFluent(_, args) => args
-            .iter()
-            .any(|(_, v)| view_expr_references_name_anywhere(v, name)),
-        ViewExpr::Expr(e) => expr_references_ident(e, name),
-        // A bare outer name read inside a deferred view is not read eagerly, at the enclosing
-        // component's own construction time — it is read later, through the generated hidden
-        // Component's `__view_owner` weak upgrade, at popup-open (build) time. So it must not force
-        // `is_deferred_field`'s own "referenced anywhere -> not deferrable" decision the way an
-        // ordinary eager reference would (Issue #162 §3.9's dependency-boundary rule, applied here
-        // to construction-time-need rather than resync).
-        ViewExpr::DeferredView(_) => false,
-    }
-}
-
-/// Whether the raw Rust expression `expr` references a bare identifier `name` anywhere within it
-/// (e.g. `corner_radius` inside `corner_radius.unwrap_or(0.0)`) — a `syn::visit::Visit` walk over
-/// every `syn::Expr::Path` node, since `ViewExpr::Expr` wraps an arbitrary parsed Rust expression
-/// with no DSL-level structure of its own left to pattern-match on.
-fn expr_references_ident(expr: &syn::Expr, name: &str) -> bool {
-    struct Finder<'a> {
-        name: &'a str,
-        found: bool,
-    }
-    impl<'a> syn::visit::Visit<'a> for Finder<'a> {
-        fn visit_expr_path(&mut self, node: &'a syn::ExprPath) {
-            if node.path.segments.len() == 1 && node.path.segments[0].ident == self.name {
-                self.found = true;
-            }
-            syn::visit::visit_expr_path(self, node);
-        }
-    }
-    let mut finder = Finder { name, found: false };
-    syn::visit::Visit::visit_expr(&mut finder, expr);
-    finder.found
-}
-
-/// [`expr_references_ident`]'s counterpart for a `ClosureBody::Block` (a multi-statement `on_*`
-/// handler body) — same bare-identifier walk, over every statement instead of a single expression.
-fn block_references_ident(block: &syn::Block, name: &str) -> bool {
-    struct Finder<'a> {
-        name: &'a str,
-        found: bool,
-    }
-    impl<'a> syn::visit::Visit<'a> for Finder<'a> {
-        fn visit_expr_path(&mut self, node: &'a syn::ExprPath) {
-            if node.path.segments.len() == 1 && node.path.segments[0].ident == self.name {
-                self.found = true;
-            }
-            syn::visit::visit_expr_path(self, node);
-        }
-    }
-    let mut finder = Finder { name, found: false };
-    syn::visit::Visit::visit_block(&mut finder, block);
-    finder.found
 }
 
 /// Recursively flattens `c`'s effective method list: its base's own effective methods (an
@@ -3390,8 +4626,11 @@ fn generate_component(
     let struct_name = format_ident!("{}", c.name);
     let mut struct_fields = TokenStream::new();
     let mut ctor_params = TokenStream::new();
+    let mut ctor_param_names = Vec::new();
+    let mut ctor_param_types = Vec::new();
     let mut ctor_field_inits = TokenStream::new();
     let mut accessors = TokenStream::new();
+    let mut initial_setters = TokenStream::new();
 
     // A defaulted `#[prop(default = ...)]`/`#[computed(expr = ...)]` field (`generate_view`'s own
     // sibling handling above has the full design-rationale doc comment) — this view-less component
@@ -3423,7 +4662,7 @@ fn generate_component(
         matches!(f.initializer, Some(Initializer::Expr(_)))
             && matches!(
                 f.kind,
-                FieldKind::Prop | FieldKind::State | FieldKind::Computed
+                FieldKind::Param | FieldKind::Prop | FieldKind::State | FieldKind::Computed
             )
     }) {
         let field_ident = format_ident!("{}", f.name);
@@ -3465,18 +4704,11 @@ fn generate_component(
         .map(|f| format_ident!("{}", f.name))
         .collect();
 
-    // PR #169 review remediation, round 2 (AD-R2-6), input corrected round 3 (A2/AD-R3-2): a
-    // no-initializer *own* field's (one `source_component.fields` itself declares — never an
-    // inherited one, see this function's own leading doc comment) deferred-vs-required membership
-    // is decided once, here, by `component_public_shape(source_component, None)` — the same
-    // source-local classification `rust_analyzer_shadow::build_component_struct_shadow` and
-    // `generate_view`'s own own-field constructor decision (below, in this file) both consult —
-    // rather than this loop independently re-running `strip_option`/deferral logic (PR #169 review
-    // finding A2's own forbidden pattern). `view: None` matches this function's own view-less
-    // generation exactly. A field present in `c.fields` (the effective set) but absent from
-    // `source_component.fields` is inherited, not this Component's own declaration — never looked
-    // up here, so it falls through to the pre-#146 direct `strip_option` computation below
-    // unchanged, exactly mirroring `generate_view`'s own `is_deferred_own_field` fallback boundary.
+    // The source-local public shape is the single classification used by the generated accessors
+    // and constructor surface. `view: None` matches this function's view-less generation exactly.
+    // A field present in `c.fields` (the effective set) but absent from `source_component.fields` is
+    // inherited, not this Component's own declaration, so its effective generation remains handled
+    // by the inherited-field path below.
     let own_field_shape = crate::component_frontend::component_public_shape(source_component, None);
     let declared_own_field_names: HashSet<&str> = source_component
         .fields
@@ -3484,8 +4716,8 @@ fn generate_component(
         .map(|f| f.name.as_str())
         .collect();
     // PR #169 review remediation, round 4 (AD-R4-1/AD-R4-2): every own-field API-membership
-    // decision below (constructor param, deferred-option storage, getter, setter, and each
-    // accessor's visibility) is driven exclusively from these four shape-derived indices — never
+    // decision below (constructor param, getter, setter, and each accessor's visibility) is driven
+    // exclusively from these shape-derived indices — never
     // independently re-derived from `f.kind`/`f.initializer`/`strip_option` for a name in
     // `declared_own_field_names`. `FieldDef` (`f` itself) is still consulted, but only to select
     // *how* an already-shape-decided accessor is implemented (Cell vs RefCell, getter/setter body,
@@ -3497,13 +4729,6 @@ fn generate_component(
         .constructor_params
         .iter()
         .map(|(name, ty)| (name.as_str(), ty.as_str()))
-        .collect();
-    let own_deferred_fields: HashMap<&str, (&str, &str)> = own_field_shape
-        .deferred_option_fields
-        .iter()
-        .map(|(name, declared_ty, inner_ty)| {
-            (name.as_str(), (declared_ty.as_str(), inner_ty.as_str()))
-        })
         .collect();
     let own_readable_fields: HashMap<&str, (&str, crate::component_frontend::ShadowVisibility)> =
         own_field_shape
@@ -3545,119 +4770,42 @@ fn generate_component(
                 }
             }
             None => {
-                // `#[param] #[inject]` field: supplied by the caller. `Option<T>`-typed fields
-                // (docs/design/runtime/ui_tree_design.md's post-construction setter convention,
-                // extended from builtins to plain `component`s) are deferred instead — dropped from
-                // `new(..)`'s own argument list, stored `Cell`/`RefCell`-wrapped (`is_copy_type`)
-                // defaulting to `None`, and given a `set_<name>(&self, value: T)` setter — `None`
-                // is `Option<T>`'s own natural "not yet set" value, so (unlike a required field of
-                // arbitrary, possibly non-`Default` type) there's always a sound value to start
-                // from. A required (non-`Option`) field stays exactly as before: a `new(..)`
-                // argument, plain storage, no setter.
-                //
-                // PR #169 review remediation, round 4 (AD-R4-3/AD-R4-4/AD-R4-5/AD-R4-6): for an
-                // *own* field, `is_deferred` (storage shape), constructor membership, and
-                // getter/setter membership+visibility all come from the shape's four indices —
-                // `f.kind`/`f.initializer`/`strip_option` below only ever select the deferred vs.
-                // required *implementation* (Cell/RefCell type, get/set body), never whether an
-                // accessor exists. An inherited field keeps the exact pre-#146 direct computation
-                // (unconditional pub getter/setter either way), unchanged (AD-R4-8).
-                let is_deferred = if is_own {
-                    own_deferred_fields.contains_key(f.name.as_str())
-                } else {
-                    strip_option(&f.ty).1
-                };
-                if is_deferred {
-                    let inner_ty_str = if is_own {
-                        own_deferred_fields
-                            .get(f.name.as_str())
-                            .map(|(_, inner_ty)| *inner_ty)
-                            .expect("is_deferred true for an own field implies a deferred_option_fields entry")
-                    } else {
-                        strip_option(&f.ty).0
-                    };
-                    let inner_ty: syn::Type =
-                        syn::parse_str(inner_ty_str).expect("field inner type must parse");
-                    let cell_ty = if is_copy_type(inner_ty_str) {
-                        quote! { std::cell::Cell }
-                    } else {
-                        quote! { std::cell::RefCell }
-                    };
-                    struct_fields.extend(quote! { #field_ident: #cell_ty<Option<#inner_ty>>, });
-                    ctor_field_inits.extend(quote! { #field_ident: #cell_ty::new(None), });
-                    let set_name = format_ident!("set_{}", f.name);
-                    let get_body = if is_copy_type(inner_ty_str) {
-                        quote! { self.#field_ident.get() }
-                    } else {
-                        quote! { self.#field_ident.borrow().clone() }
-                    };
-                    let set_body = if is_copy_type(inner_ty_str) {
-                        quote! { self.#field_ident.set(Some(value)); }
-                    } else {
-                        quote! { *self.#field_ident.borrow_mut() = Some(value); }
-                    };
-                    if is_own {
-                        if let Some((_, visibility)) = own_readable_fields.get(f.name.as_str()) {
-                            let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
-                            accessors.extend(quote! {
-                                #vis fn #field_ident(&self) -> #ty { #get_body }
-                            });
-                        }
-                        // PR #169 review remediation, round 5 (AD-R5-1/AD-R5-3/AD-R5-4): the
-                        // setter parameter *type* comes from `own_writable_fields`'s own type
-                        // entry, not `inner_ty` (round 4 still discarded this with `_`) — `#ty`/
-                        // `strip_option`/`own_deferred_fields` remain the sole authority for
-                        // *storage* (`Cell`/`RefCell<Option<T>>`, the `Some(value)` wrapping in
-                        // `#set_body` above), never for the setter's own public signature.
-                        if let Some((setter_ty_str, visibility)) =
-                            own_writable_fields.get(f.name.as_str())
-                        {
-                            let setter_ty: syn::Type = syn::parse_str(setter_ty_str)
-                                .expect("shape setter type must parse");
-                            let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
-                            accessors.extend(quote! {
-                                #vis fn #set_name(&self, value: #setter_ty) { #set_body }
-                            });
-                        }
-                    } else {
-                        accessors.extend(quote! {
-                            pub fn #field_ident(&self) -> #ty { #get_body }
-                            pub fn #set_name(&self, value: #inner_ty) { #set_body }
-                        });
-                    }
-                } else {
-                    struct_fields.extend(quote! { #field_ident: #ty, });
-                    ctor_field_inits.extend(quote! { #field_ident, });
-                    if is_own {
-                        if own_constructor_params.contains_key(f.name.as_str()) {
-                            ctor_params.extend(quote! { #field_ident: #ty, });
-                        }
-                        if let Some((_, visibility)) = own_readable_fields.get(f.name.as_str()) {
-                            let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
-                            accessors.extend(quote! {
-                                #vis fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
-                            });
-                        }
-                        // A required (non-deferred) own field never appears in `writable_fields`
-                        // for `component_public_shape(.., None)` — the view-less path
-                        // (`component_public_shape`'s own doc comment: a required `Prop` field's
-                        // setter is `has_view`-only) — so there is no sound setter body to emit
-                        // here (this field's storage is plain `#ty`, not `Cell`/`RefCell`-wrapped).
-                        debug_assert!(
-                            !own_writable_fields.contains_key(f.name.as_str()),
-                            "view-less component_public_shape must never mark a required own field writable: {}",
-                            f.name
-                        );
-                    } else {
+                // Every no-initializer generated-component field in this branch is a required
+                // `#[param]`/`#[bindable]`. Its declared type is stored and exposed as-is,
+                // including `Option<T>`; omission is diagnosed by the construction planner.
+                struct_fields.extend(quote! { #field_ident: #ty, });
+                ctor_field_inits.extend(quote! { #field_ident, });
+                if is_own {
+                    if own_constructor_params.contains_key(f.name.as_str()) {
                         ctor_params.extend(quote! { #field_ident: #ty, });
+                        ctor_param_names.push(field_ident.clone());
+                        ctor_param_types.push(ty.clone());
+                    }
+                    if let Some((_, visibility)) = own_readable_fields.get(f.name.as_str()) {
+                        let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
                         accessors.extend(quote! {
-                            pub fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
+                            #vis fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
                         });
                     }
+                    debug_assert!(
+                        !own_writable_fields.contains_key(f.name.as_str()),
+                        "a required own field must not be writable: {}",
+                        f.name
+                    );
+                } else {
+                    ctor_params.extend(quote! { #field_ident: #ty, });
+                    ctor_param_names.push(field_ident.clone());
+                    ctor_param_types.push(ty.clone());
+                    accessors.extend(quote! {
+                        pub fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
+                    });
                 }
             }
             Some(Initializer::Expr(raw_expr))
-                if matches!(f.kind, FieldKind::Prop | FieldKind::State) =>
+                if matches!(
+                    f.kind,
+                    FieldKind::Param | FieldKind::Prop | FieldKind::State
+                ) =>
             {
                 let cell_ty = if is_copy_type(&f.ty) {
                     quote! { std::cell::Cell }
@@ -3677,6 +4825,34 @@ fn generate_component(
                 } else {
                     quote! { *self.#field_ident.borrow_mut() = value; }
                 };
+                let initial_recompute_calls: Vec<TokenStream> = dependents_of
+                    .get(&f.name)
+                    .into_iter()
+                    .flatten()
+                    .map(|dep| {
+                        let recompute = format_ident!("recompute_{}", dep);
+                        quote! { self.#recompute(); }
+                    })
+                    .collect();
+                if f.kind == FieldKind::Param {
+                    let initial_name = format_ident!("__set_initial_param_{}", f.name);
+                    initial_setters.extend(quote! {
+                        #[doc(hidden)]
+                        pub fn #initial_name(&self, value: #ty) {
+                            #set_body
+                            #(#initial_recompute_calls)*
+                        }
+                    });
+                } else if f.kind == FieldKind::Prop {
+                    let initial_name = format_ident!("__set_initial_prop_{}", f.name);
+                    initial_setters.extend(quote! {
+                        #[doc(hidden)]
+                        pub fn #initial_name(&self, value: #ty) {
+                            #set_body
+                            #(#initial_recompute_calls)*
+                        }
+                    });
+                }
                 let recompute_calls: Vec<TokenStream> = dependents_of
                     .get(&f.name)
                     .into_iter()
@@ -3722,6 +4898,10 @@ fn generate_component(
                             }
                         });
                     }
+                } else if f.kind == FieldKind::Param {
+                    accessors.extend(quote! {
+                        pub fn #field_ident(&self) -> #ty { #get_body }
+                    });
                 } else {
                     let visibility = if f.kind == FieldKind::State {
                         quote! {}
@@ -3805,6 +4985,49 @@ fn generate_component(
 
     let _ = table; // reserved for future cross-component validation
     let methods = emit_methods(&c.methods);
+    let defaulted_params: Vec<EffectiveConstructorField> = c
+        .fields
+        .iter()
+        .filter(|field| {
+            field.kind == FieldKind::Param
+                && matches!(field.initializer, Some(Initializer::Expr(_)))
+                && !crate::attr_frontend::is_event_schema_field(field)
+        })
+        .map(|field| EffectiveConstructorField {
+            name: format_ident!("{}", field.name),
+            ty: syn::parse_str(&field.ty).expect("field type must parse"),
+            hidden_setter: true,
+        })
+        .collect();
+    let props: Vec<EffectiveConstructorField> = c
+        .fields
+        .iter()
+        .filter(|field| {
+            field.kind == FieldKind::Prop && !crate::attr_frontend::is_event_schema_field(field)
+        })
+        .map(|field| EffectiveConstructorField {
+            name: format_ident!("{}", field.name),
+            ty: syn::parse_str(&field.ty).expect("field type must parse"),
+            hidden_setter: true,
+        })
+        .collect();
+    let non_writable_fields = non_writable_constructor_field_names(
+        &c.fields,
+        &ctor_param_names,
+        &defaulted_params,
+        &props,
+    );
+    let constructor_shape = build_effective_constructor_shape(
+        &ctor_param_names,
+        &ctor_param_types,
+        defaulted_params,
+        props,
+        own_field_shape.constructor_return,
+        source_component.content_field.as_deref(),
+        non_writable_fields,
+    );
+    let constructor_macro =
+        build_constructor_macro(&struct_name.to_string(), &constructor_shape, None, None);
     quote! {
         #[allow(non_camel_case_types)]
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3857,8 +5080,11 @@ fn generate_component(
             }
 
             #accessors
+            #initial_setters
             #methods
         }
+
+        #constructor_macro
     }
 }
 
@@ -4103,6 +5329,15 @@ fn generate_view(
                 && matches!(f.initializer, Some(Initializer::Expr(_)))
         })
         .collect();
+    let own_default_param_fields: Vec<&FieldDef> = component
+        .fields
+        .iter()
+        .filter(|f| {
+            (!is_shape_composition || source_field_names.contains(f.name.as_str()))
+                && f.kind == FieldKind::Param
+                && matches!(f.initializer, Some(Initializer::Expr(_)))
+        })
+        .collect();
     let own_state_fields: Vec<&FieldDef> = component
         .fields
         .iter()
@@ -4112,7 +5347,13 @@ fn generate_view(
                 && matches!(f.initializer, Some(Initializer::Expr(_)))
         })
         .collect();
-    let own_stored_fields: Vec<&FieldDef> = own_default_fields
+    let own_stored_fields: Vec<&FieldDef> = own_default_param_fields
+        .iter()
+        .chain(own_default_fields.iter())
+        .chain(own_state_fields.iter())
+        .copied()
+        .collect();
+    let own_mutable_stored_fields: Vec<&FieldDef> = own_default_fields
         .iter()
         .chain(own_state_fields.iter())
         .copied()
@@ -4181,7 +5422,7 @@ fn generate_view(
             && matches!(f.initializer, Some(Initializer::Expr(_)))
             && matches!(
                 f.kind,
-                FieldKind::Prop | FieldKind::State | FieldKind::Computed
+                FieldKind::Param | FieldKind::Prop | FieldKind::State | FieldKind::Computed
             )
     }) {
         let field_ident = format_ident!("{}", f.name);
@@ -4210,10 +5451,9 @@ fn generate_view(
         });
     }
 
-    // `mutable_own_fields` is populated below, once `mutable_required_names` is known (it needs
-    // `required_own_names`/`deferred_own_names`, computed further down using `ctx.own_fields`
-    // itself) — every `emit_expr`/`plan_element`/`emit_construction`/`emit_resync` call that could
-    // actually observe it happens later still, so setting it after the fact here is sound.
+    // `mutable_own_fields` is populated below, once `mutable_required_names` is known. Every
+    // `emit_expr`/`plan_element`/`emit_construction`/`emit_resync` call that could observe it happens
+    // later, so setting it after the fact here is sound.
     let template_base_fields = if view.is_template {
         table
             .resolve(from, &target_name)
@@ -4307,7 +5547,7 @@ fn generate_view(
     } else {
         HashSet::new()
     };
-    // `on_*`-named fields are excluded because a `#[routed]` field (`UIElement`'s own
+    // Event-schema fields are excluded because a `#[routed]` field (`UIElement`'s own
     // `on_tapped`/`on_pointer_pressed`/... — inherited by every component through
     // `resolve_effective_fields`, not just ones that declare it directly, e.g. `Button.on_click`) is
     // wired through the `on_x: ..` DSL attribute + `register_routed_handler` (`emit_wiring`'s own
@@ -4315,19 +5555,12 @@ fn generate_view(
     // existed, every `has_view` composed component's `new(..)` silently gained 9 required
     // `fn(PointerEventArgs)`-typed parameters nothing ever supplied, breaking every existing call
     // site the moment these fields became inheritable (`RoundedPanel`/`DocumentView`, e.g.).
-    // `#[environment(name)]` fields never appear in `constructor_params`/`deferred_option_fields`
-    // either — see `build_symbol_table`'s matching `param_fields` filter (`codegen.rs`,
-    // `Item::Component` arm) for the parallel reasoning on the `TypeInfo` side.
+    // `#[environment(name)]` fields never appear in `constructor_params` either — see
+    // `build_symbol_table`'s matching `param_fields` filter for the parallel TypeInfo rule.
     let shape_param_eligible_names: HashSet<&str> = own_field_shape
         .constructor_params
         .iter()
         .map(|(name, _)| name.as_str())
-        .chain(
-            own_field_shape
-                .deferred_option_fields
-                .iter()
-                .map(|(name, _, _)| name.as_str()),
-        )
         .collect();
     // Field-level membership: an *own* field (in `source_component.fields`) is decided by the shape
     // above; an *inherited* one (present in `component.fields`, the effective set, but not
@@ -4339,8 +5572,8 @@ fn generate_view(
             shape_param_eligible_names.contains(f.name.as_str())
         } else {
             f.initializer.is_none()
-                && !f.name.starts_with("on_")
-                && f.kind != FieldKind::Environment
+                && f.kind == FieldKind::Param
+                && !crate::attr_frontend::is_event_schema_field(f)
         }
     };
     let param_names: Vec<syn::Ident> = component
@@ -4474,15 +5707,17 @@ fn generate_view(
     // element already does (`emit_named_accessors` reads `self.<binding>` later), even though it
     // isn't the view's actual root.
     let mut lets_map: HashMap<String, (syn::Ident, String)> = HashMap::new();
-    // A `dyn UIElement`-typed `#[param]` field (e.g. `ContentControl`'s `content`) is already a
-    // fully-constructed `Rc<dyn UIElement>` value by the time it reaches this view's body, with no
+    // A `dyn UIElement`-typed field (e.g. `ContentControl`'s `content`) is already a fully
+    // constructed `Rc<dyn UIElement>` value by the time it reaches this view's body, with no
     // component type name of its own left to resolve — unlike a literal nested element or a `let`,
-    // it can't be re-planned via `plan_element`. Seeding `lets_map` with it here lets a bare
-    // reference to it in `{}` (e.g. `ContentControl`'s `Control { content }`) resolve via the
-    // ordinary `ChildEntry::Ref` path, tagged with `PASSTHROUGH_NODE` so `into_node_if_needed` uses
-    // it as-is instead of trying to resolve it via `SymbolTable`.
+    // it can't be re-planned via `plan_element`. This also applies to an ordinary Prop-backed
+    // content field: the child-construction preamble supplies a local read from its getter before
+    // the body is emitted. Seeding `lets_map` with either form lets a bare reference to it in `{}`
+    // (e.g. `ContentControl`'s `Control { content }`) resolve via the ordinary `ChildEntry::Ref`
+    // path, tagged with `PASSTHROUGH_NODE` so `into_node_if_needed` uses it as-is instead of
+    // trying to resolve it via `SymbolTable`.
     for field in &component.fields {
-        if field.initializer.is_none() && is_ui_element_type(&field.ty) {
+        if is_ui_element_type(&field.ty) {
             lets_map.insert(
                 field.name.clone(),
                 (
@@ -4665,131 +5900,27 @@ fn generate_view(
         .map(|(_, t)| t.clone())
         .collect();
 
-    // Unreferenced own `Option<T>` fields are initialized as `None` and exposed through
-    // `set_<name>`. Fields needed while constructing the view remain constructor arguments.
-    //
-    // PR #169 review remediation (AD-R4); source corrected round 3 (A2/AD-R3-2): for a field
-    // declared directly on `source_component` (not a `synthesize_external_base_fields`-synthesized
-    // one, Refs #90, and not merely present in `component`'s own `effective_fields`-flattened list
-    // — `component_public_shape` is source-local only and has no notion of either), this reads
-    // `component_frontend::component_public_shape`'s own deferred-field classification instead of
-    // re-deriving the same `strip_option(..).1 && !view_references_name_anywhere(..)` rule
-    // independently — the exact rust-analyzer Component struct shadow
-    // (`rust_analyzer_shadow::build_component_struct_shadow`) consults, so the two can never
-    // silently drift. A synthesized or inherited field (absent from `source_component.fields`) falls
-    // back to the original direct computation unchanged. `own_field_shape`/`declared_own_field_names`
-    // are computed once, above (before `param_names`), and reused here (AD-R2-6) rather than
-    // recomputed.
-    let shape_deferred_names: HashSet<String> = own_field_shape
-        .deferred_option_fields
-        .iter()
-        .map(|(name, _, _)| name.clone())
-        .collect();
-    let is_deferred_own_field = |name: &syn::Ident| -> bool {
-        let name_str = name.to_string();
-        if declared_own_field_names.contains(name_str.as_str()) {
-            return shape_deferred_names.contains(&name_str);
-        }
-        let ty_str = ctx
-            .own_fields
-            .get(&name_str)
-            .expect("own_struct_param_names names one of ctx.own_fields' own keys");
-        strip_option(ty_str).1 && !view_references_name_anywhere(view, &name_str)
-    };
-    let deferred_own_names: Vec<syn::Ident> = own_struct_param_names
-        .iter()
-        .filter(|n| is_deferred_own_field(n))
-        .cloned()
-        .collect();
-    let deferred_own_inner_types: Vec<syn::Type> = deferred_own_names
-        .iter()
-        .map(|n| {
-            let ty_str = ctx
-                .own_fields
-                .get(&n.to_string())
-                .expect("own_struct_param_names names one of ctx.own_fields' own keys");
-            syn::parse_str(strip_option(ty_str).0).expect("field inner type must parse")
-        })
-        .collect();
-    let deferred_own_cell_types: Vec<TokenStream> = deferred_own_names
-        .iter()
-        .zip(deferred_own_inner_types.iter())
-        .map(|(n, inner_ty)| {
-            let ty_str = ctx.own_fields.get(&n.to_string()).unwrap();
-            let cell_ty = if is_copy_type(strip_option(ty_str).0) {
-                quote! { std::cell::Cell }
-            } else {
-                quote! { std::cell::RefCell }
-            };
-            quote! { #cell_ty<Option<#inner_ty>> }
-        })
-        .collect();
-    let deferred_own_names_set: HashSet<String> =
-        deferred_own_names.iter().map(|n| n.to_string()).collect();
-    // The `Self { .. }`/`#struct_ident { .. }` construction shorthand (`#(#name,)*`) only works for
-    // a field with a live local variable of the same name — still true for a required own field
-    // (still a `new(..)` argument), but not a deferred one (no argument, no local variable at all),
-    // which instead needs an explicit `#name: #cell_ty::new(None)` initializer built here once and
-    // reused by both `new(..)`'s own inline construction and `create_<snake case>(..)` below.
-    let required_own_names: Vec<syn::Ident> = own_struct_param_names
-        .iter()
-        .filter(|n| !deferred_own_names_set.contains(&n.to_string()))
-        .cloned()
-        .collect();
-    let required_own_types: Vec<syn::Type> = own_struct_param_names
-        .iter()
-        .zip(own_struct_param_types.iter())
-        .filter(|(n, _)| !deferred_own_names_set.contains(&n.to_string()))
-        .map(|(_, t)| t.clone())
-        .collect();
-    let deferred_own_field_decls: TokenStream = deferred_own_names
-        .iter()
-        .zip(deferred_own_cell_types.iter())
-        .map(|(name, cell_ty)| quote! { #name: #cell_ty, })
-        .collect();
-    let deferred_field_inits: TokenStream = deferred_own_names
-        .iter()
-        .zip(deferred_own_cell_types.iter())
-        // `<#cell_ty>::new(..)`, not the bare `#cell_ty::new(..)` — a generic type's own associated
-        // function called in *expression* position needs the qualified-path `<Type>::method()` form
-        // (`Vec<i32>::new()` alone is ambiguous with a chained `<`/`>` comparison at this position;
-        // only a type *annotation* context, e.g. `let x: Vec<i32> = ..`, allows the bare form).
-        .map(|(name, cell_ty)| quote! { #name: <#cell_ty>::new(None), })
-        .collect();
-    // `new(..)`/`create_<snake case>(..)`'s own argument list — `param_names`/`param_types` (which
-    // also includes any `forward_param_names` prefix, never deferred — see above) minus the
-    // deferred subset.
+    // Only required Params remain in the positional constructor list. Ordinary Props, including
+    // `Option<T>`, are initialized/stored through the property path and never become constructor
+    // fields.
+    let required_own_names: Vec<syn::Ident> = own_struct_param_names.clone();
+    let required_own_types: Vec<syn::Type> = own_struct_param_types.clone();
+    // `new(..)`/`create_<snake case>(..)`'s own argument list — required Params only.
     let ctor_param_names: Vec<syn::Ident> = param_names
         .iter()
-        .filter(|n| {
-            !deferred_own_names_set.contains(&n.to_string())
-                && !inherited_shape_field_names.contains(&n.to_string())
-        })
+        .filter(|n| !inherited_shape_field_names.contains(&n.to_string()))
         .cloned()
         .collect();
     let ctor_param_types: Vec<syn::Type> = param_names
         .iter()
         .zip(param_types.iter())
-        .filter(|(n, _)| {
-            !deferred_own_names_set.contains(&n.to_string())
-                && !inherited_shape_field_names.contains(&n.to_string())
-        })
+        .filter(|(n, _)| !inherited_shape_field_names.contains(&n.to_string()))
         .map(|(_, t)| t.clone())
         .collect();
 
-    // A required own field (can't be deferred — `is_deferred_own_field` above already excluded it
-    // because it's referenced somewhere in this component's own view) that's declared a plain
-    // `prop` (not `#[param]`, docs/specs/dsl_spec.md §4) still needs to stay externally updatable
-    // after construction — a `prop` field is runtime-mutable *by definition*, and "referenced at
-    // construction time" doesn't change that (e.g. `RoundedPanel`'s `label`, used immediately to
-    // build its own internal `TextBlock` but also meant to change on every `resync()` of whichever
-    // *other* component instantiated it — `document_view.rs`'s `RoundedPanel { label:
-    // t!("notepad-status-chars", count: doc.char_count) }`). Cell/RefCell-wrapped
-    // (`is_copy_type`) like a deferred field's storage, but — unlike a deferred field — stays a
-    // `new(..)` positional argument (its value is needed immediately, before `Self` exists) and its
-    // setter also re-runs `self.resync()` (its own view, being required, is guaranteed to actually
-    // reference it, so the change needs to reach the widgets built from it right away — see the
-    // setter loop below).
+    // Effective fields that are both required and writable retain Cell/RefCell storage so a generated
+    // setter can update the authored view and notification surface. Ordinary Props are classified
+    // separately and receive their own defaulted-Prop storage below.
     //
     // PR #169 review remediation, round 3 (AD-R3-5): for an *own* field (declared directly on
     // `source_component`), membership comes from `own_shape.writable_fields` — `required_own_names`
@@ -4826,10 +5957,28 @@ fn generate_view(
         .iter()
         .map(|n| n.to_string())
         .collect();
-    // A component's runtime-mutable props use the same typed notification surface as a
-    // viewmodel. Only required props participate here: deferred props are not referenced by this
-    // component's view (otherwise they would not be deferred) and therefore have no local visual
-    // update to dispatch.
+    // Required Vec content is immutable at the public property surface (it is still a `#[param]`,
+    // not a writable `Prop`) but dynamic child reconciliation needs a mutable backing collection.
+    // Keep that storage distinction separate from `mutable_required_names`: the latter controls
+    // generated setters/property notifications, while this set controls only Cell/RefCell layout.
+    let cell_required_names: Vec<syn::Ident> = required_own_names
+        .iter()
+        .filter(|name| {
+            if mutable_required_names_set.contains(&name.to_string()) {
+                return true;
+            }
+            source_component.content_field.as_deref() == Some(name.to_string().as_str())
+                && ctx
+                    .own_fields
+                    .get(&name.to_string())
+                    .is_some_and(|ty| vec_content_item_type(ty).is_some())
+        })
+        .cloned()
+        .collect();
+    let cell_required_names_set: HashSet<String> =
+        cell_required_names.iter().map(|n| n.to_string()).collect();
+    // A component's runtime-mutable Props use the same typed notification surface as a viewmodel.
+    // Defaulted Props participate here alongside any mutable effective fields.
     let component_property_enum = format_ident!("{}Property", component.name);
 
     // Own defaulted-prop/computed fields (collected above, before `ctx.own_fields`'s own map was
@@ -4867,6 +6016,14 @@ fn generate_view(
         .iter()
         .zip(own_default_cell_types.iter())
         .map(|(name, cell_ty)| quote! { #name: <#cell_ty<_>>::new(#name), })
+        .collect();
+    let own_mutable_names: Vec<syn::Ident> = own_mutable_stored_fields
+        .iter()
+        .map(|f| format_ident!("{}", f.name))
+        .collect();
+    let own_mutable_types: Vec<syn::Type> = own_mutable_stored_fields
+        .iter()
+        .map(|f| syn::parse_str(&f.ty).expect("field type must parse"))
         .collect();
 
     let own_computed_names: Vec<syn::Ident> = own_computed_fields
@@ -4940,7 +6097,7 @@ fn generate_view(
     // below read `self.__mount_environment.get().expect(..)` directly instead.
 
     let mut component_property_variants = mutable_required_names.clone();
-    component_property_variants.extend(own_default_names.iter().cloned());
+    component_property_variants.extend(own_mutable_names.iter().cloned());
     component_property_variants.extend(own_computed_names.iter().cloned());
     component_property_variants.extend(own_environment_names.iter().cloned());
     ctx.mutable_own_fields = mutable_required_names_set.clone();
@@ -4970,10 +6127,8 @@ fn generate_view(
             .is_some_and(|info| info.composed_shape.as_deref() == Some("Control"))
     {
         // The bridge's writable capability follows the generated public shape and the actual
-        // setter value type, not merely effective `Prop`/`State` membership.  In particular, a
-        // deferred `Option<T>` field has a normal DSL setter taking `T`, while its readable
-        // template-property value remains `Option<T>`; it must not receive a writable
-        // `TemplateProperty` implementation whose `Self::Value` cannot be passed to that setter.
+        // setter value type, not merely effective `Prop`/`State` membership. A full `Option<T>` Prop
+        // keeps that same `Option<T>` type in both the readable and writable template surface.
         // Private state is likewise absent from the external public shape. Inherited generated
         // properties remain eligible through their real inherited `Prop` field type.
         let own_writable_property_types: HashMap<String, String> = own_field_shape
@@ -5178,10 +6333,16 @@ fn generate_view(
         .filter(|(n, _)| mutable_required_names_set.contains(&n.to_string()))
         .map(|(_, t)| t.clone())
         .collect();
-    let mutable_required_cell_types: Vec<TokenStream> = mutable_required_names
+    let cell_required_types: Vec<syn::Type> = required_own_names
         .iter()
-        .map(|n| {
-            let ty_str = ctx.own_fields.get(&n.to_string()).unwrap();
+        .zip(required_own_types.iter())
+        .filter(|(name, _)| cell_required_names_set.contains(&name.to_string()))
+        .map(|(_, ty)| ty.clone())
+        .collect();
+    let cell_required_cell_types: Vec<TokenStream> = cell_required_names
+        .iter()
+        .map(|name| {
+            let ty_str = ctx.own_fields.get(&name.to_string()).unwrap();
             if is_copy_type(ty_str) {
                 quote! { std::cell::Cell }
             } else {
@@ -5189,28 +6350,28 @@ fn generate_view(
             }
         })
         .collect();
-    let mutable_required_field_decls: TokenStream = mutable_required_names
+    let cell_required_field_decls: TokenStream = cell_required_names
         .iter()
-        .zip(mutable_required_types.iter())
-        .zip(mutable_required_cell_types.iter())
+        .zip(cell_required_types.iter())
+        .zip(cell_required_cell_types.iter())
         .map(|((name, ty), cell_ty)| quote! { #name: #cell_ty<#ty>, })
         .collect();
-    let mutable_required_field_inits: TokenStream = mutable_required_names
+    let cell_required_field_inits: TokenStream = cell_required_names
         .iter()
-        .zip(mutable_required_cell_types.iter())
+        .zip(cell_required_cell_types.iter())
         .map(|(name, cell_ty)| quote! { #name: <#cell_ty<_>>::new(#name), })
         .collect();
     // The plain (bare-storage, `Self { #name, .. }`-shorthand-eligible) subset of `required_own_names`
     // — everything not promoted to Cell/RefCell storage above.
     let plain_required_names: Vec<syn::Ident> = required_own_names
         .iter()
-        .filter(|n| !mutable_required_names_set.contains(&n.to_string()))
+        .filter(|n| !cell_required_names_set.contains(&n.to_string()))
         .cloned()
         .collect();
     let plain_required_types: Vec<syn::Type> = required_own_names
         .iter()
         .zip(required_own_types.iter())
-        .filter(|(n, _)| !mutable_required_names_set.contains(&n.to_string()))
+        .filter(|(n, _)| !cell_required_names_set.contains(&n.to_string()))
         .map(|(_, t)| t.clone())
         .collect();
 
@@ -5375,11 +6536,8 @@ fn generate_view(
             continue;
         }
         let is_forwarded = !own_struct_param_names.contains(name);
-        // A deferred field and a mutable-required one (`mutable_required_names`) are both
-        // Cell/RefCell-backed storage read the same way — `strip_option` is a harmless no-op for
-        // the latter (never `Option<T>`-typed itself), so one branch covers both.
-        let is_cell_backed = deferred_own_names_set.contains(&name.to_string())
-            || mutable_required_names_set.contains(&name.to_string());
+        // Mutable required fields and dynamic content collections use Cell/RefCell-backed storage.
+        let is_cell_backed = cell_required_names_set.contains(&name.to_string());
         let body = if is_inherited_view_composition && is_forwarded {
             quote! { self.base.#name() }
         } else if is_forwarded {
@@ -5411,41 +6569,9 @@ fn generate_view(
             });
         }
     }
-    // `set_<name>(&self, value: T)` for every deferred own field — the post-construction setter
-    // half of the convention (`deferred_own_names`'s own doc comment). `T` is the field's *inner*
-    // (unwrapped) type, bare — not `Option<T>` — matching builtin setter signatures.
-    // exactly (`build_component_setters`): an absent value simply never calls this at all, leaving
-    // the field's own `None` default in place, so the setter itself never needs to accept `None`.
-    for (name, inner_ty) in deferred_own_names
-        .iter()
-        .zip(deferred_own_inner_types.iter())
-    {
-        let set_name = format_ident!("set_{}", name);
-        let ty_str = ctx.own_fields.get(&name.to_string()).unwrap();
-        let set_body = if is_copy_type(strip_option(ty_str).0) {
-            quote! { self.#name.set(Some(value)); }
-        } else {
-            quote! { *self.#name.borrow_mut() = Some(value); }
-        };
-        if is_composed {
-            own_class_methods.extend(quote! {
-                fn #set_name(&self, value: #inner_ty) {
-                    #set_body
-                }
-            });
-        } else {
-            named_accessors.extend(quote! {
-                pub fn #set_name(&self, value: #inner_ty) {
-                    #set_body
-                }
-            });
-        }
-    }
     // `set_<name>(&self, value: T)` for every mutable-required own field (`mutable_required_names`'s
-    // own doc comment) — unlike a deferred field's setter above, no `Some(..)` wrap (this storage
-    // is never `Option`-shaped: the field always holds a real value from construction on) and it
-    // re-runs `self.resync()` afterward, since this field — being required — is guaranteed to
-    // actually feed into this component's own view.
+    // own doc comment). It re-runs `self.resync()` afterward, since this field — being required — is
+    // guaranteed to actually feed into this component's own view.
     for (name, ty) in mutable_required_names
         .iter()
         .zip(mutable_required_types.iter())
@@ -5490,10 +6616,10 @@ fn generate_view(
     // `#[computed]` field that depends on it (`own_dependents_of`, collected near the top) —
     // mirroring `generate_viewmodel`'s own Observable-field setter cascade (`recompute_calls`,
     // this function's sibling above).
-    for ((name, ty), field) in own_default_names
+    for ((name, ty), field) in own_mutable_names
         .iter()
-        .zip(own_default_types.iter())
-        .zip(own_stored_fields.iter())
+        .zip(own_mutable_types.iter())
+        .zip(own_mutable_stored_fields.iter())
     {
         let ty_str = ctx.own_fields.get(&name.to_string()).unwrap();
         let get_body = if is_copy_type(ty_str) {
@@ -5556,6 +6682,65 @@ fn generate_view(
                 }
             });
         }
+    }
+
+    // Defaulted Params are fixed after construction: expose only their getter plus a hidden
+    // Created-state setter used by the local/external constructor ABI.  Ordinary Props use the
+    // same hidden pre-mount setter in addition to the public runtime setter above.  Both setters
+    // write the same storage and deliberately do not notify, resync, or invoke user callbacks.
+    for field in own_default_param_fields
+        .iter()
+        .chain(own_default_fields.iter())
+    {
+        let name = format_ident!("{}", field.name);
+        let ty: syn::Type = syn::parse_str(&field.ty).expect("field type must parse");
+        let get_body = if is_copy_type(&field.ty) {
+            quote! { self.#name.get() }
+        } else {
+            quote! { self.#name.borrow().clone() }
+        };
+        if field.kind == FieldKind::Param {
+            if is_composed {
+                own_class_methods.extend(quote! {
+                    fn #name(&self) -> #ty { #get_body }
+                });
+            } else {
+                named_accessors.extend(quote! {
+                    pub fn #name(&self) -> #ty { #get_body }
+                });
+            }
+        }
+        let set_body = if is_copy_type(&field.ty) {
+            quote! { self.#name.set(value); }
+        } else {
+            quote! { *self.#name.borrow_mut() = value; }
+        };
+        let initial_recompute_calls: Vec<TokenStream> = own_dependents_of
+            .get(&field.name)
+            .into_iter()
+            .flatten()
+            .map(|dep| {
+                let recompute = format_ident!("recompute_{}", dep);
+                quote! { self.#recompute(); }
+            })
+            .collect();
+        let setter_name = if field.kind == FieldKind::Param {
+            format_ident!("__set_initial_param_{}", field.name)
+        } else {
+            format_ident!("__set_initial_prop_{}", field.name)
+        };
+        named_accessors.extend(quote! {
+            #[doc(hidden)]
+            pub fn #setter_name(&self, value: #ty) {
+                if self.__lifecycle_state.get()
+                    != elwindui::core::ui::ComponentLifecycleState::Created
+                {
+                    panic!("{}: initial value can only be set before mount", stringify!(#name));
+                }
+                #set_body
+                #(#initial_recompute_calls)*
+            }
+        });
     }
 
     // Getter for a component's own `#[computed]` field (`own_computed_names`) — read-only (external
@@ -5711,6 +6896,9 @@ fn generate_view(
         if let Some(info) = resolve_context_info(&ctx, from, table, &node.type_path) {
             let value = is_semantic_brush_property(info, name);
             quote! { #value }
+        } else if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
+            let name_literal = syn::LitStr::new(name, proc_macro2::Span::call_site());
+            quote! { #ctor_macro!(@is_semantic_brush_named #name_literal) }
         } else {
             let props_macro = dsl_props_macro_path(&node.type_path, None);
             let name = format_ident!("{name}");
@@ -6837,10 +8025,10 @@ fn generate_view(
     let generated_class_prop_decls: Vec<TokenStream> =
         if is_shape_composition || is_inherited_view_composition {
             // `ComponentPublicShape::writable_fields` is the single authority for both membership and
-            // setter parameter type. In particular, a deferred `Option<T>` field appears here as `T`,
-            // while required params, computed fields, and private state do not appear as public shape
-            // declarations at all. Join back to the source field only for declaration attributes whose
-            // semantics still matter to the exported class macro (`two_way`, `routed`, etc.).
+            // setter parameter type. Required Params, computed fields, and private state do not
+            // appear as public shape declarations. Join back to the source field only for declaration
+            // attributes whose semantics still matter to the exported class macro (`two_way`,
+            // `routed`, etc.).
             let public_shape =
                 crate::component_frontend::component_public_shape(source_component, Some(view));
             public_shape
@@ -7212,7 +8400,76 @@ fn generate_view(
         }
     };
 
-    if is_composed {
+    // Build the exported constructor ABI only after `ctor_param_names`/`ctor_param_types` have
+    // been derived from the exact effective generation path above.  The source-local shape still
+    // owns the required/deferred/writable classification for fields declared by this component;
+    // inherited Prop fields are added here only as the real effective generator already exposes
+    // them through the generated class hierarchy.
+    let hidden_initial_field = |field: &FieldDef| {
+        !is_shape_composition || source_field_names.contains(field.name.as_str())
+    };
+    let defaulted_params: Vec<EffectiveConstructorField> = component
+        .fields
+        .iter()
+        .filter(|field| {
+            field.kind == FieldKind::Param
+                && matches!(field.initializer, Some(Initializer::Expr(_)))
+                && !crate::attr_frontend::is_event_schema_field(field)
+        })
+        .map(|field| EffectiveConstructorField {
+            name: format_ident!("{}", field.name),
+            ty: syn::parse_str(&field.ty).expect("field type must parse"),
+            hidden_setter: true,
+        })
+        .collect();
+    let props: Vec<EffectiveConstructorField> = component
+        .fields
+        .iter()
+        .filter(|field| {
+            field.kind == FieldKind::Prop && !crate::attr_frontend::is_event_schema_field(field)
+        })
+        .map(|field| EffectiveConstructorField {
+            name: format_ident!("{}", field.name),
+            ty: syn::parse_str(&field.ty).expect("field type must parse"),
+            hidden_setter: hidden_initial_field(field),
+        })
+        .collect();
+    let non_writable_fields = non_writable_constructor_field_names(
+        &component.fields,
+        &ctor_param_names,
+        &defaulted_params,
+        &props,
+    );
+    let props_ident = format_ident!("__elwindui_props_{target_name}");
+    let generated_props_macro = is_composed.then(|| quote! { $crate::#props_ident });
+    let content_delegate_macro = generated_props_macro.clone().or_else(|| {
+        source_component
+            .base_path
+            .as_deref()
+            .or(source_component.base.as_deref())
+            .map(|base| dsl_props_macro_path(base, resolve_context_info(&ctx, from, table, base)))
+    });
+    let constructor_content_field = table
+        .resolve(from, &target_name)
+        .and_then(|info| info.content_field.clone())
+        .or_else(|| source_component.content_field.clone());
+    let constructor_shape = build_effective_constructor_shape(
+        &ctor_param_names,
+        &ctor_param_types,
+        defaulted_params,
+        props,
+        own_field_shape.constructor_return,
+        constructor_content_field.as_deref(),
+        non_writable_fields,
+    );
+    let constructor_macro = build_constructor_macro(
+        &target_name,
+        &constructor_shape,
+        generated_props_macro,
+        content_delegate_macro,
+    );
+
+    let generated = if is_composed {
         let unmount_hook_attach = (!is_host_composition).then(|| {
             quote! {
                 let weak_begin = std::rc::Rc::downgrade(&this);
@@ -7296,11 +8553,10 @@ fn generate_view(
             #generated_class_content_decl
             pub struct #target {
                 #(#plain_required_names: #plain_required_types,)*
-                #mutable_required_field_decls
+                #cell_required_field_decls
                 #own_default_field_decls
                 #own_computed_field_decls
                 #own_environment_field_decls
-                #deferred_own_field_decls
                 #struct_fields
                 __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,
                 __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<dyn Fn(#component_property_enum)>)>>>,
@@ -7328,7 +8584,7 @@ fn generate_view(
                 fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
                     let __self_weak_erased: std::rc::Weak<dyn std::any::Any> = __self_weak.clone();
                     #construct_stmts
-                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created), __closed: std::cell::Cell::new(false) }
+                    Self { #(#plain_required_names,)* #cell_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created), __closed: std::cell::Cell::new(false) }
                 }
 
                 // Runs automatically, exactly once, right after `#[class]`'s auto-generated `new()`
@@ -7493,7 +8749,7 @@ fn generate_view(
                 pub fn __new_unmounted(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                     #content_capture_stmt
                     #construct_stmts
-                    std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created) })
+                    std::rc::Rc::new(Self { #(#plain_required_names,)* #cell_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created) })
                 }
 
                 // Establishes this component's effective Environment and performs its initial view
@@ -7585,11 +8841,10 @@ fn generate_view(
 
             pub struct #struct_ident {
                 #(#plain_required_names: #plain_required_types,)*
-                #mutable_required_field_decls
+                #cell_required_field_decls
                 #own_default_field_decls
                 #own_computed_field_decls
                 #own_environment_field_decls
-                #deferred_own_field_decls
                 #struct_fields
                 __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,
                 __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<dyn Fn(#component_property_enum)>)>>>,
@@ -7604,6 +8859,10 @@ fn generate_view(
             #template_property_impls
             #generated_dynamic_host_impl
         }
+    };
+    quote! {
+        #generated
+        #constructor_macro
     }
 }
 
@@ -11339,11 +12598,11 @@ fn emit_closure_value(
 
 /// Issue #162 §3.8/§4.7: emits the `ViewTemplate::new(move |ctx| { .. })` factory for a lowered
 /// `ViewExpr::DeferredView` (`context_popup: view! { .. }`) attribute value. Called from every
-/// deferred-`Option<T>`-field value-computation site (`build_virtual_value`/
+/// `ViewTemplate`-typed field value-computation site (`build_virtual_value`/
 /// `build_component_setters`/`build_component_optional_setters`) in place of the ordinary
-/// `emit_expr` call those sites otherwise use for a ViewTemplate-typed field's value — mirrors
-/// those functions' own `ViewExpr::Element`/`ViewExpr::Closure` special-casing, since a deferred
-/// view is likewise "not a plain reactive value expression".
+/// `emit_expr` call those sites otherwise use for a template field's value — mirrors those
+/// functions' own `ViewExpr::Element`/`ViewExpr::Closure` special-casing, since a deferred view is
+/// likewise "not a plain reactive value expression".
 ///
 /// This function's own value-computation call sites run in different generated scopes depending on
 /// this component's own shape (a shape/host-composed component's non-root children build inside
@@ -11731,23 +12990,13 @@ fn builtin_trait_use(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
     }
 }
 
-/// The only construction mechanism left: resolve `node.type_path` via `SymbolTable` (every
-/// resolved type — a plain user component, a component-with-view, or a builtin shape backed by
-/// hand-written Rust in an `elwindui-backend-*` crate — is treated identically) and either:
-/// - (`is_hand_written_native`) call `Type::new()` (no arguments) followed by whichever
-///   `set_<field>(..)` calls this use site's own attributes supply (`build_component_setters`); or
-/// - (everything else — `generate_view`-produced, `has_view == true`) call `Type::new(args)`,
-///   `args` built from `info.param_fields` in declaration order (`build_component_args`):
-///   - a param named `children` is filled from the element's bare nested children (a `Vec`,
-///     `AnyView`-converted per element only if the declared type says `AnyView`);
-///   - a `ViewExpr::Element`-valued attribute (`menu_bar: MenuBar { .. }`) is filled from its own
-///     already-planned/constructed binding (`element_attr_bindings`);
-///   - a `ViewExpr::Closure`-valued attribute compiles to a real boxed closure (`emit_closure_value`);
-///   - an `Option<..>`-typed param with no matching attribute becomes `None`;
-///   - the param named by the component's own `#[content(field_name)]` (docs/specs/dsl_spec.md 付録A,
-///     `TypeInfo::content_field`) with no matching attribute binds the element's single bare nested
-///     child (`MenuBarItem`'s single nested `Menu`, bound to its `#[content(submenu)]` field);
-///   - anything else is an ordinary `emit_expr` value.
+/// Construction of a resolved DSL element is selected by its origin. Hand-written builtins use
+/// `Type::new()` plus their existing setter/content protocol. Generated components use
+/// `build_component_args` to pass every required Param/Bindable in declaration order, then apply
+/// defaulted Params and ordinary Prop/content values through the generated initial-value protocol.
+/// Required `Option<T>` Params remain full `Option<T>` constructor values; they are not omitted or
+/// converted to an inner-type setter. Qualified external generated components are handled by the
+/// defining crate's exported constructor ABI in `emit_external_construction`.
 /// Constructs an *external* element: `table.resolve` found nothing for `node.type_path` in this
 /// compilation's own `#[component]` AST, so it is treated as a builtin declared entirely
 /// elsewhere (`elwindui-core`'s `#[class]`/`#[prop]` items, or a future crate declaring one the same
@@ -11781,7 +13030,6 @@ fn emit_external_construction(
     let binding = &node.binding;
     let type_path = dsl_concrete_type_path(&node.type_path, None);
     let ext_path = dsl_ext_path(&node.type_path, None);
-    let sets = emit_external_attribute_sets(node, ctx, from, table);
     let binding_ts = quote! { #binding };
     // `Grid::row`/`Grid::column`/... — every real builtin now goes through this construction
     // path (no `TypeInfo` left to route a virtual builtin through `emit_virtual_construction`'s
@@ -11791,6 +13039,85 @@ fn emit_external_construction(
     // 0) regardless of what the DSL wrote (`TabView { Grid::row: 1, .. }` colliding with row 0's
     // own content instead of occupying its own row).
     let attached = emit_common_ui_element_setters(node, ctx, from, table, &binding_ts);
+    let attribute_values = external_attribute_values(node, ctx, from, table);
+    let props_macro = dsl_props_macro_path(&node.type_path, None);
+    let non_dynamic_children: Vec<_> = node
+        .child_bindings
+        .iter()
+        .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
+        .map(|(child, _)| quote! { #child.clone() })
+        .collect();
+    if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
+        let props: Vec<TokenStream> = attribute_values
+            .iter()
+            .filter(|attribute| !attribute.synthesized)
+            .map(|attribute| {
+                let name = &attribute.name;
+                let name_literal =
+                    syn::LitStr::new(&name.to_string(), proc_macro2::Span::call_site());
+                let value = &attribute.value;
+                if attribute.typed {
+                    quote! { (#name_literal => @typed #value), }
+                } else {
+                    quote! { (#name_literal => #value), }
+                }
+            })
+            .collect();
+        let synthesized_sets = attribute_values
+            .iter()
+            .filter(|attribute| attribute.synthesized)
+            .map(|attribute| {
+                emit_external_attribute_set(attribute, binding, &props_macro, node, ctx)
+            });
+        let environment = semantic_brush_construction_environment(node, ctx);
+        let initial_sets = attribute_values
+            .iter()
+            .filter(|attribute| !attribute.synthesized)
+            .map(|attribute| {
+                let name = &attribute.name;
+                let name_literal =
+                    syn::LitStr::new(&name.to_string(), proc_macro2::Span::call_site());
+                let value = &attribute.value;
+                if attribute.typed {
+                    quote! {
+                        #ctor_macro!(@initial_named_typed #binding, #name_literal, #value, #environment);
+                    }
+                } else {
+                    quote! {
+                        #ctor_macro!(@initial_named #binding, #name_literal, #value, #environment);
+                    }
+                }
+            });
+        let initial_children = quote! {
+            #ctor_macro!(@initial_children #binding, children = [#(#non_dynamic_children),*]);
+        };
+        // The external ABI constructs view-bearing generated components through
+        // `__new_unmounted`; mount must happen only after required parameters, defaulted Params,
+        // authored Props, and bare content have all been initialized.
+        let mount_environment = quote! { (*#environment).clone() };
+        let constructor_value = quote! {
+            #ctor_macro!(@new #type_path, props = [#(#props)*], children = [#(#non_dynamic_children),*])
+        };
+        let external_generated = quote! {
+            // A qualified external generated component owns the constructor ABI and the
+            // constructor-consumed/content shape. The macro returns the exact `new` result; the
+            // second protocol applies only non-constructor writable values and non-consumed
+            // children through that same defining-crate shape.
+            #[allow(unused_imports)]
+            use elwindui::ui::*;
+            #[allow(unused_imports)]
+            use #ext_path as _;
+            let #binding = #constructor_value;
+            #(#initial_sets)*
+            #initial_children
+            #ctor_macro!(@mount #binding, #mount_environment);
+            #attached
+            #(#synthesized_sets)*
+        };
+        out.extend(external_generated);
+        return;
+    }
+    let sets = emit_external_attribute_sets_from_values(node, ctx, &props_macro, &attribute_values);
     out.extend(quote! {
         // Brings every builtin's `{Name}Ext` trait into scope at once — `#sets`'s method calls may
         // resolve against *any* ancestor's trait (`background` lives on `NativeControlExt`, not
@@ -11814,15 +13141,21 @@ fn emit_external_construction(
 /// are skipped (event wiring is `emit_wiring`'s own, separate pass, uniformly for every construction
 /// path). Does not itself construct `node` or open the `use elwindui::ui::*;` scope its emitted
 /// method calls need — callers own their own construction statement and glob import.
-fn emit_external_attribute_sets(
+struct ExternalAttributeValue {
+    name: syn::Ident,
+    value: TokenStream,
+    synthesized: bool,
+    typed: bool,
+}
+
+fn external_attribute_values(
     node: &PlannedNode,
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
-) -> TokenStream {
-    let binding = &node.binding;
+) -> Vec<ExternalAttributeValue> {
     let props_macro = dsl_props_macro_path(&node.type_path, None);
-    let mut sets = TokenStream::new();
+    let mut values = Vec::new();
     for attribute in &node.attributes {
         let name = &attribute.name;
         let expr = &attribute.value;
@@ -11862,8 +13195,11 @@ fn emit_external_attribute_sets(
             } else {
                 quote! { #nested_binding.clone() }
             };
-            sets.extend(quote! {
-                #props_macro!(@set #binding, #name_ident, #value);
+            values.push(ExternalAttributeValue {
+                name: name_ident,
+                value,
+                synthesized: false,
+                typed: false,
             });
             continue;
         }
@@ -11929,25 +13265,62 @@ fn emit_external_attribute_sets(
         // `info.is_none()` branch (see that call site's doc comment) — construction time needs the
         // identical `Option<T>`-vs-bare-`T` normalization for the exact same reason, since this is
         // the *other* place a bare-forwarded own field's value reaches `@set`.
-        if bare_own_field_type(expr, ctx).is_some_and(|ty| ty.contains('!')) {
-            let environment = semantic_brush_construction_environment(node, ctx);
-            sets.extend(quote! {
-                if let ::std::option::Option::Some(__v) = ::std::option::Option::from(#value) {
-                    #props_macro!(
-                        @set_with_environment #binding, #name_ident, __v, #environment
-                    );
-                }
-            });
-        } else {
-            let environment = semantic_brush_construction_environment(node, ctx);
-            sets.extend(quote! {
-                #props_macro!(
-                    @set_with_environment #binding, #name_ident, #value, #environment
-                );
-            });
+        values.push(ExternalAttributeValue {
+            name: name_ident,
+            value,
+            synthesized: bare_own_field_type(expr, ctx).is_some_and(|ty| ty.contains('!')),
+            typed: bare_own_field_type(expr, ctx).is_some(),
+        });
+    }
+    values
+}
+
+fn emit_external_attribute_set(
+    attribute: &ExternalAttributeValue,
+    binding: &syn::Ident,
+    props_macro: &TokenStream,
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+) -> TokenStream {
+    let name = &attribute.name;
+    let value = &attribute.value;
+    let environment = semantic_brush_construction_environment(node, ctx);
+    if attribute.synthesized {
+        quote! {
+            if let ::std::option::Option::Some(__v) = ::std::option::Option::from(#value) {
+                #props_macro!(@set_with_environment #binding, #name, __v, #environment);
+            }
+        }
+    } else {
+        quote! {
+            #props_macro!(@set_with_environment #binding, #name, #value, #environment);
         }
     }
-    sets
+}
+
+fn emit_external_attribute_sets_from_values(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    props_macro: &TokenStream,
+    values: &[ExternalAttributeValue],
+) -> TokenStream {
+    values
+        .iter()
+        .map(|attribute| {
+            emit_external_attribute_set(attribute, &node.binding, props_macro, node, ctx)
+        })
+        .collect()
+}
+
+fn emit_external_attribute_sets(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let props_macro = dsl_props_macro_path(&node.type_path, None);
+    let values = external_attribute_values(node, ctx, from, table);
+    emit_external_attribute_sets_from_values(node, ctx, &props_macro, &values)
 }
 
 /// Emits an `EnvironmentScope { key: value, .. }` node's own statement (CI-7 of #80, closes #100):
@@ -12112,7 +13485,8 @@ fn emit_construction(
             .iter()
             .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
             .collect();
-        if !non_dynamic_children.is_empty() {
+        if dsl_ctor_macro_path(&node.type_path, None).is_none() && !non_dynamic_children.is_empty()
+        {
             let binding = &node.binding;
             let props_macro = dsl_props_macro_path(
                 &node.type_path,
@@ -12158,11 +13532,9 @@ fn emit_construction(
             #(#setters)*
         });
     } else {
-        // `has_view`/plain-component construction (docs/design/runtime/ui_tree_design.md's
-        // post-construction setter convention): `build_component_args` omits this
-        // target's own deferred `Option<T>` fields (`is_deferred_field`) from the positional list —
-        // `build_component_optional_setters` supplies the matching trailing `.set_<field>(value)`
-        // calls for whichever of them this use site actually gives a value.
+        // `has_view`/plain-component construction uses the generated component's required Param
+        // list for positional arguments. Defaulted Params and ordinary Props are applied through
+        // the matching pre-mount initial setters below.
         let args = build_component_args(node, ctx, from, table, info, plan, false);
         let optional_setters = build_component_optional_setters(node, ctx, from, table, info);
         // CI-7 of #80 (docs/design/runtime/component_lifecycle_design.md §4f): a node declared
@@ -12181,13 +13553,23 @@ fn emit_construction(
             );
             quote! {
                 let #binding = #type_ident::__new_unmounted(#(#args),*);
+                #(#optional_setters)*
                 #type_ident::__mount(&#binding, #environment.clone());
             }
         } else {
             match &node.environment_scope {
                 Some(scope_var) => quote! {
                     let #binding = #type_ident::__new_unmounted(#(#args),*);
+                    #(#optional_setters)*
                     #type_ident::__mount(&#binding, #scope_var.clone());
+                },
+                None if info.has_view => quote! {
+                    let #binding = #type_ident::__new_unmounted(#(#args),*);
+                    #(#optional_setters)*
+                    #type_ident::__mount(
+                        &#binding,
+                        elwindui::core::environment::application_environment(),
+                    );
                 },
                 None => quote! {
                     let #binding = #type_ident::new(#(#args),*);
@@ -12236,6 +13618,7 @@ fn emit_construction(
                 .param_fields
                 .iter()
                 .any(|(name, _)| info.content_field.as_deref() == Some(name.as_str()))
+            && !local_content_initial_setter_applies(node, info)
         {
             let children: Vec<_> = node
                 .child_bindings
@@ -12310,16 +13693,12 @@ fn emit_construction(
             TokenStream::new()
         };
         out.extend(quote! {
-            // A deferred field inherited from `UIElement` itself (`margin`/`width`/`height`/... —
-            // `resolve_effective_fields`'s own doc comment) is set through `UIElementExt`, a shared
-            // trait method rather than an inherent one — needs this in scope wherever
-            // `optional_setters` (below) calls one. Harmless when unused (every other deferred
-            // field's own setter is inherent), same as `builtin_trait_use`'s own unconditional
-            // `#[allow(unused_imports)]`.
+            // A field inherited from `UIElement` itself (`margin`/`width`/`height`/...) is set
+            // through `UIElementExt`, a shared trait method rather than an inherent one. Keep the
+            // trait in scope wherever the initial setters below call one.
             #[allow(unused_imports)]
             use elwindui::core::ui::UIElementExt as _;
             #construct_call
-            #(#optional_setters)*
             #composed_content_attach
             #content_children_attach
         });
@@ -12360,75 +13739,11 @@ fn emit_construction(
     }
 }
 
-/// Whether `name` (declared type `ty`) is a *deferred* field on a `has_view`/plain (non-hand-
-/// written-native) component — `generate_view`'s own `is_deferred_own_field`/`generate_component`'s
-/// matching field split, mirrored here for the calling side so `build_component_args`/
-/// `build_component_optional_setters` agree with what that target's own generated `new(..)`
-/// actually still accepts positionally. `Option<T>`-typed, and (when the target has a `view`) not
-/// referenced anywhere in its own effective view (`view_references_name_anywhere` — not just a
-/// *bare* forward like `ContentControl`'s `padding: padding` into `Control { padding: padding }`,
-/// but also as a sub-expression identifier, e.g. `Rectangle`'s own
-/// `corner_radius.unwrap_or(0.0)`) — either way the value is needed eagerly, before that target's
-/// own `Self` exists, so it can't be deferred to a setter. A `None` effective view (a plain
-/// component with no `view` at all) has no such construction-time reference to worry about, so
-/// `Option`-ness alone decides. Never true for a hand-written native (`is_hand_written_native`) —
-/// that family defers *every* field unconditionally via the separate
-/// `build_component_setters` path, not this one.
-/// `component_name` disambiguates a field this exact type declares itself (`info.declaring_types`)
-/// from one it merely inherited — declared-here-directly fields are never deferred even with a
-/// `view` and no bare-forward, since (unlike an *inherited* field, which needs a `view`-level
-/// forward to prove its value is actually threaded through to construction) there's no base class
-/// to forward *from* in the first place: `Rectangle`'s own `corner_radius` (composed over `Shape`,
-/// which has no `corner_radius` field of its own to bare-forward) is the motivating case — its
-/// real `elwindui_core::ui::Rectangle::construct` signature always takes it positionally and has
-/// no `set_corner_radius`, so treating it as deferred would emit a call to a setter that doesn't
-/// exist.
-fn is_deferred_field(info: &TypeInfo, component_name: &str, name: &str, ty: &str) -> bool {
-    if is_hand_written_native(info) || !strip_option(ty).1 {
-        return false;
-    }
-    match &info.effective_view {
-        // Only *this* branch gets the "declared directly on this type" exemption — a type with no
-        // `view` at all (e.g. `TextBlock`, whose real constructor takes no arguments and whose own
-        // `color`/`text_alignment` genuinely do have real `set_<name>` setters) must keep every
-        // `Option<T>` field deferred regardless of who declares it, so this must never affect the
-        // `None` arm below.
-        Some(view) => {
-            let declared_here = info
-                .declaring_types
-                .get(name)
-                .is_some_and(|owner| owner == component_name);
-            !declared_here && !view_references_name_anywhere(view, name)
-        }
-        None => true,
-    }
-}
-
-/// Whether a `has_view` target's own `param_fields` member `name` (no initializer, so ordinarily
-/// construction-only — see `emit_resync`'s param-skip guard) still gets a real generated `set_<name>`
-/// despite that, so `emit_resync` should keep resyncing it rather than skip it. Two independent
-/// reasons a no-initializer field ends up with a setter after all — mirrors `generate_view`'s own
-/// field split, from `TypeInfo` alone (no local `generate_view` state needed):
-/// - It's *deferred* (`is_deferred_field`): `Option<T>`, never referenced in its own view, so
-///   `generate_view` drops it from `new(..)`'s positional args entirely and gives it a setter
-///   instead.
-/// - It's a required `prop` (not `#[param]`) field (`generate_view`'s `mutable_required_names`):
-///   needed eagerly at construction (so it can't be deferred), but declared runtime-mutable per
-///   docs/specs/dsl_spec.md §4's param/prop split — `generate_view` keeps it a positional `new(..)`
-///   argument *and* gives it a resync-triggering setter. Gated on `!info.is_builtin`: this rule
-///   only holds for a genuinely `generate_view`-generated user component — `elwindui-codegen`'s own
-///   the builtin shape set also declares a `view` for `Rectangle`/`Ellipse`/`ContentControl`
-///   (`has_view: true` too), but purely for symbol-table/validation purposes (docs/
-///   docs/design/runtime/ui_tree_design.md) — their real implementation is hand-written directly in
-///   `elwindui_core::ui`, never run through `generate_view`, so a "no `#[param]`" field there
-///   (e.g. `Rectangle::corner_radius`) may have no real setter at all regardless of `FieldKind`.
-fn is_settable_field(info: &TypeInfo, component_name: &str, name: &str, ty: &str) -> bool {
-    is_deferred_field(info, component_name, name, ty)
-        || (!info.is_builtin
-            && info
-                .effective_fields
-                .iter()
-                .any(|f| f.name == name && f.kind == FieldKind::Prop))
+/// A generated required Param/Bindable has no runtime setter, regardless of whether its type is
+/// `Option<T>` or whether it is inherited. Resync must therefore skip every no-initializer Param;
+/// ordinary Prop resync is handled by its own writable-property path.
+fn is_settable_field(_info: &TypeInfo, _component_name: &str, _name: &str, _ty: &str) -> bool {
+    false
 }
 
 /// Whether `name` is a `has_view` target's own field carrying a plain default expression
@@ -12436,36 +13751,13 @@ fn is_settable_field(info: &TypeInfo, component_name: &str, name: &str, ty: &str
 /// "".to_string()`) — as opposed to a `#[param]`/no-initializer field (already in `param_fields`),
 /// a `#[computed]` field (never independently settable from outside), or an
 /// action. Such a field has an initializer, so `param_fields` (only ever "every no-initializer
-/// field") never includes it, and unlike an `Option<..>`-typed deferred field
-/// (`is_deferred_field`) it previously had **no** way to be overridden from a use site at all —
-/// its own declared default was the only value it could ever have, even though `generate_view`
-/// already gives it a real `set_<name>` (the same one `#[computed]`'s own recompute cascade and a
-/// same-component bare-identifier reference both call). `build_component_optional_setters` (below)
-/// closes that gap: a use site providing an explicit attribute for one of these now gets a real
-/// post-construction `set_<name>(value)` call, exactly like a deferred `Option<..>` field already
-/// does. Gated on `!info.is_builtin` for the same reason `is_settable_field` is — this crate's own
-/// the builtin shape set never declares a defaulted `Prop` field today (only `#[attached]`
-/// fields have a `= expr` default, a wholly separate mechanism — `emit_attached_setters`), but
-/// nothing here should assume a hand-written native's own defaulted field (if one existed) works
-/// this same way.
-fn is_defaulted_settable_field(info: &TypeInfo, name: &str) -> bool {
-    !info.is_builtin
-        && info.effective_fields.iter().any(|f| {
-            f.name == name
-                && f.kind == FieldKind::Prop
-                && matches!(f.initializer, Some(Initializer::Expr(_)))
-        })
-}
-
 /// Evaluates a resolved user-component node's own attributes into the positional argument list its
 /// generated `new(..)`/`create_<snake case>(..)` (docs/design/runtime/ui_tree_design.md) expects, in
 /// `info.param_fields`'s declared order — shared by `emit_construction` (wraps as `Type::new(args)`)
 /// and `build_component_value` (wraps as `create_<snake case>(args)`, for a shape-composition root
 /// whose base is itself a DSL component rather than a hand-written `elwindui::core::ui` primitive).
-/// Skips a deferred field (`is_deferred_field`) entirely — no positional slot at all, not even a
-/// placeholder `None` — since that target's own `new(..)` does not declare one; the matching
-/// value (if this use site supplies one) is applied afterward instead, via
-/// `build_component_optional_setters`.
+/// Every entry is a required Param/Bindable and is passed using its declared type. Defaulted Params
+/// and ordinary Props are not part of this positional list.
 fn build_component_args(
     node: &PlannedNode,
     ctx: &ViewCtx,
@@ -12505,9 +13797,6 @@ fn build_component_args(
 
     let mut args = Vec::new();
     for (name, ty) in &info.param_fields {
-        if is_deferred_field(info, &node.type_path, name, ty) {
-            continue;
-        }
         // A shape-composition root is first constructed as a plain base value and only receives
         // its effective content after the enclosing component has an `Rc`/self-weak. This keeps
         // parent links and scalar root replacement on the same generic post-construction path as
@@ -12538,6 +13827,19 @@ fn build_component_args(
 
         let (inner_ty, is_option) = strip_option(ty);
         let attr = find_attr(node, name);
+        // A required `Option<T>` distinguishes an explicitly authored `None` from omission.
+        // The latter is handled by the `None` match arm below; the former must reach the generated
+        // constructor as `None`, not as `Some(None)`.
+        if is_option
+            && matches!(
+                attr,
+                Some(ViewExpr::Path(path))
+                    if path.len() == 1 && path[0] == "None"
+            )
+        {
+            args.push(quote! { None });
+            continue;
+        }
         let value = match attr {
             Some(ViewExpr::Element(_)) => {
                 let (nested_binding, nested_ty) = node
@@ -12553,11 +13855,8 @@ fn build_component_args(
             Some(ViewExpr::Closure { params, body }) => {
                 emit_closure_value(params, body, ctx, from, table)
             }
-            // `is_deferred_field` always routes a `ViewTemplate`-typed (`Option<T>`, never
-            // referenced elsewhere in its own view — Issue #162 §3.9) field's value here only when
-            // that guard doesn't apply; kept for defense-in-depth/exhaustiveness, not a normally-
-            // reached path for `context_popup` itself. `emit_deferred_view_value`'s own `Some(..)`-
-            // wrap is applied uniformly below with every other value.
+            // A nested deferred view is a value expression in the same way as any other authored
+            // attribute here; its own lifecycle remains handled by `emit_deferred_view_value`.
             Some(ViewExpr::DeferredView(deferred)) => {
                 emit_deferred_view_value(deferred, ctx, from, table)
             }
@@ -12607,10 +13906,6 @@ fn build_component_args(
                         value
                     }
                 }
-            }
-            None if is_option => {
-                args.push(quote! { None });
-                continue;
             }
             None if info.content_field.as_deref() == Some(name.as_str())
                 && !node.child_bindings.is_empty() =>
@@ -12680,7 +13975,10 @@ fn build_component_setters(
     info: &TypeInfo,
     plan: &[PlannedNode],
 ) -> Vec<TokenStream> {
-    let has_children_field = info.param_fields.iter().any(|(name, _)| name == "children");
+    let construction_fields = construction_fields_with_content(info);
+    let has_children_field = construction_fields
+        .iter()
+        .any(|(name, _)| name == "children");
     // A composed component routes bare children into whatever content slot the shape it composes
     // over declares (`ContentControl`'s `content`, ...), reached at runtime through that shape's own
     // `__elwindui_shape_*!` protocol rather than through a local `TypeInfo` — so there is nothing to
@@ -12705,7 +14003,7 @@ fn build_component_setters(
 
     let binding = &node.binding;
     let mut setters = Vec::new();
-    for (name, ty) in &info.param_fields {
+    for (name, ty) in &construction_fields {
         let setter_ident = format_ident!("set_{}", name);
         let is_this_field_content = info.content_field.as_deref() == Some(name.as_str());
         // `docs/specs/dsl_spec.md` §3 (`#[content(field_name)]`'s own paragraph): bare nested
@@ -12839,15 +14137,9 @@ fn build_component_setters(
     setters
 }
 
-/// Builds trailing `.set_<field>(value)` calls for a `has_view`/plain component's own *deferred*
-/// `Option<T>` fields (`is_deferred_field`, used alongside `build_component_args`'s now-shrunk
-/// positional list — see `emit_construction`'s non-`is_hand_written_native` branch) *and* its own
-/// defaulted `Prop` fields (`is_defaulted_settable_field` — a field with a plain default expression,
-/// e.g. `#[prop(default = false)]`, which never becomes a positional `new(..)` argument at all).
-/// Only ever emits a call when this use site actually supplies a value for the field — an absent
-/// one leaves that field's own already-applied default (`RefCell::new(None)`/`Cell::new(None)` for
-/// a deferred field, or the declared default expression itself for a defaulted one) in place
-/// (`generate_view`/`generate_component`'s own field-splitting doc comment).
+/// Builds pre-mount initial setter calls for a `has_view`/plain component's defaulted Params and
+/// ordinary Props. Only emits a call when this use site supplies a value; an absent one leaves the
+/// declaration's own default in place.
 fn build_component_optional_setters(
     node: &PlannedNode,
     ctx: &ViewCtx,
@@ -12856,25 +14148,31 @@ fn build_component_optional_setters(
     info: &TypeInfo,
 ) -> Vec<TokenStream> {
     let binding = &node.binding;
-    let deferred_fields = info
-        .param_fields
-        .iter()
-        .filter(|(name, ty)| is_deferred_field(info, &node.type_path, name, ty))
-        .map(|(name, ty)| (name.as_str(), ty.as_str()));
-    let defaulted_fields = info
-        .effective_fields
-        .iter()
-        .filter(|f| is_defaulted_settable_field(info, &f.name))
-        .map(|f| (f.name.as_str(), f.ty.as_str()));
+    let initial_fields = info.effective_fields.iter().filter(|f| {
+        !crate::attr_frontend::is_event_schema_field(f)
+            && ((f.kind == FieldKind::Prop)
+                || (f.kind == FieldKind::Param
+                    && matches!(f.initializer, Some(Initializer::Expr(_)))))
+    });
 
     let mut setters = Vec::new();
-    for (name, ty) in deferred_fields.chain(defaulted_fields) {
-        let setter_ident = format_ident!("set_{}", name);
-        // A deferred field is always `Option<..>` (`is_deferred_field`'s own guard); a defaulted
-        // field (`is_defaulted_settable_field`) is whatever plain type it was declared with —
-        // `strip_option` is a no-op for the latter, so `inner_ty` is always the right type either
-        // way.
-        let (inner_ty, _) = strip_option(ty);
+    for field in initial_fields {
+        let name = field.name.as_str();
+        let ty = field.ty.as_str();
+        let setter_ident = if field.kind == FieldKind::Param {
+            format_ident!("__set_initial_param_{}", name)
+        } else {
+            format_ident!("__set_initial_prop_{}", name)
+        };
+        if let Some(initial_content) =
+            build_local_content_initial_setter(node, ctx, from, table, info, field)
+        {
+            setters.push(initial_content);
+            continue;
+        }
+        // Defaulted Params and Props keep their declaration's type. `strip_option` is used only for
+        // the DSL's nested-value conversion and content-child handling.
+        let (inner_ty, is_option) = strip_option(ty);
         if let Some(expr) = find_attr(node, name).filter(|_| is_semantic_brush_property(info, name))
         {
             let raw = emit_expr(expr, ctx, &EmitMode::Construction);
@@ -12929,17 +14227,130 @@ fn build_component_optional_setters(
             }
             None => continue,
         };
-        setters.push(emit_field_setter_call(
-            name,
-            &node.type_path,
-            &setter_ident,
-            value,
-            &quote! { #binding },
-            from,
-            table,
-        ));
+        let value = if is_option
+            && !matches!(find_attr(node, name), Some(ViewExpr::Path(path)) if path.len() == 1 && path[0] == "None")
+        {
+            quote! { Some(#value) }
+        } else {
+            value
+        };
+        setters.push(quote! { #binding.#setter_ident(#value); });
     }
     setters
+}
+
+/// Emits the hidden Created-state setter for an own Prop-backed content field.  Bare content is
+/// authored as part of the element construction, so it has to be stored before `__mount` builds
+/// the component's template.  Inherited content is deliberately left to the inherited shape
+/// protocol; only a field whose declaring type is the constructed component has this hidden setter.
+fn build_local_content_initial_setter(
+    node: &PlannedNode,
+    _ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    info: &TypeInfo,
+    field: &FieldDef,
+) -> Option<TokenStream> {
+    let binding = &node.binding;
+    let content_name = info.content_field.as_deref()?;
+    if field.name != content_name || field.kind != FieldKind::Prop {
+        return None;
+    }
+    let target_name = dsl_type_ident(&node.type_path).to_string();
+    if info
+        .declaring_types
+        .get(content_name)
+        .is_none_or(|owner| owner != &target_name)
+    {
+        return None;
+    }
+    let children: Vec<_> = node
+        .child_bindings
+        .iter()
+        .filter(|(_, child_ty)| *child_ty != DYNAMIC_CHILD_SLOT_MARKER)
+        .collect();
+    if children.is_empty() {
+        return None;
+    }
+    let field_type: syn::Type = syn::parse_str(&field.ty).expect("content field type must parse");
+    let setter = format_ident!("__set_initial_prop_{content_name}");
+    if let Some(item_type) = constructor_vec_item(&field_type) {
+        let item_type_string = quote! { #item_type }.to_string();
+        let values = children.iter().map(|(child, child_ty)| {
+            if is_ui_element_type(&item_type_string) {
+                into_node_if_needed(quote! { #child }, child_ty, from, table)
+            } else {
+                into_any_view_if_needed(quote! { #child }, &item_type_string)
+            }
+        });
+        return Some(quote! {
+            #binding.#setter(::std::vec![#(#values),*]);
+        });
+    }
+    let field_type_string = quote! { #field_type }.to_string();
+    if field_type_string.contains("UIElementCollection") || field_type_string.contains("ListExt<") {
+        return None;
+    }
+    if children.len() != 1 {
+        panic!(
+            "`{}`'s `#[content({content_name})]` field can only bind a single nested child element, found {}",
+            node.type_path,
+            children.len()
+        );
+    }
+    let (child, child_ty) = children[0];
+    let value = if is_ui_element_type(&field_type_string) {
+        into_node_if_needed(quote! { #child }, child_ty, from, table)
+    } else {
+        into_any_view_if_needed(quote! { #child }, &field_type_string)
+    };
+    Some(quote! {
+        #binding.#setter(#value);
+    })
+}
+
+/// Returns whether `build_component_optional_setters` has already routed this node's static bare
+/// children through the own Prop-backed content field's hidden Created-state setter.  Such content
+/// must not also pass through `content_children_attach`, otherwise the same children are published
+/// twice after construction.  Collection types backed by a live `ListExt`/`UIElementCollection`
+/// intentionally return `false`: their ordinary post-construction attachment remains the owner of
+/// the child insertion path.
+fn local_content_initial_setter_applies(node: &PlannedNode, info: &TypeInfo) -> bool {
+    let Some(content_name) = info.content_field.as_deref() else {
+        return false;
+    };
+    let target_name = dsl_type_ident(&node.type_path).to_string();
+    if info
+        .declaring_types
+        .get(content_name)
+        .is_none_or(|owner| owner != &target_name)
+    {
+        return false;
+    }
+    let Some(field) = info
+        .effective_fields
+        .iter()
+        .find(|field| field.name == content_name && field.kind == FieldKind::Prop)
+    else {
+        return false;
+    };
+    let children = node
+        .child_bindings
+        .iter()
+        .filter(|(_, child_ty)| *child_ty != DYNAMIC_CHILD_SLOT_MARKER)
+        .count();
+    if children == 0 {
+        return false;
+    }
+    let field_type: syn::Type = syn::parse_str(&field.ty).expect("content field type must parse");
+    if constructor_vec_item(&field_type).is_some() {
+        return true;
+    }
+    let field_type_string = quote! { #field_type }.to_string();
+    if field_type_string.contains("UIElementCollection") || field_type_string.contains("ListExt<") {
+        return false;
+    }
+    true
 }
 
 /// Builds the plain (not yet `Rc`-wrapped) `create_<snake case>(args)` call for a shape-composition
@@ -12949,7 +14360,8 @@ fn build_component_optional_setters(
 /// `Type::new(args)` shape exactly, just calling the base's own plain factory instead (see
 /// `generate_view`'s `is_shape_composition` branch).
 ///
-/// Deferred fields of a composed base are not supported at this expression-only call site.
+/// Defaulted Params and ordinary Props of a composed base are applied through its initial-value
+/// protocol after the base value has been constructed.
 ///
 /// `component` is the *caller's own* component being generated — its only use here is
 /// `immediate_base_qualified_path`/`qualified_construct_path`, which only ever fire when `node`
@@ -13346,6 +14758,36 @@ fn emit_virtual_construction(
     out.extend(emit_generic_on_click_routing(node, ctx, &binding_ts));
 }
 
+/// Returns the fields that the legacy hand-written builtin construction paths configure from a
+/// use-site.  Their private test metadata historically represented the content destination as an
+/// ordinary field rather than a `param_fields` entry, while the real `#[class]` shape macro exposes
+/// the same destination through content metadata.  Keep the normal constructor field order and add
+/// a declared content field when it is not already present; this does not infer any generated
+/// component's public constructor shape.
+fn construction_fields_with_content(info: &TypeInfo) -> Vec<(String, String)> {
+    let mut fields = info.param_fields.clone();
+    let Some(content_name) = info.content_field.as_ref() else {
+        return fields;
+    };
+    if fields.iter().any(|(name, _)| name == content_name) {
+        return fields;
+    }
+    let content_type = info
+        .field_types
+        .get(content_name)
+        .or_else(|| info.value_field_types.get(content_name))
+        .or_else(|| {
+            info.effective_fields
+                .iter()
+                .find(|field| field.name == *content_name)
+                .map(|field| &field.ty)
+        });
+    if let Some(content_type) = content_type {
+        fields.push((content_name.clone(), content_type.clone()));
+    }
+    fields
+}
+
 /// Builds the plain `elwindui::core::ui::create_xxx()` (empty
 /// argument — docs/design/runtime/ui_tree_design.md's post-construction setter convention, extended to
 /// every builtin property) followed by whichever `set_<field>(..)` calls this use site's own
@@ -13401,7 +14843,8 @@ fn build_virtual_value(
     // `ControlExt` — see `emit_field_setter_call`'s own matching branch for the native-leaf/
     // `emit_resync` side of this same rule), so a dot-call here needs its own trait import too.
     let mut needs_text_style_trait = false;
-    for (name, ty) in &info.param_fields {
+    let construction_fields = construction_fields_with_content(info);
+    for (name, ty) in &construction_fields {
         let setter = format_ident!("set_{name}");
         let field_ident = format_ident!("{name}");
         let is_content = info.content_field.as_deref() == Some(name.as_str());
@@ -15353,20 +16796,16 @@ fn emit_resync_with_receiver(
     } else {
         builtin_trait_use(&node.type_path, info)
     });
-    // A deferred field inherited from `UIElement` itself (`margin`/`width`/`height`/... —
-    // `resolve_effective_fields`'s own doc comment) is set through `UIElementExt`, a shared trait
-    // method — needed here for the same reason as `emit_construction`'s own matching `use` (this
-    // function is a separate scope, so that one doesn't carry over). Harmless when unused, same as
-    // `builtin_trait_use` itself; picked up by the main per-attribute loop below (`margin`/`width`/
-    // `height`/... are now ordinary `field_types` members, no separate resync path needed for them).
+    // A field inherited from `UIElement` itself (`margin`/`width`/`height`/...) is set through
+    // `UIElementExt`, a shared trait method. Keep that trait in scope for the main per-attribute
+    // loop below; these fields are ordinary `field_types` members.
     out.extend(quote! {
         #[allow(unused_imports)]
         use elwindui::core::ui::UIElementExt as _;
     });
 
-    // Every codegen-*generated* setter (a virtual builtin's own `elwindui_core::ui` setters, or a
-    // `has_view` component's own generated `set_<name>` — both the deferred and the mutable-
-    // required kind, see `is_settable_field`) takes its non-Copy argument *by value*. Only a
+    // Every codegen-generated setter (a virtual builtin's own `elwindui_core::ui` setters, or a
+    // `has_view` component's own generated `set_<name>`) takes its non-Copy argument *by value*. Only a
     // hand-written native's shared-trait setter (`Button`/`TextArea`/`MenuItem`/`MenuBarItem`'s
     // `&str`-taking `set_text`/etc.) wants the `&(..)`-wrapped reference the `else` branch below
     // still uses.
@@ -15415,13 +16854,24 @@ fn emit_resync_with_receiver(
         if info.is_some_and(|i| i.onetime_fields.contains(name)) {
             continue;
         }
-        // A `view`-having (`has_view`) target's own no-initializer field ordinarily has no
-        // `set_<name>` at all (unlike every hand-written builtin, which by convention always
-        // defines one, even a no-op, for the "blanket resync" rule above to call generically) — so
-        // resyncing it here would be calling a method that simply doesn't exist. `is_settable_field`
-        // carves out the two cases that *do* get a real setter despite having no initializer
-        // (deferred `Option<T>` fields, and required `prop` fields — see its own doc comment), which
-        // this loop should keep resyncing normally.
+        if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
+            let name_literal = syn::LitStr::new(name, proc_macro2::Span::call_site());
+            let value = emit_expr(expr, ctx, &self_mode);
+            let environment = semantic_brush_resync_environment(node, ctx);
+            let reactive = attribute.kind == AssignmentKind::Normal
+                && view_expr_has_reactive_dependency(expr, ctx);
+            let resync_call = quote! {
+                #ctor_macro!(
+                    @resync_named #receiver, #name_literal, #value, #environment,
+                    reactive = #reactive
+                );
+            };
+            out.extend(resync_call);
+            continue;
+        }
+        // A `view`-having (`has_view`) target's required Param has no runtime setter, so resyncing it
+        // here would call a method that does not exist. `is_settable_field` preserves that fixed-field
+        // boundary while ordinary Props continue through their own writable path.
         if info.is_some_and(|i| {
             i.has_view
                 && i.param_fields.iter().any(|(n, _)| n == name)
@@ -15534,8 +16984,8 @@ fn emit_resync_with_receiver(
             // into which call sites forward an own field, structurally can't) special-case this —
             // so unwrap here, at the one call site that can actually be in this position: skip the
             // push entirely on `None` (this field was never set, so the base keeps its own default —
-            // the same "absent = leave default" convention `deferred_own_names`'s own setters
-            // already use elsewhere) rather than trying to call a `clear_<name>` that, for most
+            // the same "absent = leave default" convention used by other initial setters) rather
+            // than trying to call a `clear_<name>` that, for most
             // props (anything not theme-capable), was never hand-written to begin with.
             // `Option::from` — not a direct `if let Some(..) = #value` — because `#value` here is
             // always `self.<field>` for one of *these* fields specifically (never a bare `T`, see
@@ -16519,8 +17969,9 @@ mod tests {
         assert_valid_rust("derived_content_override", &generated);
         let rendered = generated.to_string();
         assert!(
-            rendered.contains("CustomTabView :: new (vec !"),
-            "nested children must lower through the derived collection: {rendered}"
+            rendered.contains("CustomTabView :: __new_unmounted")
+                && rendered.contains("__set_initial_prop_children"),
+            "nested children must lower through the derived collection before mount: {rendered}"
         );
     }
 
@@ -17212,6 +18663,7 @@ struct NotepadWindow {
             Some("Control"),
             r#"
                 struct Wrapper {
+                    #[param]
                     content: std::rc::Rc<dyn UIElement>,
 
                     body: view! {
@@ -18962,7 +20414,7 @@ struct NotepadWindow {
         let generated = generated.to_string();
         // `margin` is set at construction and by the initial resync. Neither `content` nor
         // `file_name` notification may relayout this unrelated common UIElement property.
-        assert_eq!(generated.matches("set_margin").count(), 2, "{generated}");
+        assert_eq!(generated.matches("set_margin").count(), 1, "{generated}");
     }
 
     #[test]
@@ -19082,18 +20534,21 @@ struct NotepadWindow {
         let generated_str = generated.to_string();
         assert!(
             generated_str.contains(
-                "elwindui :: core :: graphics :: Brush :: Solid (elwindui :: core :: graphics :: Color :: rgba (58u8 , 58u8 , 60u8 , 255u8))"
+                "Into :: < elwindui :: core :: theme :: BrushStyle > :: into (\"#3a3a3c\")"
             ),
-            "{generated_str}"
+            "the semantic brush path must preserve the authored concrete value: {generated_str}"
+        );
+        assert!(
+            generated_str.contains("ResolvedValue :: Value"),
+            "the resolved brush must be assigned only after environment resolution: {generated_str}"
         );
     }
 
-    /// `coerce_color_literal` must reject a malformed hex literal at codegen time rather than
-    /// spliced through as-is (which would only fail much later, confusingly, at real `rustc` type-
-    /// checking or — worse — silently compile if `Brush`/`Color` ever gained a `From<&str>` impl).
+    /// Semantic brush values are intentionally converted at runtime, so a string accepted by the
+    /// `BrushStyle` conversion remains an authored value even when it is not a compile-time hex
+    /// literal. This keeps theme/environment resolution authoritative for the property.
     #[test]
-    #[should_panic(expected = "invalid hex color literal")]
-    fn malformed_fill_hex_literal_panics_at_codegen_time() {
+    fn malformed_fill_hex_literal_is_preserved_for_runtime_brush_style() {
         let src = r##"
             struct Foo {
                 body: view! {
@@ -19105,7 +20560,10 @@ struct NotepadWindow {
         "##;
         let module = crate::test_module(&[(None, src, None)]).expect("should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
-        let _ = generate_module(&module, &table);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("malformed_rectangle_fill_literal", &generated);
+        let generated_str = generated.to_string();
+        assert!(generated_str.contains("BrushStyle") && generated_str.contains("#zzzzzz"));
     }
 
     /// `ContentControl inherits Control` (docs/specs/ui_spec.md#contentcontrol) — the
@@ -19136,8 +20594,8 @@ struct NotepadWindow {
         // generated code, resolving `ContentControl` as a child element, must construct that
         // concrete type (`emit_construction`'s `concrete_type_ident`).
         assert!(
-            generated_str.contains("ContentControl :: new"),
-            "{generated_str}"
+            generated_str.contains("ContentControl :: __new_unmounted"),
+            "generated components must receive initial properties before mount: {generated_str}"
         );
 
         // `ContentControl`'s own generated code (produced when `builtin_modules()` is fed through
@@ -19177,7 +20635,8 @@ struct NotepadWindow {
         // pre-expansion generated tokens.
         assert!(
             content_control_str
-                .contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >")
+                .contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >"),
+            "{content_control_str}"
         );
         assert!(
             content_control_str
@@ -20252,7 +21711,7 @@ struct NotepadWindow {
             generated_impl_method_body(&generated, "T17ChildMountWindow", "__build_view");
 
         let child_mount_pos = build_view_body
-            .find("T17Child :: new")
+            .find("T17Child :: __new_unmounted")
             .expect("__build_view should construct (and thereby mount) the real child Component");
         let user_on_mount_pos = build_view_body
             .find("t17_owner_on_mount_marker ()")

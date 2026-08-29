@@ -64,6 +64,22 @@ fn builtin_component(
     });
     let mut fields = attr_frontend::fields_from_item_struct(&item_struct, FieldKind::Prop, true)
         .unwrap_or_else(|e| panic!("failed to build fields for builtin `{name}`: {e}"));
+    // Components with a generated ordinary view need storage for their own content property. The
+    // real Rust frontend supplies an implicit Prop default for an unannotated field; mirror only
+    // that content-specific part here so the private fixture remains compatible with the current
+    // generated-component storage/accessor path.
+    if let Some(content_name) = content_field {
+        for field in &mut fields {
+            if field.name == content_name
+                && field.kind == FieldKind::Prop
+                && field.initializer.is_none()
+            {
+                field.initializer = Some(Initializer::Expr(syn::parse_quote! {
+                    ::std::default::Default::default()
+                }));
+            }
+        }
+    }
     // Injected first, ahead of the component's own hand-written fields, matching the old DSL text
     // frontend's `#[text_style]` handling (`parser.rs`'s `parse_module`) — see
     // `resolve_effective_fields`'s "first still-unclaimed field" positional fallbacks, which rely on

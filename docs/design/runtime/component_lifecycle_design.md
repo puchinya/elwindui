@@ -4,7 +4,16 @@ Related specification: [`../../specs/dsl_spec.md`](../../specs/dsl_spec.md) §3 
 
 Tracking issue: [#80](https://github.com/puchinya/elwindui/issues/80). This document is the design deliverable of child issue CI-1 (#104).
 
-## 1. Current construction flow (as of this writing)
+## 1. Current construction flow (direct constructors and `new!`)
+
+Issue #193 adds a named construction boundary without changing the lifecycle state model below.
+`elwindui::new!(Type(...))` uses the generated/internal `__new_unmounted` path for view-bearing
+components, passes required Param/Bindable values in declaration order, applies defaulted Params and
+ordinary Prop/content initial values through hidden Created-state setters, and calls `mount(environment)`
+last. These initial setters share the normal backing storage but do not publish notifications, run
+runtime resync, or invoke user callbacks. Direct generated `Type::new(..)` remains the low-level
+constructor surface generated for the component's own crate; the named macro is the cross-origin
+surface that also routes qualified external components through their defining-crate constructor ABI.
 
 There is no `Component` trait in this codebase; "component" is a DSL/codegen-level concept realized in two separate proc-macro crates that cooperate:
 

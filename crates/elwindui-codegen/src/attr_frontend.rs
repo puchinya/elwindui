@@ -324,6 +324,31 @@ pub(crate) fn fields_from_item_struct(
     Ok(out)
 }
 
+/// Returns whether a component field is an event/routed callback schema field rather than an
+/// ordinary stored property.  The name convention is kept in this one predicate so component
+/// shape, default normalization, and symbol-table construction cannot accidentally classify an
+/// `on_*` callback as a constructor parameter or a mutable property.
+pub(crate) fn is_event_schema_field(field: &FieldDef) -> bool {
+    field.name.starts_with("on_") || field.attrs.iter().any(|attr| matches!(attr, Attr::Routed))
+}
+
+/// Applies the Rust-component frontend's implicit ordinary-Prop default.  A plain Rust field is
+/// parsed as `FieldKind::Prop`; unlike `#[param]`, it is never constructor-required.  Giving it an
+/// explicit `Default::default()` initializer lets the existing generated storage path preserve
+/// the same rule for every type while leaving event schema fields outside the property surface.
+pub(crate) fn normalize_component_fields(fields: &mut [FieldDef]) {
+    for field in fields {
+        if field.kind == FieldKind::Prop
+            && field.initializer.is_none()
+            && !is_event_schema_field(field)
+        {
+            field.initializer = Some(Initializer::Expr(syn::parse_quote! {
+                ::std::default::Default::default()
+            }));
+        }
+    }
+}
+
 fn record_explicit_kind(
     current: &mut Option<String>,
     field_name: &str,

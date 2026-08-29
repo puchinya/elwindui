@@ -1,6 +1,6 @@
 # Tooling status
 
-Snapshot: 2026-08-28. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-08-29. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
 
 | Tool | State | Current capability / gap |
 |---|---|---|
@@ -17,20 +17,32 @@ Implemented commands cover launching/locating a process or window, waiting for w
 
 The command catalog and operational precautions belong in [`../agents/appkit.md`](../agents/appkit.md) and [`../../tools/macos-ui-driver/README.md`](../../tools/macos-ui-driver/README.md), not in status.
 
-## External generated-component DSL (#191)
+## External generated-component DSL (#191/#193/#194)
 
-The open PR #192 branch accepts qualified external generated-component paths in `view!`, keeps the
-authored type path for construction and extension traits, and resolves the `#[macro_export]` props
-shape at the defining crate root. Ordinary, template, dynamic, event, two-way, semantic-brush,
-and resync lowering share this path-origin decision. The real downstream fixture depends on
-`elwindui` and `elwindui-external-component-fixture` independently and covers external properties,
-collection/scalar content, property resync, two-way wiring, template dynamic `if`/`for`, nested
-module paths, and a Cargo alias. The current zero-argument-plus-setters/content construction ABI
-does not cover required constructor parameters; that work is tracked in follow-up Issue #193.
+Merged PR #192 provides qualified external generated-component paths in `view!`, keeps the authored
+type path for construction and extension traits, and resolves the `#[macro_export]` props shape at
+the defining crate root. Ordinary, template, dynamic, event, two-way, semantic-brush, and resync
+lowering share this path-origin decision. The real downstream fixture depends on `elwindui` and
+`elwindui-external-component-fixture` independently and covers external properties, collection/scalar
+content, property resync, two-way wiring, template dynamic `if`/`for`, nested module paths, and a
+Cargo alias.
+
+Issue #193's named construction surface is implemented by PR #195: `elwindui::new!` routes local,
+builtin, and qualified external generated components through one construction planner. Required
+`#[param]`/`#[bindable]`, defaulted `#[param(default = ...)]`, ordinary mutable Props, full `Option`
+storage, pre-mount initial values, external root constructor ABI macros, exact diagnostics, and the
+required-before-mount-before-runtime-resync order are covered by focused codegen and downstream tests.
 Directly-declared generated `Vec<Rc<T>>` content hosts now separate raw slot mutation from one
 post-reconciliation property-change commit, so computed/template dependents observe the final
 collection state. A derived component that only inherits the `#[content]` declaration does not
 receive that generated host forwarding in #192; this capability boundary is tracked in follow-up
-Issue #194 and is not replaced with a fake reactive bridge.
-Unqualified imported shorthand and a defining-crate `pub mod ui` facade are not required. PR #192
-is not merged yet; PR #184 remains dependent on it.
+Issue #194 and is not replaced with a fake reactive bridge. Unqualified imported shorthand and a
+defining-crate `pub mod ui` facade are not required. The inherited `Vec<Rc<T>>` content forwarding
+boundary remains follow-up Issue #194; #194 is intentionally outside PR #195.
+
+The current generated-component shape identity is basename-based within a crate: the same-crate
+registry and the hidden #192/#193 shape macros do not yet provide a path-aware identity for distinct
+components with the same basename in different modules. This is a current ElwindUI compile-time
+ABI/registry limitation, not a fundamental Rust limitation, and is tracked from requirements/design
+in [follow-up Issue #196](https://github.com/puchinya/elwindui/issues/196). PR #195 deliberately does
+not partially redesign that registry or either hidden shape ABI.

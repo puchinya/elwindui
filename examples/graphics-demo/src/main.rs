@@ -911,12 +911,19 @@ struct GraphicsDemoWindow {
     // field's type text) treats any bare, uppercase, generic-free identifier as one of this file's
     // own `Copy` enums — a `type AnyElement = Rc<dyn UIElementExt>` alias would silently
     // mis-classify as `Copy`-storable (`Cell`) even though `Rc<dyn Trait>` isn't `Copy` at all.
+    #[param]
     fills_canvas: std::rc::Rc<GraphicsDemoCanvas>,
+    #[param]
     strokes_canvas: std::rc::Rc<GraphicsDemoCanvas>,
+    #[param]
     paths_canvas: std::rc::Rc<GraphicsDemoCanvas>,
+    #[param]
     path_combine_canvas: std::rc::Rc<GraphicsDemoCanvas>,
+    #[param]
     compositing_canvas: std::rc::Rc<GraphicsDemoCanvas>,
+    #[param]
     images_canvas: std::rc::Rc<GraphicsDemoCanvas>,
+    #[param]
     svg_canvas: std::rc::Rc<GraphicsDemoCanvas>,
 
     body: view! {
@@ -994,6 +1001,7 @@ impl ZeroTabMemoryWindow {}
 /// Measurement-only window with one tab whose content has no paint callback.
 #[elwindui::component(inherits Window)]
 struct OneEmptyTabMemoryWindow {
+    #[param]
     content: Rc<EmptyTabContent>,
 
     body: view! {
@@ -1018,12 +1026,19 @@ impl OneEmptyTabMemoryWindow {}
 /// Measurement-only window with seven tabs whose content has no paint callback.
 #[elwindui::component(inherits Window)]
 struct SevenEmptyTabsMemoryWindow {
+    #[param]
     first: Rc<EmptyTabContent>,
+    #[param]
     second: Rc<EmptyTabContent>,
+    #[param]
     third: Rc<EmptyTabContent>,
+    #[param]
     fourth: Rc<EmptyTabContent>,
+    #[param]
     fifth: Rc<EmptyTabContent>,
+    #[param]
     sixth: Rc<EmptyTabContent>,
+    #[param]
     seventh: Rc<EmptyTabContent>,
 
     body: view! {
@@ -1100,7 +1115,7 @@ fn show_graphics_demo(paint_enabled: bool) {
 fn main() {
     match std::env::var("ELWINDUI_GRAPHICS_DEMO_MEMORY_CASE").as_deref() {
         Ok("F") => ZeroTabMemoryWindow::new().show(),
-        Ok("G") => OneEmptyTabMemoryWindow::new(EmptyTabContent::new()).show(),
+        Ok("G") => elwindui::new!(OneEmptyTabMemoryWindow(content: EmptyTabContent::new())).show(),
         Ok("H") => SevenEmptyTabsMemoryWindow::new(
             EmptyTabContent::new(),
             EmptyTabContent::new(),

@@ -72,6 +72,7 @@ impl MascotCanvas {
 
 #[elwindui::component(inherits Window)]
 struct MascotWindow {
+    #[param]
     mascot: Rc<MascotCanvas>,
 
     body: view! {
@@ -90,7 +91,7 @@ impl MascotWindow {}
 #[elwindui::main]
 fn main() {
     let mascot = MascotCanvas::new();
-    let window = MascotWindow::new(mascot.clone());
+    let window = elwindui::new!(MascotWindow(mascot: mascot.clone()));
     let window_ext: Rc<dyn WindowExt> = window.clone();
     let drag_anchor = Rc::new(RefCell::new(None::<Point>));
 

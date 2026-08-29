@@ -158,6 +158,7 @@ impl SemanticBrushScopeChild {}
 
 #[elwindui::component(inherits VerticalLayout)]
 struct SemanticBrushScopeView {
+    #[prop(default = BrushStyle::PlatformDefault)]
     local_primary: BrushStyle,
 
     body: view! {
@@ -174,7 +175,9 @@ impl SemanticBrushScopeView {}
 #[test]
 fn environment_scope_retains_and_replays_semantic_overrides() {
     SCOPED_PRIMARY.with(|value| *value.borrow_mut() = BrushStyle::PlatformDefault);
-    let view = SemanticBrushScopeView::new(BrushStyle::Value(brush(1, 2, 3)));
+    let view = elwindui::new!(SemanticBrushScopeView(
+        local_primary: BrushStyle::Value(brush(1, 2, 3))
+    ));
     assert_eq!(
         SCOPED_PRIMARY.with(|value| value.borrow().clone()),
         BrushStyle::Value(brush(1, 2, 3))

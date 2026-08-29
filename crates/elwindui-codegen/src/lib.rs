@@ -2798,16 +2798,12 @@ mod component_impl_tests {
         assert!(err.contains("trait impl"), "error: {err}");
     }
 
-    /// PR #169 review remediation, T10: the real `impl` half (`codegen::generate_view`'s own
-    /// `not(rust_analyzer)`-gated output, via `generate_component_from_item_impl`) and the
-    /// rust-analyzer Component struct shadow (its `rust_analyzer`-gated output) must agree on which
-    /// own `Option<T>` fields are required constructor parameters vs. deferred setter-only fields —
-    /// because both now consult the same `component_frontend::component_public_shape` classification
-    /// (AD-R4 of the PR #169 review contract), not two independently hand-written copies of it. Mirrors
-    /// `examples/graphics-demo`'s own `GraphicsDemoWindow` shape (an ordinary unannotated required
-    /// field plus a referenced-vs-unreferenced own `Option<T>` pair).
+    /// The real `impl` half and the rust-analyzer Component struct shadow must agree on the public
+    /// shape for ordinary Props, including `Option<T>` Props.  In particular, an unannotated field
+    /// is a defaulted mutable Prop, regardless of whether the view references it; both generated
+    /// surfaces therefore omit it from the fixed constructor and expose a full-type setter.
     #[test]
-    fn t10_real_and_shadow_agree_on_own_field_constructor_deferred_classification() {
+    fn ordinary_props_are_not_constructor_parameters_in_real_or_shadow_output() {
         let struct_item: syn::ItemStruct = syn::parse_str(
             r#"
             struct T10ShapeSharing {
@@ -2837,28 +2833,16 @@ mod component_impl_tests {
         let out = format!("{struct_out} {impl_out}");
 
         // Real generation names this an ancestor-composed `construct(..)` (this component inherits
-        // `VerticalLayout`, a shape-composition base); the shadow always names it `new(..)` — a
-        // pre-existing, unrelated naming/formatting difference (the shadow also always trails every
-        // parameter with a comma, real generation doesn't) this test doesn't care about. Both must
-        // still agree on *which* fields appear as parameters at all.
+        // `VerticalLayout`, a shape-composition base); the shadow always names it `new(..)`. Both
+        // must agree that ordinary Props are not fixed constructor inputs.
         assert!(
-            out.contains(
-                "fn construct (required_prop : i32 , referenced_padding : Option < f32 >)"
-            ),
-            "real construct(..) must take required_prop and the referenced own Option<T> field, in \
-             field order, with unreferenced_padding excluded: {out}"
+            out.contains("fn construct ()"),
+            "real construct(..) must have no ordinary Prop parameters: {out}"
         );
         assert!(
-            out.contains(
-                "pub fn new (required_prop : i32 , referenced_padding : Option < f32 > ,) -> std :: rc :: Rc < Self >"
-            ),
-            "shadow new(..) must classify the same two fields as required, in the same order: {out}"
+            out.contains("pub fn new () -> std :: rc :: Rc < Self >"),
+            "shadow new(..) must have no ordinary Prop parameters: {out}"
         );
-
-        // Both branches expose a setter for the deferred field, and — since this Component has a
-        // `view!` and `referenced_padding` is a plain `prop` (runtime-mutable by definition even
-        // though also required at construction time, `codegen::generate_view`'s own
-        // `mutable_required_names`) — for the required-but-referenced field too.
         assert!(out.contains("fn set_unreferenced_padding"), "{out}");
         assert!(out.contains("fn set_referenced_padding"), "{out}");
     }
@@ -3034,12 +3018,10 @@ mod component_impl_tests {
         );
     }
 
-    /// PR #169 review remediation, round 3, T-R3-6 (AD-R3-5): a required (referenced-by-view), own,
-    /// unannotated `prop` field's setter comes from `own_shape.writable_fields` — both the real
-    /// generated setter and the rust-analyzer shadow's own setter must still exist, sourced from the
-    /// same shape instance `generate_view` now builds from `source_component`.
+    /// An unannotated own field is an ordinary mutable Prop.  Its default is implicit, so it is not
+    /// a fixed constructor input even when the component's view references it.
     #[test]
-    fn t_r3_6_required_writable_prop_comes_from_shape() {
+    fn t_r3_6_ordinary_writable_prop_comes_from_shape() {
         let item_struct: syn::ItemStruct = syn::parse_str(
             r#"
             struct TR36RequiredWritableProp {
@@ -3063,17 +3045,17 @@ mod component_impl_tests {
             .nth(1)
             .and_then(|s| s.split(')').next())
             .expect("real constructor signature should be present");
-        assert!(real_ctor.contains("value"), "real ctor: {real_ctor}");
+        assert!(!real_ctor.contains("value"), "real ctor: {real_ctor}");
         assert!(
             out.contains("fn set_value"),
-            "real generation must expose a setter for a required, referenced, unannotated prop: {out}"
+            "real generation must expose a setter for an ordinary Prop: {out}"
         );
         let shadow_ctor = out
             .split("pub fn new (")
             .nth(1)
             .and_then(|s| s.split(')').next())
             .expect("shadow constructor signature should be present");
-        assert!(shadow_ctor.contains("value"), "shadow ctor: {shadow_ctor}");
+        assert!(!shadow_ctor.contains("value"), "shadow ctor: {shadow_ctor}");
     }
 
     /// PR #169 review remediation, round 3, T-R3-7: a required `#[param]` field is immutable once
@@ -3111,17 +3093,16 @@ mod component_impl_tests {
         );
     }
 
-    /// PR #169 review remediation, round 3, T-R3-8 (AD-R3-6): a view-less Component's real
-    /// (`generate_component`) and rust-analyzer-shadow public surfaces must agree exactly on
-    /// constructor params, getter names, and setter names for every own field kind — required
-    /// unannotated `prop`, deferred `Option<T>` `prop`, defaulted `prop`, and `#[param]`.
+    /// A view-less Component's real (`generate_component`) and rust-analyzer-shadow public surfaces
+    /// must agree on constructor params, getter names, and setter names for ordinary Props and a
+    /// required `#[param]`.
     #[test]
     fn t_r3_8_view_less_accessor_parity_across_field_kinds() {
         let item_struct: syn::ItemStruct = syn::parse_str(
             r#"
             struct TR38ViewLessParity {
                 required_prop: i32,
-                deferred_prop: Option<i32>,
+                optional_prop: Option<i32>,
                 #[prop(default = 1)]
                 defaulted_prop: i32,
                 #[param]
@@ -3149,17 +3130,15 @@ mod component_impl_tests {
             .and_then(|s| s.split(')').next())
             .expect("shadow constructor signature should be present");
         for ctor in [real_ctor, shadow_ctor] {
-            assert!(ctor.contains("required_prop"), "ctor: {ctor}");
             assert!(ctor.contains("required_param"), "ctor: {ctor}");
-            assert!(!ctor.contains("deferred_prop"), "ctor: {ctor}");
+            assert!(!ctor.contains("required_prop"), "ctor: {ctor}");
+            assert!(!ctor.contains("optional_prop"), "ctor: {ctor}");
             assert!(!ctor.contains("defaulted_prop"), "ctor: {ctor}");
         }
-        // Every field has a getter; only the deferred/defaulted own fields have setters (a
-        // view-less required field — Prop or Param — never gets a setter, matching real
-        // generation's own long-standing view-less-path behavior).
+        // Every field has a getter; ordinary Props have public setters and the Param does not.
         for name in [
             "required_prop",
-            "deferred_prop",
+            "optional_prop",
             "defaulted_prop",
             "required_param",
         ] {
@@ -3168,9 +3147,9 @@ mod component_impl_tests {
                 "missing getter for {name}: {generated}"
             );
         }
-        assert!(generated.contains("fn set_deferred_prop"), "{generated}");
+        assert!(generated.contains("fn set_required_prop"), "{generated}");
+        assert!(generated.contains("fn set_optional_prop"), "{generated}");
         assert!(generated.contains("fn set_defaulted_prop"), "{generated}");
-        assert!(!generated.contains("fn set_required_prop"), "{generated}");
         assert!(!generated.contains("fn set_required_param"), "{generated}");
         // Both real and shadow are view-less, so both return bare `Self`.
         assert!(
@@ -3179,13 +3158,11 @@ mod component_impl_tests {
         );
     }
 
-    /// PR #169 review remediation, round 4, T-R4-1 (AD-R4-1/AD-R4-3/AD-R4-4): a view-less
-    /// component's required (non-deferred, no-initializer) own field's constructor/getter
-    /// membership comes from `component_public_shape`'s own `constructor_params`/`readable_fields`
-    /// — checked directly against the same shape instance real generation consumes, not just
-    /// indirectly through the generated output.
+    /// A view-less ordinary Prop has an implicit default, a getter, and a public setter, but is not
+    /// part of the fixed constructor.  The assertion reads the same public shape consumed by real
+    /// generation.
     #[test]
-    fn t_r4_1_view_less_required_prop_consumes_constructor_and_readable_shape() {
+    fn t_r4_1_view_less_ordinary_prop_consumes_readable_and_writable_shape() {
         let item_struct: syn::ItemStruct = syn::parse_str(
             r#"
             struct TR41Required {
@@ -3199,7 +3176,7 @@ mod component_impl_tests {
                 .expect("should build");
         let shape = component_frontend::component_public_shape(&component_def, view_def.as_ref());
         assert!(
-            shape.constructor_params.iter().any(|(n, _)| n == "value"),
+            !shape.constructor_params.iter().any(|(n, _)| n == "value"),
             "{:?}",
             shape.constructor_params
         );
@@ -3209,7 +3186,10 @@ mod component_impl_tests {
             shape.readable_fields
         );
         assert!(
-            !shape.writable_fields.iter().any(|(n, _, _)| n == "value"),
+            shape
+                .writable_fields
+                .iter()
+                .any(|(n, ty, _)| n == "value" && ty == "i32"),
             "{:?}",
             shape.writable_fields
         );
@@ -3226,17 +3206,15 @@ mod component_impl_tests {
             .nth(1)
             .and_then(|s| s.split(')').next())
             .expect("real constructor signature should be present");
-        assert!(real_ctor.contains("value"), "{real_ctor}");
+        assert!(!real_ctor.contains("value"), "{real_ctor}");
         assert!(generated.contains("pub fn value"), "{generated}");
-        assert!(!generated.contains("fn set_value"), "{generated}");
+        assert!(generated.contains("pub fn set_value"), "{generated}");
     }
 
-    /// PR #169 review remediation, round 4, T-R4-2 (AD-R4-1/AD-R4-6/AD-R4-5): a view-less
-    /// component's deferred `Option<T>` own field is excluded from `constructor_params`, present in
-    /// `deferred_option_fields`/`readable_fields`/`writable_fields`, and its real generated setter
-    /// takes the inner `T` — never `Option<T>`.
+    /// An ordinary view-less `Option<T>` Prop is excluded from the fixed constructor while its
+    /// getter and public setter both use the full declared `Option<T>` type.
     #[test]
-    fn t_r4_2_view_less_deferred_option_consumes_all_relevant_shape_surfaces() {
+    fn t_r4_2_view_less_option_prop_consumes_all_relevant_shape_surfaces() {
         let item_struct: syn::ItemStruct = syn::parse_str(
             r#"
             struct TR42Deferred {
@@ -3256,16 +3234,6 @@ mod component_impl_tests {
         );
         assert!(
             shape
-                .deferred_option_fields
-                .iter()
-                .any(|(n, declared_ty, inner_ty)| n == "value"
-                    && declared_ty == "Option<String>"
-                    && inner_ty == "String"),
-            "{:?}",
-            shape.deferred_option_fields
-        );
-        assert!(
-            shape
                 .readable_fields
                 .iter()
                 .any(|(n, ty, _)| n == "value" && ty == "Option<String>"),
@@ -3276,7 +3244,7 @@ mod component_impl_tests {
             shape
                 .writable_fields
                 .iter()
-                .any(|(n, ty, _)| n == "value" && ty == "String"),
+                .any(|(n, ty, _)| n == "value" && ty == "Option<String>"),
             "{:?}",
             shape.writable_fields
         );
@@ -3300,8 +3268,8 @@ mod component_impl_tests {
             .and_then(|s| s.split(')').next())
             .expect("setter signature should be present");
         assert!(
-            setter.contains("value : String") && !setter.contains("Option"),
-            "setter parameter must be the inner T, not Option<T>: {setter}"
+            setter.contains("value : Option < String >"),
+            "setter parameter must preserve the full declared Option<T>: {setter}"
         );
     }
 
@@ -3399,12 +3367,10 @@ mod component_impl_tests {
         assert!(!generated.contains("fn set_value"), "{generated}");
     }
 
-    /// PR #169 review remediation, round 5, T-R5-1 (AD-R5-1/AD-R5-3/AD-R5-4): a deferred own
-    /// field's setter parameter type must come from `writable_fields`'s own type entry (the inner
-    /// `T`), not merely happen to equal it via `strip_option`/`deferred_option_fields` — checked
-    /// directly against the shape instance, and against the real generated setter signature.
+    /// An ordinary `Option<T>` Prop's setter parameter type comes from the writable shape entry and
+    /// preserves the full declared type, not an inferred inner `T`.
     #[test]
-    fn t_r5_1_deferred_setter_parameter_comes_from_writable_shape_entry() {
+    fn t_r5_1_option_prop_setter_parameter_comes_from_writable_shape_entry() {
         let item_struct: syn::ItemStruct = syn::parse_str(
             r#"
             struct TR51Deferred {
@@ -3429,7 +3395,7 @@ mod component_impl_tests {
             shape
                 .writable_fields
                 .iter()
-                .any(|(n, ty, _)| n == "value" && ty == "String"),
+                .any(|(n, ty, _)| n == "value" && ty == "Option<String>"),
             "{:?}",
             shape.writable_fields
         );
@@ -3444,8 +3410,8 @@ mod component_impl_tests {
             .expect("setter signature should be present");
         assert_eq!(
             setter.trim(),
-            "& self , value : String",
-            "setter parameter must come from writable_fields's own String entry, not Option<String>: {setter}"
+            "& self , value : Option < String >",
+            "setter parameter must come from writable_fields's full Option<String> entry: {setter}"
         );
     }
 
@@ -3532,20 +3498,17 @@ mod component_impl_tests {
         );
     }
 
-    /// PR #169 review remediation, round 5, T-R5-4 (AD-R5-1): every legal own writable field
-    /// category's real setter name/type/visibility matches `shape.writable_fields` exactly —
-    /// deferred `prop`, deferred `#[param]` (a same-crate `Option<T>` `#[param]` field is deferred
-    /// the same way an unannotated `prop` is — `component_public_shape`'s own deferral branch does
-    /// not distinguish `FieldKind::Param`/`Prop` for the deferred case), defaulted `prop`, and
-    /// defaulted `#[state]`.
+    /// Every legal own writable field category's real setter name/type/visibility matches
+    /// `shape.writable_fields` exactly: ordinary Props (including `Option<T>`), defaulted Props,
+    /// and defaulted State.  A required `#[param]` remains constructor-only.
     #[test]
     fn t_r5_4_all_own_writable_categories_match_shape_exactly() {
         let item_struct: syn::ItemStruct = syn::parse_str(
             r#"
             struct TR54AllWritable {
-                deferred_prop: Option<i32>,
+                optional_prop: Option<i32>,
                 #[param]
-                deferred_param: Option<String>,
+                required_param: Option<String>,
                 #[prop(default = 1)]
                 defaulted_prop: i32,
                 #[state(default = String::new())]
@@ -3569,13 +3532,8 @@ mod component_impl_tests {
 
         let expected: &[(&str, &str, component_frontend::ShadowVisibility)] = &[
             (
-                "deferred_prop",
-                "i32",
-                component_frontend::ShadowVisibility::Public,
-            ),
-            (
-                "deferred_param",
-                "String",
+                "optional_prop",
+                "Option<i32>",
                 component_frontend::ShadowVisibility::Public,
             ),
             (
@@ -3589,6 +3547,13 @@ mod component_impl_tests {
                 component_frontend::ShadowVisibility::Private,
             ),
         ];
+        let constructor = generated
+            .split("pub fn new (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("constructor signature should be present");
+        assert!(constructor.contains("required_param"), "{constructor}");
+        assert!(!constructor.contains("optional_prop"), "{constructor}");
         for (name, ty, visibility) in expected {
             assert!(
                 shape
@@ -3603,8 +3568,10 @@ mod component_impl_tests {
                 .nth(1)
                 .and_then(|s| s.split(')').next())
                 .unwrap_or_else(|| panic!("setter for {name} should be present: {generated}"));
+            let setter_without_spaces = setter.replace(' ', "");
+            let type_without_spaces = ty.replace(' ', "");
             assert!(
-                setter.contains(&format!("value : {ty}")),
+                setter_without_spaces.contains(&format!("value:{type_without_spaces}")),
                 "setter for {name} must use the shape's own type: {setter}"
             );
             let is_pub = generated.contains(&format!("pub fn set_{name}"));

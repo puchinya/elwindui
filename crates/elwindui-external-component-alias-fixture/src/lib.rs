@@ -6,7 +6,7 @@ use elwindui::component;
 
 #[component(inherits Control)]
 pub struct AliasedExternalProbe {
-    #[prop(default = String::new())]
+    #[param]
     label: String,
     template: template_view! {
         TextBlock { text: label }

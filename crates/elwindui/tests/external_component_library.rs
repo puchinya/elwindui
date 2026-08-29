@@ -5,10 +5,148 @@
 use std::rc::Rc;
 
 use elwindui::component;
-use elwindui::core::ui::{ContentControlExt, UIElementExt as _};
+use elwindui::core::ui::{ContentControlExt, UIElementExt as _, WindowExt};
 use elwindui_external_component_fixture::{
     ExternalProbeItem, ExternalProbeItemExt, ExternalProbeTabs, ExternalProbeTabsExt,
+    RequiredExternalCardExt,
 };
+
+#[component(inherits VerticalLayout)]
+struct LocalNewProbe {
+    #[param]
+    required: String,
+    #[param]
+    optional_param: Option<String>,
+    #[param(default = 3)]
+    fixed: usize,
+    #[prop]
+    optional: Option<String>,
+    #[prop(default = String::from("default"))]
+    label: String,
+    body: view! {
+        TextBlock { text: required }
+    },
+}
+
+#[component]
+impl LocalNewProbe {}
+
+#[component(inherits VerticalLayout)]
+struct LocalInheritedNewBase {
+    #[param]
+    id: String,
+    #[param(default = String::from("base-default"))]
+    base_mode: String,
+    #[prop]
+    title: String,
+    body: view! {
+        #[id("rendered")]
+        let rendered = TextBlock { text: format!("{id}:{title}") };
+
+        rendered
+    },
+}
+
+#[component]
+impl LocalInheritedNewBase {}
+
+#[component(inherits crate::LocalInheritedNewBase)]
+struct LocalInheritedNewDerived {
+    #[param(default = false)]
+    compact: bool,
+    #[prop]
+    subtitle: String,
+}
+
+#[component]
+impl LocalInheritedNewDerived {}
+
+#[elwindui::viewmodel]
+mod local_inherited_new_model {
+    struct LocalInheritedNewModel {
+        #[observable(default = String::new())]
+        value: String,
+    }
+}
+
+#[component(inherits VerticalLayout)]
+struct LocalInheritedBindableBase {
+    #[bindable]
+    model: Rc<LocalInheritedNewModel>,
+    body: view! {
+        TextBlock { text: model.value }
+    },
+}
+
+#[component]
+impl LocalInheritedBindableBase {}
+
+#[component(inherits crate::LocalInheritedBindableBase)]
+struct LocalInheritedBindableDerived {}
+
+#[component]
+impl LocalInheritedBindableDerived {}
+
+#[test]
+fn new_macro_constructs_local_component_with_own_fields() {
+    let value = elwindui::new!(LocalNewProbe(
+        required: "required",
+        optional_param: Some("optional-param"),
+        fixed: 9,
+        optional: None,
+        label: "label",
+    ));
+
+    assert_eq!(LocalNewProbeExt::required(&*value), "required");
+    assert_eq!(
+        LocalNewProbeExt::optional_param(&*value),
+        Some(String::from("optional-param"))
+    );
+    assert_eq!(LocalNewProbeExt::fixed(&*value), 9);
+    assert_eq!(LocalNewProbeExt::optional(&*value), None);
+    assert_eq!(LocalNewProbeExt::label(&*value), "label");
+}
+
+#[test]
+fn new_macro_constructs_local_component_with_effective_inherited_shape() {
+    let value = elwindui::new!(LocalInheritedNewDerived(
+        subtitle: "sub",
+        title: "title",
+        compact: true,
+        id: "id",
+    ));
+
+    assert_eq!(LocalInheritedNewBaseExt::id(&value.base), "id");
+    assert_eq!(
+        LocalInheritedNewBaseExt::base_mode(&value.base),
+        "base-default"
+    );
+    assert_eq!(LocalInheritedNewBaseExt::title(&value.base), "title");
+    assert!(LocalInheritedNewDerivedExt::compact(&*value));
+    assert_eq!(LocalInheritedNewDerivedExt::subtitle(&*value), "sub");
+    assert_eq!(value.base.rendered().text.borrow().as_str(), "id:title");
+
+    LocalInheritedNewBaseExt::set_title(&value.base, String::from("updated"));
+    assert_eq!(LocalInheritedNewBaseExt::title(&value.base), "updated");
+}
+
+#[test]
+fn new_macro_accepts_inherited_required_bindable() {
+    let model = LocalInheritedNewModel::new();
+    let value = elwindui::new!(LocalInheritedBindableDerived(model: Rc::clone(&model)));
+
+    assert!(Rc::ptr_eq(
+        &LocalInheritedBindableBaseExt::model(&value.base),
+        &model
+    ));
+}
+
+// Compile/type-shape coverage only. AppKit Window creation is not executed from an ordinary Rust
+// test worker; the codegen semantic expansion test and Windows main-thread test own behavior proof.
+#[allow(dead_code)]
+fn new_macro_constructs_builtin_window_with_named_property() {
+    let _window = elwindui::new!(Window(title: "Text"));
+}
 
 /// This is intentionally a normal consumer shape: `elwindui` and the external generated
 /// component crate are separate dependencies, and the DSL uses the external crate-qualified path
@@ -108,17 +246,96 @@ impl ExternalDynamicForTemplateHost {}
 struct ExternalShapeHost {
     #[prop(default = Some(String::from("optional")))]
     optional_value: Option<String>,
+    #[prop(default = Some(String::from("deferred")))]
+    deferred_value: Option<String>,
     body: view! {
         elwindui_external_component_fixture::ExternalShapeProbe {
             count: 7
             optional: optional_value
-            deferred: "deferred"
+            deferred: deferred_value
         }
     },
 }
 
 #[component]
 impl ExternalShapeHost {}
+
+#[test]
+fn new_macro_constructs_external_generated_component_with_named_fields() {
+    let title_calls = Rc::new(std::cell::Cell::new(0));
+    let fallback_calls = Rc::new(std::cell::Cell::new(0));
+    let title_calls_for_expr = Rc::clone(&title_calls);
+    let fallback_calls_for_expr = Rc::clone(&fallback_calls);
+    let card = elwindui::new!(elwindui_external_component_fixture::RequiredExternalCard(
+        mutable_label: "mutable",
+        optional_fallback: {
+            fallback_calls_for_expr.set(fallback_calls_for_expr.get() + 1);
+            String::from("fallback")
+        },
+        optional: Some("optional"),
+        count: 7,
+        fixed: 9,
+        defaulted_optional: Some("defaulted"),
+        title: {
+            title_calls_for_expr.set(title_calls_for_expr.get() + 1);
+            String::from("title")
+        },
+    ));
+
+    assert_eq!(title_calls.get(), 1);
+    assert_eq!(fallback_calls.get(), 1);
+    assert_eq!(RequiredExternalCardExt::title(&*card), "title");
+    assert_eq!(RequiredExternalCardExt::count(&*card), 7);
+    assert_eq!(RequiredExternalCardExt::fixed(&*card), 9);
+    assert_eq!(
+        RequiredExternalCardExt::defaulted_optional(&*card),
+        Some(String::from("defaulted"))
+    );
+    assert_eq!(
+        RequiredExternalCardExt::optional(&*card),
+        Some(String::from("optional"))
+    );
+    assert_eq!(
+        RequiredExternalCardExt::optional_fallback(&*card),
+        "fallback"
+    );
+    assert_eq!(RequiredExternalCardExt::mutable_label(&*card), "mutable");
+
+    let defaulted_card = elwindui::new!(elwindui_external_component_fixture::RequiredExternalCard(
+        title: "defaulted",
+        count: 1,
+        optional: None,
+    ));
+    assert_eq!(RequiredExternalCardExt::fixed(&*defaulted_card), 5);
+    assert_eq!(
+        RequiredExternalCardExt::defaulted_optional(&*defaulted_card),
+        None
+    );
+}
+
+#[test]
+fn new_macro_constructs_same_crate_generated_component_and_mounts_it() {
+    let probe = elwindui::new!(LocalNewProbe(
+        label: "label",
+        optional: Some(String::from("optional")),
+        optional_param: Some("parameter"),
+        fixed: 9,
+        required: "required",
+    ));
+
+    assert_eq!(LocalNewProbeExt::required(&*probe), "required");
+    assert_eq!(
+        LocalNewProbeExt::optional_param(&*probe),
+        Some(String::from("parameter"))
+    );
+    assert_eq!(LocalNewProbeExt::fixed(&*probe), 9);
+    assert_eq!(
+        LocalNewProbeExt::optional(&*probe),
+        Some(String::from("optional"))
+    );
+    assert_eq!(LocalNewProbeExt::label(&*probe), "label");
+    assert_eq!(probe.visual_children().len(), 1);
+}
 
 #[test]
 fn qualified_external_components_preserve_properties_content_and_resync() {
@@ -253,6 +470,25 @@ fn cargo_alias_external_component_uses_defining_crate_shape() {
 }
 
 #[test]
+fn new_macro_constructs_cargo_aliased_external_component() {
+    let item = elwindui::new!(external_component_fixture_alias::AliasedExternalProbe(
+        label: "new alias"
+    ));
+    let text = item
+        .visual_children()
+        .into_iter()
+        .next()
+        .expect("aliased component template root is attached")
+        .as_any()
+        .downcast_ref::<elwindui::core::ui::TextBlock>()
+        .expect("aliased component template root is TextBlock")
+        .text
+        .borrow()
+        .to_string();
+    assert_eq!(text, "new alias");
+}
+
+#[test]
 fn qualified_external_template_dynamic_for_replaces_collection_items() {
     let host = ExternalDynamicForTemplateHost::new();
     let root = host
@@ -282,7 +518,7 @@ fn qualified_external_template_dynamic_for_replaces_collection_items() {
 }
 
 #[test]
-fn qualified_external_shape_preserves_scalar_option_and_deferred_setters() {
+fn qualified_external_shape_preserves_scalar_and_option_props() {
     let host = ExternalShapeHost::new();
     let probe_root = host
         .visual_children()

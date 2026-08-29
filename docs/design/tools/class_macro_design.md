@@ -121,8 +121,10 @@ whether the external class shape contains a writable property and for the setter
 The source `FieldDef` is joined only for declaration attributes such as `two_way`, `routed`, and
 semantic-brush behavior. The internal `#[prop(owned, ..)]` marker preserves generated setter
 conventions: only an actual `String` setter parameter receives `.to_string()`; every other actual
-setter type is passed through unchanged. Required constructor parameters are not synthesized by the
-zero-argument external construction path; that constructor ABI is deferred to follow-up Issue #193.
+setter type is passed through unchanged. The separate generated constructor ABI is consumed by
+`elwindui::new!`: required/defaulted Param shape is supplied by `ComponentPublicShape`/`TypeInfo`,
+while ordinary Props remain optional pre-mount initial values and are not promoted to constructor
+parameters.
 
 `owned` is an internal class-shape flag used only when generated component metadata must preserve an
 owned setter convention, for example `#[prop(owned, title: String)]`. It is not recommended

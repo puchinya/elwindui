@@ -144,7 +144,7 @@ fn test_unmount_cancels_property_subscriptions() {
     clear_unmount_events();
     CHILD_PROP_CHANGED_COUNT.with(|c| c.set(0));
 
-    let parent = SubscribingParent::new("initial".to_string());
+    let parent = elwindui::new!(SubscribingParent(text: "initial".to_string()));
     let initial_count = CHILD_PROP_CHANGED_COUNT.with(|c| c.get());
 
     parent.set_text("second".to_string());
@@ -349,7 +349,7 @@ fn test_dynamic_if_branch_removal_triggers_unmount() {
     clear_unmount_events();
 
     let vm = DynamicSwitchViewModel::new();
-    let _host = DynamicIfHost::new(vm.clone());
+    let _host = elwindui::new!(DynamicIfHost(vm: vm.clone()));
 
     assert_eq!(get_unmount_events().len(), 0);
 
@@ -495,7 +495,7 @@ fn test_dynamic_for_removal_triggers_unmount() {
     vm.items_push(item_b.clone());
     vm.items_push(item_c.clone());
 
-    let _host = DynamicForHost::new(vm.clone());
+    let _host = elwindui::new!(DynamicForHost(vm: vm.clone()));
 
     assert_eq!(get_unmount_events().len(), 0);
 
@@ -590,7 +590,7 @@ fn test_dynamic_match_branch_removal_triggers_unmount() {
     clear_unmount_events();
 
     let vm = DynamicMatchViewModel::new();
-    let _host = DynamicMatchHost::new(vm.clone());
+    let _host = elwindui::new!(DynamicMatchHost(vm: vm.clone()));
 
     assert_eq!(get_unmount_events().len(), 0);
 

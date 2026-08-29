@@ -2169,9 +2169,9 @@ fn check_attached_properties_in_expr(
 /// Checks a `Type { attr: value, .. }` element used as a value — either a closure body
 /// (`render_content: |param| Type { .. }`, `param` is `Some`) or an ordinary named-slot attribute
 /// value (`menu_bar: MenuBar { .. }`, `param` is `None`). `Type` must resolve to an in-scope
-/// component, and every one of its required `#[param]`-shaped fields must be satisfiable: by a
-/// matching attribute, by being `Option<..>`-typed (defaults to `None`), by a `children`-named
-/// field (filled from `elem`'s bare nested children, whatever their count), or — mirroring
+/// component, and every one of its required `#[param]`-shaped fields must be satisfiable by a
+/// matching attribute, by a `children`-named field (filled from `elem`'s bare nested children,
+/// whatever their count), or — mirroring
 /// `emit_construction`'s own positional fallback (e.g. `MenuBarItem`'s single nested `Menu`) — by
 /// an available bare child. Anything left over is reported here instead of `panic!`ing deep in
 /// codegen.
@@ -2194,16 +2194,15 @@ fn check_element_value(
                 return;
             }
             let mut next_positional_child = 0usize;
-            for (name, ty) in &info.param_fields {
+            for (name, _) in &info.param_fields {
                 if name == "children" {
                     continue;
                 }
-                let (_, is_option) = codegen::strip_option(ty);
                 let has_attr = elem
                     .attributes
                     .iter()
                     .any(|attribute| &attribute.name == name);
-                if has_attr || is_option {
+                if has_attr {
                     continue;
                 }
                 if next_positional_child < elem.children.len() {

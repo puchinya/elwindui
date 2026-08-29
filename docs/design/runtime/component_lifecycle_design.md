@@ -4,26 +4,46 @@ Related specification: [`../../specs/dsl_spec.md`](../../specs/dsl_spec.md) §3 
 
 Tracking issue: [#80](https://github.com/puchinya/elwindui/issues/80). This document is the design deliverable of child issue CI-1 (#104).
 
-## 1. Current construction flow (as of this writing)
+## 1. Current construction flow (direct constructors and `new!`)
 
-There is no `Component` trait in this codebase; "component" is a DSL/codegen-level concept realized in two separate proc-macro crates that cooperate:
+Issue #193 adds a named construction boundary without changing the lifecycle state model below.
+`elwindui::new!(Type(...))` uses the generated/internal `__new_unmounted` path for view-bearing
+components, passes required Param/Bindable values in declaration order, applies defaulted Params and
+ordinary Prop/content initial values through hidden Created-state setters, and calls `mount(environment)`
+last. These initial setters share the normal backing storage but do not publish notifications, run
+runtime resync, or invoke user callbacks. Direct generated `Type::new(..)` remains the low-level
+constructor surface generated for the component's own crate; the named macro is the cross-origin
+surface that also routes qualified external components through their defining-crate constructor ABI.
 
-- **`elwindui-codegen`**'s `generate_view` (`crates/elwindui-codegen/src/codegen.rs`, the function that expands a `#[elwindui::component]` struct with a `view!` body) plans the element tree (`plan_element`, post-order flatten into `Vec<PlannedNode>`) and emits per-node construction (`emit_construction`). For a nested user component, `emit_construction` emits `let #binding = #ChildType::new(#args);` — a direct, synchronous, recursive call into the child's own generated `new()`.
-- **`elwindui-macros`**'s `#[elwindui::class]` (`crates/elwindui-macros/src/class.rs`) independently owns generating the *outer* `new()` for any class using the macro (which includes every `view!`-bearing component, since `generate_view` targets are `#[class]`-composed). Its contract (`docs/design/tools/class_macro_design.md` §"Construction", `crates/elwindui-macros/src/class.rs:110-116`):
-  - A class must define `fn construct(..) -> Self` (never a hand-written `new` — hand-written `new` is a compile error, "it would compete with the generated ownership sequence").
-  - The macro generates `new(..) -> Rc<Self>` as `Rc::new_cyclic(|weak| Self::construct(..))`, then calls `__elwindui_run_on_constructed()` **unconditionally, automatically, exactly once**, immediately after `Rc::new_cyclic` returns.
-  - `__elwindui_run_on_constructed()` chains any optional `fn on_constructed(&self)` a class defines, **base-first** across one `inherits` hop (composed multi-level chaining is a known limitation, `docs/status/implementation_status.md`).
+There is no `Component` trait in this codebase; "component" is a DSL/codegen-level concept realized in two cooperating proc-macro crates:
 
-`generate_view` supplies the `construct`/`on_constructed` bodies `#[class]` expects:
+- **`elwindui-codegen`**'s `generate_view` plans the element tree and emits the view-bearing component's
+  `construct`, `mount`, `__new_unmounted`, and `__build_view` paths. Plan-driven descendants are built
+  from `__build_view`, after the owner has entered `Mounted`; a normal nested `view!` child still uses
+  its generated `Type::new(..)` path and therefore self-mounts immediately.
+- **`elwindui-macros`**'s `#[elwindui::class]` owns the generated outer `new(..) -> Rc<Self>` and its
+  `__new_unmounted(..) -> Rc<Self>` sibling. Both allocate through the same `construct(..)` method;
+  only `new` invokes the automatic `on_constructed` hook chain. `__new_unmounted` is the internal seam
+  used by named construction so initial values can be applied before `mount`.
 
-- `construct(..)` (`codegen.rs:4642-4646`) runs `construct_stmts` — which is where the entire descendant tree is built today: `plan_element`'s flattened nodes are constructed in post-order via `emit_construction`, each nested user-component node making its own recursive `ChildType::new()` call (which itself runs this whole pipeline, including *that* child's own `on_constructed`, before returning). `#[environment(name)]` fields are also resolved here, first, via `EnvironmentContext::current()` (ambient thread-local read).
-- `on_constructed(&self)` (`codegen.rs:4674-4700`) runs, in order: `content_attach_stmt`, event `wiring_stmts` (reconstructing a real `Rc<Self>` from the `__self_weak` field `construct` populated), `__refresh_dynamic_regions()`, `resync()`, then (again gated on the reconstructed `Rc`) `component_self_subscription`, `subscribe_stmts`, `own_environment_subscribe_stmts`, and finally `on_mount_stmt` — the DSL-author's `on_mount { .. }` block, spliced verbatim, last.
+`generate_view` supplies the `construct`/`on_constructed` bodies expected by `#[class]`: `construct`
+creates the bare storage and composed base, while `on_constructed` invokes `mount(application_environment())`
+(except for a `Window` host composition, which mounts on first `show()`). `mount` establishes the
+environment, runs the mount override, and invokes `__build_view` exactly once. `__build_view` constructs
+descendants, attaches ordinary content, wires events, performs initial resync/subscriptions, and finally
+runs `on_mount`.
 
-For a plain (non-`#[class]`, `has_view == true` but no ancestor/shape composition) component, `generate_view` instead emits a single hand-rolled `new()` (`codegen.rs:4725-4739`) that inlines the same sequence directly — construct, `Rc::new`, content attach, wiring, resync, subscribe, `on_mount` — with no `construct`/`on_constructed` split at all today.
+For the plain non-`#[class]` view-bearing shape, `generate_view` emits the same public behavior directly:
+`new` calls `__new_unmounted` and then `mount`, while named construction calls `__new_unmounted`, applies
+defaulted Params and ordinary writable Props/content through hidden initial setters, and mounts last.
+`on_unmount` and `on_update` are generated as part of the same lifecycle/property machinery and are
+invoked by teardown or later property notifications respectively.
 
-`on_unmount` is codegen'd as an inert `__run_on_unmount(&self)` method with zero call sites in either shape (no detach/teardown trigger exists in the runtime today). `on_update` has no codegen path at all.
-
-**Net effect:** today, "construct," "mount," and "build" are the same synchronous call, for both component shapes. The `#[class]`-composed shape already has a two-function seam (`construct`/`on_constructed`) that looks superficially like a construction/mount split, but both halves run back-to-back inside one macro-generated `new()`, automatically, with no host-attach boundary and no way to defer the second half.
+**Net effect:** direct generated `Type::new(..)` remains a convenience entry point that constructs and
+mounts immediately. `elwindui::new!(Type(...))` is the explicit named-construction boundary: it preserves
+the Created interval long enough to apply required/defaulted constructor values and ordinary initial
+Props/content, then performs one mount. Builtin `Type::new()` plus its existing property/content protocol
+continues to serve hand-written framework types.
 
 ## 2. Target lifecycle state model
 
@@ -43,11 +63,11 @@ Unmounted
 
 The internal representation does not need a literal `enum LifecycleState` field on every generated component (see §6, Performance) — what must remain true and distinguishable is:
 
-- **Created**: `new()` has returned an `Rc<Self>`. No `view!` has been evaluated. No descendant Components exist. No Environment has been resolved or subscribed to. `__environment` (where present) is absent/unset.
-- **Mounted+Built**: `mount(environment)` has run to completion. Per spec §5, "mount" and "initial build" are not separately invoked by generated/application code — `mount()` performs both, in that order, as one step. `__environment` is set. The view subtree exists. `on_mount` has fired.
+- **Created**: `__new_unmounted()` has returned an `Rc<Self>` and `mount()` has not yet run. No `view!` has been evaluated. No descendant Components exist. No Environment has been resolved or subscribed to. `__environment` (where present) is absent/unset. This is the temporary state used by `new!` and by explicit environment-scope construction; direct `Type::new(..)` normally advances past it immediately.
+- **Mounted+Built**: `mount(environment)` has run to completion. Per spec §5, "mount" and "initial build" are not separately invoked by generated/application code — `mount()` performs both, in that order, as one step. `__environment` is set. The view subtree exists. `on_mount` has fired. Direct generated `Type::new(..)` returns in this state.
 - **Unmounted**: subscriptions cancelled, Visual subtree released, native backend objects released where applicable. Re-mounting an unmounted Component is not part of this initiative's scope (§80's non-goals; nothing in the Codex Task spec requires resurrection).
 
-This directly reuses `ui_tree_design.md`'s existing "Construction / Mounting / Unmounting" terminology (`ui_tree_design.md:23-27`) rather than inventing new nouns; "Built" is introduced here as the sub-state `ui_tree_design.md` already implies ("Mounting attaches the subtree to a host and enables ... layout, rendering, input") without a separate name. No code in this repository names a `build()` phase independently reachable from `mount()` — per Codex Task spec §5, a separate internal build function ("desirable for code organization and future rebuild behavior") is an implementation-organization choice for CI-2/CI-3, not a third state application or generated code observes.
+This directly reuses `ui_tree_design.md`'s existing "Construction / Mounting / Unmounting" terminology (`ui_tree_design.md:23-27`) rather than inventing new nouns; "Built" is introduced here as the sub-state `ui_tree_design.md` already implies ("Mounting attaches the subtree to a host and enables ... layout, rendering, input") without a separate public phase. `__new_unmounted()` is an internal construction seam, not a second public lifecycle model; `new!` is the only named API that intentionally exposes the Created interval to generated initialization code.
 
 ## 3. Ownership rule (spec §23)
 
@@ -70,6 +90,15 @@ This is the central structural decision this document must make, because every l
 - Idempotency: `mount()` calls `self.__mount_environment.set(environment).expect("mount: component is already mounted")`. `OnceCell::set` failing on a second call *is* the idempotency guard — no separate boolean flag needed. This is a hard panic (not a `Result` returned to the caller, not a silent no-op): lifecycle misuse must "fail deterministically" (spec §27), and a duplicated Visual subtree is worse than a panic since nothing in the DSL author's control could accidentally trigger this today (only generated code calls `mount()`).
 - Signature: `#[doc(hidden)] pub fn mount(&self, environment: EnvironmentContext)` for the `#[class]`-composed shape (matching `on_constructed`'s own `&self` receiver, and reusing the existing `__self_weak` reconstruction inside `__build_view` rather than needing `Rc<Self>` at the `mount` boundary itself); `#[doc(hidden)] fn mount(self: &std::rc::Rc<Self>, environment: EnvironmentContext)` for the plain shape (matching `__build_view`'s own `Rc<Self>` receiver there). `pub` on the composed shape now, ahead of CI-4 actually needing cross-component calls, since visibility is not an observable-behavior change.
 - Call sites: `on_constructed(&self) { self.mount(EnvironmentContext::current()); }` (composed); `new() { ...; this.mount(EnvironmentContext::current()); this }` (plain) — the `EnvironmentContext::current()` bridge is explicitly temporary (spec §7) and is removed once CI-6 deletes ambient thread-local propagation.
+
+The named-construction ABI is layered on this lifecycle seam. Its generated `__new_unmounted(..)`
+returns while the instance is still `Created`; `elwindui::new!` then applies defaulted Params and
+ordinary writable Props/content through hidden initial setters, and calls `mount(application_environment())`
+last. Those initial writes use the normal storage without notifications, resync, or user callbacks.
+`#[content(field)]` remains a regular content/property designation: it does not add a constructor
+argument or a bare-child constructor protocol. Inherited generated components reuse the effective
+constructor order and forward inherited required Params/Bindables and writable Props through their
+existing base/class surface; they do not flatten a second public shape.
 
 ### 4b. CI-4's concrete mechanism: relocating plan-driven descendant construction into `__build_view()`
 

@@ -196,6 +196,6 @@ impl FontDemoWindow {}
 #[elwindui::main]
 fn main() {
     let vm = FontDemoViewModel::new();
-    let window = FontDemoWindow::new(vm);
+    let window = elwindui::new!(FontDemoWindow(vm: vm));
     window.show();
 }

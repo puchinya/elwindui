@@ -1,5 +1,9 @@
 use proc_macro::TokenStream;
+use std::collections::HashSet;
+use syn::parse::{Parse, ParseStream};
+use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
+use syn::{Expr, Ident, Path, Token, parenthesized};
 
 mod class;
 
@@ -147,6 +151,83 @@ pub fn template_view(input: TokenStream) -> TokenStream {
         Ok(tokens) => tokens.into(),
         Err(error) => {
             let message = format!("template_view!: {error}");
+            quote::quote! { compile_error!(#message); }.into()
+        }
+    }
+}
+
+struct NewArgument {
+    name: Ident,
+    _colon: Token![:],
+    value: Expr,
+}
+
+impl Parse for NewArgument {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let name: Ident = input.parse()?;
+        if input.peek(Token![=]) {
+            return Err(syn::Error::new(
+                name.span(),
+                "new! arguments must use the name: expression form",
+            ));
+        }
+        let colon = input.parse().map_err(|_| {
+            syn::Error::new(
+                name.span(),
+                "new! arguments must use the name: expression form",
+            )
+        })?;
+        let value = input.parse()?;
+        Ok(Self {
+            name,
+            _colon: colon,
+            value,
+        })
+    }
+}
+
+struct NewInput {
+    target: Path,
+    args: Punctuated<NewArgument, Token![,]>,
+}
+
+impl Parse for NewInput {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let target: Path = input.parse()?;
+        let content;
+        parenthesized!(content in input);
+        let args = content.parse_terminated(NewArgument::parse, Token![,])?;
+        if !input.is_empty() {
+            return Err(input.error("new! expects one type call: Type(name: expression, ...)"));
+        }
+        let mut names = HashSet::new();
+        for argument in &args {
+            if !names.insert(argument.name.to_string()) {
+                return Err(syn::Error::new(
+                    argument.name.span(),
+                    format!("duplicate constructor field '{}' in new!", argument.name),
+                ));
+            }
+        }
+        Ok(Self { target, args })
+    }
+}
+
+#[proc_macro]
+pub fn new(input: TokenStream) -> TokenStream {
+    let input = match syn::parse::<NewInput>(input) {
+        Ok(input) => input,
+        Err(error) => return error.into_compile_error().into(),
+    };
+    let args: Vec<_> = input
+        .args
+        .into_iter()
+        .map(|argument| (argument.name, argument.value))
+        .collect();
+    match elwindui_codegen::codegen::generate_new_expression(&input.target, &args) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => {
+            let message = format!("new!: {error}");
             quote::quote! { compile_error!(#message); }.into()
         }
     }
@@ -472,4 +553,39 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
     .into()
+}
+
+#[cfg(test)]
+mod new_parser_tests {
+    use super::NewInput;
+
+    #[test]
+    fn accepts_qualified_named_arguments_in_free_order() {
+        let input: NewInput = syn::parse_str(
+            "some_alias::widgets::Card(count: if enabled { 1 } else { 0 }, title: label,)",
+        )
+        .expect("new! should accept qualified named arguments and a trailing comma");
+
+        assert_eq!(input.target.segments.last().unwrap().ident, "Card");
+        assert_eq!(input.args.len(), 2);
+        assert_eq!(input.args[0].name, "count");
+        assert_eq!(input.args[1].name, "title");
+    }
+
+    #[test]
+    fn rejects_duplicate_and_non_named_argument_forms() {
+        let duplicate = match syn::parse_str::<NewInput>("Card(title: first, title: second)") {
+            Ok(_) => panic!("duplicate fields must be rejected before codegen"),
+            Err(error) => error,
+        };
+        assert!(
+            duplicate
+                .to_string()
+                .contains("duplicate constructor field")
+        );
+
+        assert!(syn::parse_str::<NewInput>("Card(title = value)").is_err());
+        assert!(syn::parse_str::<NewInput>("Card(value)").is_err());
+        assert!(syn::parse_str::<NewInput>("Card(title: value) { child }").is_err());
+    }
 }

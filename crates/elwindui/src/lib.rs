@@ -256,7 +256,7 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// ```
 ///
 /// A deferred view (`view! { .. }` written as an attribute value, e.g. `context_popup: view! {
-/// .. }`) may only be assigned to a property declared `ViewTemplate`/`Option<ViewTemplate>` — on a
+/// .. }`) may only be assigned to a property declared `ViewFactory`/`Option<ViewFactory>` — on a
 /// same-crate `#[elwindui::component]`-declared type this is caught by static DSL validation, but
 /// a real builtin (`TextBlock`, every other type re-exported here) has no such local type
 /// information for the validator to check against, so this is instead enforced by a generated
@@ -268,7 +268,7 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// struct InvalidDeferredViewTarget {
 ///     body: view! {
 ///         TextBlock {
-///             // `text` is declared `String`, not `ViewTemplate`/`Option<ViewTemplate>` — this
+///             // `text` is declared `String`, not `ViewFactory`/`Option<ViewFactory>` — this
 ///             // must fail to compile, not silently coerce or panic at runtime.
 ///             text: view! {
 ///                 TextBlock { text: "nope" }
@@ -281,7 +281,7 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// impl InvalidDeferredViewTarget {}
 /// ```
 ///
-/// while the matching `context_popup` assignment (a real `ViewTemplate`-typed builtin property)
+/// while the matching `context_popup` assignment (a real `ViewFactory`-typed builtin property)
 /// compiles: see `crates/elwindui/tests/context_menu_and_popup.rs`'s many
 /// `declarative_context_popup_*` tests.
 pub mod ui {

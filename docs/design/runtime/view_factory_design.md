@@ -1,9 +1,9 @@
-# ViewTemplate: generic deferred View factory
+# ViewFactory: generic deferred View factory
 
 Normative contract: [`../../specs/ui_spec.md`](../../specs/ui_spec.md) (`context_popup`)
 
 Tracking: [#161](https://github.com/puchinya/elwindui/issues/161) (this document's own scope — the
-`ViewTemplate` runtime/backend foundation); declarative `context_popup: view! { .. }` DSL codegen
+`ViewFactory` runtime/backend foundation); declarative `context_popup: view! { .. }` DSL codegen
 sugar (§3) was split out to [#162](https://github.com/puchinya/elwindui/issues/162) and is now
 implemented — see `docs/design/runtime/popup_context_menu_design.md`'s "Declarative `context_popup:
 view! { .. }` DSL" subsection for the lowering mechanism in full; §3/§4 below are kept as a shorter
@@ -11,16 +11,16 @@ summary from this document's own, narrower perspective.
 
 ## 1. Relationship to `ControlTemplate<C>`
 
-`ViewTemplate` and `ControlTemplate<C>` (`docs/design/runtime/control_template_design.md`) are
+`ViewFactory` and `ControlTemplate<C>` (`docs/design/runtime/control_template_design.md`) are
 **separate public types** — neither an alias nor a shared public supertype of the other, and this is
 deliberate, not an oversight to unify later.
 
-`ControlTemplate<C>` carries Control-specific semantics that `ViewTemplate` does not share:
+`ControlTemplate<C>` carries Control-specific semantics that `ViewFactory` does not share:
 `templated_parent` (a strongly-typed `Weak<C>`), the `ContentPresenter`/logical-content vs.
 template-visual split, and template selection fixed for the owning Control's entire mount lifetime
-(selected once, in `mount()`, never re-evaluated). `ViewTemplate` has none of these — it exists for
+(selected once, in `mount()`, never re-evaluated). `ViewFactory` has none of these — it exists for
 content whose lifecycle is independent of any single owner's mount lifetime and may be built again on
-each new demand (a popup opened a second time gets a second, unrelated `ViewTemplate::build` call, not
+each new demand (a popup opened a second time gets a second, unrelated `ViewFactory::build` call, not
 a re-selection of the same template instance).
 
 What the two types share is only the shape of their private storage:
@@ -31,15 +31,15 @@ struct DeferredViewFactory<C> {
 }
 ```
 
-(`crates/elwindui-core/src/ui/view_template.rs`, `pub(crate)`, not exported). `ControlTemplate<C>`
+(`crates/elwindui-core/src/ui/view_factory.rs`, `pub(crate)`, not exported). `ControlTemplate<C>`
 wraps `DeferredViewFactory<ControlTemplateContext<C>>` and unwraps the `Option` in `__build` (its own
 contract guarantees a factory always produces a root — building is infallible from a caller's
 perspective, since `ControlTemplateContext<C>::control: Rc<C>` is always alive during a build).
-`ViewTemplate` wraps `DeferredViewFactory<ViewBuildContext>` and stays `Option`-returning end to end,
+`ViewFactory` wraps `DeferredViewFactory<ViewBuildContext>` and stays `Option`-returning end to end,
 since its `ViewBuildContext::owner: Weak<dyn UIElementExt>` may have already been dropped by build
 time.
 
-## 2. `ViewTemplate` / `ViewBuildContext`
+## 2. `ViewFactory` / `ViewBuildContext`
 
 ```rust
 pub struct ViewBuildContext {
@@ -47,11 +47,11 @@ pub struct ViewBuildContext {
     pub environment: EnvironmentContext,
 }
 
-pub struct ViewTemplate {
+pub struct ViewFactory {
     factory: DeferredViewFactory<ViewBuildContext>,
 }
 
-impl ViewTemplate {
+impl ViewFactory {
     pub fn new(factory: impl Fn(ViewBuildContext) -> Option<Rc<dyn UIElementExt>> + 'static) -> Self;
     pub fn build(&self, context: ViewBuildContext) -> Option<Rc<dyn UIElementExt>>;
 }
@@ -60,12 +60,12 @@ impl ViewTemplate {
 `ViewBuildContext` carries no popup-specific field (no dismiss handle) — a popup-specific value
 (`PopupDismissAction`) is threaded through the popup-scoped `EnvironmentContext` instead
 (`docs/design/runtime/popup_context_menu_design.md` §6), never through `ViewBuildContext` itself, so
-that `ViewTemplate` stays a genuinely general primitive: today `context_popup`
+that `ViewFactory` stays a genuinely general primitive: today `context_popup`
 (`crate::ui::element::UIElement::context_popup`), potentially in the future lazy tab content,
-dialogs, sheets, or popovers — none of which is implemented against `ViewTemplate` yet, but the type
+dialogs, sheets, or popovers — none of which is implemented against `ViewFactory` yet, but the type
 carries no popup-only shape that would need to be generalized later.
 
-`owner` is always `Weak`: a `ViewTemplate` value is typically stored as a property of the very element
+`owner` is always `Weak`: a `ViewFactory` value is typically stored as a property of the very element
 it is a deferred view *for* (e.g. `context_popup` on the element that opens the popup), so a factory
 that captured its owner strongly would create an ownership cycle through that property. `build`
 upgrading a dead `owner` and returning `None` (rather than panicking or falling back to some default)
@@ -140,14 +140,14 @@ shape a physical bind owner already gets. See `docs/design/tools/codegen_design.
 full derivation and emission detail.
 
 Only the small amount of new surface area needed to recognize a `view! { .. }` token sequence in
-`context_popup` position, extract it into the hidden pair, and emit a `ViewTemplate::new(..)` factory
+`context_popup` position, extract it into the hidden pair, and emit a `ViewFactory::new(..)` factory
 that constructs a fresh instance of it per popup open is genuinely new. See
 `docs/design/runtime/popup_context_menu_design.md`'s "Declarative `context_popup: view! { .. }` DSL"
 subsection for the full three-part mechanism (lowering / weak-owner codegen / factory emission), and
 `docs/design/tools/codegen_design.md` §3.35 for the lowering pass and the raw-block rewriter's own
 lexical-scope-stack mechanism.
 
-`context_popup` may still be authored via the low-level `ViewTemplate::new(|ctx| ...)` API directly
+`context_popup` may still be authored via the low-level `ViewFactory::new(|ctx| ...)` API directly
 when full manual control is wanted (see `crates/elwindui/tests/context_menu_and_popup.rs` for
 examples) — the declarative sugar above compiles down to exactly that API.
 
@@ -156,17 +156,17 @@ examples) — the declarative sugar above compiles down to exactly that API.
 This document's own scope (§§1–2) and #162's scope (§3) are both delivered, but they make different
 guarantees, and the difference matters enough to state explicitly rather than leave implicit:
 
-**The `ViewTemplate` runtime contract (delivered, this document)** guarantees only:
+**The `ViewFactory` runtime contract (delivered, this document)** guarantees only:
 
 - the factory closure is invoked at deferred build/open time, not at any earlier declaration time;
 - `ViewBuildContext::owner` is supplied as `Weak<dyn UIElementExt>`;
 - a popup-scoped, `derive()`-d `EnvironmentContext` is supplied;
 - the owner may already be gone by build time, in which case `build` returns `None` — mechanically
-  enforced by `ViewTemplate::build` itself (`context.owner.upgrade()?` before the factory ever runs),
+  enforced by `ViewFactory::build` itself (`context.owner.upgrade()?` before the factory ever runs),
   not merely documented intent a factory could still bypass by never checking `ctx.owner`.
 
-It does **not** guarantee that a hand-written `ViewTemplate::new(|ctx| ...)` closure automatically
-reads the owner's *current* field/state value — `ViewTemplate::new` takes arbitrary Rust code, and a
+It does **not** guarantee that a hand-written `ViewFactory::new(|ctx| ...)` closure automatically
+reads the owner's *current* field/state value — `ViewFactory::new` takes arbitrary Rust code, and a
 caller can just as easily capture a stale value by mistake (e.g. `move |_ctx| { /* uses `selected_item`
 captured by value before this closure was even stored */ }`) as read it correctly through `ctx.owner`.
 The runtime type cannot enforce an authoring discipline it has no visibility into.
@@ -181,7 +181,7 @@ The runtime type cannot enforce an authoring discipline it has no visibility int
   lifetime, not the enclosing Component's.
 
 `docs/specs/ui_spec.md`'s "owner の現在値を評価する" wording describes the second (declarative)
-contract's behavior specifically — not a guarantee the first (low-level `ViewTemplate`) contract
+contract's behavior specifically — not a guarantee the first (low-level `ViewFactory`) contract
 enforces mechanically, since a hand-written closure can always capture a stale value by mistake as
 §4's first contract already notes.
 
@@ -208,15 +208,15 @@ the public key, per `theme_environment_spec.md` §2 — this is not an absolute 
 popup" runtime guarantee, only what the DSL-managed popup machinery itself does. This works today,
 independent of #162 — see
 `crates/elwindui/tests/context_menu_and_popup.rs`'s `popup_dismiss_environment_field_*` tests for a
-Component using it end to end via the low-level `ViewTemplate` API (§4's first contract).
+Component using it end to end via the low-level `ViewFactory` API (§4's first contract).
 
 ## 6. What this revision changed at the `elwindui-core`/backend layer
 
 Independent of the DSL question above, this revision:
 
-- Replaced `PopupContentTemplate`/`PopupContentContext` with `ViewTemplate`/`ViewBuildContext`
+- Replaced `PopupContentTemplate`/`PopupContentContext` with `ViewFactory`/`ViewBuildContext`
   (breaking rename — no compatibility shim was kept; `context_popup`'s prop type changed from
-  `Option<PopupContentTemplate>` to `Option<ViewTemplate>`).
+  `Option<PopupContentTemplate>` to `Option<ViewFactory>`).
 - Made `ContextMenuService::open_custom_popup` take the owner element, derive a popup-scoped
   `EnvironmentContext`, install a `PopupDismissAction` (also resolvable declaratively, §5), and return
   `Option<Rc<dyn PopupSurfaceHandle>>` (`None` when the template declines to build).
@@ -245,13 +245,13 @@ Independent of the DSL question above, this revision:
   already-unmounted popup subtree alive. Verified by `elwindui-core`'s
   `popup_surface_handle_releases_content_after_close_not_just_unmounted`.
 - Gave `PopupDismissAction` a private `PopupDismissState` (`Building` / `Open(Weak<..>)` /
-  `Dismissed`) inside `open_custom_popup`, so a dismiss request arriving during `ViewTemplate::build`
+  `Dismissed`) inside `open_custom_popup`, so a dismiss request arriving during `ViewFactory::build`
   (before any native surface exists — including a generated Component's own `on_mount`, both the
-  hand-authored `ViewTemplate` case and, since #162, a lowered hidden Component's own `on_mount`)
+  hand-authored `ViewFactory` case and, since #162, a lowered hidden Component's own `on_mount`)
   aborts the show entirely (`unmount_subtree`'d, never displayed) instead of being silently lost.
   Verified by `elwindui-core`'s `open_custom_popup_dismiss_during_build_prevents_the_popup_from_
   showing`; end to end with a real `#[elwindui::component]`, `elwindui`'s
-  `popup_dismiss_during_on_mount_prevents_popup_from_showing` (low-level `ViewTemplate` API) and
+  `popup_dismiss_during_on_mount_prevents_popup_from_showing` (low-level `ViewFactory` API) and
   `declarative_context_popup_dismiss_during_on_mount_prevents_popup_from_showing` (declarative
   `context_popup: view! { .. }`, #162).
 - Made `PopupHost::show_popup` fallible (`-> Option<Rc<dyn PopupSurfaceHandle>>`, previously
@@ -262,7 +262,7 @@ Independent of the DSL question above, this revision:
   `open_custom_popup`/`open_custom_menu`, rather than leaking a mounted-but-never-shown subtree.
   Verified by `elwindui-core`'s `open_custom_popup_unmounts_and_returns_none_when_backend_show_fails`
   and `open_custom_menu_unmounts_and_returns_none_when_backend_show_fails`.
-- Made `ViewTemplate::build` itself enforce owner liveness (`context.owner.upgrade()?` before
+- Made `ViewFactory::build` itself enforce owner liveness (`context.owner.upgrade()?` before
   invoking the factory) rather than merely documenting that a factory *should* check it — closing the
   gap between the documented runtime contract and what the type actually did. Verified by
   `elwindui-core`'s `build_returns_none_when_owner_dropped_and_never_invokes_the_factory`, which

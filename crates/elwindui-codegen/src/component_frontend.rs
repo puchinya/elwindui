@@ -255,7 +255,7 @@ pub(crate) fn component_module_items(
 /// is no token-level `view!` invocation left to re-parse here, only already-structured AST.
 ///
 /// `hidden_name` must already be the deterministic, ordinal-qualified name the caller assigned
-/// (`__ElwinduiViewTemplateInstanceFor<Outer>_<ordinal>`); `owner_type_name` is always the
+/// (`__ElwinduiViewFactoryInstanceFor<Outer>_<ordinal>`); `owner_type_name` is always the
 /// *original source* lexical Component's own bare name — the real, DSL-author-visible Component
 /// whose `view! { .. }` body this `DeferredView` was written inside — regardless of how many
 /// levels of nested `context_popup: view! { .. }` separate it from that Component (PR #165 review
@@ -267,7 +267,7 @@ pub(crate) fn component_module_items(
 /// rereview remediation, A2 — `codegen::implicit_owner_schema`, computed once from `owner_type_name`
 /// before any lowering happens, threaded through unchanged by every `lower_deferred_views_in_*`
 /// call, never recomputed from the hidden Component's own field list).
-pub(crate) fn hidden_view_template_component(
+pub(crate) fn hidden_view_factory_component(
     hidden_name: &str,
     owner_type_name: &str,
     implicit_owner: &ast::ImplicitOwnerDef,

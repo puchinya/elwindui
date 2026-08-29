@@ -12395,9 +12395,9 @@ fn emit_closure_value(
     quote! { Box::new(move |#param_ident: &_| { #body_expr }) }
 }
 
-/// Issue #162 §3.8/§4.7: emits the `ViewTemplate::new(move |ctx| { .. })` factory for a lowered
+/// Issue #162 §3.8/§4.7: emits the `ViewFactory::new(move |ctx| { .. })` factory for a lowered
 /// `ViewExpr::DeferredView` (`context_popup: view! { .. }`) attribute value. Called from every
-/// `ViewTemplate`-typed field value-computation site (`build_virtual_value`/
+/// `ViewFactory`-typed field value-computation site (`build_virtual_value`/
 /// `build_component_setters`/`build_component_optional_setters`) in place of the ordinary
 /// `emit_expr` call those sites otherwise use for a template field's value — mirrors those
 /// functions' own `ViewExpr::Element`/`ViewExpr::Closure` special-casing, since a deferred view is
@@ -12424,9 +12424,9 @@ fn emit_closure_value(
 /// hidden-Component constructor whose own field expects `Weak<SourceComponent>` — a straight type
 /// mismatch, not merely a semantic one.
 ///
-/// The factory is an `Fn`, not `FnOnce` (`ViewTemplate::new`'s own bound) — cloning the captured
+/// The factory is an `Fn`, not `FnOnce` (`ViewFactory::new`'s own bound) — cloning the captured
 /// weak owner on every call (Issue #162 §3.8) is required, not merely an optimization choice: the
-/// same `ViewTemplate` value is built once and may be `.build()` many times (once per popup-open).
+/// same `ViewFactory` value is built once and may be `.build()` many times (once per popup-open).
 fn emit_deferred_view_value(
     deferred: &DeferredViewExpr,
     ctx: &ViewCtx,
@@ -12458,7 +12458,7 @@ fn emit_deferred_view_value(
             ctx.template_bare_parent_fields.clone(),
         )
         .unwrap_or_else(|error| panic!("invalid nested template_view body: {error}"));
-        return crate::emit_view_template_factory(&compiled, target, &parent);
+        return crate::emit_view_factory(&compiled, target, &parent);
     }
     let hidden_name = deferred.hidden_component.as_deref().unwrap_or_else(|| {
         panic!(
@@ -12502,9 +12502,9 @@ fn emit_deferred_view_value(
     quote! {
         {
             #owner_capture
-            elwindui::core::ui::ViewTemplate::new(move |ctx| {
-                // `ViewTemplate::build` has already checked `ctx.owner`'s liveness before ever
-                // invoking this factory (docs/design/runtime/view_template_design.md §2) — this
+            elwindui::core::ui::ViewFactory::new(move |ctx| {
+                // `ViewFactory::build` has already checked `ctx.owner`'s liveness before ever
+                // invoking this factory (docs/design/runtime/view_factory_design.md §2) — this
                 // upgrade is for the *lexical* enclosing Component (`__view_owner_weak`), a
                 // distinct liveness check (Issue #162 §3.7).
                 __view_owner_weak.upgrade()?;
@@ -13012,15 +13012,15 @@ fn external_attribute_values(
             }
             // Issue #162: every real builtin (`TextBlock`, `Window`, ...) goes through this
             // `TypeInfo`-less path in a real (non-`elwindui-codegen`-internal-test) compilation —
-            // `context_popup`/any other `ViewTemplate`-typed field on one of them reaches codegen
+            // `context_popup`/any other `ViewFactory`-typed field on one of them reaches codegen
             // here, not through `build_virtual_value`/`build_component_setters` (those only ever
             // run for a component whose shape *does* have a local `TypeInfo`, e.g. this crate's own
             // `#[cfg(test)]` builtin-module fixtures). No `TypeInfo` here means no `is_option` to
             // check either — `wrap_prop_value` (`elwindui-macros`) only auto-`Some(..)`-wraps a
             // handful of recognized shapes (`String`/`Vec`/`BareFn`/`Brush`/`Color`/`Rc<dyn Trait>`),
-            // none of which `ViewTemplate` is, so this wraps unconditionally: every real target a
+            // none of which `ViewFactory` is, so this wraps unconditionally: every real target a
             // `ViewExpr::DeferredView` validates against (`validate::check_deferred_view_assignment`,
-            // §3.13) is `Option<ViewTemplate>` in practice — `context_popup` is still the only
+            // §3.13) is `Option<ViewFactory>` in practice — `context_popup` is still the only
             // production consumer.
             ViewExpr::DeferredView(deferred) => {
                 let factory = emit_deferred_view_value(deferred, ctx, from, table);
@@ -13032,13 +13032,13 @@ fn external_attribute_values(
                 // `synthesize_external_base_fields` already uses (Refs #90) — an unknown property
                 // name falls through to `@field_type`'s own existing terminal `compile_error!`
                 // unchanged (never reaches this call at all), and a known property whose declared
-                // type isn't `ViewTemplate`/`Option<ViewTemplate>` fails to compile with
+                // type isn't `ViewFactory`/`Option<ViewFactory>` fails to compile with
                 // `DeferredViewAssignmentTarget`'s own `#[diagnostic::on_unimplemented]` message
                 // naming both the field and the required type (`docs/specs/dsl_spec.md` rule 37).
                 // Unlike the round-1 version (which asserted the target type but then always
                 // wrapped in `Some(..)` regardless), this genuinely *produces* whichever of the
                 // two accepted shapes the property declares — correct for a real builtin property
-                // declared bare `ViewTemplate`, not only `Option<ViewTemplate>`.
+                // declared bare `ViewFactory`, not only `Option<ViewFactory>`.
                 quote! {
                     elwindui::core::ui::__coerce_deferred_view_assignment_target::<
                         #props_macro!(@field_type #name_ident)
@@ -14739,7 +14739,7 @@ fn build_virtual_value(
         let value = if let ViewExpr::DeferredView(deferred) = expr {
             // Issue #162: a virtual builtin (e.g. `TextBlock`) has no `ViewExpr::Element`/
             // `ViewExpr::Closure` special-casing elsewhere in this function (none of its own
-            // fields take one) — `context_popup`/any other `ViewTemplate`-typed field is the
+            // fields take one) — `context_popup`/any other `ViewFactory`-typed field is the
             // first one that needs a non-`emit_expr` value here.
             let factory = emit_deferred_view_value(deferred, ctx, from, table);
             if is_option {
@@ -17029,7 +17029,7 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
             panic!(
                 "a deferred view (`view! {{ .. }}`) cannot itself be used as a value expression \
                  here — it is only valid as a whole attribute value (e.g. `context_popup: view! \
-                 {{ .. }}`), emitted via its own dedicated ViewTemplate construction path, never \
+                 {{ .. }}`), emitted via its own dedicated ViewFactory construction path, never \
                  nested inside a larger expression"
             )
         }
@@ -20767,7 +20767,7 @@ struct NotepadWindow {
             .items
             .iter()
             .filter_map(|item| match item {
-                Item::Component(c) if c.name.starts_with("__ElwinduiViewTemplateInstance") => {
+                Item::Component(c) if c.name.starts_with("__ElwinduiViewFactoryInstance") => {
                     Some(c.name.as_str())
                 }
                 _ => None,
@@ -20883,7 +20883,7 @@ struct NotepadWindow {
     /// must route the built factory through `__coerce_deferred_view_assignment_target::<@field_type
     /// ..>(..)`, never through an unconditional `Some(..)` wrap regardless of the target's real
     /// declared type. Regression test for the exact round-1 defect: a real builtin property
-    /// declared bare `ViewTemplate` (not `Option<ViewTemplate>`) would have compiled (the round-1
+    /// declared bare `ViewFactory` (not `Option<ViewFactory>`) would have compiled (the round-1
     /// assertion only checked the type, never converted the value) and then failed at the
     /// generated setter call with a confusing type mismatch.
     ///
@@ -20940,7 +20940,7 @@ struct NotepadWindow {
         // The old, round-1 defect: the built factory wrapped unconditionally in `Some(..)` before
         // the declared type was ever consulted, entirely independent of the coercion call above.
         assert!(
-            !generated_str.contains("Some (elwindui :: core :: ui :: ViewTemplate :: new"),
+            !generated_str.contains("Some (elwindui :: core :: ui :: ViewFactory :: new"),
             "the external DeferredView branch must not unconditionally wrap the factory in \
              Some(..) — the target's real declared type must decide the shape: {generated_str}"
         );
@@ -21282,7 +21282,7 @@ struct NotepadWindow {
         // this test guards against is specific to the *hidden* Component's own generated section,
         // which begins at its own struct name and has no `vm` field of its own at all.
         let hidden_section_start = generated_str
-            .find("struct __ElwinduiViewTemplateInstanceForT27Owner_1")
+            .find("struct __ElwinduiViewFactoryInstanceForT27Owner_1")
             .expect("a hidden Component must have been generated for the one context_popup");
         let hidden_section = &generated_str[hidden_section_start..];
         assert!(
@@ -21351,8 +21351,8 @@ struct NotepadWindow {
         // declaration appears first so the slice always starts right after `T34Owner`'s own code,
         // regardless of that internal emission-order detail.
         let hidden_section_start = [
-            "struct __ElwinduiViewTemplateInstanceForT34Owner_1",
-            "struct __ElwinduiViewTemplateInstanceForT34Owner_2",
+            "struct __ElwinduiViewFactoryInstanceForT34Owner_1",
+            "struct __ElwinduiViewFactoryInstanceForT34Owner_2",
         ]
         .iter()
         .filter_map(|marker| generated_str.find(marker))

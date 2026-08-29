@@ -1057,7 +1057,7 @@ fn ancestor_bridge_path(bare_name: &str, ty: &Type) -> TokenStream2 {
 
 /// Rewrites every literal `crate` token to the `$crate` macro_rules metavariable, recursing into
 /// delimited groups (`(..)`/`[..]`/`{..}`) so a `crate`-qualified path nested inside a wrapping
-/// generic (`Option<crate::ui::ViewTemplate>`, `Fn(crate::X) -> crate::Y`) is rewritten too, not
+/// generic (`Option<crate::ui::ViewFactory>`, `Fn(crate::X) -> crate::Y`) is rewritten too, not
 /// only a path that *starts* the whole token stream. Needed specifically when a type/trait path is
 /// embedded as a *literal* token stream into a macro body this class generates for its *own* future
 /// descendants (`AncestorRoute`'s own fields, threaded into `build_inherit_macros`; `@field_type`'s
@@ -1073,7 +1073,7 @@ fn ancestor_bridge_path(bare_name: &str, ty: &Type) -> TokenStream2 {
 /// PR #165 review remediation, A4: an earlier revision of this function only ever checked the
 /// *first* token of the whole stream — correct for a token stream that *is itself* one bare path
 /// (`inherits = crate::ui::Control`'s own argument), but silently left `crate` unrewritten anywhere
-/// else, including a field type like `context_popup`'s own `Option<crate::ui::ViewTemplate>` (whose
+/// else, including a field type like `context_popup`'s own `Option<crate::ui::ViewFactory>` (whose
 /// first token is `Option`, not `crate`) — undetected until `@field_type` (A4's own new consumer)
 /// was the first caller to ever pass a type shaped that way through this function. `crate` is a
 /// reserved keyword only legally valid as the *start* of a path, never as an ordinary identifier

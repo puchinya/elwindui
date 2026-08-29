@@ -1326,7 +1326,7 @@ fn check_vm_references(
 }
 
 /// Issue #162 §3.13: a `ViewExpr::DeferredView` value (`context_popup: view! { .. }`) may only be
-/// assigned to a property declared `ViewTemplate`/`Option<ViewTemplate>` (any qualified-path
+/// assigned to a property declared `ViewFactory`/`Option<ViewFactory>` (any qualified-path
 /// spelling that resolves to the same bare type name), via a plain `property: value` or
 /// `once!(value)` assignment — never `<=>` (`AssignmentKind::TwoWay`), since a deferred view has no
 /// writable target to read back from. `once!(view! { .. })` is a distinct rejection from the target-
@@ -1371,11 +1371,11 @@ fn check_deferred_view_assignment(
         .next()
         .unwrap_or(inner)
         .trim();
-    if bare_name != "ViewTemplate" {
+    if bare_name != "ViewFactory" {
         errors.registry_dependent(format!(
-            "{component_name}: {location}: `{}.{}` is declared `{declared_ty}`, not `ViewTemplate` \
-             / `Option<ViewTemplate>` — a deferred view (`view! {{ .. }}`) can only be assigned to a \
-             `ViewTemplate`-typed property",
+            "{component_name}: {location}: `{}.{}` is declared `{declared_ty}`, not `ViewFactory` \
+             / `Option<ViewFactory>` — a deferred view (`view! {{ .. }}`) can only be assigned to a \
+             `ViewFactory`-typed property",
             node.type_path, attribute.name
         ));
     }
@@ -4399,9 +4399,9 @@ mod tests {
         );
     }
 
-    /// Issue #162 T3: a deferred view assigned to a non-`ViewTemplate`-typed property is rejected.
+    /// Issue #162 T3: a deferred view assigned to a non-`ViewFactory`-typed property is rejected.
     #[test]
-    fn rejects_deferred_view_assigned_to_non_view_template_field() {
+    fn rejects_deferred_view_assigned_to_non_view_factory_field() {
         let window_src = r#"
         struct WindowWithMistargetedDeferredView {
             body: view! {
@@ -4420,7 +4420,7 @@ mod tests {
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter()
-                .any(|e| e.contains("ViewTemplate") && e.contains("text")),
+                .any(|e| e.contains("ViewFactory") && e.contains("text")),
             "errors: {errs:?}"
         );
     }

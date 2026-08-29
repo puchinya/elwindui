@@ -7,7 +7,7 @@ use elwindui::core::ui::popup::{
     ContextMenuService, ContextRequest, PopupAnchor, PopupDismissAction, PopupHost, PopupRequest,
     PopupSurfaceHandle, ResolvedContextDefinition,
 };
-use elwindui::core::ui::{LayoutExt, MenuItemExt, UIElementExt, ViewTemplate, unmount_subtree};
+use elwindui::ui::{LayoutExt, MenuItemExt, UIElementExt, ViewFactory, unmount_subtree};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -191,7 +191,7 @@ fn custom_context_menu_service_opens_and_closes_popup() {
 #[test]
 fn rich_context_popup_displays_arbitrary_layout_and_controls() {
     let target = elwindui::core::ui::TextBlock::new();
-    let template = ViewTemplate::new(|_ctx| {
+    let template = ViewFactory::new(|_ctx| {
         let layout = elwindui::core::ui::VerticalLayout::new();
         let title = elwindui::core::ui::TextBlock::new();
         layout
@@ -492,7 +492,7 @@ thread_local! {
 struct PopupScopeChild {
     template: template_view! {
         on_mount {
-            let template = ViewTemplate::new(|ctx| {
+            let template = ViewFactory::new(|ctx| {
                 OBSERVED_SCOPE_THEME.with(|c| {
                     *c.borrow_mut() = ctx.environment.get::<PopupTestScopeTheme>();
                 });
@@ -728,7 +728,7 @@ fn popup_dismiss_environment_field_resolves_and_dismisses_declaratively() {
 
     let captured_dismiss: Rc<RefCell<Option<PopupDismissAction>>> = Rc::new(RefCell::new(None));
     let captured_clone = Rc::clone(&captured_dismiss);
-    let template = ViewTemplate::new(move |ctx| {
+    let template = ViewFactory::new(move |ctx| {
         // Mirrors what #162's `context_popup: view! { PopupDismissFieldContent {} }` codegen will
         // generate: construct without auto-mounting, then mount explicitly against the popup-scoped
         // Environment `ctx` carries (the same `__new_unmounted`/`mount` split `EnvironmentScope`'s
@@ -803,7 +803,7 @@ fn popup_dismiss_field_content_repeated_open_close_has_independent_lifetimes() {
     let open_and_close = || -> PopupDismissAction {
         let captured: Rc<RefCell<Option<PopupDismissAction>>> = Rc::new(RefCell::new(None));
         let captured_clone = Rc::clone(&captured);
-        let template = ViewTemplate::new(move |ctx| {
+        let template = ViewFactory::new(move |ctx| {
             let instance = PopupDismissFieldContent::__new_unmounted();
             instance.mount(ctx.environment);
             *captured_clone.borrow_mut() = instance.dismiss();
@@ -862,7 +862,7 @@ thread_local! {
 
 /// Calls the declarative `popup_dismiss` action from its own `on_mount` — mirrors what a generated
 /// declarative `context_popup: view! { .. }` root will be able to do once #162 lands (its Component
-/// root mounts *inside* `ViewTemplate::build`, before any native popup surface exists).
+/// root mounts *inside* `ViewFactory::build`, before any native popup surface exists).
 #[elwindui::component(inherits VerticalLayout)]
 struct PreShowDismissContent {
     #[environment(popup_dismiss)]
@@ -898,7 +898,7 @@ fn popup_dismiss_during_on_mount_prevents_popup_from_showing() {
     let weak_content: Rc<RefCell<Option<std::rc::Weak<dyn UIElementExt>>>> =
         Rc::new(RefCell::new(None));
     let weak_clone = Rc::clone(&weak_content);
-    let template = ViewTemplate::new(move |ctx| {
+    let template = ViewFactory::new(move |ctx| {
         // Mirrors #162's planned codegen shape: construct without auto-mounting, then mount
         // explicitly against the popup-scoped Environment (`EnvironmentScope`'s own existing
         // pattern) — `on_mount` (and therefore the dismiss() call inside it) runs during this
@@ -1118,7 +1118,7 @@ fn declarative_context_popup_builds_a_fresh_instance_on_every_open() {
 }
 
 /// Issue #162 T15: the enclosing Component is captured only `Weak` — once it's gone, the popup
-/// simply declines to build (`None`), the same "owner went away" contract `ViewTemplate::build`
+/// simply declines to build (`None`), the same "owner went away" contract `ViewFactory::build`
 /// already enforces for `ViewBuildContext::owner`, never a panic or a stale/dangling popup.
 #[test]
 fn declarative_context_popup_returns_none_when_lexical_owner_is_dropped() {
@@ -1128,7 +1128,7 @@ fn declarative_context_popup_returns_none_when_lexical_owner_is_dropped() {
         vm: vm.clone(),
         log: Rc::clone(&log),
     ));
-    // `target_dyn` keeps the *target element* (and its `context_popup: Option<ViewTemplate>`)
+    // `target_dyn` keeps the *target element* (and its `context_popup: Option<ViewFactory>`)
     // alive independently of `owner` itself — exactly the ownership shape a real popup-target
     // element has relative to the Component that declared it.
     let target_dyn: Rc<dyn UIElementExt> = owner.target();
@@ -1333,7 +1333,7 @@ fn declarative_context_popup_content_is_releasable_after_close() {
 }
 
 /// Issue #162 T14: a nested Component's own `on_mount` calling the declarative `popup_dismiss`
-/// action (`PreShowDismissContent`, already exercised via the low-level `ViewTemplate::new(|ctx|
+/// action (`PreShowDismissContent`, already exercised via the low-level `ViewFactory::new(|ctx|
 /// ..)` API above) works identically through the real `context_popup: view! { .. }` declarative
 /// path — the popup is aborted before any native surface is shown, distinguishing "never shown"
 /// from "shown then immediately closed".
@@ -2000,7 +2000,7 @@ fn declarative_context_popup_nested_popup_observes_current_outer_value() {
     // chain reaching all the way back to `A3NestedDeferredOwner`).
     let inner_content = Rc::clone(&inner_host.shown.borrow()[0].0);
     // The inner popup's own content root is the second hidden Component's own root (a
-    // `ContentControl`, per `hidden_view_template_component`'s base) — its declared `TextBlock {
+    // `ContentControl`, per `hidden_view_factory_component`'s base) — its declared `TextBlock {
     // text: value }` is its visual *child*, same one-level-of-wrapping shape already navigated
     // from `outer_content` to `inner_target` above.
     let inner_text_node = inner_content

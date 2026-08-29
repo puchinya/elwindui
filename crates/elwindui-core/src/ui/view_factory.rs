@@ -2,15 +2,15 @@
 //!
 //! [`DeferredViewFactory`] is the shared internal storage behind both
 //! [`ControlTemplate`](crate::ui::ControlTemplate) (Control-appearance-specific, see
-//! `docs/design/runtime/control_template_design.md`) and [`ViewTemplate`] (this module,
+//! `docs/design/runtime/control_template_design.md`) and [`ViewFactory`] (this module,
 //! general-purpose). The two public types intentionally stay separate — see
-//! `docs/design/runtime/view_template_design.md` for why they are not unified or aliased.
+//! `docs/design/runtime/view_factory_design.md` for why they are not unified or aliased.
 
 use super::*;
 use crate::environment::EnvironmentContext;
 
 /// Storage shared by every deferred-view factory type. Not exposed publicly: each public type
-/// (`ControlTemplate<C>`, `ViewTemplate`) wraps this with its own typed `Context` and semantics,
+/// (`ControlTemplate<C>`, `ViewFactory`) wraps this with its own typed `Context` and semantics,
 /// and callers only ever interact with the wrapping type.
 pub(crate) struct DeferredViewFactory<C> {
     factory: Rc<dyn Fn(C) -> Option<Rc<dyn UIElementExt>>>,
@@ -36,17 +36,17 @@ impl<C> Clone for DeferredViewFactory<C> {
     }
 }
 
-/// The context supplied to a [`ViewTemplate`] factory upon building its deferred view.
+/// The context supplied to a [`ViewFactory`] factory upon building its deferred view.
 ///
 /// Unlike `ControlTemplateContext<C>`, this carries no target-type parameter and no
 /// Control-specific semantics (no `templated_parent`, no `ContentPresenter` involvement) —
-/// `ViewTemplate` is a general primitive for any deferred, independently-lifetimed View subtree:
+/// `ViewFactory` is a general primitive for any deferred, independently-lifetimed View subtree:
 /// today `context_popup`, and potentially future lazy tab content, dialogs, sheets, popovers.
 #[derive(Clone)]
 pub struct ViewBuildContext {
-    /// The element that owns this deferred view. Retained only as `Weak` — a `ViewTemplate`
+    /// The element that owns this deferred view. Retained only as `Weak` — a `ViewFactory`
     /// factory must never keep its owner alive, since the owner strong-owns (directly or
-    /// indirectly) the `ViewTemplate` value itself.
+    /// indirectly) the `ViewFactory` value itself.
     pub owner: Weak<dyn UIElementExt>,
     /// The effective [`EnvironmentContext`] the deferred view should mount against.
     pub environment: EnvironmentContext,
@@ -59,11 +59,11 @@ pub struct ViewBuildContext {
 /// with its own mount/unmount lifecycle. Building may fail (`build` returns `None`) once the
 /// captured owner has already been dropped, i.e. `ViewBuildContext::owner` fails to upgrade.
 #[derive(Clone)]
-pub struct ViewTemplate {
+pub struct ViewFactory {
     factory: DeferredViewFactory<ViewBuildContext>,
 }
 
-impl ViewTemplate {
+impl ViewFactory {
     /// Creates a new view template from a factory closure.
     pub fn new(
         factory: impl Fn(ViewBuildContext) -> Option<Rc<dyn UIElementExt>> + 'static,
@@ -77,7 +77,7 @@ impl ViewTemplate {
     ///
     /// Owner liveness is enforced here, mechanically, before the factory closure ever runs — not
     /// left to the closure's own discretion. A factory that never itself checks `ctx.owner` (e.g.
-    /// `ViewTemplate::new(|_ctx| Some(TextBlock::new()))`) still cannot build once the owner has been
+    /// `ViewFactory::new(|_ctx| Some(TextBlock::new()))`) still cannot build once the owner has been
     /// dropped, so "a deferred View cannot be built after its owner is gone" is a real invariant of
     /// this type, not just documented intent. The factory may call `context.owner.upgrade()` again
     /// itself if it needs the concrete `Rc` — this only re-checks liveness, it doesn't consume or
@@ -88,7 +88,7 @@ impl ViewTemplate {
     }
 }
 
-impl<F> From<F> for ViewTemplate
+impl<F> From<F> for ViewFactory
 where
     F: Fn(ViewBuildContext) -> Option<Rc<dyn UIElementExt>> + 'static,
 {
@@ -97,11 +97,11 @@ where
     }
 }
 
-/// PR #165 review remediation, A4 (round 2: `from_view_template` replaces the assertion-only
-/// original): a sealed marker implemented only for `ViewTemplate` and `Option<ViewTemplate>` —
+/// PR #165 review remediation, A4 (round 2: `from_view_factory` replaces the assertion-only
+/// original): a sealed marker implemented only for `ViewFactory` and `Option<ViewFactory>` —
 /// the only two types a `context_popup: view! { .. }` (or any other `ViewExpr::DeferredView`) may
 /// ever be assigned to (`docs/specs/dsl_spec.md` rule 37) — that also *converts* a freshly-built
-/// `ViewTemplate` factory into whichever of the two shapes the target property actually declares.
+/// `ViewFactory` factory into whichever of the two shapes the target property actually declares.
 ///
 /// `elwindui-codegen`'s own `validate::check_deferred_view_assignment` already rejects a
 /// mismatched target *when* the target component has a local `TypeInfo` (a same-crate
@@ -119,51 +119,51 @@ where
 /// The round-1 version of this trait was assertion-only (`__assert_deferred_view_assignment_target`)
 /// — it type-checked the target but `emit_external_attribute_sets` still unconditionally wrapped
 /// the built factory in `Some(..)` regardless of which of the two accepted shapes the property
-/// actually declared, so a real builtin property declared bare `ViewTemplate` (not
-/// `Option<ViewTemplate>`) would pass this assertion and then fail immediately afterward with a
+/// actually declared, so a real builtin property declared bare `ViewFactory` (not
+/// `Option<ViewFactory>`) would pass this assertion and then fail immediately afterward with a
 /// type mismatch on the generated setter call — only accidentally correct for `context_popup`
-/// (the only production `Option<ViewTemplate>` consumer today). `from_view_template` fixes this by
+/// (the only production `Option<ViewFactory>` consumer today). `from_view_factory` fixes this by
 /// performing the actual shape conversion generically, so the external emission path works for
 /// either accepted shape identically to the local-`TypeInfo` path, which already branches on
 /// `is_option`.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a valid `context_popup`/deferred-view target type",
-    label = "a deferred view (`view! {{ .. }}`) can only be assigned to a `ViewTemplate` or `Option<ViewTemplate>` property, not `{Self}`",
-    note = "rewrite the target property's declared type to `ViewTemplate` or `Option<ViewTemplate>`, or assign an ordinary value instead of `view! {{ .. }}`"
+    label = "a deferred view (`view! {{ .. }}`) can only be assigned to a `ViewFactory` or `Option<ViewFactory>` property, not `{Self}`",
+    note = "rewrite the target property's declared type to `ViewFactory` or `Option<ViewFactory>`, or assign an ordinary value instead of `view! {{ .. }}`"
 )]
 pub trait DeferredViewAssignmentTarget: private::Sealed + Sized {
     #[doc(hidden)]
-    fn from_view_template(value: ViewTemplate) -> Self;
+    fn from_view_factory(value: ViewFactory) -> Self;
 }
 
 mod private {
     pub trait Sealed {}
-    impl Sealed for super::ViewTemplate {}
-    impl Sealed for Option<super::ViewTemplate> {}
+    impl Sealed for super::ViewFactory {}
+    impl Sealed for Option<super::ViewFactory> {}
 }
 
-impl DeferredViewAssignmentTarget for ViewTemplate {
-    fn from_view_template(value: ViewTemplate) -> Self {
+impl DeferredViewAssignmentTarget for ViewFactory {
+    fn from_view_factory(value: ViewFactory) -> Self {
         value
     }
 }
 
-impl DeferredViewAssignmentTarget for Option<ViewTemplate> {
-    fn from_view_template(value: ViewTemplate) -> Self {
+impl DeferredViewAssignmentTarget for Option<ViewFactory> {
+    fn from_view_factory(value: ViewFactory) -> Self {
         Some(value)
     }
 }
 
 /// Generated-code-only entry point (`elwindui-codegen`'s `emit_external_attribute_sets`): converts
-/// a freshly-built `ViewTemplate` factory into whichever of `ViewTemplate`/`Option<ViewTemplate>`
+/// a freshly-built `ViewFactory` factory into whichever of `ViewFactory`/`Option<ViewFactory>`
 /// the real builtin's own `@field_type` transport reports as `T`, failing to compile (via
 /// `DeferredViewAssignmentTarget`'s own `#[diagnostic::on_unimplemented]`) for any other `T`.
 #[doc(hidden)]
 pub fn __coerce_deferred_view_assignment_target<T: DeferredViewAssignmentTarget>(
-    value: ViewTemplate,
+    value: ViewFactory,
 ) -> T {
-    T::from_view_template(value)
+    T::from_view_factory(value)
 }
 
 #[cfg(test)]
@@ -175,7 +175,7 @@ mod tests {
     fn build_invokes_factory_with_context() {
         let calls = Rc::new(Cell::new(0));
         let calls_for_factory = calls.clone();
-        let template = ViewTemplate::new(move |ctx: ViewBuildContext| {
+        let template = ViewFactory::new(move |ctx: ViewBuildContext| {
             calls_for_factory.set(calls_for_factory.get() + 1);
             assert!(ctx.owner.upgrade().is_some());
             Some(crate::ui::TextBlock::new())
@@ -191,12 +191,12 @@ mod tests {
 
     #[test]
     fn build_returns_none_when_owner_dropped_and_never_invokes_the_factory() {
-        // Stronger than "the factory itself checks ctx.owner and declines": `ViewTemplate::build`
+        // Stronger than "the factory itself checks ctx.owner and declines": `ViewFactory::build`
         // enforces owner liveness mechanically, before the factory closure runs at all, so even a
         // factory that never checks `ctx.owner` (like this one) cannot build once the owner is gone.
         let calls = Rc::new(Cell::new(0));
         let calls_for_factory = calls.clone();
-        let template = ViewTemplate::new(move |_ctx: ViewBuildContext| {
+        let template = ViewFactory::new(move |_ctx: ViewBuildContext| {
             calls_for_factory.set(calls_for_factory.get() + 1);
             Some(crate::ui::TextBlock::new())
         });
@@ -219,7 +219,7 @@ mod tests {
     fn clone_keeps_a_capturing_factory() {
         let calls = Rc::new(Cell::new(0));
         let calls_for_factory = calls.clone();
-        let template = ViewTemplate::new(move |_ctx| {
+        let template = ViewFactory::new(move |_ctx| {
             calls_for_factory.set(calls_for_factory.get() + 1);
             Some(crate::ui::TextBlock::new())
         });
@@ -232,17 +232,17 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
 
-    /// A4-T1: `__coerce_deferred_view_assignment_target::<ViewTemplate>` returns the same
+    /// A4-T1: `__coerce_deferred_view_assignment_target::<ViewFactory>` returns the same
     /// logical template value unwrapped — the bare, non-`Option` accepted shape.
     #[test]
-    fn coerce_deferred_view_assignment_target_bare_view_template() {
+    fn coerce_deferred_view_assignment_target_bare_view_factory() {
         let calls = Rc::new(Cell::new(0));
         let calls_for_factory = calls.clone();
-        let template = ViewTemplate::new(move |_ctx| {
+        let template = ViewFactory::new(move |_ctx| {
             calls_for_factory.set(calls_for_factory.get() + 1);
             Some(crate::ui::TextBlock::new())
         });
-        let value: ViewTemplate = __coerce_deferred_view_assignment_target(template);
+        let value: ViewFactory = __coerce_deferred_view_assignment_target(template);
         let owner: Rc<dyn UIElementExt> = crate::ui::TextBlock::new();
         let built = value.build(ViewBuildContext {
             owner: Rc::downgrade(&owner),
@@ -252,13 +252,13 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
 
-    /// A4-T2: `__coerce_deferred_view_assignment_target::<Option<ViewTemplate>>` wraps the
+    /// A4-T2: `__coerce_deferred_view_assignment_target::<Option<ViewFactory>>` wraps the
     /// template in `Some` — the optional accepted shape (`context_popup`'s own real declared
     /// type today).
     #[test]
-    fn coerce_deferred_view_assignment_target_optional_view_template() {
-        let template = ViewTemplate::new(|_ctx| Some(crate::ui::TextBlock::new()));
-        let value: Option<ViewTemplate> = __coerce_deferred_view_assignment_target(template);
+    fn coerce_deferred_view_assignment_target_optional_view_factory() {
+        let template = ViewFactory::new(|_ctx| Some(crate::ui::TextBlock::new()));
+        let value: Option<ViewFactory> = __coerce_deferred_view_assignment_target(template);
         assert!(value.is_some());
     }
 }

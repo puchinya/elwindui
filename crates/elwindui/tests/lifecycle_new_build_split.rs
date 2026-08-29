@@ -17,12 +17,12 @@ thread_local! {
 
 #[elwindui::component(inherits ContentControl)]
 struct LifecycleBuildSplitProbe {
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             BUILD_COUNT.with(|c| c.set(c.get() + 1));
         }
         TextBlock { text: "probe" }
-    },
+    }),
 }
 
 #[elwindui::component]

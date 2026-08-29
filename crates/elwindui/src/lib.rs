@@ -19,8 +19,7 @@ pub use elwindui_i18n as i18n;
 /// `match`/`if let` exhaustiveness checking a DSL-text `enum` always got — see
 /// `elwindui_macros::dsl_enum`'s own doc comment.
 pub use elwindui_macros::{
-    class, component, control_template, dsl_enum, environment_key, main, new, store, template_view,
-    theme, viewmodel,
+    class, component, dsl_enum, environment_key, main, new, store, template_view, theme, viewmodel,
 };
 /// SVG loading (`load_svg_file`/`load_svg_bytes`/`load_svg_str`, `SvgLoader`) — backends never
 /// depend on this crate directly, only on the `elwindui_core::graphics::VectorImage` it produces
@@ -98,11 +97,11 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 ///     #[computed(expr = source.clone())]
 ///     read_only_value: String,
 ///
-///     template: template_view! {
+///     template: template_view!(|probe: Self| {
 ///         TextArea {
-///             text <=> templated_parent.read_only_value
+///             text <=> probe.read_only_value
 ///         }
-///     },
+///     }),
 /// }
 ///
 /// #[component]
@@ -125,15 +124,15 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 ///     #[computed(expr = source.clone())]
 ///     read_only_value: String,
 ///
-///     template: template_view! {
+///     template: template_view!(|probe: Self| {
 ///         TextBlock {
-///             text: templated_parent.read_only_value,
+///             text: probe.read_only_value,
 ///             on_tapped: |_event| {
-///                 templated_parent
+///                 probe
 ///                     .set_read_only_value(String::from("illegal"));
 ///             }
 ///         }
-///     },
+///     }),
 /// }
 ///
 /// #[component]
@@ -149,9 +148,9 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// use elwindui::core::ui::{Control, ControlTemplate, TextBlock};
 ///
 /// fn main() {
-///     let _: ControlTemplate<Control> = template_view! {
+///     let _: ControlTemplate<Control> = template_view!(|control: Control| {
 ///         TextBlock { text: "framework target" }
-///     };
+///     });
 /// }
 /// ```
 ///
@@ -238,7 +237,7 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 ///     #[prop(default = Vec::new())]
 ///     labels: Vec<String>,
 ///
-///     template: template_view! {
+///     template: template_view!(|probe: Self| {
 ///         elwindui_external_component_fixture::DerivedExternalTabs {
 ///             for label in labels {
 ///                 elwindui_external_component_fixture::ExternalProbeItem {
@@ -246,7 +245,7 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 ///                 }
 ///             }
 ///         }
-///     },
+///     }),
 /// }
 ///
 /// #[component]

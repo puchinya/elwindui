@@ -4,9 +4,7 @@
 // inherits *this*, a user-defined component, which is the case #25 actually fixes.
 #[elwindui::component(inherits ContentControl)]
 struct LabeledPanel {
-    template: template_view! {
-        TextBlock { text: "panel" }
-    },
+    template: template_view!(|templated_parent: Self| { TextBlock { text: "panel" } }),
 }
 
 #[elwindui::component]

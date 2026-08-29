@@ -380,16 +380,32 @@ pub struct OnUpdateHook {
     pub block: syn::Block,
 }
 
+/// The target spelling supplied by a lambda-style `template_view!` header. `Self` is only
+/// meaningful in a component's `template:` pseudo-field; standalone templates must name a
+/// concrete control type so the expression has a stable `ControlTemplate<C>` result.
+#[derive(Debug, Clone)]
+pub enum TemplateTarget {
+    SelfType,
+    Concrete(syn::TypePath),
+}
+
+/// The single source of template-parent identity: both the alias used in the body and the target
+/// type come from `template_view!(|alias: Target| { ... })`. Keeping this metadata on the shared
+/// AST prevents component, standalone, and deferred/template compiler paths from inventing their
+/// own parent spelling or target inference rule.
+#[derive(Debug, Clone)]
+pub struct TemplateHeader {
+    pub parent_alias: String,
+    pub target: TemplateTarget,
+}
+
 /// `view Name { on_mount { .. } on_unmount { .. } let-bindings... ElementTree }`. See
 /// docs/specs/dsl_spec.md §2, §13, docs/design/runtime/ui_tree_design.md.
 #[derive(Debug, Clone)]
 pub struct ViewDef {
     pub target: String,
     /// `true` when this view is a component-level `template: template_view!` declaration.
-    /// `template_instance` is reserved for the generated private component that materializes a
-    /// selected template factory; it is not public authoring syntax.
     pub is_template: bool,
-    pub template_instance: bool,
     /// `on_mount { .. }`, run once right after construction (spliced into generated `new()` after
     /// `resync()`). When `Name` inherits a base with its own `view` and `Name` provides its own
     /// `view`, an `on_mount` here may call `base::on_mount()` to chain into the base's block
@@ -400,6 +416,8 @@ pub struct ViewDef {
     /// not yet wired to any runtime teardown trigger — `elwindui_core::ui` has no detach/removal
     /// hook today. See docs/design/runtime/ui_tree_design.md.
     pub on_unmount: Option<syn::Block>,
+    /// Lambda-style template header metadata. `None` for ordinary `view!` bodies.
+    pub template_header: Option<TemplateHeader>,
     /// `on_update(field, ...) { .. }` / bare `on_update { .. }` (docs/specs/dsl_spec.md §3). Runs
     /// after any listed `#[prop]`/`#[computed]`/`#[state]`/`#[environment(name)]` field changes (or
     /// any of them, for the bare form) — installed as a `subscribe_property_changed` listener
@@ -418,8 +436,8 @@ pub struct ViewDef {
     /// majority) — only a synthetic hidden `Component` produced by Issue #162's
     /// `ViewExpr::DeferredView` lowering pass (`lib.rs`'s deferred-view lowering,
     /// `component_frontend.rs`'s hidden-Component construction helper) sets this. Unlike
-    /// `ControlTemplate<C>`'s `templated_parent` (always explicit-qualification-only, never a
-    /// bare-name fallback), this is exactly the "implicit bare fallback" half of `codegen.rs`'s
+    /// A template's declared parent alias is always explicit-qualification-only, never a
+    /// bare-name fallback; this is exactly the "implicit bare fallback" half of `codegen.rs`'s
     /// generalized weak-owner mechanism — docs/design/runtime/view_factory_design.md §3. PR #165
     /// final rereview remediation, A2: this used to be a bare `Option<String>` field name, which let
     /// *any* unshadowed bare Rust name (not just an actual source-Component field) fall back to a

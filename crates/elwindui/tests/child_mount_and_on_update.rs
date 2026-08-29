@@ -26,13 +26,13 @@ fn next_order() -> u32 {
 
 #[elwindui::component(inherits ContentControl)]
 struct MountOrderChildA {
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             let n = next_order();
             CHILD_A_MOUNT_ORDER.with(|c| c.set(n));
         }
         TextBlock { text: "a" }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -40,13 +40,13 @@ impl MountOrderChildA {}
 
 #[elwindui::component(inherits ContentControl)]
 struct MountOrderChildB {
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             let n = next_order();
             CHILD_B_MOUNT_ORDER.with(|c| c.set(n));
         }
         TextBlock { text: "b" }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -117,12 +117,12 @@ struct OnUpdateProbe {
     #[prop]
     label: String,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_update(label): {
             ON_UPDATE_COUNT.with(|c| c.set(c.get() + 1));
         }
         TextBlock { text: label }
-    },
+    }),
 }
 
 #[elwindui::component]

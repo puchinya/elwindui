@@ -9,9 +9,7 @@ use std::rc::Rc;
 struct OverrideProbe {
     #[prop(default = false)]
     arranged_marker: bool,
-    template: template_view! {
-        Rectangle { fill: "#00000000" }
-    },
+    template: template_view!(|templated_parent: Self| { Rectangle { fill: "#00000000" } }),
 }
 
 #[elwindui::component]

@@ -95,7 +95,7 @@ struct NonSemanticFillLeaf {
     #[prop(default = String::from("default"))]
     fill: String,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             NON_SEMANTIC_FILL.with(|value| *value.borrow_mut() = self.fill());
         }
@@ -103,7 +103,7 @@ struct NonSemanticFillLeaf {
             NON_SEMANTIC_FILL.with(|value| *value.borrow_mut() = this.fill());
         }
         TextBlock { text: fill }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -111,9 +111,11 @@ impl NonSemanticFillLeaf {}
 
 #[elwindui::component(inherits ContentControl)]
 struct NonSemanticFillHost {
-    template: template_view! {
-        NonSemanticFillLeaf { fill: "ordinary string" }
-    },
+    template: template_view!(|templated_parent: Self| {
+        NonSemanticFillLeaf {
+            fill: "ordinary string",
+        }
+    }),
 }
 
 #[elwindui::component]
@@ -139,7 +141,7 @@ struct SemanticBrushScopeChild {
     #[environment(primary)]
     primary_style: BrushStyle,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             SCOPED_PRIMARY.with(|value| *value.borrow_mut() = self.primary_style());
         }
@@ -150,7 +152,7 @@ struct SemanticBrushScopeChild {
             text: "scoped",
             foreground: BrushStyle::Primary,
         }
-    },
+    }),
 }
 
 #[elwindui::component]

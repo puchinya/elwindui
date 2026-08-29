@@ -39,7 +39,7 @@ impl<C> Clone for DeferredViewFactory<C> {
 /// The context supplied to a [`ViewFactory`] factory upon building its deferred view.
 ///
 /// Unlike `ControlTemplateContext<C>`, this carries no target-type parameter and no
-/// Control-specific semantics (no `templated_parent`, no `ContentPresenter` involvement) —
+/// Control-specific semantics (no typed template-parent alias, no `ContentPresenter` involvement) —
 /// `ViewFactory` is a general primitive for any deferred, independently-lifetimed View subtree:
 /// today `context_popup`, and potentially future lazy tab content, dialogs, sheets, popovers.
 #[derive(Clone)]

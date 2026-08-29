@@ -16,7 +16,7 @@ struct DocumentView {
     // ever get its own small natural height, never the remaining window space. `Grid`'s
     // `GridLength::Star` row does actually fill whatever's left after the status bar's `Auto` row
     // takes its own height.
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         Grid {
             rows: [elwindui::core::layout::GridLength::Star(1.0), elwindui::core::layout::GridLength::Auto]
             columns: [elwindui::core::layout::GridLength::Star(1.0)]
@@ -30,7 +30,7 @@ struct DocumentView {
                 RoundedPanel { label: t!("notepad-status-chars", count: doc.char_count) }
             }
         }
-    },
+    }),
 }
 
 #[elwindui::component]

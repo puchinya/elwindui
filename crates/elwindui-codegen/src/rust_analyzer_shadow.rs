@@ -342,33 +342,6 @@ pub(crate) fn build_theme_shadow(item_struct: &syn::ItemStruct) -> Result<TokenS
     })
 }
 
-/// PR #169 review remediation (A3/AD-R6): the rust-analyzer-only shadow for
-/// `#[elwindui::control_template(target = ..)]`'s own **public** declaration — `TemplateName` and
-/// `TemplateName::template() -> ControlTemplate<Target>`, signature only. Deliberately does not
-/// reach for the generic Component shadow's own machinery: real `template()`'s body constructs and
-/// mounts a private hidden Component instance via real runtime-only methods
-/// (`__new_unmounted`/`mount`/`into_node`) the generic Component shadow never fakes (see
-/// `build_component_impl_shadow`'s own doc comment and AD-R6 of the Issue #146/PR #169 contract:
-/// "do not add runtime-only APIs to generic Component shadows just to make `#[control_template]`
-/// compile") — so this shadow's own `template()` body is `unreachable!()`, exactly like every other
-/// shadow method in this module, rather than attempting to replicate that construction.
-pub(crate) fn build_control_template_shadow(
-    item_struct: &syn::ItemStruct,
-    target: &syn::Path,
-) -> Result<TokenStream, String> {
-    let vis = &item_struct.vis;
-    let ident = &item_struct.ident;
-    gate_shadow_items(quote! {
-        #vis struct #ident;
-
-        impl #ident {
-            pub fn template() -> elwindui::core::ui::ControlTemplate<#target> {
-                unreachable!()
-            }
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,9 +398,9 @@ mod tests {
         ast::ViewDef {
             target: target.to_string(),
             is_template: false,
-            template_instance: false,
             on_mount: None,
             on_unmount: None,
+            template_header: None,
             on_update: None,
             lets: Vec::new(),
             root: ast::ViewBody {

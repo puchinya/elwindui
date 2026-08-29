@@ -4,6 +4,7 @@ use elwindui::core::ui::{
     ContentControlExt as _, ContentPresenter, ControlTemplate, ControlTemplateContext, TextBlock,
     TextBlockExt as _, UIElementExt as _,
 };
+use elwindui::template_view;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -32,11 +33,11 @@ struct DefaultBodyContentProbe {
     #[prop(default = "header".to_string())]
     label: String,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         VerticalLayout {
             TextBlock { text: templated_parent.label }
         }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -89,12 +90,12 @@ impl LocalDynamicTemplateUseProbe {}
 
 #[elwindui::component(inherits ContentControl)]
 struct DefaultBodyPresenterProbe {
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         VerticalLayout {
             TextBlock { text: "header" }
             ContentPresenter {}
         }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -120,13 +121,13 @@ struct DynamicDefaultBodyProbe {
     #[prop(default = false)]
     alternate: bool,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         if alternate {
             TextBlock { text: "alternate" }
         } else {
             TextBlock { text: "initial" }
         }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -134,12 +135,12 @@ impl DynamicDefaultBodyProbe {}
 
 #[elwindui::component(inherits Control)]
 struct DefaultTemplateProbe {
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             record_default_template_mount();
         }
         VerticalLayout { }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -150,7 +151,7 @@ struct ControlTemplateTestPanel {
     #[prop]
     label: String,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             TARGET_MOUNTS.with(|count| count.set(count.get() + 1));
         }
@@ -159,20 +160,19 @@ struct ControlTemplateTestPanel {
             TextBlock { text: label }
             ContentPresenter { }
         }
-    },
+    }),
 }
 
 #[elwindui::component]
 impl ControlTemplateTestPanel {}
 
-#[elwindui::control_template(target = ControlTemplateTestPanel)]
-struct CompactControlTemplateTestPanel {
-    template: template_view! {
+fn compact_control_template_test_panel() -> ControlTemplate<ControlTemplateTestPanel> {
+    template_view!(|panel: ControlTemplateTestPanel| {
         VerticalLayout {
-            TextBlock { text: templated_parent.label }
+            TextBlock { text: panel.label }
             ContentPresenter { }
         }
-    },
+    })
 }
 
 fn text_values(root: &dyn elwindui::core::ui::UIElementExt) -> Vec<String> {
@@ -195,7 +195,7 @@ fn environment_template_is_built_once_resyncs_and_presents_logical_content() {
     TARGET_MOUNTS.with(|count| count.set(0));
     let environment = elwindui::core::environment::application_environment();
     let executions = Rc::new(Cell::new(0));
-    let authored = CompactControlTemplateTestPanel::template();
+    let authored = compact_control_template_test_panel();
     let executions_for_factory = executions.clone();
     let capturing = ControlTemplate::new(
         move |context: ControlTemplateContext<ControlTemplateTestPanel>| {

@@ -3,13 +3,17 @@ pub struct LocalTemplateDescendantProbe {
     #[prop(default = false)]
     pub show_alternate: bool,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         if templated_parent.show_alternate {
-            TextBlock { text: "derived alternate" }
+            TextBlock {
+                text: "derived alternate",
+            }
         } else {
-            TextBlock { text: "derived initial" }
+            TextBlock {
+                text: "derived initial",
+            }
         }
-    },
+    }),
 }
 
 #[elwindui::component]

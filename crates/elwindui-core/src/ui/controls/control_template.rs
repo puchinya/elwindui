@@ -74,7 +74,7 @@ pub trait TemplateProperty<const KEY: u64> {
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`{Self}` has no writable template-property capability for this key",
-    note = "template two-way bindings and templated_parent.set_* require a #[prop] or #[state] property with a setter"
+    note = "template two-way bindings and the declared parent alias's set_* require a #[prop] or #[state] property with a setter"
 )]
 pub trait WritableTemplateProperty<const KEY: u64>: TemplateProperty<KEY> {
     /// Writes the value through the generated component property's typed setter.

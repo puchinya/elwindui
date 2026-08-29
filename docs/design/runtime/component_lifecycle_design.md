@@ -175,11 +175,11 @@ Concretely, `show()`'s body: if `self.__mount_environment.get().is_none()` (this
 
 ### 4h. ControlTemplate mount selection
 
-`template: template_view! { ... }`を宣言したcomponentは、own Environment field解決後、descendant
+`template: template_view!(|alias: Self| { ... })`を宣言したcomponentは、own Environment field解決後、descendant
 construction前にtyped `ControlTemplateEnvironment<Self>`を一度読む。
 `Some(template)`ではdefault planを構築せず、typed factoryへtarget `Rc`と確定済みcontextを渡す。
 macro-authored template instanceは同じcontextでmountされ、その`on_mount`完了後にtargetの`on_mount`を実行する。
-`None`ではcomponentが宣言したdefault `template: template_view! { ... }` factoryを実行する。Key subscriptionとruntime re-templateは生成しない。
+`None`ではcomponentが宣言したdefault `template: template_view!(|alias: Self| { ... })` factoryを実行する。Key subscriptionとruntime re-templateは生成しない。
 詳細なownership/wiring順序は[`control_template_design.md`](control_template_design.md)を参照する。
 
 ### 4i. Issue #162: `Window` `mount_override`/`unmount_override` hooks and native close routing

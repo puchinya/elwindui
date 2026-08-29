@@ -4,8 +4,9 @@
 //! instead, annotated `#[elwindui::component(inherits Base)]`. Ordinary fields become the
 //! component's `#[param]`/`#[prop]`/etc. fields (via `attr_frontend::fields_from_item_struct`,
 //! shared with the viewmodel frontend); at most one authored presentation field, typed as a
-//! `view!` or `template_view!` macro invocation (`field: view! { .. }` / `template: template_view!
-//! { .. }`, parsed by `syn` as `syn::Type::Macro` — legal Rust in type position), supplies the
+//! `view!` or `template_view!` macro invocation (`field: view! { .. }` /
+//! `template: template_view!(|alias: Target| { .. })`, parsed by `syn` as `syn::Type::Macro` —
+//! legal Rust in type position), supplies the
 //! ordinary view or typed ControlTemplate definition.
 //!
 //! `view!` itself is never a real macro and never gets expanded: `#[elwindui::component]` (a
@@ -25,7 +26,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` or
-/// `template: template_view! { .. }` (already
+/// `template: template_view!(|alias: Self| { .. })` (already
 /// parsed as a `syn::ItemStruct` by the `elwindui-macros` proc-macro, `base` from the attribute's
 /// own `inherits Base` argument) — builds the matching `ComponentDef`/`ViewDef` pair. `Name` may
 /// omit the `view! { .. }` field entirely — same as a DSL `component X { .. }` with no
@@ -40,10 +41,6 @@ pub fn component_and_view_from_item_struct(
     item_struct: &syn::ItemStruct,
 ) -> Result<(ComponentDef, Option<ViewDef>), String> {
     let name = item_struct.ident.to_string();
-    let item_template_instance = item_struct
-        .attrs
-        .iter()
-        .any(|attr| attr.path().is_ident("template_instance"));
     // `base` arrives as whatever `elwindui_macros::path_to_string` produced from the attribute's own
     // `inherits <path>` argument: a bare name (`ContentControl`) or a full crate-root-qualified path
     // (`crate::ui::LabeledPanel`, Refs #25). Split it here rather than upstream — this is the one
@@ -66,7 +63,7 @@ pub fn component_and_view_from_item_struct(
             && !is_presentation_macro_field(field)
     }) {
         return Err(format!(
-            "`{name}`: `template` is reserved for `template: template_view! {{ ... }}` and cannot be declared as a normal property"
+            "`{name}`: `template` is reserved for `template: template_view!(|alias: Self| {{ ... }})` and cannot be declared as a normal property"
         ));
     }
 
@@ -80,7 +77,7 @@ pub fn component_and_view_from_item_struct(
         [] => None,
         _ => {
             return Err(format!(
-                "`{name}`: expected at most one authored presentation field (`body: view! {{ .. }}` or `template: template_view! {{ .. }}`), found {}",
+                "`{name}`: expected at most one authored presentation field (`body: view! {{ .. }}` or `template: template_view!(|alias: Self| {{ .. }})`), found {}",
                 view_fields.len()
             ));
         }
@@ -97,11 +94,6 @@ pub fn component_and_view_from_item_struct(
                 .ident
                 .as_ref()
                 .is_some_and(|ident| ident == "template");
-            let template_instance = item_template_instance
-                || view_field
-                    .attrs
-                    .iter()
-                    .any(|attr| attr.path().is_ident("template_instance"));
             let macro_is_template = view_macro.mac.path.is_ident("template_view");
             let expected_field = if is_template { "template" } else { "body" };
             if (is_template != macro_is_template)
@@ -110,21 +102,33 @@ pub fn component_and_view_from_item_struct(
                 return Err(format!(
                     "`{name}`: `{expected_field}` must use {}",
                     if is_template {
-                        "`template_view! { ... }`"
+                        "`template_view!(|alias: Target| { ... })`"
                     } else {
                         "`view! { ... }`"
                     }
                 ));
             }
-            let view_src = view_macro.mac.tokens.to_string();
+            let (template_header, view_src) = if is_template {
+                let invocation =
+                    parser::parse_template_view_invocation(view_macro.mac.tokens.clone())
+                        .map_err(|e| format!("`{name}`: invalid template header: {e}"))?;
+                if !matches!(invocation.header.target, ast::TemplateTarget::SelfType) {
+                    return Err(format!(
+                        "`{name}`: a component default template must use `Self` as its target"
+                    ));
+                }
+                (Some(invocation.header), invocation.body.to_string())
+            } else {
+                (None, view_macro.mac.tokens.to_string())
+            };
             let (on_mount, on_unmount, on_update, lets, root) = parser::parse_view_body(&view_src)
                 .map_err(|e| format!("`{name}`: invalid authored presentation body: {e}"))?;
             Ok::<_, String>(ViewDef {
                 target: name.clone(),
                 is_template,
-                template_instance,
                 on_mount,
                 on_unmount,
+                template_header,
                 on_update,
                 lets,
                 root,
@@ -248,8 +252,8 @@ pub(crate) fn component_module_items(
 /// (`ast::DeferredViewBody`) by the time this runs (`lib.rs`'s lowering pass, called after
 /// validation, before `codegen::build_symbol_table`).
 ///
-/// Mirrors `lib.rs::generate_control_template_from_item_struct`'s existing `ControlTemplate`
-/// precedent (a `#[param]` weak-owner field plus the authored body, composed over
+/// Mirrors the deferred-view `ControlTemplate` precedent (a `#[param]` weak-owner field plus the
+/// authored body, composed over
 /// `ContentControl`), but builds the `ComponentDef`/`ViewDef` values directly rather than
 /// round-tripping through a synthesized `syn::ItemStruct` and re-parsing its `view!` tokens — there
 /// is no token-level `view!` invocation left to re-parse here, only already-structured AST.
@@ -295,9 +299,9 @@ pub(crate) fn hidden_view_factory_component(
     let view_def = ViewDef {
         target: hidden_name.to_string(),
         is_template: false,
-        template_instance: false,
         on_mount: body.on_mount.clone(),
         on_unmount: body.on_unmount.clone(),
+        template_header: None,
         on_update: body.on_update.clone(),
         lets: body.lets.clone(),
         root: body.root.clone(),
@@ -1276,7 +1280,7 @@ mod tests {
             r#"
                 struct Both {
                     body: view! { TextBlock { text: "body" } },
-                    template: template_view! { TextBlock { text: "template" } },
+                    template: template_view!(|templated_parent: Self| { TextBlock { text: "template" } }),
                 }
             "#,
         )
@@ -1413,14 +1417,14 @@ mod tests {
     fn composed_component_generates_unmount_and_registers_hook() {
         let src = r#"
             struct CustomCard {
-                template: template_view! {
+                template: template_view!(|templated_parent: Self| {
                     on_unmount {
                         // teardown hook
                     }
                     VerticalLayout {
                         TextBlock { text: "card" }
                     }
-                }
+                }),
             }
         "#;
         let generated = generate(Some("ContentControl"), src);

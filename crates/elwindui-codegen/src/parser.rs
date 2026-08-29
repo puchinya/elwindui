@@ -8,6 +8,79 @@
 //! See docs/specs/dsl_spec.md §1-14.
 
 use crate::ast::*;
+use proc_macro2::TokenStream;
+use syn::parse::{Parse, ParseStream};
+
+/// Structured input for the public lambda-style `template_view!` macro. The header is parsed as
+/// Rust syntax once and its body is preserved as tokens for the shared DSL parser; no string
+/// splitting or expected-type target discovery is involved because the target is declared in the
+/// lambda-style header.
+#[derive(Debug, Clone)]
+pub struct TemplateViewInvocation {
+    pub header: TemplateHeader,
+    pub body: TokenStream,
+}
+
+impl Parse for TemplateViewInvocation {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        input
+            .parse::<syn::Token![|]>()
+            .map_err(|_| input.error("expected `template_view!(|alias: Target| { ... })`"))?;
+        let alias: syn::Ident = input
+            .parse()
+            .map_err(|_| input.error("expected a parent alias in `|alias: Target|`"))?;
+        input
+            .parse::<syn::Token![:]>()
+            .map_err(|_| input.error("expected `:` after the template parent alias"))?;
+        let target: syn::TypePath = input.parse().map_err(|_| {
+            input.error("expected a concrete control type or `Self` in the template header")
+        })?;
+        input
+            .parse::<syn::Token![|]>()
+            .map_err(|_| input.error("expected `|` after the template target type"))?;
+        let content;
+        syn::braced!(content in input);
+        let body = content.parse::<TokenStream>()?;
+        if !input.is_empty() {
+            return Err(
+                input.error("unexpected tokens after `template_view!(|alias: Target| { ... })`")
+            );
+        }
+
+        let target = if target.qself.is_none() && target.path.is_ident("Self") {
+            TemplateTarget::SelfType
+        } else {
+            if target.qself.is_some()
+                || target
+                    .path
+                    .segments
+                    .iter()
+                    .any(|segment| !segment.arguments.is_empty())
+            {
+                return Err(syn::Error::new_spanned(
+                    target,
+                    "template target must be a concrete type path without generic arguments; use `Self` only for a component default template",
+                ));
+            }
+            TemplateTarget::Concrete(target)
+        };
+
+        Ok(Self {
+            header: TemplateHeader {
+                parent_alias: alias.to_string(),
+                target,
+            },
+            body,
+        })
+    }
+}
+
+/// Parses the complete lambda-style invocation used by all template frontends.
+pub fn parse_template_view_invocation(
+    tokens: TokenStream,
+) -> Result<TemplateViewInvocation, String> {
+    syn::parse2(tokens).map_err(|error| error.to_string())
+}
 
 /// Parses the content that would appear inside `view Name { <this> }` — on_mount/on_unmount
 /// blocks, `let`-bindings, then the root body — from a standalone string with no enclosing
@@ -1939,5 +2012,54 @@ Button {
         assert_eq!(name, "on_click");
         assert_eq!(chords, &[(None, "Ctrl+S".to_string())]);
         assert_eq!(*scope, ShortcutScope::Global);
+    }
+
+    #[test]
+    fn parses_explicit_template_header_and_preserves_body_tokens() {
+        let invocation: TemplateViewInvocation =
+            syn::parse_str("|button: CustomButton| { TextBlock { text: button.label } }")
+                .expect("explicit template header should parse");
+        assert_eq!(invocation.header.parent_alias, "button");
+        let TemplateTarget::Concrete(target) = invocation.header.target else {
+            panic!("expected a concrete target");
+        };
+        assert!(target.path.is_ident("CustomButton"));
+        assert_eq!(
+            invocation.body.to_string(),
+            "TextBlock { text : button . label }"
+        );
+    }
+
+    #[test]
+    fn parses_self_template_target_for_component_defaults() {
+        let invocation: TemplateViewInvocation = syn::parse_str("|control: Self| { TextBlock {} }")
+            .expect("Self template target should parse");
+        assert_eq!(invocation.header.parent_alias, "control");
+        assert!(matches!(invocation.header.target, TemplateTarget::SelfType));
+    }
+
+    #[test]
+    fn rejects_template_view_without_header() {
+        let error = syn::parse_str::<TemplateViewInvocation>("TextBlock {}")
+            .expect_err("template header is required")
+            .to_string();
+        assert!(error.contains("expected `template_view!(|alias: Target| { ... })`"));
+    }
+
+    #[test]
+    fn rejects_generic_template_target_and_trailing_tokens() {
+        let generic_error = syn::parse_str::<TemplateViewInvocation>(
+            "|control: CustomButton<String>| { TextBlock {} }",
+        )
+        .expect_err("generic target should be rejected")
+        .to_string();
+        assert!(generic_error.contains("without generic arguments"));
+
+        let trailing_error = syn::parse_str::<TemplateViewInvocation>(
+            "|control: CustomButton| { TextBlock {} } trailing",
+        )
+        .expect_err("trailing tokens should be rejected")
+        .to_string();
+        assert!(trailing_error.contains("unexpected tokens after"));
     }
 }

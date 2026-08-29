@@ -3,9 +3,7 @@
 // the content supplied at each call site.
 #[elwindui::component(inherits ContentControl)]
 struct ContentWrapper {
-    template: template_view! {
-        ContentPresenter {}
-    },
+    template: template_view!(|templated_parent: Self| { ContentPresenter {} }),
 }
 
 #[elwindui::component]

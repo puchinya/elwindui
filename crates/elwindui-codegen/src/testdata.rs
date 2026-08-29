@@ -115,9 +115,9 @@ fn builtin_view(target: &str, body_src: &str) -> ViewDef {
     ViewDef {
         target: target.to_string(),
         is_template: false,
-        template_instance: false,
         on_mount,
         on_unmount,
+        template_header: None,
         on_update,
         lets,
         root,

@@ -68,11 +68,11 @@ pub fn store(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields..,
-/// template: template_view! { .. } }` — lets a
+/// template: template_view!(|alias: Self| { .. }) }` — lets a
 /// `component`+`view` pair be written as a single ordinary Rust `struct` instead of the DSL text
 /// form's `component Name inherits Base { .. } view Name { .. }` block pair. Ordinary fields become
 /// the component's own `#[param]`/`#[prop]`/etc. fields, exactly as in DSL text; exactly one
-/// field, typed as a `view! { .. }` or `template_view! { .. }` macro invocation, supplies the
+/// field, typed as a `view! { .. }` or `template_view!(|alias: Target| { .. })` macro invocation, supplies the
 /// ordinary composition or typed default template tree. Environment overrides use the generic
 /// `EnvironmentContext::set_control_template::<Name>(...)` API.
 ///
@@ -143,11 +143,11 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Builds a typed `ControlTemplate<C>` value from the shared view grammar. The target `C` is
-/// inferred from the expected Rust type (for example `set_control_template::<C>(Some(...))`).
+/// Builds a typed `ControlTemplate<C>` value from the shared view grammar. The target type and
+/// parent alias are declared by the lambda-style header.
 #[proc_macro]
 pub fn template_view(input: TokenStream) -> TokenStream {
-    match elwindui_codegen::generate_template_view_expression(&input.to_string()) {
+    match elwindui_codegen::generate_template_view_expression(input.into()) {
         Ok(tokens) => tokens.into(),
         Err(error) => {
             let message = format!("template_view!: {error}");
@@ -228,34 +228,6 @@ pub fn new(input: TokenStream) -> TokenStream {
         Ok(tokens) => tokens.into(),
         Err(error) => {
             let message = format!("new!: {error}");
-            quote::quote! { compile_error!(#message); }.into()
-        }
-    }
-}
-
-/// Defines a typed, reusable `ControlTemplate` factory.
-#[proc_macro_attribute]
-pub fn control_template(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let target = match parse_control_template_target(attr.into()) {
-        Ok(target) => target,
-        Err(error) => {
-            let message = format!("#[elwindui::control_template]: {error}");
-            return quote::quote! { compile_error!(#message); }.into();
-        }
-    };
-    let item_struct = match syn::parse::<syn::ItemStruct>(item) {
-        Ok(item_struct) => item_struct,
-        Err(error) => {
-            let message = format!(
-                "#[elwindui::control_template]: expected `struct Name {{ template: template_view! {{ .. }} }}`: {error}"
-            );
-            return quote::quote! { compile_error!(#message); }.into();
-        }
-    };
-    match elwindui_codegen::generate_control_template_from_item_struct(&target, &item_struct) {
-        Ok(tokens) => tokens.into(),
-        Err(error) => {
-            let message = format!("#[elwindui::control_template]: {error}");
             quote::quote! { compile_error!(#message); }.into()
         }
     }
@@ -385,7 +357,7 @@ fn parse_component_args(attr: proc_macro2::TokenStream) -> syn::Result<Component
             } else if kw == "template" {
                 return Err(syn::Error::new(
                     kw.span(),
-                    "`template = <environment_key>` is no longer supported; declare `template: template_view! { ... }` and use EnvironmentContext::set_control_template::<Target>(...) for overrides",
+                    "`template = <environment_key>` is no longer supported; declare `template: template_view!(|alias: Self| { ... })` and use EnvironmentContext::set_control_template::<Target>(...) for overrides",
                 ));
             } else {
                 return Err(syn::Error::new(
@@ -399,26 +371,6 @@ fn parse_component_args(attr: proc_macro2::TokenStream) -> syn::Result<Component
             input.parse::<syn::Token![,]>()?;
         }
         Ok(ComponentArgs { base })
-    })
-    .parse2(attr)
-}
-
-fn parse_control_template_target(attr: proc_macro2::TokenStream) -> syn::Result<syn::Path> {
-    use syn::parse::Parser;
-    (|input: syn::parse::ParseStream| {
-        let name: syn::Ident = input.parse()?;
-        if name != "target" {
-            return Err(syn::Error::new(
-                name.span(),
-                "expected `target = <ControlType>`",
-            ));
-        }
-        input.parse::<syn::Token![=]>()?;
-        let target: syn::Path = input.parse()?;
-        if !input.is_empty() {
-            return Err(input.error("unexpected tokens after ControlTemplate target"));
-        }
-        Ok(target)
     })
     .parse2(attr)
 }

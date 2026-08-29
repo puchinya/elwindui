@@ -64,7 +64,7 @@ pub struct ViewFactory {
 }
 
 impl ViewFactory {
-    /// Creates a new view template from a factory closure.
+    /// Creates a new factory for a deferred View subtree.
     pub fn new(
         factory: impl Fn(ViewBuildContext) -> Option<Rc<dyn UIElementExt>> + 'static,
     ) -> Self {
@@ -213,6 +213,27 @@ mod tests {
             0,
             "factory must not run once the owner is already gone"
         );
+    }
+
+    #[test]
+    fn repeated_builds_execute_factory_and_return_independent_roots() {
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_factory = calls.clone();
+        let factory = ViewFactory::new(move |_ctx| {
+            calls_for_factory.set(calls_for_factory.get() + 1);
+            Some(crate::ui::TextBlock::new() as Rc<dyn UIElementExt>)
+        });
+        let owner: Rc<dyn UIElementExt> = crate::ui::TextBlock::new();
+        let context = ViewBuildContext {
+            owner: Rc::downgrade(&owner),
+            environment: EnvironmentContext::root(),
+        };
+
+        let first = factory.build(context.clone()).unwrap();
+        let second = factory.build(context).unwrap();
+
+        assert!(!Rc::ptr_eq(&first, &second));
+        assert_eq!(calls.get(), 2);
     }
 
     #[test]

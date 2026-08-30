@@ -59,6 +59,8 @@ Record the discovery and proposed resolution in the Issue. Do not let code and t
 
 ## Verification
 
+For Rust-affecting changes, the mandatory Rust verification gate defined in [`docs/agents/testing.md`](../agents/testing.md) MUST pass before transition to review. After this baseline Issue, a known pre-existing formatter or analyzer failure is no longer an acceptable completion exception. If the gate cannot pass, remain in implementation or mark the Issue blocked as appropriate. The Pull Request verification report must contain the exact command and result.
+
 Use the relevant commands and platform-specific verification rules already defined in the root `AGENTS.md`. Do not duplicate that command catalog here.
 
 Record honestly:

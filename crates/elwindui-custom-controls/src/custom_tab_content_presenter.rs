@@ -1,7 +1,18 @@
 use super::core::base::{Rect, Size};
+use super::core::reactive::Subscription;
 use super::core::ui::{ContentControlExt, ControlExt, UIElementExt};
-use super::{ContentEntry, CustomTabViewItem, weak_self_from_visual_owner};
+use super::{CustomTabViewItem, weak_self_from_visual_owner};
 use std::rc::Rc;
+
+// This module is private; `pub` only allows the component macro to name the
+// state type in generated methods and does not expose it through the crate.
+pub struct ContentEntry {
+    item: std::rc::Weak<CustomTabViewItem>,
+    content: Option<Rc<dyn UIElementExt>>,
+    // Retained solely to keep the item-content subscription alive for this entry.
+    #[allow(dead_code)]
+    subscription: Subscription,
+}
 
 /// Private presenter that keeps every tab page content visually attached while arranging only the
 /// selected page into the available content rectangle.

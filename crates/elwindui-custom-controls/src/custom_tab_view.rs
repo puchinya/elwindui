@@ -1,15 +1,44 @@
+use super::core::base::Point;
 use super::core::input::{MouseButton, PointerEventArgs};
 use super::core::ui::{ControlExt, ListExt, UIElementExt};
 use super::{
     CloseButtonPresentation, CustomTabContentPresenter, CustomTabContentPresenterExt,
     CustomTabStripPresenter, CustomTabStripPresenterExt, CustomTabViewItem, CustomTabViewItemExt,
     TabCloseRequested, TabDragCompletedEventArgs, TabDragMovedEventArgs, TabDragStartedEventArgs,
-    TabGesture, TabGestureKind, TabItemPointerEvent, TabStripPosition, weak_self_from_visual_owner,
+    TabStripPosition, weak_self_from_visual_owner,
 };
 use std::rc::Rc;
 
 const TAB_STRIP_HEIGHT: f32 = 32.0;
 const TAB_DRAG_THRESHOLD: f32 = 4.0;
+
+#[derive(Clone, Debug)]
+// This module is private; `pub` is required only so the component macro can
+// name the state type in generated methods. The type remains unreachable from
+// outside this crate because `custom_tab_view` is not exported.
+pub enum TabGestureKind {
+    Pressed,
+    Dragging,
+}
+
+#[derive(Clone, Debug)]
+pub struct TabGesture {
+    item: std::rc::Weak<CustomTabViewItem>,
+    press_position: Point,
+    press_screen_position: Option<Point>,
+    last_position: Point,
+    last_screen_position: Option<Point>,
+    kind: TabGestureKind,
+}
+
+pub enum TabItemPointerEvent {
+    Pressed(PointerEventArgs),
+    Moved(PointerEventArgs),
+    Released(PointerEventArgs),
+    Canceled(PointerEventArgs),
+    Entered,
+    Exited,
+}
 
 /// A templated tab strip and selected-content host.
 #[elwindui::component(inherits Control)]

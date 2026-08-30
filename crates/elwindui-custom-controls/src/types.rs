@@ -1,10 +1,4 @@
-use super::CustomTabViewItem;
 use super::core::base::Point;
-use super::core::input::PointerEventArgs;
-use super::core::layout::Orientation;
-use super::core::reactive::Subscription;
-use super::core::ui::UIElementExt;
-use std::rc::Rc;
 
 /// The edge on which a tab strip is authored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -78,46 +72,6 @@ pub type TabDragMoved = TabDragMovedEventArgs;
 pub type TabDragCompleted = TabDragCompletedEventArgs;
 /// Backwards-compatible short name for [`TabCloseRequestedEventArgs`].
 pub type TabCloseRequested = TabCloseRequestedEventArgs;
-
-#[derive(Clone, Debug)]
-pub(crate) enum TabGestureKind {
-    Pressed,
-    Dragging,
-}
-
-#[derive(Clone, Debug)]
-pub struct TabGesture {
-    pub(crate) item: std::rc::Weak<CustomTabViewItem>,
-    pub(crate) press_position: Point,
-    pub(crate) press_screen_position: Option<Point>,
-    pub(crate) last_position: Point,
-    pub(crate) last_screen_position: Option<Point>,
-    pub(crate) kind: TabGestureKind,
-}
-
-pub enum TabItemPointerEvent {
-    Pressed(PointerEventArgs),
-    Moved(PointerEventArgs),
-    Released(PointerEventArgs),
-    Canceled(PointerEventArgs),
-    Entered,
-    Exited,
-}
-
-pub struct ContentEntry {
-    pub(crate) item: std::rc::Weak<CustomTabViewItem>,
-    pub(crate) content: Option<Rc<dyn UIElementExt>>,
-    #[allow(dead_code)]
-    pub(crate) subscription: Subscription,
-}
-
-#[derive(Clone, Debug)]
-pub struct SplitterGesture {
-    pub(crate) orientation: Orientation,
-    pub(crate) position: Point,
-    pub(crate) screen_position: Option<Point>,
-    pub(crate) cumulative_delta: f32,
-}
 
 /// Payload emitted when splitter dragging starts.
 #[derive(Clone, Copy, Debug, PartialEq)]

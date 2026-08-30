@@ -31,9 +31,16 @@ the shape metadata marks that conversion boundary separately from the borrowed
 string setters of hand-written builtins.
 
 Each `#[component]` in `elwindui-custom-controls` is maintained in its own source
-file. `lib.rs` is the public facade and module root, shared event/value types
-live in `types.rs`, and non-component cross-cutting implementation support is
-limited to `support.rs`.
+file. `lib.rs` is the public facade and module root. `types.rs` contains only
+the public shared value/event types and their public aliases; component- and
+presenter-private state is owned by the implementation file that uses it:
+`custom_tab_view.rs` owns tab gesture state and item pointer events,
+`custom_tab_content_presenter.rs` owns `ContentEntry`, and
+`custom_splitter.rs` owns `SplitterGesture`. Those implementation modules stay
+private, and their state types are not crate-root API. The facade lists the
+intended public `types.rs` names explicitly rather than re-exporting the module
+wildcard. Non-component cross-cutting implementation support is limited to
+`support.rs`.
 
 The tab view template is a `Grid` with two rows. Its declarative content field
 is exactly `#[content(children)] children: Vec<Rc<CustomTabViewItem>>`. The private

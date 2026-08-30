@@ -3,9 +3,10 @@ use super::core::graphics::IconSource;
 use super::core::input::PointerEventArgs;
 use super::core::layout::Visibility;
 use super::core::ui::{ControlExt, IconSourceElementExt, UIElementExt};
+use super::custom_tab_view::TabItemPointerEvent;
 use super::{
-    CloseButtonPresentation, CustomTabCloseButton, CustomTabCloseButtonExt, TabItemPointerEvent,
-    TabStripPosition, weak_self_from_visual_owner,
+    CloseButtonPresentation, CustomTabCloseButton, CustomTabCloseButtonExt, TabStripPosition,
+    weak_self_from_visual_owner,
 };
 use std::rc::Rc;
 

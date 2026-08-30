@@ -1,11 +1,21 @@
+use super::core::base::Point;
 use super::core::input::{MouseButton, PointerEventArgs};
 use super::core::ui::UIElementExt;
 use super::{
     Orientation, SplitterDragCompletedEventArgs, SplitterDragDelta, SplitterDragDeltaEventArgs,
-    SplitterDragStarted, SplitterDragStartedEventArgs, SplitterGesture,
-    weak_self_from_visual_owner,
+    SplitterDragStarted, SplitterDragStartedEventArgs, weak_self_from_visual_owner,
 };
 use std::rc::Rc;
+
+#[derive(Clone, Debug)]
+// This module is private; `pub` only allows the component macro to name the
+// state type in generated methods and does not expose it through the crate.
+pub struct SplitterGesture {
+    orientation: Orientation,
+    position: Point,
+    screen_position: Option<Point>,
+    cumulative_delta: f32,
+}
 
 #[elwindui::component(inherits Control)]
 pub struct CustomSplitter {

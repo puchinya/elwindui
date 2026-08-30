@@ -36,6 +36,12 @@ pub(crate) use custom_tab_strip_presenter::{CustomTabStripPresenter, CustomTabSt
 pub use custom_tab_view::{CustomTabView, CustomTabViewExt};
 pub use custom_tab_view_item::{CustomTabViewItem, CustomTabViewItemExt};
 pub(crate) use support::weak_self_from_visual_owner;
-pub use types::*;
+pub use types::{
+    CloseButtonPresentation, SplitterDragCompleted, SplitterDragCompletedEventArgs,
+    SplitterDragDelta, SplitterDragDeltaEventArgs, SplitterDragStarted,
+    SplitterDragStartedEventArgs, TabCloseRequested, TabCloseRequestedEventArgs, TabDragCompleted,
+    TabDragCompletedEventArgs, TabDragMoved, TabDragMovedEventArgs, TabDragStarted,
+    TabDragStartedEventArgs, TabStripPosition,
+};
 
 pub use core::layout::Orientation;

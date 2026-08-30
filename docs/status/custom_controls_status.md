@@ -1,6 +1,7 @@
 # Custom controls status
 
-Snapshot: 2026-08-31. The public contract is
+Snapshot: 2026-08-31. Review-remediation implementation commit:
+`623a3c0`. The public contract is
 [`../specs/custom_controls_spec.md`](../specs/custom_controls_spec.md).
 
 ## Implemented

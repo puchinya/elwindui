@@ -54,9 +54,13 @@ pub fn init() -> Result<(), InitError> {
 ))]
 pub fn init() -> Result<(), InitError> {
     #[cfg(all(target_os = "macos", feature = "backend-appkit"))]
-    return elwindui_backend_appkit::init().map_err(|error| InitError(error.to_string()));
+    {
+        elwindui_backend_appkit::init().map_err(|error| InitError(error.to_string()))
+    }
     #[cfg(all(target_os = "linux", feature = "backend-gtk4"))]
-    return elwindui_backend_gtk4::init().map_err(|error| InitError(error.to_string()));
+    {
+        elwindui_backend_gtk4::init().map_err(|error| InitError(error.to_string()))
+    }
 }
 
 #[cfg(all(target_os = "macos", feature = "backend-appkit"))]

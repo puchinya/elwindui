@@ -348,23 +348,23 @@ fn parse_component_args(attr: proc_macro2::TokenStream) -> syn::Result<Component
         let mut base = None;
         while !input.is_empty() {
             let kw: syn::Ident = input.parse()?;
-            if kw == "inherits" {
-                if base.is_some() {
-                    return Err(syn::Error::new(kw.span(), "duplicate `inherits` argument"));
+            if kw != "inherits" {
+                if kw == "template" {
+                    return Err(syn::Error::new(
+                        kw.span(),
+                        "`template = <environment_key>` is no longer supported; declare `template: template_view!(|alias: Self| { ... })` and use EnvironmentContext::set_control_template::<Target>(...) for overrides",
+                    ));
                 }
-                let path: syn::Path = input.parse()?;
-                base = Some(path_to_string(&path));
-            } else if kw == "template" {
-                return Err(syn::Error::new(
-                    kw.span(),
-                    "`template = <environment_key>` is no longer supported; declare `template: template_view!(|alias: Self| { ... })` and use EnvironmentContext::set_control_template::<Target>(...) for overrides",
-                ));
-            } else {
                 return Err(syn::Error::new(
                     kw.span(),
                     "expected `inherits <Base>`",
                 ));
             }
+            if base.is_some() {
+                return Err(syn::Error::new(kw.span(), "duplicate `inherits` argument"));
+            }
+            let path: syn::Path = input.parse()?;
+            base = Some(path_to_string(&path));
             if input.is_empty() {
                 break;
             }

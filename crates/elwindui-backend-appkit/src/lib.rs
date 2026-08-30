@@ -51,8 +51,8 @@ mod render;
 #[cfg(test)]
 mod testsupport;
 
-pub use native_ui::*;
 pub use inner::{AppKitPopupHandle, AppKitPopupHost};
+pub use native_ui::*;
 
 // `elwindui-codegen`'s generated code references `elwindui::backend::AnyView` directly (see
 // `inner::AnyView`'s own doc comment), so it needs to stay reachable at this crate's own root even

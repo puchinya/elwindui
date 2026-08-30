@@ -6,8 +6,11 @@ Tracking: [#187](https://github.com/puchinya/elwindui/issues/187)
 
 `ControlTemplate<C>` is a typed, deferred factory for the visual subtree of a
 `Control`-derived value. `NativeControl` is excluded because its backend owns
-the native visual structure. Selection is mount-time only; a mounted control is
-not re-templated when an Environment value changes.
+the native visual structure. Mounting establishes the effective Environment and
+installs the typed template provider, but selection and construction occur at
+the first successful template application after mount. A mounted control is
+not re-templated after successful application when an Environment value
+changes.
 
 ## 2. Typed authoring
 
@@ -176,7 +179,12 @@ explicit entry that shadows an ancestor value and selects the component
 default; it does not remove the local entry. Lookup is exact target type:
 `ControlTemplate<Base>` does not satisfy `ControlTemplate<Derived>`.
 
-Selection order is:
+Selection is evaluated when the control first successfully applies its
+template, either through explicit `UIElement::apply_template()` or through a
+participating `measure()` call. A control that is not mounted, has no provider,
+or has already started or completed application does not apply a template.
+
+Selection order at that first application is:
 
 1. effective Environment `ControlTemplateEnvironment<Self>` containing `Some`;
 2. otherwise the component-declared default template.
@@ -184,25 +192,51 @@ Selection order is:
 The selected factory receives the effective Environment. If an Environment
 override wins, the default factory is not executed.
 
+`UIElement::apply_template() -> bool` is a virtual class method whose default
+implementation returns `false`; `Control` overrides it with the Core-owned
+template state machine. It returns `true` only when that call performs
+the first successful application. It returns `false` before mount, when no
+typed provider exists, while application is reentrant, after a successful
+application, or after a terminal application failure. A participating
+`measure()` implicitly performs the same application before measuring the
+control's template root; a non-participating (for example, collapsed) measure
+does not realize the template. Non-Control elements retain the default
+`false` implementation and have no template state.
+
 ## 5. Lifecycle and ownership
 
-Mounting establishes the effective Environment before template selection. The
-existing lifecycle is retained:
+Mounting establishes the effective Environment and typed provider before
+template selection. Template realization is lazy and the lifecycle is:
 
 ```text
 logical construction
  -> effective Environment
+ -> typed provider installation
+ -> target wiring and on_mount
+ -> template remains Unapplied
+ -> first explicit apply_template() or participating measure()
  -> __prepare_template_presentation()
  -> select Environment template or component default
  -> build ControlTemplateContext<Self>
  -> __set_template_root(root)
  -> mount/wire template subtree
- -> target wiring and on_mount
+ -> on_apply_template
 ```
 
 `Control` retains one private template-root store and
 `ContentControl::__prepare_template_presentation()` remains the virtual hook.
-No second root store or hidden body-presentation protocol exists.
+No second root store or hidden body-presentation protocol exists. `on_mount`
+may complete while the template root is absent; code that requires the
+realized template uses `on_apply_template` or explicit `apply_template()`.
+`on_apply_template` is an ordinary overridable method, runs exactly once after
+the root is installed and its attachment-triggered mount hooks have completed,
+and is not a DSL lifecycle block. Its panic does not undo the committed root
+or make application retryable. A panic before root commit is terminal for that
+control instance.
+
+Environment template selection can observe a value changed after mount but
+before first application. After successful application, later Environment
+changes do not replace the root or rerun the factory.
 
 For a Window host-composition component, `Window::new()` remains in the
 `Created` state until the first `show()`. Generated `#[id]` child accessors are

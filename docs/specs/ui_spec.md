@@ -93,6 +93,7 @@ ElwindUI のすべてのビジュアル要素（`UIElement`）は、**Measure（
   1. `margin` を `available_size` から減算する。
   2. 明示的なプロパティ（`width`, `height`, `min_width`, `max_width`, `min_height`, `max_height`）によるサイズクランプを適用する。
   3. コレクション・コンテンツを持つ要素は、各子要素の `measure` を呼び出し、レイアウト規則（縦並び、横並び、グリッド等）に従って自身の Desired Size を決定する。
+- template-enabledな`Control`は、レイアウトに参加する最初の`measure()`のpre-measure段階で暗黙にtemplateを適用してから`measure_override`へ進む。適用されたtemplate rootは同じmeasure passで計測される。`Collapsed`などレイアウトに参加しないmeasureはtemplateを実体化せず、後に参加状態となった次のmeasureで適用する。
 - **`visibility` の影響**:
   - `Visible`: 通常通りサイズ計測を行い、レイアウト領域を占有する。
   - `Collapsed`: 計測結果を常に Desired Size `(0, 0)` とみなし、レイアウト計算から完全に除外される。
@@ -289,8 +290,8 @@ pub trait CoordinateHost {
 ### `Control`
 
 スタイリング、テーマ設定、テンプレート合成に対応した汎用コントロール基底。
-template-enabled派生型ではmount時に選択した単一template rootをVisual childとして保持し、logical childにはしない。
-typed factoryと選択規則は[ControlTemplate Specification](control_template_spec.md)で定義する。
+template-enabled派生型ではmount時に最終具象型へ特化したtyped providerだけを保持し、最初のtemplate適用まではtemplate rootを持たない。適用された単一template rootはVisual childとして保持し、logical childにはしない。
+typed factoryと選択規則は[ControlTemplate Specification](control_template_spec.md)で定義する。`UIElement::apply_template() -> bool`はdefaultでは`false`を返し、`Control`がmount後の最初のtemplate適用を同じvirtual経路で実行する。`#[overridable] fn on_apply_template(&self)`はroot接続後に一度だけ呼ばれる。template-enabledな`Control`はmount完了時点でrootを持たないことがあり、通常の`view!` bodyの実体化タイミングは変更しない。
 `Control` 自身は公開 content collection を持たない。`#[component(inherits Control)]` の
 `template: template_view!(|alias: Self| { ... })` が宣言する typed default template の単一 root は、private な
 `template_root` 経路を通じてVisual childとして接続される。templateのuse-siteで書かれたbare childは

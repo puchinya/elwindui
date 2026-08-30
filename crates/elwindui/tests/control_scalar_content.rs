@@ -2,7 +2,7 @@
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
-use elwindui::core::ui::{TextBlock, UIElementExt};
+use elwindui::core::ui::{ControlExt as _, TextBlock, UIElementExt};
 use std::rc::Rc;
 
 #[elwindui::component(inherits Control)]
@@ -25,6 +25,7 @@ impl ScalarControlProbe {}
 #[test]
 fn scalar_control_content_replaces_one_visual_root_on_property_change() {
     let probe = ScalarControlProbe::new();
+    assert!(probe.apply_template());
     let old_root = probe
         .visual_children()
         .into_iter()

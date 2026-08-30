@@ -7,7 +7,9 @@ use elwindui::core::ui::popup::{
     ContextMenuService, ContextRequest, PopupAnchor, PopupDismissAction, PopupHost, PopupRequest,
     PopupSurfaceHandle, ResolvedContextDefinition,
 };
-use elwindui::ui::{LayoutExt, MenuItemExt, UIElementExt, ViewFactory, unmount_subtree};
+use elwindui::ui::{
+    LayoutExt, MenuItemExt, TextBlock, UIElementExt, VerticalLayout, ViewFactory, unmount_subtree,
+};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -492,6 +494,7 @@ thread_local! {
 struct PopupScopeChild {
     template: template_view!(|templated_parent: Self| {
         on_mount {
+            assert!(self.apply_template());
             let template = ViewFactory::new(|ctx| {
                 OBSERVED_SCOPE_THEME.with(|c| {
                     *c.borrow_mut() = ctx.environment.get::<PopupTestScopeTheme>();

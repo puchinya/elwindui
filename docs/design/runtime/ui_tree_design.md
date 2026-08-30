@@ -36,6 +36,15 @@ Component `on_mount`, `on_update`, and `on_unmount` callbacks are invoked by gen
 
 How generated code realizes Construction/Mounting/Unmounting — the `new()`/`mount(environment)`/build split, its interaction with `#[class]`'s `construct`/`on_constructed` contract, and Environment's move to mount-time resolution — is specified in [`component_lifecycle_design.md`](component_lifecycle_design.md) (tracking: [#80](https://github.com/puchinya/elwindui/issues/80)).
 
+`UIElement`のclass interfaceにはvirtualな`apply_template() -> bool`を置き、
+defaultは`false`とする。固定`measure()`はlayoutへ参加する場合に限り、
+margin/constraint処理と`measure_override()`の前に`self.apply_template()`を
+呼ぶ。`Control`のoverrideはこの同じ地点でCore所有のtemplate適用を実行するため、
+最初に実体化されたtemplate rootは同じmeasure passで計測される。Collapsed/inactive
+など参加しないmeasureでは呼ばず、templateを実体化しない。非`Control`要素は
+defaultの`false`を継承し、template application stateとproviderはControlだけが
+所有する。
+
 ## Participation
 
 Existence and active participation are separate. A collapsed or inactive hosted subtree may retain UI and native-control state while being excluded from layout, render-tree generation, hit testing, focus order, and shortcut dispatch. Host activation is the boundary used by independently hosted content such as `TabView` pages.

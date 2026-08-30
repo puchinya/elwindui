@@ -6,7 +6,7 @@
 
 use elwindui::core::graphics::{Brush, Color};
 use elwindui::core::theme::{BrushStyle, ResolvedValue, Theme};
-use elwindui::core::ui::{LayoutExt as _, TextStyleOwner as _};
+use elwindui::core::ui::{ControlExt as _, LayoutExt as _, TextStyleOwner as _, UIElementExt as _};
 
 fn brush(r: u8, g: u8, b: u8) -> Brush {
     Brush::Solid(Color::rgb(r, g, b))
@@ -124,7 +124,8 @@ impl NonSemanticFillHost {}
 #[test]
 fn an_unrelated_property_named_fill_is_not_treated_as_a_semantic_brush() {
     NON_SEMANTIC_FILL.with(|value| value.borrow_mut().clear());
-    let _host = NonSemanticFillHost::new();
+    let host = NonSemanticFillHost::new();
+    assert!(host.apply_template());
     assert_eq!(
         NON_SEMANTIC_FILL.with(|value| value.borrow().clone()),
         "ordinary string"
@@ -180,6 +181,15 @@ fn environment_scope_retains_and_replays_semantic_overrides() {
     let view = elwindui::new!(SemanticBrushScopeView(
         local_primary: BrushStyle::Value(brush(1, 2, 3))
     ));
+    let child = elwindui::core::visual_tree::find_all::<SemanticBrushScopeChild>(view.as_ref())
+        .into_iter()
+        .next()
+        .expect("scoped semantic brush child");
+    let child = child
+        .as_any()
+        .downcast_ref::<SemanticBrushScopeChild>()
+        .expect("scoped semantic brush child has its concrete type");
+    assert!(child.apply_template());
     assert_eq!(
         SCOPED_PRIMARY.with(|value| value.borrow().clone()),
         BrushStyle::Value(brush(1, 2, 3))

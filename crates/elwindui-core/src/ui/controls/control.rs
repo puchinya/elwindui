@@ -1,6 +1,30 @@
 //! `elwindui::ui::Control` — the templated-control base, and its local text-style storage.
 
+use super::control_template::ControlTemplateProvider;
 use super::*;
+use std::cell::OnceCell;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TemplateApplyState {
+    Unapplied,
+    Applying,
+    Applied,
+    Failed,
+}
+
+struct TemplateApplyGuard<'a> {
+    state: &'a Cell<TemplateApplyState>,
+    committed: bool,
+}
+
+impl Drop for TemplateApplyGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.state.set(TemplateApplyState::Failed);
+        }
+    }
+}
 
 /// A composable, templated component base (WinUI3's `Control`). `Control` has no public collection
 /// content slot: its visual presentation is owned by the private template-root path. A component
@@ -26,6 +50,8 @@ pub struct Control {
     pub content_horizontal_alignment: Cell<HorizontalAlignment>,
     pub content_vertical_alignment: Cell<VerticalAlignment>,
     template_root: RefCell<Option<Rc<dyn UIElementExt>>>,
+    template_provider: OnceCell<ControlTemplateProvider>,
+    template_apply_state: Cell<TemplateApplyState>,
     /// `Control`-level font/foreground properties (指示書 §10: "Control派生型からも、基底の
     /// フォントプロパティをDSLで直接指定できること") — inherited by any Visual descendant via
     /// [`TextStyleOwner`], regardless of whether the elements in between are themselves owners.
@@ -34,6 +60,68 @@ pub struct Control {
 
 #[elwindui_macros::class]
 impl Control {
+    /// Applies this control's typed template exactly once.
+    ///
+    /// Returns `true` only when the first application succeeds.  The method returns `false` when
+    /// the control is not mounted, has no generated provider, is already applying/applied, or has
+    /// entered the terminal failed state.  A pre-commit panic leaves the control failed; a panic
+    /// from [`on_apply_template`](Self::on_apply_template) occurs after the root is committed and
+    /// leaves the control applied.
+    #[overrides]
+    fn apply_template(&self) -> bool {
+        let Some(_environment) = self.environment_context() else {
+            return false;
+        };
+
+        match self.template_apply_state.get() {
+            TemplateApplyState::Unapplied => {}
+            TemplateApplyState::Applying
+            | TemplateApplyState::Applied
+            | TemplateApplyState::Failed => return false,
+        }
+
+        let Some(provider) = self.template_provider.get() else {
+            return false;
+        };
+
+        self.template_apply_state.set(TemplateApplyState::Applying);
+        let mut guard = TemplateApplyGuard {
+            state: &self.template_apply_state,
+            committed: false,
+        };
+
+        provider.prepare();
+        let root = provider.build(
+            self.environment_context()
+                .expect("mounted Control lost its Environment during template application"),
+        );
+        match catch_unwind(AssertUnwindSafe(|| self.__set_template_root(root.clone()))) {
+            Ok(()) => {}
+            Err(payload) => {
+                let _ = catch_unwind(AssertUnwindSafe(|| {
+                    self.__rollback_failed_template_root(&root);
+                }));
+                resume_unwind(payload);
+            }
+        }
+        self.template_apply_state.set(TemplateApplyState::Applied);
+        guard.committed = true;
+        provider.on_applied();
+        true
+    }
+
+    /// Installs the generated typed provider without realizing its template.
+    #[doc(hidden)]
+    fn __set_control_template_provider(&self, provider: ControlTemplateProvider) {
+        if self.template_provider.set(provider).is_err() {
+            panic!("ControlTemplate provider was installed more than once");
+        }
+    }
+
+    /// Called once after a successful template root installation and descendant mount.
+    #[overridable]
+    fn on_apply_template(&self) {}
+
     #[overrides]
     fn measure_override(&self, available: Size) -> Size {
         let inner = self
@@ -121,6 +209,53 @@ impl Control {
         *self.template_root.borrow_mut() = Some(root);
         self.invalidate_measure();
     }
+    /// Restores the Visual-tree invariants after a template root failed while being attached.
+    ///
+    /// `UIElementVisualCollection::add` installs the parent edge and stores the child before it
+    /// runs deferred mount hooks, so a hook panic can leave either a stored child or only a stale
+    /// parent edge. This helper is deliberately scoped to the Control template transaction; the
+    /// collection's global panic semantics remain unchanged.
+    fn __rollback_failed_template_root(&self, failed_root: &Rc<dyn UIElementExt>) {
+        let owner = self.as_ui_element().visual_collection.owner_rc();
+        let is_self_parent = || {
+            failed_root
+                .visual_parent()
+                .as_ref()
+                .zip(owner.as_ref())
+                .is_some_and(|(parent, owner)| Rc::ptr_eq(parent, owner))
+        };
+        let is_visual_child = || {
+            self.visual_children()
+                .iter()
+                .any(|child| Rc::ptr_eq(child, failed_root))
+        };
+
+        if is_visual_child() || is_self_parent() {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                crate::ui::unmount_subtree(failed_root);
+            }));
+        }
+        if is_visual_child() {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                self.as_ui_element().visual_collection.remove(failed_root);
+            }));
+        }
+        if !is_visual_child() && is_self_parent() {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                *failed_root.as_ui_element().visual_parent.borrow_mut() = None;
+            }));
+        }
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let should_clear = self
+                .template_root
+                .borrow()
+                .as_ref()
+                .is_some_and(|root| Rc::ptr_eq(root, failed_root));
+            if should_clear {
+                self.template_root.borrow_mut().take();
+            }
+        }));
+    }
     fn construct() -> Self {
         Self {
             base: UIElement::construct(),
@@ -128,6 +263,8 @@ impl Control {
             content_horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
             content_vertical_alignment: Cell::new(VerticalAlignment::Stretch),
             template_root: RefCell::new(None),
+            template_provider: OnceCell::new(),
+            template_apply_state: Cell::new(TemplateApplyState::Unapplied),
             text_style: crate::graphics::TextStyleStorage::new(),
         }
     }

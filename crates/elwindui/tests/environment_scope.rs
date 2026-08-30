@@ -12,6 +12,8 @@
 
 use std::cell::RefCell;
 
+use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
+
 thread_local! {
     static INSIDE_LOCALE: RefCell<String> = RefCell::new(String::new());
     static OUTSIDE_LOCALE: RefCell<String> = RefCell::new(String::new());
@@ -217,9 +219,8 @@ fn nested_environment_scope_derives_from_its_own_enclosing_scope() {
 // gap noted in PR #121 ("Known limitation: only a bare literal element... an if/match/for... falls
 // back to the ordinary, non-scoped path"). Both branches here are single childless leaves — the
 // exact shape that would otherwise qualify for lazy-once materialization (`lazy_branch_plan`) —
-// deliberately, so this test also exercises the "force eager while inside a scope" fallback
-// (`lazy_branch_plan` returns `None` whenever `environment_scope.is_some()`), not just the ordinary
-// eager path.
+// deliberately, so this test also exercises scoped Environment propagation after the parent
+// template is explicitly applied.
 thread_local! {
     static IF_IN_SCOPE_LOCALE: RefCell<String> = RefCell::new(String::new());
 }
@@ -268,7 +269,8 @@ fn an_if_directly_inside_environment_scope_is_scope_aware() {
         .set::<EnvironmentScopeLocale>("en-US".to_string());
     IF_IN_SCOPE_LOCALE.with(|c| *c.borrow_mut() = String::new());
 
-    let _parent = elwindui::new!(EnvironmentScopeIfParent(show_child: true));
+    let parent = elwindui::new!(EnvironmentScopeIfParent(show_child: true));
+    assert!(parent.apply_template());
 
     assert_eq!(
         IF_IN_SCOPE_LOCALE.with(|c| c.borrow().clone()),

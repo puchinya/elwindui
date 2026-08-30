@@ -5,14 +5,14 @@
 
 use crate::ffi::mtm;
 use crate::host::TreeHostView;
+use block2::RcBlock;
 use elwindui_core::ui::popup::{
     PopupDismissPolicy, PopupFocusPolicy, PopupHost, PopupRequest, PopupSurfaceHandle,
 };
 use elwindui_core::ui::{UIElementExt, unmount_subtree};
 use objc2::rc::Retained;
-use objc2::{MainThreadOnly, msg_send};
-use block2::RcBlock;
 use objc2::runtime::AnyObject;
+use objc2::{MainThreadOnly, msg_send};
 use objc2_app_kit::{
     NSBackingStoreType, NSColor, NSEvent, NSEventMask, NSEventType, NSFloatingWindowLevel,
     NSScreen, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
@@ -40,10 +40,7 @@ pub(crate) struct InnerPopupSurface {
 
 impl InnerPopupSurface {
     /// Creates and immediately displays a new popup surface.
-    pub(crate) fn show(
-        request: PopupRequest,
-        owner_window: Option<&NSWindow>,
-    ) -> Rc<Self> {
+    pub(crate) fn show(request: PopupRequest, owner_window: Option<&NSWindow>) -> Rc<Self> {
         let m = mtm();
         let primary_screen_height = NSScreen::screens(m)
             .firstObject()
@@ -53,7 +50,8 @@ impl InnerPopupSurface {
             .or_else(|| owner_window.map(|w| w.frame().size.height))
             .unwrap_or(0.0);
 
-        let appkit_y = primary_screen_height - (request.position.y as f64 + request.size.height as f64);
+        let appkit_y =
+            primary_screen_height - (request.position.y as f64 + request.size.height as f64);
         let content_rect = NSRect::new(
             NSPoint::new(request.position.x as f64, appkit_y),
             NSSize::new(request.size.width as f64, request.size.height as f64),
@@ -104,7 +102,9 @@ impl InnerPopupSurface {
         surface.window.display();
 
         if request.focus_policy == PopupFocusPolicy::Root {
-            surface.window.makeFirstResponder(Some(&surface.content_host));
+            surface
+                .window
+                .makeFirstResponder(Some(&surface.content_host));
             surface.content_host.focus_element(&request.content);
         }
 

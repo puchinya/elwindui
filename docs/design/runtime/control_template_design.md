@@ -12,10 +12,14 @@ constrained by `C: ControlExt + 'static`; no target strings, `Any`, reflection,
 or downcast are used. The context carries the strong target only during factory
 execution and the effective `EnvironmentContext`.
 
-`Control` owns one private `template_root`. Installation remains centralized in
-`__set_template_root()` and removes the old Visual edge before attaching the
-new one. `__prepare_template_presentation()` remains the virtual hook; the
-ContentControl override enables template mode and preserves logical content.
+`Control` owns one private `template_root`, a single-assignment typed provider,
+and the private `Unapplied`/`Applying`/`Applied`/`Failed` application state.
+Installation remains centralized in `__set_template_root()` and removes the
+old Visual edge before attaching the new one. `__prepare_template_presentation()`
+remains the virtual hook; the ContentControl override enables template mode and
+preserves logical content. The provider captures only a `Weak<C>` and exposes
+the Core-internal prepare, build, and post-application operations; it never
+owns the target strongly.
 
 ## 2. Authoring pipeline
 
@@ -69,7 +73,7 @@ property metadata; raw framework/class-managed `ControlExt` types are not
 required to provide them in #187. No fake non-reactive bridge, runtime
 reflection, or class-wide reactive-property redesign is introduced here.
 
-The generated flow is:
+The generated and runtime flows are:
 
 ```text
 component parser
@@ -79,17 +83,26 @@ component parser
 
 mount
   effective Environment
-      -> typed ControlTemplate<Self> lookup
+      -> install provider specialized to the final concrete component type
+      -> target wiring and on_mount
+      -> template remains Unapplied
+
+first explicit apply_template() or participating measure()
+  Control state machine
+      -> provider.prepare()
+      -> exact typed Environment lookup at application time
       -> selected factory (or default)
-      -> __prepare_template_presentation()
+      -> provider.build(environment)
       -> __set_template_root(root)
       -> mount/wire subtree
+      -> provider.on_applied() / on_apply_template
 ```
 
 The default factory is not executed if an Environment override supplies
 `Some`. A cheap factory value may be stored in generated type metadata, but
 template nodes, bindings, dynamic regions, and subscriptions are created only
-by the selected factory.
+by the selected factory. The generated mount path installs the provider; it
+does not select, build, or attach the template root.
 
 ## 3. Environment selection
 
@@ -99,9 +112,12 @@ typed `C`/`TypeId`, so exact-type lookup has no base-type fallback or covariance
 `set_control_template::<C>(None)` is a real local entry and shadows an ancestor
 `Some`; it selects the component default without removing the local cell.
 
-Selection is mount-time only. The template slot is not subscribed for runtime
-replacement. Child contexts reuse the existing Environment `derive()` cell
-inheritance and shadowing semantics.
+Selection occurs once at the first successful application after mount. The
+provider performs the exact `C` lookup in Core generic code, preserving local
+`None` shadowing and the existing `Environment::derive()` inheritance. The
+template slot is not subscribed for runtime replacement. An Environment change
+before first application can affect selection; a change after application
+cannot replace the committed root or rerun the factory.
 
 ## 4. ContentControl presentation
 
@@ -113,11 +129,24 @@ validator allows zero or one static presenter and rejects multiple or dynamic
 presenters. Content replacement and pre-mount transitions remain handled by the
 existing weak/cancelable subscription and template-root paths.
 
+`__prepare_template_presentation()` runs before provider factory build and
+wiring so that logical content is no longer directly presented before a
+`ContentPresenter` can acquire the Visual edge. Root attachment commits before
+`on_apply_template`; descendant mount hooks triggered by attachment therefore
+complete before that ordinary overridable hook runs.
+
+For template application, the successful return from `__set_template_root()` is
+the root-commit boundary. Attachment-triggered mount hooks are part of the
+pre-commit operation. If one unwinds, the Control-local transaction runs the
+existing subtree teardown, removes the failed root, clears any stale parent or
+template-root reference, and resumes the original panic; the application state
+becomes terminally `Failed`. `on_apply_template` begins only after that commit.
+
 When the target is nested in a Window host-composition body, the Window stays
 unmounted until its first `show()`, and its generated named child accessors are
 not readable during that interval. A demo or application that needs logical
 content pre-mount passes it through the initial `content:`/Param construction
-path; the target receives it before this template's mount-time selection. This
+path; the target receives it before this template's provider installation and first application. This
 preserves the lifecycle boundary instead of adding a special pre-mount
 template-accessor path.
 

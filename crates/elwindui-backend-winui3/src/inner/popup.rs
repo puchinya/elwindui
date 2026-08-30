@@ -117,8 +117,11 @@ impl InnerPopupSurface {
         // 12. Focus policy — best-effort, non-fatal (unchanged from before this fix; focus
         // semantics are out of scope here).
         if request.focus_policy == PopupFocusPolicy::Root {
-            let uie: crate::bindings::Microsoft::UI::Xaml::UIElement =
-                surface.content_host.canvas().cast().expect("Canvas as UIElement");
+            let uie: crate::bindings::Microsoft::UI::Xaml::UIElement = surface
+                .content_host
+                .canvas()
+                .cast()
+                .expect("Canvas as UIElement");
             let _ = uie.Focus(crate::bindings::Microsoft::UI::Xaml::FocusState::Programmatic);
             surface.content_host.focus_element(&request.content);
         }

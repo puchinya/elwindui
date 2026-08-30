@@ -20,7 +20,7 @@ Snapshot: 2026-08-30. Public behavior is defined by [`../specs/ui_spec.md`](../s
 | TabView / TabViewItem | ✅ | ✅ | ⬜ | hosted page activation and native child reconciliation; AppKit tab chrome (layerless chip drawing, system-symbol close/new-tab, closable live sync, shrink-to-fit overflow) screenshot-verified on `controls-demo`/`notepad` ([#167](https://github.com/puchinya/elwindui/issues/167)) — Accessibility-driven interaction verification (`find`/`click`) not run, no Accessibility permission granted to the verification environment |
 | Rectangle / Ellipse / Image | ✅ | ✅ | ⬜ | backend-neutral self-rendered controls |
 | IconElement / IconSourceElement | ✅ | ✅ | ⬜ | backend-neutral self-rendered icon base/value wrapper; Core unit and cross-crate DSL tests, no backend-specific control path ([#176](https://github.com/puchinya/elwindui/issues/176)) |
-| ControlTemplate / ContentPresenter | ✅ | ✅ | ⬜ | mount-time typed Environment selection, explicit `template_view!(|alias: Self| { ... })` defaults, and logical/Visual separation; backend-neutral runtime; ordinary view/template planner-emitter is shared, with readable `TemplateProperty<KEY>` and setter-only `WritableTemplateProperty<KEY>` bridges (including inherited base delegation); standalone/reusable forms require an explicit concrete target and reusable templates are ordinary Rust functions; property-free templates accept valid raw `ControlExt` targets, while property paths remain capability-gated and raw framework/class-managed property bridges are not guaranteed; template roots use private template-root ownership while caller bare content remains the inherited `content` slot |
+| ControlTemplate / ContentPresenter | ✅ | ✅ | ⬜ | typed Environment selection on the first successful `UIElement::apply_template()` (explicit call or participating measure), explicit `template_view!(|alias: Self| { ... })` defaults, and logical/Visual separation; backend-neutral runtime; ordinary view/template planner-emitter is shared, with readable `TemplateProperty<KEY>` and setter-only `WritableTemplateProperty<KEY>` bridges (including inherited base delegation); standalone/reusable forms require an explicit concrete target and reusable templates are ordinary Rust functions; property-free templates accept valid raw `ControlExt` targets, while property paths remain capability-gated and raw framework/class-managed property bridges are not guaranteed; `UIElement` owns only the virtual default `false` method, while template roots/provider/state remain on `Control`; template roots use private template-root ownership while caller bare content remains the inherited `content` slot |
 
 ## Current gaps
 
@@ -38,7 +38,7 @@ Snapshot: 2026-08-30. Public behavior is defined by [`../specs/ui_spec.md`](../s
 PR #200's final remediation keeps the demo on the public path: the reusable
 template is parameterized and installed directly, and logical content is
 provided as a Window constructor Param so it reaches the target before the
-target's template mount. The public `control_template` acceptance tests cover
+target's first template application. The public `control_template` acceptance tests cover
 default/override selection, alias resync, ContentPresenter ownership, layout,
 and RenderTree descendants. On 2026-08-30, the rebuilt executable launched with
 `cargo run -p control-template-demo`; a Computer Use screenshot of that same

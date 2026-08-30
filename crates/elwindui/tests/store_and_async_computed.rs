@@ -107,10 +107,18 @@ fn store_singleton_and_async_computed_end_to_end() {
     );
     drain_until(
         &receiver,
-        || !matches!(a.doubled(), elwindui::core::reactive::AsyncComputed::Loading),
+        || {
+            !matches!(
+                a.doubled(),
+                elwindui::core::reactive::AsyncComputed::Loading
+            )
+        },
         "store's initial #[async_computed] recompute to resolve",
     );
-    assert_eq!(a.doubled(), elwindui::core::reactive::AsyncComputed::Ready(0));
+    assert_eq!(
+        a.doubled(),
+        elwindui::core::reactive::AsyncComputed::Ready(0)
+    );
 
     // Supersede: two rapid dependency changes while the first recompute is still suspended
     // (`double_after_a_real_suspend` genuinely awaits a cross-thread `spawn_background` delay) —
@@ -119,7 +127,12 @@ fn store_singleton_and_async_computed_end_to_end() {
     a.set_count(2);
     drain_until(
         &receiver,
-        || matches!(a.doubled(), elwindui::core::reactive::AsyncComputed::Ready(4)),
+        || {
+            matches!(
+                a.doubled(),
+                elwindui::core::reactive::AsyncComputed::Ready(4)
+            )
+        },
         "superseding #[async_computed] recompute to settle on the latest trigger's result",
     );
     assert_eq!(
@@ -132,7 +145,12 @@ fn store_singleton_and_async_computed_end_to_end() {
     let vm = GreetingViewModel::new();
     drain_until(
         &receiver,
-        || !matches!(vm.greeting(), elwindui::core::reactive::AsyncComputed::Loading),
+        || {
+            !matches!(
+                vm.greeting(),
+                elwindui::core::reactive::AsyncComputed::Loading
+            )
+        },
         "viewmodel's initial #[async_computed] recompute to resolve",
     );
     assert_eq!(
@@ -143,7 +161,12 @@ fn store_singleton_and_async_computed_end_to_end() {
     vm.set_name("world".to_string());
     drain_until(
         &receiver,
-        || matches!(vm.greeting(), elwindui::core::reactive::AsyncComputed::Ready(_)),
+        || {
+            matches!(
+                vm.greeting(),
+                elwindui::core::reactive::AsyncComputed::Ready(_)
+            )
+        },
         "viewmodel's #[async_computed] to resolve after a dependency change",
     );
     assert_eq!(

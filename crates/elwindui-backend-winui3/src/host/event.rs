@@ -69,5 +69,6 @@ pub(crate) fn winui_modifiers() -> KeyModifiers {
 /// Checks whether a key event corresponds to the Windows platform context invocation
 /// (VK_APPS [0x5D] or Shift+F10 [0x79]).
 pub(crate) fn is_context_menu_key(virtual_key: VirtualKey, modifiers: KeyModifiers) -> bool {
-    virtual_key.0 == 0x5D || (virtual_key.0 == 0x79 && modifiers.shift && !modifiers.control && !modifiers.alt)
+    virtual_key.0 == 0x5D
+        || (virtual_key.0 == 0x79 && modifiers.shift && !modifiers.control && !modifiers.alt)
 }

@@ -317,9 +317,9 @@ struct ContentWrapper {
 impl ContentWrapper {}
 ```
 
-ここで`Control`は`elwindui::ui::Control`(ビルトイン、裸名で参照)である。`template_view!(|control: ContentWrapper| { ... })`のようにtargetをヘッダーへ明記した結果は`ControlTemplate<ContentWrapper>`として型付けされ、インスタンスごとの`template`プロパティにはならない。caller側で`ContentWrapper { TextBlock { ... } }`のように書いたbare childは、templateとは独立した実効`#[content(...)]`へlowerされる。
+ここで`Control`は`elwindui::ui::Control`(ビルトイン、裸名で参照)である。`template_view!(|control: ContentWrapper| { ... })`のようにtargetをヘッダーへ明記した結果は`ControlTemplate<ContentWrapper>`として型付けされ、インスタンスごとの`template`プロパティにはならない。caller側で`ContentWrapper { TextBlock { ... } }`のように書いたbare childは、templateとは独立した実効`#[content(...)]`へlowerされる。template-enabled componentの既定templateはmount時には構築されず、mount後の最初の明示的な`apply_template()`または参加する`measure()`で初めて選択・構築される。選択前のEnvironment変更はその最初の適用から参照され、適用後の変更は再テンプレート化しない。
 
-`Control`派生componentのvisual chromeは`body: view!`ではなく`template: template_view!`で宣言する。これは内部の`__prepare_template_presentation()`/`__set_template_root()`経路へ接続される型レベルの既定templateであり、hiddenなbody-presentation metadataではない。EnvironmentContextの`set_control_template::<ContentWrapper>(...)`でmount前のoverrideを指定でき、lookupは対象型のTypeIdに対して完全一致する。`ContentPresenter`をtemplate内に静的に1つ置いた場合だけ、callerのlogical contentがそのvisual subtreeへpresentされる。
+`Control`派生componentのvisual chromeは`body: view!`ではなく`template: template_view!`で宣言する。これは内部の`__prepare_template_presentation()`/`__set_template_root()`経路へ接続される型レベルの既定templateであり、hiddenなbody-presentation metadataではない。EnvironmentContextの`set_control_template::<ContentWrapper>(...)`でmount前または最初の適用前にoverrideを指定でき、lookupは対象型のTypeIdに対して完全一致する。`ContentPresenter`をtemplate内に静的に1つ置いた場合だけ、callerのlogical contentがそのvisual subtreeへpresentされる。`on_mount`はtemplate rootの実体化を保証せず、実体化後の処理は通常の`#[overridable]`/`#[overrides]`による`on_apply_template`で記述する。
 
 継承したフィールドは、派生component自身の`view`が**同名のまま裸で参照**している場合のみ、派生側の実効フィールド(＝コンストラクタ引数)になる。リテラル値で上書きしている場合(例:`Rectangle { fill: "#3a3a3c" }`)や、そもそも参照していない場合は、その基底フィールドは派生側の公開APIには現れない。
 
@@ -749,7 +749,7 @@ environment.set_control_template::<RoundedPanel>(Some(template_view!(|panel: Rou
 ```
 
 `template:`はcomponentの型レベルdefault factoryであり、`#[prop]`やinstance propertyではない。
-`EnvironmentContext::set_control_template::<C>(Some/None)`はmount-timeのexact-type overrideである。
+`EnvironmentContext::set_control_template::<C>(Some/None)`は最初のtemplate適用時に参照されるexact-type overrideである。
 `None`はそのcontextでdefaultを選ぶ明示的なshadow entryであり、ancestor entryを削除する操作ではない。
 `ControlTemplate<Base>`は`ControlTemplate<Derived>`へ自動変換されない。旧
 `#[component(template = key)]`はmigration diagnosticでrejectする。

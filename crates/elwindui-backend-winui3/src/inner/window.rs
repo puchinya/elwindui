@@ -118,9 +118,8 @@ impl InnerWindow {
             match decide_native_close(framework_initiated_close.get(), handler.is_some()) {
                 NativeCloseDecision::AllowNativeDefault => {}
                 NativeCloseDecision::InvokeHandler => {
-                    let handler = handler.expect(
-                        "InvokeHandler is only returned when handler_installed was true",
-                    );
+                    let handler = handler
+                        .expect("InvokeHandler is only returned when handler_installed was true");
                     if should_veto_native_close(handler()) {
                         let _ = args.SetCancel(true);
                     }

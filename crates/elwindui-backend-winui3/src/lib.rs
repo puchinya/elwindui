@@ -43,8 +43,8 @@ mod render;
 #[allow(unused_imports)]
 pub(crate) use bindings::Windows;
 
-pub use native_ui::*;
 pub use inner::{WinUI3PopupHandle, WinUI3PopupHost};
+pub use native_ui::*;
 
 // `elwindui-codegen`'s generated code references `elwindui::backend::AnyView` directly (see
 // `inner::AnyView`'s own doc comment), so it needs to stay reachable at this crate's own root even

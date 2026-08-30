@@ -3,6 +3,7 @@
 use super::control_template::ControlTemplateProvider;
 use super::*;
 use std::cell::OnceCell;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TemplateApplyState {
@@ -94,7 +95,15 @@ impl Control {
             self.environment_context()
                 .expect("mounted Control lost its Environment during template application"),
         );
-        self.__set_template_root(root);
+        match catch_unwind(AssertUnwindSafe(|| self.__set_template_root(root.clone()))) {
+            Ok(()) => {}
+            Err(payload) => {
+                let _ = catch_unwind(AssertUnwindSafe(|| {
+                    self.__rollback_failed_template_root(&root);
+                }));
+                resume_unwind(payload);
+            }
+        }
         self.template_apply_state.set(TemplateApplyState::Applied);
         guard.committed = true;
         provider.on_applied();
@@ -199,6 +208,53 @@ impl Control {
         self.as_ui_element().visual_collection.add(root.clone());
         *self.template_root.borrow_mut() = Some(root);
         self.invalidate_measure();
+    }
+    /// Restores the Visual-tree invariants after a template root failed while being attached.
+    ///
+    /// `UIElementVisualCollection::add` installs the parent edge and stores the child before it
+    /// runs deferred mount hooks, so a hook panic can leave either a stored child or only a stale
+    /// parent edge. This helper is deliberately scoped to the Control template transaction; the
+    /// collection's global panic semantics remain unchanged.
+    fn __rollback_failed_template_root(&self, failed_root: &Rc<dyn UIElementExt>) {
+        let owner = self.as_ui_element().visual_collection.owner_rc();
+        let is_self_parent = || {
+            failed_root
+                .visual_parent()
+                .as_ref()
+                .zip(owner.as_ref())
+                .is_some_and(|(parent, owner)| Rc::ptr_eq(parent, owner))
+        };
+        let is_visual_child = || {
+            self.visual_children()
+                .iter()
+                .any(|child| Rc::ptr_eq(child, failed_root))
+        };
+
+        if is_visual_child() || is_self_parent() {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                crate::ui::unmount_subtree(failed_root);
+            }));
+        }
+        if is_visual_child() {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                self.as_ui_element().visual_collection.remove(failed_root);
+            }));
+        }
+        if !is_visual_child() && is_self_parent() {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                *failed_root.as_ui_element().visual_parent.borrow_mut() = None;
+            }));
+        }
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let should_clear = self
+                .template_root
+                .borrow()
+                .as_ref()
+                .is_some_and(|root| Rc::ptr_eq(root, failed_root));
+            if should_clear {
+                self.template_root.borrow_mut().take();
+            }
+        }));
     }
     fn construct() -> Self {
         Self {

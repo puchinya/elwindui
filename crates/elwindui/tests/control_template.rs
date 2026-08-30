@@ -9,6 +9,7 @@ use elwindui::core::ui::{
 };
 use elwindui::template_view;
 use std::cell::{Cell, RefCell};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 #[path = "control_template/local_template_base.rs"]
@@ -27,6 +28,17 @@ thread_local! {
     static OVERRIDE_TEMPLATE_MOUNTS: Cell<u32> = const { Cell::new(0) };
     static TARGET_MOUNTS: Cell<u32> = const { Cell::new(0) };
     static VIRTUAL_MEASURE_EVENTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    static ATTACHMENT_PANIC_FACTORY_CALLS: Cell<u32> = const { Cell::new(0) };
+    static ATTACHMENT_PANIC_MOUNT_HOOKS: Cell<u32> = const { Cell::new(0) };
+    static ATTACHMENT_PANIC_ON_APPLY: Cell<u32> = const { Cell::new(0) };
+    static ATTACHMENT_PANIC_ROOT: RefCell<Option<Rc<TextBlock>>> = const { RefCell::new(None) };
+    static REENTRANT_FACTORY_CALLS: Cell<u32> = const { Cell::new(0) };
+    static REENTRANT_INNER_RESULTS: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+    static REENTRANT_ON_APPLY: Cell<u32> = const { Cell::new(0) };
+    static FACTORY_PANIC_FACTORY_CALLS: Cell<u32> = const { Cell::new(0) };
+    static FACTORY_PANIC_ON_APPLY: Cell<u32> = const { Cell::new(0) };
+    static POST_COMMIT_FACTORY_CALLS: Cell<u32> = const { Cell::new(0) };
+    static POST_COMMIT_ON_APPLY: Cell<u32> = const { Cell::new(0) };
 }
 
 fn record_default_template_mount() {
@@ -179,6 +191,111 @@ impl VirtualApplyMeasureProbe {
     }
 }
 
+#[elwindui::component(inherits Control)]
+struct AttachmentPanicProbe {
+    template: template_view!(|templated_parent: Self| {
+        TextBlock {
+            text: "default attachment panic root",
+        }
+    }),
+}
+
+#[elwindui::component]
+impl AttachmentPanicProbe {
+    #[overrides]
+    fn on_apply_template(&self) {
+        ATTACHMENT_PANIC_ON_APPLY.with(|count| count.set(count.get() + 1));
+    }
+}
+
+fn attachment_panic_template() -> ControlTemplate<AttachmentPanicProbe> {
+    ControlTemplate::new(|_context| {
+        ATTACHMENT_PANIC_FACTORY_CALLS.with(|count| count.set(count.get() + 1));
+        let root = TextBlock::new();
+        root.add_mount_hook(Box::new(|| {
+            ATTACHMENT_PANIC_MOUNT_HOOKS.with(|count| count.set(count.get() + 1));
+            panic!("attachment-mount-panic-sentinel");
+        }));
+        ATTACHMENT_PANIC_ROOT.with(|slot| *slot.borrow_mut() = Some(root.clone()));
+        root
+    })
+}
+
+#[elwindui::component(inherits Control)]
+struct ReentrantApplyProbe {
+    template: template_view!(|templated_parent: Self| {
+        TextBlock {
+            text: "default reentrant root",
+        }
+    }),
+}
+
+#[elwindui::component]
+impl ReentrantApplyProbe {
+    #[overrides]
+    fn on_apply_template(&self) {
+        REENTRANT_ON_APPLY.with(|count| count.set(count.get() + 1));
+    }
+}
+
+fn reentrant_template() -> ControlTemplate<ReentrantApplyProbe> {
+    ControlTemplate::<ReentrantApplyProbe>::new(|context| {
+        REENTRANT_FACTORY_CALLS.with(|count| count.set(count.get() + 1));
+        let inner_result = context.control.apply_template();
+        REENTRANT_INNER_RESULTS.with(|results| results.borrow_mut().push(inner_result));
+        TextBlock::new()
+    })
+}
+
+#[elwindui::component(inherits Control)]
+struct FactoryPanicProbe {
+    template: template_view!(|templated_parent: Self| {
+        TextBlock {
+            text: "default factory panic root",
+        }
+    }),
+}
+
+#[elwindui::component]
+impl FactoryPanicProbe {
+    #[overrides]
+    fn on_apply_template(&self) {
+        FACTORY_PANIC_ON_APPLY.with(|count| count.set(count.get() + 1));
+    }
+}
+
+fn factory_panic_template() -> ControlTemplate<FactoryPanicProbe> {
+    ControlTemplate::new(|_context| {
+        FACTORY_PANIC_FACTORY_CALLS.with(|count| count.set(count.get() + 1));
+        panic!("factory-panic-sentinel");
+    })
+}
+
+#[elwindui::component(inherits Control)]
+struct PostCommitPanicProbe {
+    template: template_view!(|templated_parent: Self| {
+        TextBlock {
+            text: "default post-commit root",
+        }
+    }),
+}
+
+#[elwindui::component]
+impl PostCommitPanicProbe {
+    #[overrides]
+    fn on_apply_template(&self) {
+        POST_COMMIT_ON_APPLY.with(|count| count.set(count.get() + 1));
+        panic!("post-commit-panic-sentinel");
+    }
+}
+
+fn post_commit_template() -> ControlTemplate<PostCommitPanicProbe> {
+    ControlTemplate::new(|_context| {
+        POST_COMMIT_FACTORY_CALLS.with(|count| count.set(count.get() + 1));
+        TextBlock::new()
+    })
+}
+
 #[elwindui::component(inherits ContentControl)]
 struct ControlTemplateTestPanel {
     #[prop]
@@ -283,6 +400,148 @@ fn non_control_ui_element_uses_default_false_template_application() {
 
     assert!(text.measured_size().is_some());
     assert!(text.visual_children().is_empty());
+}
+
+#[test]
+fn attachment_mount_hook_panic_rolls_back_failed_template_root() {
+    ATTACHMENT_PANIC_FACTORY_CALLS.with(|count| count.set(0));
+    ATTACHMENT_PANIC_MOUNT_HOOKS.with(|count| count.set(0));
+    ATTACHMENT_PANIC_ON_APPLY.with(|count| count.set(0));
+    ATTACHMENT_PANIC_ROOT.with(|slot| *slot.borrow_mut() = None);
+
+    let environment = elwindui::core::environment::application_environment();
+    environment.set_control_template::<AttachmentPanicProbe>(Some(attachment_panic_template()));
+    let probe = AttachmentPanicProbe::new();
+
+    let panic = catch_unwind(AssertUnwindSafe(|| probe.apply_template()))
+        .expect_err("a root attachment mount hook must panic");
+    assert_eq!(
+        *panic
+            .downcast_ref::<&'static str>()
+            .expect("sentinel panic payload is a static string"),
+        "attachment-mount-panic-sentinel"
+    );
+    assert_eq!(ATTACHMENT_PANIC_FACTORY_CALLS.with(Cell::get), 1);
+    assert_eq!(ATTACHMENT_PANIC_MOUNT_HOOKS.with(Cell::get), 1);
+    assert_eq!(ATTACHMENT_PANIC_ON_APPLY.with(Cell::get), 0);
+
+    let failed_root = ATTACHMENT_PANIC_ROOT
+        .with(|slot| slot.borrow().clone())
+        .expect("the factory retained the failed root for structural assertions");
+    assert!(
+        probe.visual_children().is_empty(),
+        "a failed root must not remain in Control.visual_children"
+    );
+    assert!(
+        probe.__template_root().is_none(),
+        "a failed root must not remain in Control.template_root"
+    );
+    assert!(
+        failed_root.visual_parent().is_none(),
+        "a failed root must not retain the Control as visual parent"
+    );
+
+    assert!(!probe.apply_template());
+    assert_eq!(ATTACHMENT_PANIC_FACTORY_CALLS.with(Cell::get), 1);
+    assert_eq!(ATTACHMENT_PANIC_MOUNT_HOOKS.with(Cell::get), 1);
+    assert_eq!(ATTACHMENT_PANIC_ON_APPLY.with(Cell::get), 0);
+    environment.set_control_template::<AttachmentPanicProbe>(None);
+}
+
+#[test]
+fn reentrant_apply_returns_false_without_double_building() {
+    REENTRANT_FACTORY_CALLS.with(|count| count.set(0));
+    REENTRANT_INNER_RESULTS.with(|results| results.borrow_mut().clear());
+    REENTRANT_ON_APPLY.with(|count| count.set(0));
+
+    let environment = elwindui::core::environment::application_environment();
+    environment.set_control_template::<ReentrantApplyProbe>(Some(reentrant_template()));
+    let probe = ReentrantApplyProbe::new();
+
+    assert!(probe.apply_template());
+    assert_eq!(REENTRANT_FACTORY_CALLS.with(Cell::get), 1);
+    assert_eq!(
+        REENTRANT_INNER_RESULTS.with(|results| results.borrow().clone()),
+        vec![false]
+    );
+    assert_eq!(probe.visual_children().len(), 1);
+    assert!(probe.__template_root().is_some());
+    assert_eq!(REENTRANT_ON_APPLY.with(Cell::get), 1);
+
+    assert!(!probe.apply_template());
+    assert_eq!(REENTRANT_FACTORY_CALLS.with(Cell::get), 1);
+    assert_eq!(REENTRANT_ON_APPLY.with(Cell::get), 1);
+    environment.set_control_template::<ReentrantApplyProbe>(None);
+}
+
+#[test]
+fn factory_panic_is_terminal_before_root_commit() {
+    FACTORY_PANIC_FACTORY_CALLS.with(|count| count.set(0));
+    FACTORY_PANIC_ON_APPLY.with(|count| count.set(0));
+
+    let environment = elwindui::core::environment::application_environment();
+    environment.set_control_template::<FactoryPanicProbe>(Some(factory_panic_template()));
+    let probe = FactoryPanicProbe::new();
+
+    let panic = catch_unwind(AssertUnwindSafe(|| probe.apply_template()))
+        .expect_err("the selected template factory must panic");
+    assert_eq!(
+        *panic
+            .downcast_ref::<&'static str>()
+            .expect("sentinel panic payload is a static string"),
+        "factory-panic-sentinel"
+    );
+    assert_eq!(FACTORY_PANIC_FACTORY_CALLS.with(Cell::get), 1);
+    assert_eq!(FACTORY_PANIC_ON_APPLY.with(Cell::get), 0);
+    assert!(probe.visual_children().is_empty());
+    assert!(probe.__template_root().is_none());
+
+    assert!(!probe.apply_template());
+    assert_eq!(FACTORY_PANIC_FACTORY_CALLS.with(Cell::get), 1);
+    assert_eq!(FACTORY_PANIC_ON_APPLY.with(Cell::get), 0);
+    environment.set_control_template::<FactoryPanicProbe>(None);
+}
+
+#[test]
+fn on_apply_template_panic_keeps_committed_root() {
+    POST_COMMIT_FACTORY_CALLS.with(|count| count.set(0));
+    POST_COMMIT_ON_APPLY.with(|count| count.set(0));
+
+    let environment = elwindui::core::environment::application_environment();
+    environment.set_control_template::<PostCommitPanicProbe>(Some(post_commit_template()));
+    let probe = PostCommitPanicProbe::new();
+
+    let panic = catch_unwind(AssertUnwindSafe(|| probe.apply_template()))
+        .expect_err("on_apply_template must panic after root commit");
+    assert_eq!(
+        *panic
+            .downcast_ref::<&'static str>()
+            .expect("sentinel panic payload is a static string"),
+        "post-commit-panic-sentinel"
+    );
+    assert_eq!(POST_COMMIT_FACTORY_CALLS.with(Cell::get), 1);
+    assert_eq!(POST_COMMIT_ON_APPLY.with(Cell::get), 1);
+    assert_eq!(probe.visual_children().len(), 1);
+    let root = probe
+        .visual_children()
+        .into_iter()
+        .next()
+        .expect("committed root");
+    let probe_node: Rc<dyn elwindui::core::ui::UIElementExt> = probe.clone();
+    assert!(
+        probe.__template_root().is_some(),
+        "post-commit hook panic must retain template_root"
+    );
+    assert!(
+        root.visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &probe_node)),
+        "post-commit hook panic must retain the Visual parent"
+    );
+
+    assert!(!probe.apply_template());
+    assert_eq!(POST_COMMIT_FACTORY_CALLS.with(Cell::get), 1);
+    assert_eq!(POST_COMMIT_ON_APPLY.with(Cell::get), 1);
+    environment.set_control_template::<PostCommitPanicProbe>(None);
 }
 
 #[test]

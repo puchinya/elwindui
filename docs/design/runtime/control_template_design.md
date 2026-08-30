@@ -135,6 +135,13 @@ wiring so that logical content is no longer directly presented before a
 `on_apply_template`; descendant mount hooks triggered by attachment therefore
 complete before that ordinary overridable hook runs.
 
+For template application, the successful return from `__set_template_root()` is
+the root-commit boundary. Attachment-triggered mount hooks are part of the
+pre-commit operation. If one unwinds, the Control-local transaction runs the
+existing subtree teardown, removes the failed root, clears any stale parent or
+template-root reference, and resumes the original panic; the application state
+becomes terminally `Failed`. `on_apply_template` begins only after that commit.
+
 When the target is nested in a Window host-composition body, the Window stays
 unmounted until its first `show()`, and its generated named child accessors are
 not readable during that interval. A demo or application that needs logical

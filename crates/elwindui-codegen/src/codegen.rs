@@ -15782,7 +15782,12 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
             if let syn::Expr::Path(p) = assign.left.as_ref() {
                 if let Some(ident) = p.path.get_ident() {
                     let name = ident.to_string();
-                    if !self.is_shadowed(&name) && self.ctx.mutable_own_fields.contains(&name) {
+                    let is_mutable_own_field =
+                        !self.is_shadowed(&name) && self.ctx.mutable_own_fields.contains(&name);
+                    let is_template_parent_field = !self.is_shadowed(&name)
+                        && self.ctx.template_parent.is_some()
+                        && self.ctx.template_bare_parent_fields.contains(&name);
+                    if is_mutable_own_field {
                         if let EmitMode::WithSelf(self_tok) = self.mode {
                             self.visit_expr_mut(&mut assign.right);
                             let setter = format_ident!("set_{}", name);
@@ -15790,10 +15795,8 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                             *node = syn::parse_quote! { #self_tok.#setter(#rhs) };
                             return;
                         }
-                    } else if !self.is_shadowed(&name)
-                        && self.ctx.template_parent.is_some()
-                        && self.ctx.template_bare_parent_fields.contains(&name)
-                    {
+                    }
+                    if !is_mutable_own_field && is_template_parent_field {
                         // Component default templates retain the ordinary bare-property
                         // shorthand (`is_checked = !is_checked`).  The template closure is
                         // evaluated against its captured parent, so assignments must target that
@@ -15816,11 +15819,14 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                         *node = syn::parse2(setter)
                             .expect("generated bare template parent setter parses");
                         return;
-                    } else if let Some(setter) = self.resolved_implicit_owner_setter(&name) {
-                        self.visit_expr_mut(&mut assign.right);
-                        let rhs = &assign.right;
-                        *node = syn::parse_quote! { #setter(#rhs) };
-                        return;
+                    }
+                    if !is_mutable_own_field {
+                        if let Some(setter) = self.resolved_implicit_owner_setter(&name) {
+                            self.visit_expr_mut(&mut assign.right);
+                            let rhs = &assign.right;
+                            *node = syn::parse_quote! { #setter(#rhs) };
+                            return;
+                        }
                     }
                 }
             }

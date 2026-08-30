@@ -12,9 +12,9 @@
 //! that installed the executor) actually works.
 
 use elwindui_core::task::{self, Dispatcher, LocalExecutor};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Marshals a woken task back onto this test's "UI thread" via a channel — the same shape a real

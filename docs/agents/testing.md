@@ -36,10 +36,17 @@ repeat it after any Rust-affecting review remediation:
    replacement for this command. The latter is an additive deterministic companion check when
    proc-macro, codegen, or rust-analyzer-shadow behavior changes.
 
-4. Fix every actionable rust-analyzer Error and Warning. The accepted exception is limited to
-   the informational, non-Warning/non-Error `inactive-code` diagnostic for code under
-   `#[cfg(test)]` when rust-analyzer is analyzing the non-test configuration. An inactive-code
-   item reported at Warning or Error severity must be fixed; no broader exception is allowed.
+4. Fix every rust-analyzer `Error`, `Warning`, and `WeakWarning` except for the one explicitly
+   permitted case below.
+
+   The only permitted diagnostic exception is `Ra("inactive-code", WeakWarning)` when the code
+   is inactive solely because `#[cfg(test)]` is disabled in the configuration analyzed by
+   rust-analyzer. Any other `WeakWarning`, including an `inactive-code` diagnostic with a
+   different cause, is actionable and must be fixed. Do not generalize this exception to all
+   `WeakWarning` or all `#[cfg(...)]` diagnostics.
+
+   The completion condition is zero `Error`, zero `Warning`, and zero non-exempt `WeakWarning`
+   diagnostics. Allowed `WeakWarning` records must still be counted and reported.
 
 5. The task is not verification-complete if either mandatory formatter command or actual
    rust-analyzer diagnostics is skipped or fails. If a required tool cannot run, report the task

@@ -28,6 +28,10 @@ thread_local! {
     /// intentionally single-threaded (`Rc<RefCell<_>>`). WinUI invokes these delegates on this UI
     /// thread, so the delegate captures only a numeric key and resolves the actual callback here.
     static UI_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn()>>> = RefCell::new(HashMap::new());
+    static UI_BOOL_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn() -> bool>>> = RefCell::new(HashMap::new());
+    static UI_CONTEXT_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::ContextRequestedEventArgs)>>> = RefCell::new(HashMap::new());
+    static UI_POINTER_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs)>>> = RefCell::new(HashMap::new());
+    static UI_RIGHT_TAPPED_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::RightTappedRoutedEventArgs)>>> = RefCell::new(HashMap::new());
     static UI_INDEX_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(usize)>>> = RefCell::new(HashMap::new());
     static UI_F32_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(f32)>>> = RefCell::new(HashMap::new());
     static UI_KEY_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(RawKeyEvent)>>> = RefCell::new(HashMap::new());
@@ -37,6 +41,10 @@ thread_local! {
 #[derive(Clone, Copy)]
 enum UiCallbackKind {
     Event,
+    BoolEvent,
+    ContextEvent,
+    PointerEvent,
+    RightTapped,
     Index,
     Key,
     Text,
@@ -52,6 +60,18 @@ impl Drop for UiCallbackRegistryOwnerInner {
         for (kind, id) in self.registrations.get_mut().drain(..) {
             let _ = match kind {
                 UiCallbackKind::Event => UI_EVENT_CALLBACKS.try_with(|callbacks| {
+                    callbacks.borrow_mut().remove(&id);
+                }),
+                UiCallbackKind::BoolEvent => UI_BOOL_EVENT_CALLBACKS.try_with(|callbacks| {
+                    callbacks.borrow_mut().remove(&id);
+                }),
+                UiCallbackKind::ContextEvent => UI_CONTEXT_EVENT_CALLBACKS.try_with(|callbacks| {
+                    callbacks.borrow_mut().remove(&id);
+                }),
+                UiCallbackKind::PointerEvent => UI_POINTER_EVENT_CALLBACKS.try_with(|callbacks| {
+                    callbacks.borrow_mut().remove(&id);
+                }),
+                UiCallbackKind::RightTapped => UI_RIGHT_TAPPED_CALLBACKS.try_with(|callbacks| {
                     callbacks.borrow_mut().remove(&id);
                 }),
                 UiCallbackKind::Index => UI_INDEX_EVENT_CALLBACKS.try_with(|callbacks| {
@@ -87,6 +107,59 @@ impl UiCallbackRegistryOwner {
             .registrations
             .borrow_mut()
             .push((UiCallbackKind::Event, id));
+        id
+    }
+
+    /// Registers a no-argument boolean callback owned by this lifetime group.
+    pub(crate) fn register_bool_event(&self, callback: Rc<dyn Fn() -> bool>) -> usize {
+        let id = register_ui_bool_event_callback(callback);
+        self.0
+            .registrations
+            .borrow_mut()
+            .push((UiCallbackKind::BoolEvent, id));
+        id
+    }
+
+    /// Registers a ContextRequested callback owned by this lifetime group.
+    pub(crate) fn register_context_event(
+        &self,
+        callback: Rc<
+            dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::ContextRequestedEventArgs),
+        >,
+    ) -> usize {
+        let id = register_ui_context_event_callback(callback);
+        self.0
+            .registrations
+            .borrow_mut()
+            .push((UiCallbackKind::ContextEvent, id));
+        id
+    }
+
+    /// Registers a pointer-routed callback owned by this lifetime group.
+    pub(crate) fn register_pointer_event(
+        &self,
+        callback: Rc<dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs)>,
+    ) -> usize {
+        let id = register_ui_pointer_event_callback(callback);
+        self.0
+            .registrations
+            .borrow_mut()
+            .push((UiCallbackKind::PointerEvent, id));
+        id
+    }
+
+    /// Registers a RightTapped callback owned by this lifetime group.
+    pub(crate) fn register_right_tapped(
+        &self,
+        callback: Rc<
+            dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::RightTappedRoutedEventArgs),
+        >,
+    ) -> usize {
+        let id = register_ui_right_tapped_callback(callback);
+        self.0
+            .registrations
+            .borrow_mut()
+            .push((UiCallbackKind::RightTapped, id));
         id
     }
 
@@ -138,6 +211,81 @@ pub(crate) fn invoke_ui_event_callback(id: usize) {
     let callback = UI_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
     if let Some(callback) = callback {
         callback();
+    }
+}
+
+pub(crate) fn register_ui_bool_event_callback(callback: Rc<dyn Fn() -> bool>) -> usize {
+    let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
+    UI_BOOL_EVENT_CALLBACKS.with(|callbacks| {
+        callbacks.borrow_mut().insert(id, callback);
+    });
+    id
+}
+
+pub(crate) fn invoke_ui_bool_event_callback(id: usize) -> bool {
+    let callback = UI_BOOL_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
+    callback.is_some_and(|callback| callback())
+}
+
+pub(crate) fn register_ui_context_event_callback(
+    callback: Rc<dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::ContextRequestedEventArgs)>,
+) -> usize {
+    let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
+    UI_CONTEXT_EVENT_CALLBACKS.with(|callbacks| {
+        callbacks.borrow_mut().insert(id, callback);
+    });
+    id
+}
+
+pub(crate) fn invoke_ui_context_event_callback(
+    id: usize,
+    args: &crate::bindings::Microsoft::UI::Xaml::Input::ContextRequestedEventArgs,
+) {
+    let callback =
+        UI_CONTEXT_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
+    if let Some(callback) = callback {
+        callback(args);
+    }
+}
+
+pub(crate) fn register_ui_pointer_event_callback(
+    callback: Rc<dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs)>,
+) -> usize {
+    let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
+    UI_POINTER_EVENT_CALLBACKS.with(|callbacks| {
+        callbacks.borrow_mut().insert(id, callback);
+    });
+    id
+}
+
+pub(crate) fn invoke_ui_pointer_event_callback(
+    id: usize,
+    args: &crate::bindings::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs,
+) {
+    let callback =
+        UI_POINTER_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
+    if let Some(callback) = callback {
+        callback(args);
+    }
+}
+
+pub(crate) fn register_ui_right_tapped_callback(
+    callback: Rc<dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::RightTappedRoutedEventArgs)>,
+) -> usize {
+    let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
+    UI_RIGHT_TAPPED_CALLBACKS.with(|callbacks| {
+        callbacks.borrow_mut().insert(id, callback);
+    });
+    id
+}
+
+pub(crate) fn invoke_ui_right_tapped_callback(
+    id: usize,
+    args: &crate::bindings::Microsoft::UI::Xaml::Input::RightTappedRoutedEventArgs,
+) {
+    let callback = UI_RIGHT_TAPPED_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
+    if let Some(callback) = callback {
+        callback(args);
     }
 }
 

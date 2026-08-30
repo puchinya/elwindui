@@ -373,8 +373,11 @@ impl InnerMenu {
                 }
             }
             let item_clone = item.clone();
-            let _ = flyout_item.Click(&RoutedEventHandler::new(move |_, _| {
+            let callback_id = register_ui_event_callback(Rc::new(move || {
                 item_clone.select();
+            }));
+            let _ = flyout_item.Click(&RoutedEventHandler::new(move |_, _| {
+                invoke_ui_event_callback(callback_id);
                 Ok(())
             }));
             let base: MenuFlyoutItemBase = flyout_item.cast()?;
@@ -513,7 +516,6 @@ mod live_menu_item_icon_tests {
             .xaml
             .Icon()
             .ok()
-            .flatten()
             .expect("MenuFlyoutItem.Icon must be non-null after set_icon(System(Copy))");
         let symbol_icon: SymbolIcon = icon_after_copy
             .cast()
@@ -546,7 +548,6 @@ mod live_menu_item_icon_tests {
             .xaml
             .Icon()
             .ok()
-            .flatten()
             .expect("MenuFlyoutItem.Icon must be non-null after set_icon(Image(Rgba8))");
         let _image_icon: ImageIcon = icon_after_rgba8
             .cast()
@@ -556,7 +557,7 @@ mod live_menu_item_icon_tests {
         item.set_icon(None);
         assert!(item.icon().is_none());
         assert!(
-            item.xaml.Icon().ok().flatten().is_none(),
+            item.xaml.Icon().is_err(),
             "MenuFlyoutItem.Icon must be null after set_icon(None)"
         );
 
@@ -595,7 +596,6 @@ mod live_menu_item_icon_tests {
         let realized_icon = realized
             .Icon()
             .ok()
-            .flatten()
             .expect("the newly-realized MenuFlyoutItem must have an icon");
         let realized_symbol: SymbolIcon = realized_icon
             .cast()
@@ -625,7 +625,6 @@ mod live_menu_item_icon_tests {
         let realized2_icon = realized2
             .Icon()
             .ok()
-            .flatten()
             .expect("second realization must have an icon");
         let realized2_symbol: SymbolIcon = realized2_icon
             .cast()
@@ -662,7 +661,7 @@ mod live_menu_item_icon_tests {
         item.set_icon(Some(IconSource::Image(ImageSource::Raster(incompatible))));
 
         assert!(
-            item.xaml.Icon().ok().flatten().is_none(),
+            item.xaml.Icon().is_err(),
             "an incompatible backend handle must omit the icon, not synthesize one"
         );
         assert_eq!(item.text(), "Broken Icon Action");

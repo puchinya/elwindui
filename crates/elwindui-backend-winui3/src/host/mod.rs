@@ -8,12 +8,16 @@ mod event;
 mod replay;
 
 use crate::ffi::{
-    AnyView, UiCallbackRegistryOwner, invoke_ui_event_callback, invoke_ui_key_event_callback,
+    AnyView, UiCallbackRegistryOwner, invoke_ui_bool_event_callback,
+    invoke_ui_context_event_callback, invoke_ui_event_callback, invoke_ui_key_event_callback,
+    invoke_ui_pointer_event_callback, invoke_ui_right_tapped_callback,
     invoke_ui_text_event_callback,
 };
 use event::*;
 use replay::*;
 
+use crate::bindings::Microsoft;
+use crate::bindings::Microsoft::UI::Input::PointerUpdateKind;
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 use crate::bindings::Microsoft::UI::Xaml::Input::{
     CharacterReceivedRoutedEventArgs, KeyEventHandler, PointerEventHandler, PointerRoutedEventArgs,
@@ -23,11 +27,12 @@ use crate::render::composition::{
     CompositionClipSpec, CompositionPrimitive, CompositionRenderer, DesiredCompositionIsland,
     DesiredCompositionNode, IslandId,
 };
+use elwindui_core::base::{Point, Rect};
 use elwindui_core::input::{
     FocusState, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent, RawKeyEventKind,
     RawPointerEvent, RawPointerEventKind, RawTextInputEvent,
 };
-use elwindui_core::ui::{CoordinateHost, FocusHost, PointerGestureHost, UIElementExt as _};
+use elwindui_core::ui::{CoordinateHost, FocusHost, PointerGestureHost, UIElementExt};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
@@ -266,6 +271,49 @@ impl TreeHostPanel {
             let tree_for_key = Rc::downgrade(&this.tree);
             let keyboard_for_key = Rc::downgrade(&this.keyboard);
             let active_for_key = Rc::downgrade(&this.active_popup);
+            let canvas_for_context_key = this.canvas.clone();
+            let context_callback_id = this.callback_owner.register_bool_event(Rc::new(move || {
+                let tree_ref = tree_for_key.upgrade().and_then(|t| t.borrow().clone());
+                let kb_ref = keyboard_for_key.upgrade();
+                let active_ref = active_for_key.upgrade();
+                if let (Some(tree), Some(kb), Some(active)) = (tree_ref, kb_ref, active_ref) {
+                    let screen_anchor = if let Some(focused) = kb.focus.focused() {
+                        let offset = focused
+                            .arranged_offset()
+                            .unwrap_or(Point { x: 0.0, y: 0.0 });
+                        let w = focused.arranged_width().unwrap_or(0.0);
+                        let h = focused.arranged_height().unwrap_or(0.0);
+                        Self::canvas_to_screen_point(&canvas_for_context_key, offset).map(
+                            |screen_pt| {
+                                elwindui_core::ui::popup::PopupAnchor::Rect(
+                                    elwindui_core::base::Rect {
+                                        x: screen_pt.x,
+                                        y: screen_pt.y,
+                                        width: w,
+                                        height: h,
+                                    },
+                                )
+                            },
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some(screen_anchor) = screen_anchor {
+                        let request =
+                            elwindui_core::ui::ContextRequest::keyboard(Some(screen_anchor));
+                        return Self::dispatch_context_request(
+                            &Some(tree),
+                            &kb,
+                            &canvas_for_context_key,
+                            &active,
+                            &request,
+                        );
+                    }
+                }
+                false
+            }));
+            let tree_for_key = Rc::downgrade(&this.tree);
+            let keyboard_for_key = Rc::downgrade(&this.keyboard);
             let callback_id = this.callback_owner.register_key(Rc::new(move |event| {
                 if let (Some(tree), Some(keyboard)) =
                     (tree_for_key.upgrade(), keyboard_for_key.upgrade())
@@ -293,46 +341,8 @@ impl TreeHostPanel {
                         .unwrap_or(false);
                     let modifiers = winui_modifiers();
                     if crate::host::event::is_context_menu_key(virtual_key, modifiers) {
-                        let tree_ref = tree_for_key.upgrade().and_then(|t| t.borrow().clone());
-                        let kb_ref = keyboard_for_key.upgrade();
-                        let active_ref = active_for_key.upgrade();
-                        if let (Some(tree), Some(kb), Some(active)) = (tree_ref, kb_ref, active_ref)
-                        {
-                            let screen_anchor = if let Some(focused) = kb.focus.focused() {
-                                let offset = focused
-                                    .arranged_offset()
-                                    .unwrap_or(Point { x: 0.0, y: 0.0 });
-                                let w = focused.arranged_width().unwrap_or(0.0);
-                                let h = focused.arranged_height().unwrap_or(0.0);
-                                Self::canvas_to_screen_point(&this.canvas, offset).map(
-                                    |screen_pt| {
-                                        elwindui_core::ui::popup::PopupAnchor::Rect(
-                                            elwindui_core::base::Rect {
-                                                x: screen_pt.x,
-                                                y: screen_pt.y,
-                                                width: w,
-                                                height: h,
-                                            },
-                                        )
-                                    },
-                                )
-                            } else {
-                                None
-                            };
-                            if let Some(screen_anchor) = screen_anchor {
-                                let request = elwindui_core::ui::ContextRequest::keyboard(Some(
-                                    screen_anchor,
-                                ));
-                                if Self::dispatch_context_request(
-                                    &Some(tree),
-                                    &kb,
-                                    &this.canvas,
-                                    &active,
-                                    &request,
-                                ) {
-                                    return Ok(());
-                                }
-                            }
+                        if invoke_ui_bool_event_callback(context_callback_id) {
+                            return Ok(());
                         }
                     }
                     invoke_ui_key_event_callback(
@@ -419,26 +429,31 @@ impl TreeHostPanel {
             let pointer = Rc::downgrade(&this.pointer);
             let keyboard = Rc::downgrade(&this.keyboard);
             let canvas = this.canvas.clone();
-            let canvas_for_handler = canvas.clone();
+            let canvas_for_callback = canvas.clone();
+            let callback_id = this
+                .callback_owner
+                .register_pointer_event(Rc::new(move |args| {
+                    let Some(kind) = Self::pointer_button_kind(args, &canvas_for_callback, true)
+                    else {
+                        return;
+                    };
+                    if Self::dispatch_pointer_routed(
+                        &tree,
+                        &pointer,
+                        &keyboard,
+                        &canvas_for_callback,
+                        args,
+                        kind,
+                    ) {
+                        if let Ok(native_pointer) = args.Pointer() {
+                            let _ = canvas_for_callback.CapturePointer(&native_pointer);
+                        }
+                        let _ = args.SetHandled(true);
+                    }
+                }));
             let _ = canvas.PointerPressed(&PointerEventHandler::new(move |_sender, args| {
-                let Some(args) = args.as_ref() else {
-                    return Ok(());
-                };
-                let Some(kind) = Self::pointer_button_kind(args, &canvas_for_handler, true) else {
-                    return Ok(());
-                };
-                if Self::dispatch_pointer_routed(
-                    &tree,
-                    &pointer,
-                    &keyboard,
-                    &canvas_for_handler,
-                    args,
-                    kind,
-                ) {
-                    if let Ok(native_pointer) = args.Pointer() {
-                        let _ = canvas_for_handler.CapturePointer(&native_pointer);
-                    }
-                    let _ = args.SetHandled(true);
+                if let Some(args) = args.as_ref() {
+                    invoke_ui_pointer_event_callback(callback_id, args);
                 }
                 Ok(())
             }));
@@ -448,20 +463,24 @@ impl TreeHostPanel {
             let pointer = Rc::downgrade(&this.pointer);
             let keyboard = Rc::downgrade(&this.keyboard);
             let canvas = this.canvas.clone();
-            let canvas_for_handler = canvas.clone();
+            let canvas_for_callback = canvas.clone();
+            let callback_id = this
+                .callback_owner
+                .register_pointer_event(Rc::new(move |args| {
+                    if Self::dispatch_pointer_routed(
+                        &tree,
+                        &pointer,
+                        &keyboard,
+                        &canvas_for_callback,
+                        args,
+                        RawPointerEventKind::Moved,
+                    ) {
+                        let _ = args.SetHandled(true);
+                    }
+                }));
             let _ = canvas.PointerMoved(&PointerEventHandler::new(move |_sender, args| {
-                let Some(args) = args.as_ref() else {
-                    return Ok(());
-                };
-                if Self::dispatch_pointer_routed(
-                    &tree,
-                    &pointer,
-                    &keyboard,
-                    &canvas_for_handler,
-                    args,
-                    RawPointerEventKind::Moved,
-                ) {
-                    let _ = args.SetHandled(true);
+                if let Some(args) = args.as_ref() {
+                    invoke_ui_pointer_event_callback(callback_id, args);
                 }
                 Ok(())
             }));
@@ -471,26 +490,31 @@ impl TreeHostPanel {
             let pointer = Rc::downgrade(&this.pointer);
             let keyboard = Rc::downgrade(&this.keyboard);
             let canvas = this.canvas.clone();
-            let canvas_for_handler = canvas.clone();
-            let _ = canvas.PointerReleased(&PointerEventHandler::new(move |_sender, args| {
-                let Some(args) = args.as_ref() else {
-                    return Ok(());
-                };
-                let Some(kind) = Self::pointer_button_kind(args, &canvas_for_handler, false) else {
-                    return Ok(());
-                };
-                if Self::dispatch_pointer_routed(
-                    &tree,
-                    &pointer,
-                    &keyboard,
-                    &canvas_for_handler,
-                    args,
-                    kind,
-                ) {
-                    if let Ok(native_pointer) = args.Pointer() {
-                        let _ = canvas_for_handler.ReleasePointerCapture(&native_pointer);
+            let canvas_for_callback = canvas.clone();
+            let callback_id = this
+                .callback_owner
+                .register_pointer_event(Rc::new(move |args| {
+                    let Some(kind) = Self::pointer_button_kind(args, &canvas_for_callback, false)
+                    else {
+                        return;
+                    };
+                    if Self::dispatch_pointer_routed(
+                        &tree,
+                        &pointer,
+                        &keyboard,
+                        &canvas_for_callback,
+                        args,
+                        kind,
+                    ) {
+                        if let Ok(native_pointer) = args.Pointer() {
+                            let _ = canvas_for_callback.ReleasePointerCapture(&native_pointer);
+                        }
+                        let _ = args.SetHandled(true);
                     }
-                    let _ = args.SetHandled(true);
+                }));
+            let _ = canvas.PointerReleased(&PointerEventHandler::new(move |_sender, args| {
+                if let Some(args) = args.as_ref() {
+                    invoke_ui_pointer_event_callback(callback_id, args);
                 }
                 Ok(())
             }));
@@ -500,21 +524,25 @@ impl TreeHostPanel {
             let pointer = Rc::downgrade(&this.pointer);
             let keyboard = Rc::downgrade(&this.keyboard);
             let canvas = this.canvas.clone();
-            let canvas_for_handler = canvas.clone();
+            let canvas_for_callback = canvas.clone();
+            let callback_id = this
+                .callback_owner
+                .register_pointer_event(Rc::new(move |args| {
+                    if Self::dispatch_pointer_routed(
+                        &tree,
+                        &pointer,
+                        &keyboard,
+                        &canvas_for_callback,
+                        args,
+                        RawPointerEventKind::Canceled,
+                    ) {
+                        let _ = canvas_for_callback.ReleasePointerCaptures();
+                        let _ = args.SetHandled(true);
+                    }
+                }));
             let _ = canvas.PointerCanceled(&PointerEventHandler::new(move |_sender, args| {
-                let Some(args) = args.as_ref() else {
-                    return Ok(());
-                };
-                if Self::dispatch_pointer_routed(
-                    &tree,
-                    &pointer,
-                    &keyboard,
-                    &canvas_for_handler,
-                    args,
-                    RawPointerEventKind::Canceled,
-                ) {
-                    let _ = canvas_for_handler.ReleasePointerCaptures();
-                    let _ = args.SetHandled(true);
+                if let Some(args) = args.as_ref() {
+                    invoke_ui_pointer_event_callback(callback_id, args);
                 }
                 Ok(())
             }));
@@ -524,20 +552,24 @@ impl TreeHostPanel {
             let pointer = Rc::downgrade(&this.pointer);
             let keyboard = Rc::downgrade(&this.keyboard);
             let canvas = this.canvas.clone();
-            let canvas_for_handler = canvas.clone();
+            let canvas_for_callback = canvas.clone();
+            let callback_id = this
+                .callback_owner
+                .register_pointer_event(Rc::new(move |args| {
+                    if Self::dispatch_pointer_routed(
+                        &tree,
+                        &pointer,
+                        &keyboard,
+                        &canvas_for_callback,
+                        args,
+                        RawPointerEventKind::Canceled,
+                    ) {
+                        let _ = args.SetHandled(true);
+                    }
+                }));
             let _ = canvas.PointerCaptureLost(&PointerEventHandler::new(move |_sender, args| {
-                let Some(args) = args.as_ref() else {
-                    return Ok(());
-                };
-                if Self::dispatch_pointer_routed(
-                    &tree,
-                    &pointer,
-                    &keyboard,
-                    &canvas_for_handler,
-                    args,
-                    RawPointerEventKind::Canceled,
-                ) {
-                    let _ = args.SetHandled(true);
+                if let Some(args) = args.as_ref() {
+                    invoke_ui_pointer_event_callback(callback_id, args);
                 }
                 Ok(())
             }));
@@ -596,45 +628,48 @@ impl TreeHostPanel {
             let keyboard_for_context = Rc::downgrade(&this.keyboard);
             let canvas_for_context = this.canvas.clone();
             let active_for_context = Rc::downgrade(&this.active_popup);
+            let callback_id = this
+                .callback_owner
+                .register_right_tapped(Rc::new(move |args| {
+                    if args.Handled().unwrap_or(false) {
+                        return;
+                    }
+                    if let (Some(tree), Some(keyboard), Some(active)) = (
+                        tree_for_context.upgrade(),
+                        keyboard_for_context.upgrade(),
+                        active_for_context.upgrade(),
+                    ) {
+                        if let Some(tree) = tree.borrow().clone() {
+                            let Ok(point) = args.GetPosition(&canvas_for_context) else {
+                                return;
+                            };
+                            let local_pt = elwindui_core::base::Point {
+                                x: point.X,
+                                y: point.Y,
+                            };
+                            if let Some(screen_pt) =
+                                Self::canvas_to_screen_point(&canvas_for_context, local_pt)
+                            {
+                                let request =
+                                    elwindui_core::ui::ContextRequest::pointer(local_pt, screen_pt);
+                                if Self::dispatch_context_request(
+                                    &Some(tree),
+                                    &keyboard,
+                                    &canvas_for_context,
+                                    &active,
+                                    &request,
+                                ) {
+                                    let _ = args.SetHandled(true);
+                                }
+                            }
+                        }
+                    }
+                }));
             let _ = this.canvas.RightTapped(
                 &crate::bindings::Microsoft::UI::Xaml::Input::RightTappedEventHandler::new(
                     move |_sender, args| {
-                        let Some(args) = args.cloned() else {
-                            return Ok(());
-                        };
-                        if args.Handled().unwrap_or(false) {
-                            return Ok(());
-                        }
-                        if let (Some(tree), Some(keyboard), Some(active)) = (
-                            tree_for_context.upgrade(),
-                            keyboard_for_context.upgrade(),
-                            active_for_context.upgrade(),
-                        ) {
-                            if let Some(tree) = tree.borrow().clone() {
-                                let Ok(point) = args.GetPosition(&canvas_for_context) else {
-                                    return Ok(());
-                                };
-                                let local_pt = elwindui_core::base::Point {
-                                    x: point.X,
-                                    y: point.Y,
-                                };
-                                if let Some(screen_pt) =
-                                    Self::canvas_to_screen_point(&canvas_for_context, local_pt)
-                                {
-                                    let request = elwindui_core::ui::ContextRequest::pointer(
-                                        local_pt, screen_pt,
-                                    );
-                                    if Self::dispatch_context_request(
-                                        &Some(tree),
-                                        &keyboard,
-                                        &canvas_for_context,
-                                        &active,
-                                        &request,
-                                    ) {
-                                        let _ = args.SetHandled(true);
-                                    }
-                                }
-                            }
+                        if let Some(args) = args.as_ref() {
+                            invoke_ui_right_tapped_callback(callback_id, args);
                         }
                         Ok(())
                     },
@@ -646,85 +681,81 @@ impl TreeHostPanel {
             let keyboard_for_ctx = Rc::downgrade(&this.keyboard);
             let canvas_for_ctx = this.canvas.clone();
             let active_for_ctx = Rc::downgrade(&this.active_popup);
-            let _ =
-                this.canvas.ContextRequested(
-                    &TypedEventHandler::new(
-                        move |_sender,
-                              args: &Option<
-                            Microsoft::UI::Xaml::Input::ContextRequestedEventArgs,
-                        >| {
-                            let Some(args) = args.as_ref() else {
-                                return Ok(());
-                            };
-                            let mut pt = windows::Foundation::Point::default();
-                            let is_pointer = args
-                                .TryGetPosition(&canvas_for_ctx, &mut pt)
-                                .unwrap_or(false);
-                            let request = if is_pointer {
-                                let local_pt = elwindui_core::base::Point { x: pt.X, y: pt.Y };
-                                TreeHostPanel::canvas_to_screen_point(&canvas_for_ctx, local_pt)
-                                    .map(|screen_pt| {
-                                        elwindui_core::ui::ContextRequest::pointer(
-                                            local_pt, screen_pt,
+            let callback_id = this
+                .callback_owner
+                .register_context_event(Rc::new(move |args| {
+                    let mut pt = windows::Foundation::Point::default();
+                    let is_pointer = args
+                        .TryGetPosition(&canvas_for_ctx, &mut pt)
+                        .unwrap_or(false);
+                    let request = if is_pointer {
+                        let local_pt = elwindui_core::base::Point { x: pt.X, y: pt.Y };
+                        TreeHostPanel::canvas_to_screen_point(&canvas_for_ctx, local_pt).map(
+                            |screen_pt| {
+                                elwindui_core::ui::ContextRequest::pointer(local_pt, screen_pt)
+                            },
+                        )
+                    } else {
+                        let screen_anchor = if let Some(keyboard) = keyboard_for_ctx.upgrade() {
+                            if let Some(focused) = keyboard.focus.focused() {
+                                let offset = focused
+                                    .arranged_offset()
+                                    .unwrap_or(Point { x: 0.0, y: 0.0 });
+                                let w = focused.arranged_width().unwrap_or(0.0);
+                                let h = focused.arranged_height().unwrap_or(0.0);
+                                TreeHostPanel::canvas_to_screen_point(&canvas_for_ctx, offset).map(
+                                    |screen_pt| {
+                                        elwindui_core::ui::popup::PopupAnchor::Rect(
+                                            elwindui_core::base::Rect {
+                                                x: screen_pt.x,
+                                                y: screen_pt.y,
+                                                width: w,
+                                                height: h,
+                                            },
                                         )
-                                    })
+                                    },
+                                )
                             } else {
-                                let screen_anchor = if let Some(keyboard) =
-                                    keyboard_for_ctx.upgrade()
-                                {
-                                    if let Some(focused) = keyboard.focus.focused() {
-                                        let offset = focused
-                                            .arranged_offset()
-                                            .unwrap_or(Point { x: 0.0, y: 0.0 });
-                                        let w = focused.arranged_width().unwrap_or(0.0);
-                                        let h = focused.arranged_height().unwrap_or(0.0);
-                                        TreeHostPanel::canvas_to_screen_point(
-                                            &canvas_for_ctx,
-                                            offset,
-                                        )
-                                        .map(|screen_pt| {
-                                            elwindui_core::ui::popup::PopupAnchor::Rect(
-                                                elwindui_core::base::Rect {
-                                                    x: screen_pt.x,
-                                                    y: screen_pt.y,
-                                                    width: w,
-                                                    height: h,
-                                                },
-                                            )
-                                        })
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                };
-                                screen_anchor.map(|anchor| {
-                                    elwindui_core::ui::ContextRequest::keyboard(Some(anchor))
-                                })
-                            };
-                            if let Some(request) = request {
-                                if let (Some(tree), Some(keyboard), Some(active)) = (
-                                    tree_for_ctx.upgrade(),
-                                    keyboard_for_ctx.upgrade(),
-                                    active_for_ctx.upgrade(),
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        screen_anchor
+                            .map(|anchor| elwindui_core::ui::ContextRequest::keyboard(Some(anchor)))
+                    };
+                    if let Some(request) = request {
+                        if let (Some(tree), Some(keyboard), Some(active)) = (
+                            tree_for_ctx.upgrade(),
+                            keyboard_for_ctx.upgrade(),
+                            active_for_ctx.upgrade(),
+                        ) {
+                            if let Some(tree) = tree.borrow().clone() {
+                                if Self::dispatch_context_request(
+                                    &Some(tree),
+                                    &keyboard,
+                                    &canvas_for_ctx,
+                                    &active,
+                                    &request,
                                 ) {
-                                    if let Some(tree) = tree.borrow().clone() {
-                                        if Self::dispatch_context_request(
-                                            &Some(tree),
-                                            &keyboard,
-                                            &canvas_for_ctx,
-                                            &active,
-                                            &request,
-                                        ) {
-                                            let _ = args.SetHandled(true);
-                                        }
-                                    }
+                                    let _ = args.SetHandled(true);
                                 }
                             }
-                            Ok(())
-                        },
-                    ),
-                );
+                        }
+                    }
+                }));
+            let _ = this.canvas.ContextRequested(&TypedEventHandler::new(
+                move |_sender,
+                      args: windows::core::Ref<
+                    '_,
+                    Microsoft::UI::Xaml::Input::ContextRequestedEventArgs,
+                >| {
+                    if let Some(args) = args.as_ref() {
+                        invoke_ui_context_event_callback(callback_id, args);
+                    }
+                    Ok(())
+                },
+            ));
         }
         this
     }
@@ -743,8 +774,6 @@ impl TreeHostPanel {
         canvas: &Canvas,
         pressed: bool,
     ) -> Option<RawPointerEventKind> {
-        use windows::UI::Input::PointerUpdateKind;
-
         let update = args
             .GetCurrentPoint(canvas)
             .ok()?
@@ -833,7 +862,9 @@ impl TreeHostPanel {
                 });
                 let _ = self.canvas.SetBackground(&brush);
             }
-        } else if let Ok(property) = Canvas::BackgroundProperty() {
+        } else if let Ok(property) =
+            crate::bindings::Microsoft::UI::Xaml::Controls::Panel::BackgroundProperty()
+        {
             let _ = self.canvas.ClearValue(&property);
         }
     }
@@ -929,12 +960,18 @@ impl TreeHostPanel {
         tree.as_ui_element().set_invalidate_host(Some(host));
         tree.as_ui_element()
             .set_coordinate_host(Some(Rc::new(WinUI3CoordinateHost {
-                canvas: self.canvas.downgrade().unwrap_or_default(),
+                canvas: self
+                    .canvas
+                    .downgrade()
+                    .unwrap_or_else(|_| windows::core::Weak::new()),
             })));
         tree.as_ui_element()
             .set_pointer_gesture_host(Some(Rc::new(WinUI3PointerGestureHost {
                 pointer: Rc::downgrade(&self.pointer),
-                canvas: self.canvas.downgrade().unwrap_or_default(),
+                canvas: self
+                    .canvas
+                    .downgrade()
+                    .unwrap_or_else(|_| windows::core::Weak::new()),
             })));
         tree.as_ui_element()
             .set_focus_host(Some(Rc::new(WinUI3FocusHost {
@@ -1583,7 +1620,7 @@ impl TreeHostPanel {
         if let Ok(island) = xaml_root.ContentIslandEnvironment() {
             if let Ok(app_window_id) = island.AppWindowId() {
                 if let Ok(converter) = crate::bindings::Microsoft::UI::Content::ContentCoordinateConverter::CreateForWindowId(app_window_id) {
-                    if let Ok(screen_phys) = converter.ConvertLocalToScreen(local_dip) {
+                    if let Ok(screen_phys) = converter.ConvertLocalToScreenWithPoint(local_dip) {
                         let scale = if scale <= 0.0 { 1.0 } else { scale };
                         return Some(Point {
                             x: (screen_phys.X as f64 / scale) as f32,
@@ -1651,7 +1688,7 @@ impl TreeHostPanel {
         if let Ok(island) = xaml_root.ContentIslandEnvironment() {
             if let Ok(app_window_id) = island.AppWindowId() {
                 if let Ok(converter) = crate::bindings::Microsoft::UI::Content::ContentCoordinateConverter::CreateForWindowId(app_window_id) {
-                    if let Ok(local_dip) = converter.ConvertScreenToLocal(screen_phys) {
+                    if let Ok(local_dip) = converter.ConvertScreenToLocalWithPoint(screen_phys) {
                         return Some(Point {
                             x: local_dip.X,
                             y: local_dip.Y,
@@ -1783,9 +1820,9 @@ impl TreeHostPanel {
                             menu.as_any().downcast_ref::<crate::native_ui::Menu>()
                         {
                             if let Ok(flyout) = winui_menu.create_flyout() {
-                                let uie: crate::bindings::Microsoft::UI::Xaml::UIElement =
-                                    canvas.cast().expect("Canvas as UIElement");
-                                let _ = flyout.ShowAt(&uie);
+                                let fe: FrameworkElement =
+                                    canvas.cast().expect("Canvas as FrameworkElement");
+                                let _ = flyout.ShowAt(&fe);
                                 return true;
                             }
                         }

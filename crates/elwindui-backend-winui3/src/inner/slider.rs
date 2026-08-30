@@ -60,7 +60,7 @@ impl InnerSlider {
 
     pub(crate) fn set_value(&self, value: f32) {
         self.events.suppress(|| {
-            let _ = self.xaml.SetValue(value as f64);
+            let _ = self.xaml.SetValue2(value as f64);
         });
     }
 

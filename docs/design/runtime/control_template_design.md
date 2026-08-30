@@ -121,6 +121,12 @@ path; the target receives it before this template's mount-time selection. This
 preserves the lifecycle boundary instead of adding a special pre-mount
 template-accessor path.
 
+For a generated component whose scalar content slot is supplied by an external
+base shape, codegen forwards a named `content:` value through that shape's
+exported setter protocol before the generated component mounts. The slot is not
+duplicated into local component metadata, and the defining shape performs the
+single concrete-to-trait conversion.
+
 ## 5. Validation boundaries
 
 Frontend validation rejects body/template coexistence, template on a non-

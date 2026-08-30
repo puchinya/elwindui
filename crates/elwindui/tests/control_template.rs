@@ -168,6 +168,25 @@ struct ControlTemplateTestPanel {
 #[elwindui::component]
 impl ControlTemplateTestPanel {}
 
+#[elwindui::component(inherits VerticalLayout)]
+struct NamedContentUseProbe {
+    #[param]
+    logical_content: Rc<TextBlock>,
+
+    body: view! {
+        #[id("panel")]
+        let panel = ControlTemplateTestPanel {
+            label: "nested"
+            content: logical_content
+        };
+
+        panel
+    },
+}
+
+#[elwindui::component]
+impl NamedContentUseProbe {}
+
 fn compact_control_template_test_panel(
     prefix: String,
 ) -> ControlTemplate<ControlTemplateTestPanel> {
@@ -340,6 +359,45 @@ fn default_template_root_lays_out_and_reaches_render_tree() {
         render_tree
             .visual_index
             .contains_key(&template_root.render_group_id())
+    );
+}
+
+#[test]
+fn named_inherited_content_is_bound_before_template_mount() {
+    DEFAULT_TEMPLATE_MOUNTS.with(|count| count.set(0));
+    TARGET_MOUNTS.with(|count| count.set(0));
+    let environment = elwindui::core::environment::application_environment();
+    environment.set_control_template(Some(compact_control_template_test_panel(
+        "Override: ".to_string(),
+    )));
+
+    let logical = TextBlock::new();
+    logical.set_text("pre-mount logical content");
+    let host = NamedContentUseProbe::new(logical.clone());
+    let panel = host.panel();
+    let panel_node: Rc<dyn elwindui::core::ui::UIElementExt> = panel.clone();
+    let presenter = elwindui::core::visual_tree::find_all::<ContentPresenter>(panel.as_ref())
+        .into_iter()
+        .next()
+        .expect("named content reaches the selected template presenter");
+    let presenter_node: Rc<dyn elwindui::core::ui::UIElementExt> = presenter.clone();
+
+    let logical_parent = logical
+        .as_ui_element()
+        .parent
+        .borrow()
+        .as_ref()
+        .and_then(std::rc::Weak::upgrade)
+        .expect("named content retains its logical ContentControl parent");
+    assert!(Rc::ptr_eq(&logical_parent, &panel_node));
+    assert!(
+        logical
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &presenter_node))
+    );
+    assert_eq!(
+        text_values(panel.as_ref()),
+        vec!["Override: nested", "pre-mount logical content"]
     );
 }
 

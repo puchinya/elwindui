@@ -296,6 +296,12 @@ component自身のauthored presentationと、componentを使用する側のbare 
 template lowererを経由せず、effective `#[content(...)]`のscalar/collection loweringへ送られる。
 この区別はtype-name dispatchやhidden presentation metadataではなく、authoring slotの種類から決まる。
 
+テンプレートを持つgenerated componentがexternal shapeのscalar content slotを継承する場合、そのslotは
+component自身のeffective field listに重複してコピーしない。使用側の名前付き`content:`値だけを、継承元
+shapeのexported `@set` protocolへ渡し、generated componentが`__mount`する前にlogical contentを設定する。
+値のtrait-object化は宣言側shape macroの型情報で一度だけ行うため、consumer側にreflectionや別の
+content-binding engineは導入しない。
+
 #### Component override bridge
 
 `#[elwindui::component]` の companion `impl` にある `#[overridable]` / `#[overrides]` は

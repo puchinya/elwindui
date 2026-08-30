@@ -12869,13 +12869,11 @@ fn builtin_trait_use(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
 /// unification (see `build_props_macro`'s own doc comment on why `@set` accepts a bare callable for
 /// a `#[routed]` property too).
 ///
-/// **Known gaps, deliberately not yet handled** (no current builtin construction needs them — see
-/// `docs/status/implementation_status.md`'s tracking of this rewrite): a named attribute matching a
-/// `#[content(..)]`-designated property (`Window { content: SomeElement { .. } }` — as opposed to a
-/// *bare* nested child, which `emit_construction`'s own caller already routes through `@children`
-/// separately), a `ViewExpr::Element`-valued named attribute (`menu_bar: MenuBar { .. }`), and a
-/// dynamic/`for`-driven single-child content slot. Each panics with a specific message rather than
-/// silently emitting something wrong.
+/// **Known gap, deliberately not yet handled** (no current builtin construction needs it — see
+/// `docs/status/implementation_status.md`'s tracking of this rewrite): a dynamic/`for`-driven
+/// single-child content slot. Named content and other element-valued attributes are routed through
+/// the defining shape's `@set` protocol, while bare nested children use `@children`; neither path
+/// silently drops the authored value.
 fn emit_external_construction(
     node: &PlannedNode,
     ctx: &ViewCtx,
@@ -13035,29 +13033,21 @@ fn external_attribute_values(
         // local `TypeInfo`, like `Grid`/`MenuBar` now that builtins live outside this table
         // entirely) always `impl`s whatever trait its own real setter declares directly (`#[class]`
         // gives it one), so plain unsized coercion at the eventual setter call already handles it.
-        // Only an ordinary `#[elwindui::component]`-frontend user struct (has local `TypeInfo`,
-        // isn't itself native/a virtual builtin) never `impl`s a `dyn` target trait directly —
-        // its own generated `into_node()` is the only way to erase it, and skipping that call
-        // here used to silently pass the raw concrete value through as an opaque, un-attached
-        // value (compiled fine, `@set`'s generated setter call is generic enough to accept it, but
-        // never actually reached the visual tree as a `dyn UIElementExt` child). Found via a real
-        // notepad screenshot regression (Refs #14) — `cargo test`'s string-level codegen assertions
-        // never caught this since the generated code is syntactically valid either way.
+        // The exported `@set` protocol for a single-slot trait-object property performs the
+        // concrete-to-trait conversion through the target trait's `into_<trait>_node` default
+        // method. Keep the freshly constructed binding concrete here: pre-erasing an ordinary
+        // generated component to `Rc<dyn UIElementExt>` would make that `Self: Sized` helper
+        // unavailable at the later `@set` expansion site. This is also why the named attribute
+        // path differs from the bare-child path's `single_slot_child_value` conversion: each
+        // path must convert exactly once.
         if let ViewExpr::Element(_) = expr {
-            let (nested_binding, nested_ty) = node
+            let (nested_binding, _nested_ty) = node
                 .element_attr_bindings
                 .get(name.as_str())
                 .unwrap_or_else(|| panic!("planned element binding for `{name}` must exist"));
-            let info = resolve_context_info(ctx, from, table, nested_ty);
-            let needs_into_node = info.is_some_and(|i| !i.is_native && !i.is_virtual_builtin);
-            let value = if needs_into_node {
-                quote! { #nested_binding.clone().into_node() }
-            } else {
-                quote! { #nested_binding.clone() }
-            };
             values.push(ExternalAttributeValue {
                 name: name_ident,
-                value,
+                value: quote! { #nested_binding.clone() },
                 synthesized: false,
                 typed: false,
             });
@@ -13403,6 +13393,41 @@ fn emit_construction(
         // `EnvironmentContext` local variable — instead of `new()`'s ordinary path, which would
         // otherwise auto-mount it against `application_environment()` before this statement even
         // gets a chance to override anything.
+        // A template-enabled component can inherit an external shape's scalar content slot
+        // without that slot appearing in its local `effective_fields` (the template owns
+        // presentation, while the external shape owns storage).  Preserve a named `content:`
+        // value at the component boundary and apply it while the generated component is still in
+        // Created state, before its selected template is built.  The defining shape macro performs
+        // the concrete-to-trait conversion and validates the slot name; this keeps the cross-crate
+        // content type out of the local symbol table and reuses the existing setter protocol.
+        let composed_named_content_attach = if info.content_field.is_none()
+            && info.composed_shape.is_some()
+            && !info.field_types.contains_key("content")
+        {
+            find_attr(node, "content").map(|expr| {
+                let value = match expr {
+                    ViewExpr::Element(_) => {
+                        let (nested_binding, _) = node
+                            .element_attr_bindings
+                            .get("content")
+                            .unwrap_or_else(|| {
+                                panic!("planned element binding for `content` must exist")
+                            });
+                        quote! { #nested_binding.clone() }
+                    }
+                    _ => emit_expr(expr, ctx, &EmitMode::Construction),
+                };
+                let base_name = info.composed_shape.as_deref().expect("composed shape name");
+                let base_info = resolve_context_info(ctx, from, table, base_name);
+                let macro_path = dsl_props_macro_path(base_name, base_info);
+                quote! {
+                    #macro_path!(@set #binding, content, #value);
+                }
+            })
+        } else {
+            None
+        };
+        let composed_named_content_attach = composed_named_content_attach.unwrap_or_default();
         let construct_call = if ctx.is_template_storage() {
             let environment = node.environment_scope.as_ref().map_or_else(
                 || {
@@ -13414,6 +13439,7 @@ fn emit_construction(
             quote! {
                 let #binding = #type_ident::__new_unmounted(#(#args),*);
                 #(#optional_setters)*
+                #composed_named_content_attach
                 #type_ident::__mount(&#binding, #environment.clone());
             }
         } else {
@@ -13421,11 +13447,13 @@ fn emit_construction(
                 Some(scope_var) => quote! {
                     let #binding = #type_ident::__new_unmounted(#(#args),*);
                     #(#optional_setters)*
+                    #composed_named_content_attach
                     #type_ident::__mount(&#binding, #scope_var.clone());
                 },
                 None if info.has_view => quote! {
                     let #binding = #type_ident::__new_unmounted(#(#args),*);
                     #(#optional_setters)*
+                    #composed_named_content_attach
                     #type_ident::__mount(
                         &#binding,
                         elwindui::core::environment::application_environment(),

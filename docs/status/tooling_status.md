@@ -18,10 +18,13 @@ Implemented commands cover launching/locating a process or window, waiting for w
 The command catalog and operational precautions belong in [`../agents/appkit.md`](../agents/appkit.md) and [`../../tools/macos-ui-driver/README.md`](../../tools/macos-ui-driver/README.md), not in status.
 
 On 2026-08-30, `cargo run -p control-template-demo` reached executable
-startup after the public-path remediation. Computer Use could not inspect the
-window because the Mac was locked and automatic unlock failed; no screenshot or
-Accessibility-tree result was recorded, so this run is `BLOCKED`, not a runtime
-PASS.
+startup after the public-path remediation. Computer Use then captured the same
+rebuilt executable in an inspectable AppKit bundle: the screenshot showed
+`Captured: Environment override`, `Reactive parent alias label`, and
+`Logical content, visually hosted by ContentPresenter`; `Default template` was
+absent. This is an objective AppKit visual PASS. The repository
+`macos-ui-driver` doctor still reports unavailable Accessibility and Screen
+Recording permissions in this environment, so no AX-tree evidence is claimed.
 
 ## External generated-component DSL (#191/#193/#194)
 

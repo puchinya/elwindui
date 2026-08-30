@@ -46,16 +46,13 @@ struct ControlTemplateDemoWindow {
     logical_content: std::rc::Rc<TextBlock>,
 
     body: view! {
-        #[id("panel")]
-        let panel = DemoPanel {
-            label: "Reactive parent alias label"
-            content: logical_content
-        };
-
         title: "elwindui ControlTemplate Demo"
         width: 520.0
         height: 260.0
-        panel
+        content: DemoPanel {
+            label: "Reactive parent alias label"
+            content: logical_content
+        }
     },
 }
 

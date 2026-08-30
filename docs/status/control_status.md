@@ -40,6 +40,9 @@ template is parameterized and installed directly, and logical content is
 provided as a Window constructor Param so it reaches the target before the
 target's template mount. The public `control_template` acceptance tests cover
 default/override selection, alias resync, ContentPresenter ownership, layout,
-and RenderTree descendants. The demo executable launched on 2026-08-30 after
-the cleanup, but Accessibility/screenshot inspection was blocked because the
-Mac was locked; the demo is therefore not marked runtime-verified here.
+and RenderTree descendants. On 2026-08-30, the rebuilt executable launched with
+`cargo run -p control-template-demo`; a Computer Use screenshot of that same
+executable showed `Captured: Environment override`, `Reactive parent alias
+label`, and `Logical content, visually hosted by ContentPresenter`. The
+default-only marker `Default template` was absent. This is AppKit runtime
+evidence; Windows and GTK4 remain unverified.

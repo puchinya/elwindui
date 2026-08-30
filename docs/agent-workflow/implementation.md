@@ -36,6 +36,10 @@ It does not silently override normative specifications. If an approved change in
   - implementation progress, backend support, known gaps, or verification state -> [`docs/status/`](../status/).
 - Use `gh` for Issue, label, comment, Pull Request, review, and Actions operations. Use `git` for local branch, staging, commit, and push operations.
 
+### Context-efficient execution
+
+Follow the Issue-scoped working-set and bounded-output rules in the root [`AGENTS.md`](../../AGENTS.md). When implementation begins from a supplied and approved Implementation Contract, its material architecture and behavioral decisions are resolved inputs. Inspect referenced files and symbols for implementation details, but do not re-derive the architecture through broad rescans unless repository evidence conflicts with the contract. Context reduction must not suppress required errors, acceptance evidence, or final verification.
+
 ## Handling specification disagreement during implementation
 
 When code, design, status, and normative specifications disagree during implementation:
@@ -88,6 +92,16 @@ Before creating the Pull Request, inspect the complete diff and verify:
 - Agent instructions, commands, and document paths affected by the change are synchronized;
 - error handling and unsafe assumptions are justified;
 - generated files or lockfile changes are intentional.
+
+## Implementation completion gate
+
+Editing, testing, committing, or pushing alone does not make implementation complete. Before reporting implementation-phase completion:
+
+- the changes are committed and the working branch is pushed;
+- a Pull Request exists, includes `Closes #<issue-number>`, and the final implementation report includes the Pull Request URL;
+- the Issue has successfully transitioned from `phase:implementation` to `phase:review`, and the review workflow has been entered.
+
+If Pull Request creation or the phase transition fails, report the result as blocked with the exact blocker and relevant command/error. Overall Issue/work completion remains governed by [`docs/agent-workflow/review.md`](review.md).
 
 ## Transition to review
 

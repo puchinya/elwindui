@@ -1,7 +1,7 @@
 # Custom controls status
 
-Snapshot: 2026-08-31. Review-remediation implementation commit:
-`623a3c0`. The public contract is
+Snapshot: 2026-08-31. Final verified remediation implementation commit:
+`f31ad651f2e4fd9b7c89a7e90f89baad294c3b63`. The public contract is
 [`../specs/custom_controls_spec.md`](../specs/custom_controls_spec.md).
 
 ## Implemented
@@ -35,8 +35,18 @@ Snapshot: 2026-08-31. Review-remediation implementation commit:
   The two ownership paths use the shared typed component-template path delivered
   by [#188](https://github.com/puchinya/elwindui/pull/188).
 - The component source topology is explicit: `lib.rs` is a facade/module root,
-  each component has its own source file, shared event/value types are in
-  `types.rs`, and cross-cutting weak-owner support is in `support.rs`.
+  each component has its own source file, `types.rs` contains only public
+  shared value/event types and aliases, and component/presenter-private state
+  is colocated with its owner (`TabGestureKind`, `TabGesture`, and
+  `TabItemPointerEvent` in `custom_tab_view.rs`; `ContentEntry` in
+  `custom_tab_content_presenter.rs`; `SplitterGesture` in
+  `custom_splitter.rs`). Cross-cutting weak-owner support remains in
+  `support.rs`.
+- The crate-root `types` export is explicit. There is no `pub use types::*`,
+  and the five implementation types above are not crate-root API. The owning
+  component modules remain private; their generated component metadata needs
+  the declarations to be nameable inside those private modules, but no
+  external import path is exposed.
 - Weak callback owners derive a temporary typed `Rc<T>` from the Visual owner,
   downgrade it, and drop that temporary strong reference normally. No leaked
   strong reference, raw-pointer registry, or strong callback is used.
@@ -55,20 +65,31 @@ Snapshot: 2026-08-31. Review-remediation implementation commit:
 
 ## Verification
 
-The focused custom-controls suite passes with 35 tests and no ignored tests.
-`cargo fmt --all` and its check pass. `RUSTFLAGS="--cfg rust_analyzer" cargo
-check --workspace`, `cargo check --workspace`, `cargo build --workspace`,
-`cargo check -p custom-controls-demo`, `cargo test --workspace --quiet`, and
-`git diff --check` pass with the remediation changes. The actual command
-`rust-analyzer diagnostics .` reports zero `Error`, zero `Warning`, and zero
-non-exempt `WeakWarning` diagnostics, with 132 permitted
-`Ra("inactive-code", WeakWarning)` records for intentional `#[cfg(...)]`
-branches, but exits 1 with the generic diagnostics failure status. Per the
-verification contract this is not a PASS and remains the outstanding gate.
-Windows and GTK4 runtime interaction have not been run. The existing
-interactive AppKit smoke evidence was captured with `tools/macos-ui-driver`;
-individual pointer behavior remains covered by the Core PointerDispatcher
-host-path tests.
+The focused custom-controls suite passes with 35 tests and no ignored tests;
+the external `declarative_content` regression passes with 1 test. `cargo fmt
+--all`, `cargo fmt --all -- --check`, and `git diff --check` pass.
+`cargo check -p custom-controls-demo`, `cargo check --workspace`, and `cargo
+build --workspace` exit 0, but they emit respectively 5, 22, and 22 compiler
+warnings. All remaining warnings are `unreachable statement` diagnostics
+originating in the component proc-macro expansion; 17 of the workspace
+locations are already present on clean `origin/master` and 5 are the custom
+controls' corresponding expansions. The `SystemIcon::ALL` warning was removed
+by keeping that test-only constant under `cfg(test)`. The warning-free Issue
+acceptance is therefore blocked; no warning suppression or codegen change was
+introduced.
+
+The exact `rust-analyzer diagnostics .` command exits 0 on the final
+implementation snapshot with 0 `Error`, 0 `Warning`, 133 permitted
+`Ra("inactive-code", WeakWarning)` records, and 0 non-exempt
+`WeakWarning` records. Against clean `origin/master`
+(`f2412f7ea807e66d780be57480c5be86453f07e6`) in the same environment it also
+exits 0 with 0 `Error`, 0 `Warning`, 125 permitted inactive-code
+`WeakWarning` records, and 0 non-exempt records. The rust-analyzer gate is
+resolved. `cargo test --workspace --quiet` passes; its test-target compilation
+still reports the same compiler warning family. Windows and GTK4 runtime
+interaction have not been run. The existing interactive AppKit smoke evidence
+was captured with `tools/macos-ui-driver`; individual pointer behavior remains
+covered by the Core PointerDispatcher host-path tests.
 
 ## Follow-up
 

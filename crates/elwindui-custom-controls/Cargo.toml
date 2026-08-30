@@ -7,5 +7,10 @@ edition.workspace = true
 elwindui-core = { path = "../elwindui-core" }
 elwindui-macros = { path = "../elwindui-macros" }
 
+[dev-dependencies]
+# Real downstream-style declarative regression: the test depends on the facade and this library
+# under their actual crate names, as an application does.
+elwindui = { path = "../elwindui", features = ["backend-appkit", "backend-winui3"] }
+
 [lints]
 workspace = true

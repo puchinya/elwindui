@@ -6,20 +6,16 @@ extern crate self as elwindui;
 
 pub use elwindui_macros::{class, component};
 
-// Keep the core facade shape expected by generated `view!` code while exposing this crate's
-// component property-shape macros alongside the builtin shapes.
+// Keep the ordinary facade shape expected by generated code in this crate. Cross-crate
+// `view!` expansion resolves this library's generated component shapes through the normal
+// #191/#192 external-component protocol; no custom-controls-specific forwarding is needed here.
 pub mod core {
-    pub use crate::{
-        __elwindui_props_CustomSplitter, __elwindui_props_CustomTabCloseButton,
-        __elwindui_props_CustomTabContentPresenter, __elwindui_props_CustomTabStripPresenter,
-        __elwindui_props_CustomTabView, __elwindui_props_CustomTabViewItem,
-    };
     pub use elwindui_core::*;
 }
 
-// Generated component property-shape macros address the generated extension trait through the
-// declaring crate's `ui` namespace. Keep the core UI surface intact while making the public custom
-// controls' own property shapes reachable to cross-crate `view!` expansion as well.
+// The generated components authored inside this crate use the same ordinary `ui` namespace as
+// builtin components. The external DSL uses qualified paths and does not depend on these exports
+// as a facade impersonation.
 pub mod ui {
     pub use crate::{
         CustomSplitter, CustomSplitterExt, CustomTabView, CustomTabViewExt, CustomTabViewItem,
@@ -37,10 +33,34 @@ use core::reactive::Subscription;
 use core::ui::{
     ContentControlExt, ControlExt, IconSourceElementExt, LayoutExt, ListExt, UIElementExt,
 };
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 const TAB_STRIP_HEIGHT: f32 = 32.0;
 const TAB_DRAG_THRESHOLD: f32 = 4.0;
+
+/// Recovers the concrete self handle from the Visual collection's owner weak reference.
+///
+/// Generated component storage is intentionally private to the `#[component]` expansion. The
+/// collection owner is the same most-derived `Rc` used to initialize that storage, so this keeps
+/// the callback wiring weak without depending on generated implementation fields that are not part
+/// of the rust-analyzer shadow surface.
+fn weak_self_from_visual_owner<T: UIElementExt + 'static>(value: &T) -> Weak<T> {
+    let Some(owner) = value.as_ui_element().visual_collection.owner_rc() else {
+        return Weak::new();
+    };
+    assert!(
+        owner.as_any().is::<T>(),
+        "component Visual collection owner has an unexpected concrete type"
+    );
+    let raw = Rc::into_raw(owner) as *const () as *const T;
+    // SAFETY: the owner was checked against the exact `T` type above. Reconstructing this
+    // temporary `Rc<T>` preserves the original strong count; it is forgotten after deriving the
+    // weak callback handle.
+    let owner = unsafe { Rc::from_raw(raw) };
+    let weak = Rc::downgrade(&owner);
+    std::mem::forget(owner);
+    weak
+}
 
 /// The edge on which a tab strip is authored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -214,9 +234,12 @@ struct CustomTabCloseButton {
     slot_visibility: Visibility,
     #[computed(expr = if glyph_visible { "×".to_string() } else { String::new() })]
     glyph_text: String,
-    template: template_view! {
+    template: template_view!(|this: Self| {
         on_mount {
             this.bind_pointer_handlers();
+        }
+        on_update(glyph_visible, slot_visible) {
+            this.invalidate_measure();
         }
         Grid {
             width: 20.0
@@ -227,7 +250,7 @@ struct CustomTabCloseButton {
                 text_alignment: elwindui::core::ui::TextAlignment::Center
             }
         }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -288,19 +311,21 @@ pub struct CustomTabViewItem {
         CloseButtonPresentation::Never => false,
     })]
     close_glyph_visible: bool,
+    #[computed(expr = closable && close_button_presentation == CloseButtonPresentation::Always)]
+    initial_close_glyph_visible: bool,
     #[computed(expr = if is_selected { Visibility::Visible } else { Visibility::Collapsed })]
     indicator_visibility: Visibility,
-    template: template_view! {
+    template: template_view!(|this: Self| {
         on_mount {
             this.bind_header_handlers();
             this.sync_close_button();
         }
-        on_update(header, icon, closable, is_selected, is_pointer_over, tab_strip_position, close_button_presentation) {
+        on_update(header, icon, closable, is_selected, tab_strip_position, close_button_presentation) {
             this.sync_close_button();
         }
         let close_button = CustomTabCloseButton {
             slot_visible: close_slot_visible
-            glyph_visible: close_glyph_visible
+            glyph_visible: initial_close_glyph_visible
         };
         Grid {
             rows: header_grid_rows
@@ -333,7 +358,7 @@ pub struct CustomTabViewItem {
                 visibility: indicator_visibility
             }
         }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -418,7 +443,7 @@ struct CustomTabContentPresenter {
     bound_items: Vec<std::rc::Weak<CustomTabViewItem>>,
     #[state(default = None)]
     presentation_state: Option<Rc<std::cell::RefCell<Vec<ContentEntry>>>>,
-    template: template_view! {
+    template: template_view!(|this: Self| {
         on_mount {
             this.reconcile_contents();
         }
@@ -427,7 +452,7 @@ struct CustomTabContentPresenter {
             this.invalidate_measure();
         }
         Grid {}
-    },
+    }),
 }
 
 impl CustomTabContentPresenter {
@@ -461,6 +486,10 @@ impl CustomTabContentPresenter {
         }
         let mut entries = Vec::with_capacity(items.len());
         for item in &items {
+            // A tab item is also a templated ContentControl. Prepare its inherited content
+            // surface before the stable presenter adopts the page visually; this preserves the
+            // logical item parent while switching the content from direct to presenter display.
+            item.__prepare_template_presentation();
             let content = item.__content_opt();
             if let Some(content) = content.as_ref() {
                 if let Some(parent) = content.visual_parent() {
@@ -538,13 +567,7 @@ impl CustomTabContentPresenter {
     }
 
     fn weak_self(&self) -> std::rc::Weak<Self> {
-        self.__self_weak
-            .borrow()
-            .clone()
-            .upgrade()
-            .and_then(|rc| rc.downcast::<Self>().ok())
-            .map(|rc| Rc::downgrade(&rc))
-            .unwrap_or_default()
+        weak_self_from_visual_owner(self)
     }
 }
 
@@ -655,11 +678,7 @@ pub struct CustomTabView {
     tab_items: Vec<Rc<CustomTabViewItem>>,
     #[computed(expr = template_items.clone())]
     content_items: Vec<Rc<CustomTabViewItem>>,
-    template: template_view! {
-        on_mount {
-            this.set_clip_to_bounds(Some(true));
-            this.reconcile_children();
-        }
+    template: template_view!(|this: Self| {
         on_update(children, template_items, selected_index, tab_strip_position, close_button_presentation) {
             this.reconcile_children();
         }
@@ -681,11 +700,17 @@ pub struct CustomTabView {
             tab_strip
             content_presenter
         }
-    },
+    }),
 }
 
 #[elwindui::component]
-impl CustomTabView {}
+impl CustomTabView {
+    #[overrides]
+    fn on_apply_template(&self) {
+        self.set_clip_to_bounds(Some(true));
+        self.reconcile_children();
+    }
+}
 
 /// A templated splitter that reports logical-axis drag deltas.
 #[elwindui::component(inherits Control)]
@@ -700,7 +725,7 @@ pub struct CustomSplitter {
     drag_completed_callback: Option<Rc<dyn Fn(SplitterDragCompletedEventArgs)>>,
     #[state(default = None)]
     gesture: Option<SplitterGesture>,
-    template: template_view! {
+    template: template_view!(|this: Self| {
         on_mount {
             this.bind_pointer_handlers();
         }
@@ -718,7 +743,7 @@ pub struct CustomSplitter {
                 }
             }
         }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -823,13 +848,7 @@ impl CustomTabCloseButton {
     }
 
     fn weak_self(&self) -> std::rc::Weak<Self> {
-        self.__self_weak
-            .borrow()
-            .clone()
-            .upgrade()
-            .and_then(|rc| rc.downcast::<Self>().ok())
-            .map(|rc| Rc::downgrade(&rc))
-            .unwrap_or_default()
+        weak_self_from_visual_owner(self)
     }
 }
 
@@ -845,6 +864,7 @@ impl CustomTabViewItem {
     }
 
     /// Updates the tab label only when its value changes.
+    #[cfg(not(rust_analyzer))]
     pub fn set_header(&self, header: String) {
         if self.header() == header {
             return;
@@ -853,6 +873,7 @@ impl CustomTabViewItem {
     }
 
     /// Updates the close capability only when its value changes.
+    #[cfg(not(rust_analyzer))]
     pub fn set_closable(&self, closable: bool) {
         if self.closable() == closable {
             return;
@@ -873,19 +894,8 @@ impl CustomTabViewItem {
         if self.is_pointer_over() == value {
             return;
         }
-        let old_glyph_visible = self.close_glyph_visible();
-        self.is_pointer_over.set(value);
-        let new_glyph_visible = self.closable()
-            && match self.close_button_presentation() {
-                CloseButtonPresentation::Always => true,
-                CloseButtonPresentation::OnPointerOver => value,
-                CloseButtonPresentation::Never => false,
-            };
-        self.close_glyph_visible.set(new_glyph_visible);
-        if old_glyph_visible != new_glyph_visible {
-            self.on_property_changed(CustomTabViewItemProperty::close_glyph_visible);
-        }
-        self.on_property_changed(CustomTabViewItemProperty::is_pointer_over);
+        self.set_is_pointer_over(value);
+        self.sync_close_button();
     }
 
     fn set_presentation(
@@ -1046,13 +1056,7 @@ impl CustomTabViewItem {
     }
 
     fn weak_self(&self) -> std::rc::Weak<Self> {
-        self.__self_weak
-            .borrow()
-            .clone()
-            .upgrade()
-            .and_then(|rc| rc.downcast::<Self>().ok())
-            .map(|rc| Rc::downgrade(&rc))
-            .unwrap_or_default()
+        weak_self_from_visual_owner(self)
     }
 
     /// Resolves the icon into the Core `IconSourceElement` realization used by callers that need a
@@ -1093,16 +1097,25 @@ impl CustomTabView {
 
     /// Replaces the ordered tab list and reconciles its logical and visual ownership.
     pub fn replace_children(&self, children: Vec<Rc<CustomTabViewItem>>) {
-        self.set_children(children);
+        self.set_children_internal(children);
     }
 
     /// Returns the established typed ordered-list surface for tab items.
+    #[cfg(not(rust_analyzer))]
     pub fn children(&self) -> &dyn ListExt<dyn CustomTabViewItemExt> {
         self
     }
 
     /// Replaces the concrete list used by declarative and programmatic callers.
+    #[cfg(not(rust_analyzer))]
     pub fn set_children(&self, children: Vec<Rc<CustomTabViewItem>>) {
+        self.set_children_internal(children);
+    }
+
+    fn set_children_internal(&self, children: Vec<Rc<CustomTabViewItem>>) {
+        #[cfg(rust_analyzer)]
+        self.set_children(children);
+        #[cfg(not(rust_analyzer))]
         <Self as CustomTabViewExt>::set_children(self, children);
     }
 
@@ -1110,7 +1123,7 @@ impl CustomTabView {
     pub fn append_child(&self, item: Rc<CustomTabViewItem>) {
         let mut children = self.children_values();
         children.push(item);
-        self.set_children(children);
+        self.set_children_internal(children);
     }
 
     /// Removes and returns an item by index, if present.
@@ -1120,7 +1133,7 @@ impl CustomTabView {
             return None;
         }
         let removed = children.remove(index);
-        self.set_children(children);
+        self.set_children_internal(children);
         Some(removed)
     }
 
@@ -1192,7 +1205,14 @@ impl CustomTabView {
     }
 
     fn children_values(&self) -> Vec<Rc<CustomTabViewItem>> {
-        <Self as CustomTabViewExt>::children(self)
+        #[cfg(rust_analyzer)]
+        {
+            self.children()
+        }
+        #[cfg(not(rust_analyzer))]
+        {
+            <Self as CustomTabViewExt>::children(self)
+        }
     }
 
     /// Returns the typed ordered-list surface used by dynamic content composition.
@@ -1283,6 +1303,7 @@ impl CustomTabView {
             presenter
                 .as_ui_element()
                 .set_attached::<i32>("Grid", "row", self.tab_strip_row());
+            presenter.reconcile_items();
             break;
         }
         for node in core::visual_tree::find_all::<CustomTabContentPresenter>(self) {
@@ -1294,6 +1315,7 @@ impl CustomTabView {
             presenter
                 .as_ui_element()
                 .set_attached::<i32>("Grid", "row", self.content_row());
+            presenter.reconcile_contents();
             break;
         }
         for (index, item) in children.iter().enumerate() {
@@ -1511,13 +1533,7 @@ impl CustomTabView {
     }
 
     fn weak_self(&self) -> std::rc::Weak<Self> {
-        self.__self_weak
-            .borrow()
-            .clone()
-            .upgrade()
-            .and_then(|rc| rc.downcast::<Self>().ok())
-            .map(|rc| Rc::downgrade(&rc))
-            .unwrap_or_default()
+        weak_self_from_visual_owner(self)
     }
 }
 
@@ -1538,14 +1554,14 @@ impl ListExt<dyn CustomTabViewItemExt> for CustomTabView {
     fn add(&self, item: Rc<dyn CustomTabViewItemExt>) {
         let mut children = self.children_values();
         children.push(concrete_tab_item(item));
-        self.set_children(children);
+        self.set_children_internal(children);
     }
 
     fn insert(&self, index: usize, item: Rc<dyn CustomTabViewItemExt>) {
         let mut children = self.children_values();
         let index = index.min(children.len());
         children.insert(index, concrete_tab_item(item));
-        self.set_children(children);
+        self.set_children_internal(children);
     }
 
     fn remove(&self, item: &Rc<dyn CustomTabViewItemExt>) -> bool {
@@ -1557,19 +1573,19 @@ impl ListExt<dyn CustomTabViewItemExt> for CustomTabView {
             return false;
         };
         children.remove(index);
-        self.set_children(children);
+        self.set_children_internal(children);
         true
     }
 
     fn remove_at(&self, index: usize) -> Rc<dyn CustomTabViewItemExt> {
         let mut children = self.children_values();
         let item = children.remove(index);
-        self.set_children(children);
+        self.set_children_internal(children);
         item
     }
 
     fn clear(&self) {
-        self.set_children(Vec::new());
+        self.set_children_internal(Vec::new());
     }
 
     fn len(&self) -> usize {
@@ -1585,57 +1601,6 @@ impl ListExt<dyn CustomTabViewItemExt> for CustomTabView {
             .into_iter()
             .map(|item| item as Rc<dyn CustomTabViewItemExt>)
             .collect()
-    }
-}
-
-impl ListExt<CustomTabViewItem> for CustomTabView {
-    fn add(&self, item: Rc<CustomTabViewItem>) {
-        let mut children = self.children_values();
-        children.push(item);
-        self.set_children(children);
-    }
-
-    fn insert(&self, index: usize, item: Rc<CustomTabViewItem>) {
-        let mut children = self.children_values();
-        let index = index.min(children.len());
-        children.insert(index, item);
-        self.set_children(children);
-    }
-
-    fn remove(&self, item: &Rc<CustomTabViewItem>) -> bool {
-        let mut children = self.children_values();
-        let Some(index) = children
-            .iter()
-            .position(|candidate| Rc::ptr_eq(candidate, item))
-        else {
-            return false;
-        };
-        children.remove(index);
-        self.set_children(children);
-        true
-    }
-
-    fn remove_at(&self, index: usize) -> Rc<CustomTabViewItem> {
-        let mut children = self.children_values();
-        let item = children.remove(index);
-        self.set_children(children);
-        item
-    }
-
-    fn clear(&self) {
-        self.set_children(Vec::new());
-    }
-
-    fn len(&self) -> usize {
-        self.children_values().len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.children_values().is_empty()
-    }
-
-    fn to_vec(&self) -> Vec<Rc<CustomTabViewItem>> {
-        self.children_values()
     }
 }
 
@@ -1787,12 +1752,6 @@ impl CustomSplitter {
     }
 
     fn weak_self(&self) -> std::rc::Weak<Self> {
-        self.__self_weak
-            .borrow()
-            .clone()
-            .upgrade()
-            .and_then(|rc| rc.downcast::<Self>().ok())
-            .map(|rc| Rc::downgrade(&rc))
-            .unwrap_or_default()
+        weak_self_from_visual_owner(self)
     }
 }

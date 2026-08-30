@@ -1,20 +1,18 @@
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
-extern crate elwindui_custom_controls as elwindui;
-
 use elwindui::component;
 use elwindui::core::base::Size;
 use elwindui::core::graphics::{RenderCommand, RenderGroup, RenderTree};
 use elwindui::core::ui::{ContentControlExt, TextBlock, UIElementExt, layout_root};
-use elwindui::{CustomTabViewExt, CustomTabViewItemExt};
+use elwindui_custom_controls::{CustomTabView, CustomTabViewExt, CustomTabViewItemExt};
 use std::rc::Rc;
 
 #[component(inherits VerticalLayout)]
 struct DeclarativeTabHost {
     body: view! {
         #[id("tabs")]
-        let tabs = CustomTabView {
-            CustomTabViewItem {
+        let tabs = elwindui_custom_controls::CustomTabView {
+            elwindui_custom_controls::CustomTabViewItem {
                 header: "Document"
                 TextBlock { text: "Page body" }
             }
@@ -69,7 +67,7 @@ fn declarative_bare_children_preserve_content_and_template_ownership() {
     let host = DeclarativeTabHost::new();
     let tabs = host.tabs();
 
-    let typed_items = <elwindui::CustomTabView as CustomTabViewExt>::children(&*tabs);
+    let typed_items = <CustomTabView as CustomTabViewExt>::children(&*tabs);
     let list_items = tabs.children().to_vec();
     assert_eq!(typed_items.len(), 1);
     assert_eq!(list_items.len(), 1);

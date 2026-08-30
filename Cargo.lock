@@ -282,6 +282,7 @@ dependencies = [
 name = "elwindui-custom-controls"
 version = "0.1.0"
 dependencies = [
+ "elwindui",
  "elwindui-core",
  "elwindui-macros",
 ]

@@ -7,30 +7,10 @@
 
 use std::{cell::Cell, rc::Rc};
 
-extern crate elwindui as elwindui_facade;
-
-// `view!` currently emits the facade paths for external element names. Extend that facade only
-// inside this example so the custom controls can participate in the declarative tree without
-// changing the dependency direction of the reusable-controls crate.
-mod elwindui {
-    pub use crate::elwindui_facade::{class, component, main};
-
-    pub mod core {
-        pub use crate::elwindui_facade::core::*;
-    }
-
-    pub mod ui {
-        pub use crate::elwindui_facade::ui::*;
-        pub use ::elwindui_custom_controls::{CustomSplitter, CustomTabView, CustomTabViewItem};
-    }
-}
-
 use elwindui::core::graphics::FontWeight;
 use elwindui::core::layout::{GridLength, Orientation};
 use elwindui::core::ui::WindowExt;
-use elwindui_custom_controls::{
-    CloseButtonPresentation, CustomSplitterExt as _, CustomTabViewExt as _,
-};
+use elwindui_custom_controls::CloseButtonPresentation;
 
 #[elwindui::component(inherits VerticalLayout)]
 struct OverviewPage {
@@ -155,22 +135,8 @@ impl ActivityPage {}
 struct CustomControlsDemoSurface {
     body: view! {
         on_mount {
-            let overview = this.overview();
-            overview.set_header("Overview".to_string());
-            overview.set_closable(false);
-            overview.set_content(this.overview_page().into_node());
-
-            let inspector = this.inspector();
-            inspector.set_header("Inspector".to_string());
-            inspector.set_content(this.inspector_page().into_node());
-
-            let activity = this.activity();
-            activity.set_header("Activity".to_string());
-            activity.set_content(this.activity_page().into_node());
-
             let tabs = this.tabs();
             tabs.set_close_button_presentation(CloseButtonPresentation::Always);
-            tabs.set_children(vec![overview, inspector, activity]);
             tabs.set_attached("Grid", "column", 0i32);
 
             let splitter = this.splitter();
@@ -235,25 +201,25 @@ struct CustomControlsDemoSurface {
             foreground: "#abb7c4"
         };
 
-        #[id("overview_page")]
-        let overview_page = OverviewPage {};
-        #[id("inspector_page")]
-        let inspector_page = InspectorPage {};
-        #[id("activity_page")]
-        let activity_page = ActivityPage {};
-
-        #[id("overview")]
-        let overview = CustomTabViewItem {};
-        #[id("inspector")]
-        let inspector = CustomTabViewItem {};
-        #[id("activity")]
-        let activity = CustomTabViewItem {};
-
         #[id("tabs")]
-        let tabs = CustomTabView {};
+        let tabs = elwindui_custom_controls::CustomTabView {
+            elwindui_custom_controls::CustomTabViewItem {
+                header: "Overview"
+                closable: false
+                OverviewPage {}
+            }
+            elwindui_custom_controls::CustomTabViewItem {
+                header: "Inspector"
+                InspectorPage {}
+            }
+            elwindui_custom_controls::CustomTabViewItem {
+                header: "Activity"
+                ActivityPage {}
+            }
+        };
 
         #[id("splitter")]
-        let splitter = CustomSplitter {};
+        let splitter = elwindui_custom_controls::CustomSplitter {};
 
         #[id("content_grid")]
         let content_grid = Grid {

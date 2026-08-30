@@ -1,16 +1,17 @@
 # Custom controls status
 
-Snapshot: 2026-08-28. The public contract is
+Snapshot: 2026-08-30. The public contract is
 [`../specs/custom_controls_spec.md`](../specs/custom_controls_spec.md).
 
 ## Implemented
 
-- `elwindui-custom-controls` is a separate workspace crate depending only on
-  Core and macros.
+- `elwindui-custom-controls` is a separate workspace crate whose runtime
+  dependencies are only Core and macros; its external-consumer regression
+  uses the top-level `elwindui` facade as a dev-dependency.
 - `CustomTabView`, `CustomTabViewItem`, and `CustomSplitter` use
   `#[elwindui::component]` with the required Control/ContentControl
   inheritance; no new custom `#[class]` declaration was introduced.
-- The controls are templated: authored `template: template_view! { ... }`
+- The controls are templated with typed `template_view!(|alias: Self| { ... })`
   subtrees use Grid, HorizontalLayout, Rectangle, TextBlock, and
   IconSourceElement. CustomTabView and CustomSplitter do not draw chrome
   through `render()`.
@@ -45,14 +46,23 @@ Snapshot: 2026-08-28. The public contract is
 ## Verification
 
 The focused custom-controls suite passes with 31 tests and no ignored tests.
-Core, codegen, AppKit-enabled facade, inheritance-demo, workspace build/check,
-and workspace test results are recorded in the PR completion report against
-the final head. Workspace-wide formatter or rust-analyzer diagnostics are
-reported separately when their baseline macro/environment diagnostics remain.
+The workspace formatter, rust-analyzer, companion shadow check, workspace
+build/check, and diff checks are recorded against the final head. The focused
+custom-controls suite passes with 31 tests and no ignored tests. The required
+`cargo test --workspace --quiet` currently stops at the existing AppKit
+Window-host RT4 executable (`control_template_window_rt4`: zero arranged
+height under the active host, then SIGABRT); a follow-up workspace run without
+the `elwindui` package reaches three existing Core Image SVG-golden failures
+because `+[CIContext context]` returns NULL. These failures are outside this
+branch's changed Core/backend files. `rust-analyzer diagnostics .` reports
+zero Error, Warning, and non-exempt WeakWarning diagnostics; 131 permitted
+`Ra("inactive-code", WeakWarning)` records remain for intentional
+`#[cfg(...)]` branches. The diagnostics CLI still terminates with its generic
+`diagnostic error detected` status after emitting those permitted records.
 Windows and GTK4 runtime interaction have not been run. Interactive AppKit
 verification of the custom-controls demo has been captured with
-`tools/macos-ui-driver`; frontmost interaction remains environment-limited when
-another agent application owns the foreground.
+`tools/macos-ui-driver`; frontmost interaction remains environment-limited
+when another agent application owns the foreground.
 
 ## Follow-up
 

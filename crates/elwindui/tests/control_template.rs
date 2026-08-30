@@ -23,6 +23,7 @@ use local_template_descendant::{
 
 thread_local! {
     static DEFAULT_TEMPLATE_MOUNTS: Cell<u32> = const { Cell::new(0) };
+    static OVERRIDE_TEMPLATE_MOUNTS: Cell<u32> = const { Cell::new(0) };
     static TARGET_MOUNTS: Cell<u32> = const { Cell::new(0) };
 }
 
@@ -191,6 +192,9 @@ fn compact_control_template_test_panel(
     prefix: String,
 ) -> ControlTemplate<ControlTemplateTestPanel> {
     template_view!(|panel: ControlTemplateTestPanel| {
+        on_mount {
+            OVERRIDE_TEMPLATE_MOUNTS.with(|count| count.set(count.get() + 1));
+        }
         VerticalLayout {
             TextBlock {
                 text: format!("{}{}", prefix, panel.label)
@@ -228,6 +232,7 @@ fn render_tree_texts(group: &RenderGroup, texts: &mut Vec<String>) {
 #[test]
 fn environment_template_resyncs_and_presents_logical_content() {
     DEFAULT_TEMPLATE_MOUNTS.with(|count| count.set(0));
+    OVERRIDE_TEMPLATE_MOUNTS.with(|count| count.set(0));
     TARGET_MOUNTS.with(|count| count.set(0));
     let environment = elwindui::core::environment::application_environment();
     environment.set_control_template(Some(compact_control_template_test_panel(
@@ -236,10 +241,12 @@ fn environment_template_resyncs_and_presents_logical_content() {
 
     let panel = elwindui::new!(ControlTemplateTestPanel(label: "custom".to_string()));
     assert_eq!(DEFAULT_TEMPLATE_MOUNTS.with(Cell::get), 0);
+    assert_eq!(OVERRIDE_TEMPLATE_MOUNTS.with(Cell::get), 1);
     assert_eq!(TARGET_MOUNTS.with(Cell::get), 1);
     assert_eq!(text_values(panel.as_ref()), vec!["Override: custom"]);
 
     panel.set_label("updated".to_string());
+    assert_eq!(OVERRIDE_TEMPLATE_MOUNTS.with(Cell::get), 1);
     assert_eq!(TARGET_MOUNTS.with(Cell::get), 1);
     assert_eq!(text_values(panel.as_ref()), vec!["Override: updated"]);
 
@@ -271,6 +278,7 @@ fn environment_template_resyncs_and_presents_logical_content() {
     let replacement = TextBlock::new();
     replacement.set_text("replacement");
     panel.set_content(replacement.clone());
+    assert_eq!(OVERRIDE_TEMPLATE_MOUNTS.with(Cell::get), 1);
     assert!(content.visual_parent().is_none());
     assert!(
         replacement
@@ -285,8 +293,10 @@ fn environment_template_resyncs_and_presents_logical_content() {
         mounted_values_before_environment_change,
         "changing the Environment slot must not re-template an already-mounted panel"
     );
+    assert_eq!(OVERRIDE_TEMPLATE_MOUNTS.with(Cell::get), 1);
     let default_panel = elwindui::new!(ControlTemplateTestPanel(label: "default".to_string()));
     assert_eq!(DEFAULT_TEMPLATE_MOUNTS.with(Cell::get), 1);
+    assert_eq!(OVERRIDE_TEMPLATE_MOUNTS.with(Cell::get), 1);
     assert_eq!(TARGET_MOUNTS.with(Cell::get), 2);
     assert_eq!(text_values(default_panel.as_ref()), vec!["default"]);
 }

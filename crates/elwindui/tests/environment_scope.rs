@@ -29,12 +29,12 @@ struct EnvironmentScopeInsideChild {
     #[environment(environment_scope_locale)]
     locale: String,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             INSIDE_LOCALE.with(|c| *c.borrow_mut() = self.locale());
         }
         TextBlock { text: locale }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -45,12 +45,12 @@ struct EnvironmentScopeOutsideChild {
     #[environment(environment_scope_locale)]
     locale: String,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             OUTSIDE_LOCALE.with(|c| *c.borrow_mut() = self.locale());
         }
         TextBlock { text: locale }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -104,12 +104,12 @@ thread_local! {
 
 #[elwindui::component(inherits ContentControl)]
 struct EnvironmentScopeCountingLeaf {
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             NO_EXTRA_NODE_MOUNT_COUNT.with(|c| c.set(c.get() + 1));
         }
         TextBlock { text: "leaf" }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -168,13 +168,13 @@ struct EnvironmentScopeNestedInnerChild {
     #[environment(environment_scope_nested_locale)]
     locale: String,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             NESTED_INNER_TINT.with(|c| *c.borrow_mut() = self.tint());
             NESTED_INNER_LOCALE.with(|c| *c.borrow_mut() = self.locale());
         }
         TextBlock { text: locale }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -229,12 +229,12 @@ struct EnvironmentScopeIfChild {
     #[environment(environment_scope_locale)]
     locale: String,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             IF_IN_SCOPE_LOCALE.with(|c| *c.borrow_mut() = self.locale());
         }
         TextBlock { text: locale }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -245,7 +245,7 @@ struct EnvironmentScopeIfParent {
     #[param]
     show_child: bool,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         VerticalLayout {
             EnvironmentScope {
                 environment_scope_locale: "fr-FR",
@@ -256,7 +256,7 @@ struct EnvironmentScopeIfParent {
                 }
             }
         }
-    },
+    }),
 }
 
 #[elwindui::component]

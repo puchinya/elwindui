@@ -490,7 +490,7 @@ thread_local! {
 
 #[elwindui::component(inherits ContentControl)]
 struct PopupScopeChild {
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             let template = ViewFactory::new(|ctx| {
                 OBSERVED_SCOPE_THEME.with(|c| {
@@ -511,7 +511,7 @@ struct PopupScopeChild {
         ContentControl {
             target
         }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -977,12 +977,12 @@ struct DeferredPopupProbe {
     vm: std::rc::Rc<DeferredPopupViewModel>,
     #[param]
     log: std::rc::Rc<RefCell<Vec<i32>>>,
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             log.borrow_mut().push(vm.selected_item());
         }
         TextBlock { text: "probe" }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -1180,12 +1180,12 @@ thread_local! {
 struct ReactiveDeferredPopupContent {
     #[bindable]
     vm: std::rc::Rc<DeferredPopupViewModel>,
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_unmount {
             REACTIVE_POPUP_UNMOUNT_COUNT.with(|c| c.set(c.get() + 1));
         }
         TextBlock { text: vm.label }
-    },
+    }),
 }
 
 #[elwindui::component]

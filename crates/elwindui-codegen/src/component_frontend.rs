@@ -4,8 +4,9 @@
 //! instead, annotated `#[elwindui::component(inherits Base)]`. Ordinary fields become the
 //! component's `#[param]`/`#[prop]`/etc. fields (via `attr_frontend::fields_from_item_struct`,
 //! shared with the viewmodel frontend); at most one authored presentation field, typed as a
-//! `view!` or `template_view!` macro invocation (`field: view! { .. }` / `template: template_view!
-//! { .. }`, parsed by `syn` as `syn::Type::Macro` — legal Rust in type position), supplies the
+//! `view!` or `template_view!` macro invocation (`field: view! { .. }` /
+//! `template: template_view!(|alias: Target| { .. })`, parsed by `syn` as `syn::Type::Macro` —
+//! legal Rust in type position), supplies the
 //! ordinary view or typed ControlTemplate definition.
 //!
 //! `view!` itself is never a real macro and never gets expanded: `#[elwindui::component]` (a
@@ -21,11 +22,11 @@
 
 use crate::ast::{ComponentDef, FieldKind, Module, ViewDef};
 use crate::{ast, attr_frontend, parser};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` or
-/// `template: template_view! { .. }` (already
+/// `template: template_view!(|alias: Self| { .. })` (already
 /// parsed as a `syn::ItemStruct` by the `elwindui-macros` proc-macro, `base` from the attribute's
 /// own `inherits Base` argument) — builds the matching `ComponentDef`/`ViewDef` pair. `Name` may
 /// omit the `view! { .. }` field entirely — same as a DSL `component X { .. }` with no
@@ -40,10 +41,6 @@ pub fn component_and_view_from_item_struct(
     item_struct: &syn::ItemStruct,
 ) -> Result<(ComponentDef, Option<ViewDef>), String> {
     let name = item_struct.ident.to_string();
-    let item_template_instance = item_struct
-        .attrs
-        .iter()
-        .any(|attr| attr.path().is_ident("template_instance"));
     // `base` arrives as whatever `elwindui_macros::path_to_string` produced from the attribute's own
     // `inherits <path>` argument: a bare name (`ContentControl`) or a full crate-root-qualified path
     // (`crate::ui::LabeledPanel`, Refs #25). Split it here rather than upstream — this is the one
@@ -66,7 +63,7 @@ pub fn component_and_view_from_item_struct(
             && !is_presentation_macro_field(field)
     }) {
         return Err(format!(
-            "`{name}`: `template` is reserved for `template: template_view! {{ ... }}` and cannot be declared as a normal property"
+            "`{name}`: `template` is reserved for `template: template_view!(|alias: Self| {{ ... }})` and cannot be declared as a normal property"
         ));
     }
 
@@ -80,7 +77,7 @@ pub fn component_and_view_from_item_struct(
         [] => None,
         _ => {
             return Err(format!(
-                "`{name}`: expected at most one authored presentation field (`body: view! {{ .. }}` or `template: template_view! {{ .. }}`), found {}",
+                "`{name}`: expected at most one authored presentation field (`body: view! {{ .. }}` or `template: template_view!(|alias: Self| {{ .. }})`), found {}",
                 view_fields.len()
             ));
         }
@@ -97,11 +94,6 @@ pub fn component_and_view_from_item_struct(
                 .ident
                 .as_ref()
                 .is_some_and(|ident| ident == "template");
-            let template_instance = item_template_instance
-                || view_field
-                    .attrs
-                    .iter()
-                    .any(|attr| attr.path().is_ident("template_instance"));
             let macro_is_template = view_macro.mac.path.is_ident("template_view");
             let expected_field = if is_template { "template" } else { "body" };
             if (is_template != macro_is_template)
@@ -110,21 +102,33 @@ pub fn component_and_view_from_item_struct(
                 return Err(format!(
                     "`{name}`: `{expected_field}` must use {}",
                     if is_template {
-                        "`template_view! { ... }`"
+                        "`template_view!(|alias: Target| { ... })`"
                     } else {
                         "`view! { ... }`"
                     }
                 ));
             }
-            let view_src = view_macro.mac.tokens.to_string();
+            let (template_header, view_src) = if is_template {
+                let invocation =
+                    parser::parse_template_view_invocation(view_macro.mac.tokens.clone())
+                        .map_err(|e| format!("`{name}`: invalid template header: {e}"))?;
+                if !matches!(invocation.header.target, ast::TemplateTarget::SelfType) {
+                    return Err(format!(
+                        "`{name}`: a component default template must use `Self` as its target"
+                    ));
+                }
+                (Some(invocation.header), invocation.body.to_string())
+            } else {
+                (None, view_macro.mac.tokens.to_string())
+            };
             let (on_mount, on_unmount, on_update, lets, root) = parser::parse_view_body(&view_src)
                 .map_err(|e| format!("`{name}`: invalid authored presentation body: {e}"))?;
             Ok::<_, String>(ViewDef {
                 target: name.clone(),
                 is_template,
-                template_instance,
                 on_mount,
                 on_unmount,
+                template_header,
                 on_update,
                 lets,
                 root,
@@ -248,8 +252,8 @@ pub(crate) fn component_module_items(
 /// (`ast::DeferredViewBody`) by the time this runs (`lib.rs`'s lowering pass, called after
 /// validation, before `codegen::build_symbol_table`).
 ///
-/// Mirrors `lib.rs::generate_control_template_from_item_struct`'s existing `ControlTemplate`
-/// precedent (a `#[param]` weak-owner field plus the authored body, composed over
+/// Mirrors the deferred-view `ControlTemplate` precedent (a `#[param]` weak-owner field plus the
+/// authored body, composed over
 /// `ContentControl`), but builds the `ComponentDef`/`ViewDef` values directly rather than
 /// round-tripping through a synthesized `syn::ItemStruct` and re-parsing its `view!` tokens — there
 /// is no token-level `view!` invocation left to re-parse here, only already-structured AST.
@@ -295,9 +299,9 @@ pub(crate) fn hidden_view_factory_component(
     let view_def = ViewDef {
         target: hidden_name.to_string(),
         is_template: false,
-        template_instance: false,
         on_mount: body.on_mount.clone(),
         on_unmount: body.on_unmount.clone(),
+        template_header: None,
         on_update: body.on_update.clone(),
         lets: body.lets.clone(),
         root: body.root.clone(),
@@ -354,6 +358,102 @@ pub(crate) struct ComponentPublicShape {
     /// State fields.  Required/defaulted Params deliberately do not appear here: Params are fixed
     /// after construction.
     pub writable_fields: Vec<(String, String, ShadowVisibility)>,
+}
+
+/// The compile-time property capability exposed to a typed `template_view!` target.  This is the
+/// shared component-side metadata boundary for both the real template bridge and the
+/// `cfg(rust_analyzer)` shadow: neither side is allowed to independently decide which field is
+/// readable, what its associated `Value` is, or whether a writable capability exists.
+///
+/// `origin` is deliberately structural rather than a name-based heuristic.  An effective field
+/// that is not present in `source_component.fields` is inherited; all other entries are the
+/// component's own declaration.  The effective list itself is still supplied by the normal
+/// resolver, while the source-local public shape supplies own-field writability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TemplateCapabilityOrigin {
+    Own,
+    Inherited,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TemplateCapabilityShape {
+    pub name: String,
+    pub value_type: String,
+    pub writable: bool,
+    pub origin: TemplateCapabilityOrigin,
+    /// A computed field marked `#[override]` replaces the same inherited capability. The
+    /// rust-analyzer shadow lets the ancestor capability provide the analysis-only impl so it does
+    /// not emit two impls for the same `(Target, KEY)` pair; normal rustc generation still emits
+    /// the real derived getter bridge from the effective field.
+    pub overridden: bool,
+}
+
+/// Computes the exact component property capability used by the generated
+/// `TemplateProperty`/`WritableTemplateProperty` bridge.
+///
+/// `source_component` must contain the literal fields written on this component, while
+/// `effective_component` may contain the resolver's inherited/flattened fields.  This preserves
+/// the existing source/effective boundary: own `#[prop]`/`#[state]` visibility comes from
+/// [`component_public_shape`], and an inherited writable property is eligible only when the
+/// effective field is an ordinary `Prop`.  Event schemas and viewmodel-only fields never become a
+/// template property capability.
+pub(crate) fn template_capability_shapes(
+    source_component: &ComponentDef,
+    effective_component: &ComponentDef,
+) -> Vec<TemplateCapabilityShape> {
+    let own_shape = component_public_shape(source_component, None);
+    let public_own_writable: HashSet<&str> = own_shape
+        .writable_fields
+        .iter()
+        .filter(|(_, _, visibility)| *visibility == ShadowVisibility::Public)
+        .map(|(name, _, _)| name.as_str())
+        .collect();
+    let own_names: HashSet<&str> = source_component
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    let mut seen = HashSet::new();
+
+    effective_component
+        .fields
+        .iter()
+        .filter_map(|field| {
+            if !seen.insert(field.name.as_str())
+                || crate::attr_frontend::is_event_schema_field(field)
+                || matches!(
+                    field.kind,
+                    FieldKind::Attached
+                        | FieldKind::Action
+                        | FieldKind::Observable
+                        | FieldKind::AsyncComputed
+                )
+            {
+                return None;
+            }
+
+            let origin = if own_names.contains(field.name.as_str()) {
+                TemplateCapabilityOrigin::Own
+            } else {
+                TemplateCapabilityOrigin::Inherited
+            };
+            let writable = match origin {
+                TemplateCapabilityOrigin::Own => public_own_writable.contains(field.name.as_str()),
+                TemplateCapabilityOrigin::Inherited => field.kind == FieldKind::Prop,
+            };
+
+            Some(TemplateCapabilityShape {
+                name: field.name.clone(),
+                value_type: field.ty.clone(),
+                writable,
+                origin,
+                overridden: field
+                    .attrs
+                    .iter()
+                    .any(|attr| matches!(attr, ast::Attr::Override)),
+            })
+        })
+        .collect()
 }
 
 /// Classifies `component`'s own fields into the constructor/getter/setter surface described by
@@ -1276,7 +1376,7 @@ mod tests {
             r#"
                 struct Both {
                     body: view! { TextBlock { text: "body" } },
-                    template: template_view! { TextBlock { text: "template" } },
+                    template: template_view!(|templated_parent: Self| { TextBlock { text: "template" } }),
                 }
             "#,
         )
@@ -1413,14 +1513,14 @@ mod tests {
     fn composed_component_generates_unmount_and_registers_hook() {
         let src = r#"
             struct CustomCard {
-                template: template_view! {
+                template: template_view!(|templated_parent: Self| {
                     on_unmount {
                         // teardown hook
                     }
                     VerticalLayout {
                         TextBlock { text: "card" }
                     }
-                }
+                }),
             }
         "#;
         let generated = generate(Some("ContentControl"), src);

@@ -47,12 +47,12 @@ mod toggle_view_model {
 
 #[elwindui::component(inherits ContentControl)]
 struct ThenLeaf {
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             THEN_MOUNTS.with(|c| c.set(c.get() + 1));
         }
         TextBlock { text: "then" }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -60,12 +60,12 @@ impl ThenLeaf {}
 
 #[elwindui::component(inherits ContentControl)]
 struct ElseLeaf {
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             ELSE_MOUNTS.with(|c| c.set(c.get() + 1));
         }
         TextBlock { text: "else" }
-    },
+    }),
 }
 
 #[elwindui::component]
@@ -76,7 +76,7 @@ struct BindOwnerToggleHost {
     #[bindable]
     vm: Rc<ToggleViewModel>,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         VerticalLayout {
             if vm.show_then {
                 ThenLeaf {}
@@ -84,7 +84,7 @@ struct BindOwnerToggleHost {
                 ElseLeaf {}
             }
         }
-    },
+    }),
 }
 
 #[elwindui::component]

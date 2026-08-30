@@ -12,26 +12,28 @@ not re-templated when an Environment value changes.
 ## 2. Typed authoring
 
 ```rust
-let template: ControlTemplate<MyButton> = template_view! {
+let template: ControlTemplate<MyButton> = template_view!(|button: MyButton| {
     Grid {
-        TextBlock { text: templated_parent.label }
+        TextBlock { text: button.label }
     }
-};
+});
 ```
 
 `template_view!` is an expression-producing macro returning
-`ControlTemplate<C>`. `templated_parent` is the typed target from
-`ControlTemplateContext<C>` and uses the ordinary typed getter/event wiring
-when the corresponding compile-time capability is present. Component defaults,
-named `#[control_template]` templates, and standalone expressions all enter one
-shared semantic lowering path. Ordinary `view!` and all three template
-frontends use the same planner/emitter for element construction,
+`ControlTemplate<T>`. Its header is the single source of truth for both the
+parent alias used in the body and the exact target type `T`; there is no target
+inference from an expected result type. The alias uses the ordinary typed
+getter/event wiring when the corresponding compile-time capability is present.
+Component defaults and standalone expressions enter one shared semantic
+lowering path. A reusable template is an ordinary Rust function returning the
+appropriate `ControlTemplate<T>`, so it uses that same standalone form.
+Ordinary `view!` and both template frontends use the same planner/emitter for
+element construction,
 metadata/property and content lowering, event and lifecycle wiring,
 dynamic-region reconciliation, ContentPresenter restrictions, ownership, and
 Environment propagation. Only typed-parent acquisition, template-property
 capability bridging, factory wrapping, and template-root replacement are
-template-specific. A completely unconstrained expression may require a Rust
-type annotation.
+template-specific.
 
 ### 2.1 Read and write capabilities
 
@@ -44,10 +46,15 @@ Generated code implements the writable capability only for effective `#[prop]`
 and `#[state]` fields that have a real setter. Computed, environment,
 read-only, derived, and otherwise non-settable fields remain readable but do
 not implement `WritableTemplateProperty<KEY>`. A template `<=>` binding or
-`templated_parent.set_<field>(...)` therefore fails during Rust trait
+`button.set_<field>(...)` therefore fails during Rust trait
 resolution; it cannot become a runtime panic or silent no-op. Inherited
 writable fields delegate through the composed base's existing typed setter,
 without duplicating storage.
+
+The `on_update(field, ...)` selector list remains an unqualified list of field
+names such as `label` or `source`; a parent alias path such as
+`on_update(button.label, ...)` is not a selector form. Alias-qualified paths
+are used inside the template body for reads, setters, and bindings.
 
 `KEY` is a compile-time 64-bit FNV-1a-style token derived from the field-name
 literal. It is not a runtime registry or string lookup. A collision is an
@@ -62,8 +69,8 @@ raw framework or class-managed targets such as `Control` and `ContentControl`.
 
 Typed template-parent property paths are capability-gated:
 
-- `templated_parent.<property>` requires `TemplateProperty<KEY>`;
-- `templated_parent.set_<property>(...)` and two-way bindings require
+- `<alias>.<property>` requires `TemplateProperty<KEY>`;
+- `<alias>.set_<property>(...)` and two-way bindings require
   `WritableTemplateProperty<KEY>`.
 
 Generated Control-derived `#[component]` types export these capabilities from
@@ -74,9 +81,10 @@ reflection or string-lookup fallback. PR #187 does not add class-wide reactive
 property notifications or fake no-op subscriptions/setters.
 
 Inside a `#[component]` declaration, the reserved pseudo-field
-`template: template_view! { ... }` declares the component type's default
-`ControlTemplate<Self>`. It is not a `#[prop]`, instance field, observable
-property, or runtime setter.
+`template: template_view!(|alias: Self| { ... })` declares the component
+type's default `ControlTemplate<Self>`. Component defaults must use `Self` as
+their target; the alias is chosen explicitly by the author. It is not a
+`#[prop]`, instance field, observable property, or runtime setter.
 
 ```rust
 #[elwindui::component(inherits ContentControl)]
@@ -84,11 +92,11 @@ struct CustomButton {
     #[prop(default = String::new())]
     label: String,
 
-    template: template_view! {
+    template: template_view!(|button: Self| {
         Border {
-            TextBlock { text: templated_parent.label }
+            TextBlock { text: button.label }
         }
-    },
+    }),
 }
 ```
 
@@ -196,6 +204,14 @@ logical construction
 `ContentControl::__prepare_template_presentation()` remains the virtual hook.
 No second root store or hidden body-presentation protocol exists.
 
+For a Window host-composition component, `Window::new()` remains in the
+`Created` state until the first `show()`. Generated `#[id]` child accessors are
+therefore unavailable before that mount. Pre-mount logical content is supplied
+through the initial construction/content path (for example, a constructor
+Param forwarded to the target's `content:` field), so the target owns the
+content before its template is selected; application code must not bypass this
+lifecycle by reading a child accessor before `show()`.
+
 ## 6. ContentControl and ContentPresenter
 
 Raw `ContentControl` direct mode remains compatible: logical content is also a
@@ -211,12 +227,23 @@ Multiple presenters and presenters inside `if`/`match`/`for` regions are
 compile-time errors. Content replacement detaches the old logical/Visual edge
 before attaching the new one, and pre-mount content survives the transition.
 
-## 7. Named templates
+## 7. Reusable templates
 
-`#[elwindui::control_template(target = T)]` remains a named reusable-template
-convenience API. Its declaration uses the same `template_view!` parser,
-validator, factory generation, and `templated_parent` semantics, and exposes
-`Name::template() -> ControlTemplate<T>`.
+Named reusable templates are ordinary Rust functions. There is no dedicated
+template declaration attribute or marker struct API:
+
+```rust
+pub fn compact_button_template() -> ControlTemplate<CustomButton> {
+    template_view!(|button: CustomButton| {
+        Border {
+            TextBlock { text: button.label }
+        }
+    })
+}
+```
+
+The function may be called wherever a `ControlTemplate<CustomButton>` value is
+needed, including `EnvironmentContext::set_control_template`.
 
 ## 8. Removed and forbidden forms
 
@@ -229,5 +256,7 @@ validator, factory generation, and `templated_parent` semantics, and exposes
   lookup, `Any` target erasure, and NativeControl templates.
 
 Legacy `#[component(template = key)]` produces a migration diagnostic directing
-authors to `template: template_view! { ... }` and
-`EnvironmentContext::set_control_template::<Target>(...)`.
+authors to `template: template_view!(|alias: Self| { ... })` and
+`EnvironmentContext::set_control_template::<Target>(...)`. A standalone
+template must use a concrete target in the same header; `Self` is invalid
+outside a component default.

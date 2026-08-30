@@ -472,7 +472,9 @@ pub(crate) fn validate_classified(modules: &[Module]) -> Vec<ValidationDiagnosti
                                 c,
                                 &table,
                                 None,
-                                view.is_template,
+                                view.template_header
+                                    .as_ref()
+                                    .map(|header| header.parent_alias.as_str()),
                                 &mut errors,
                             );
                         }
@@ -534,7 +536,9 @@ pub(crate) fn validate_classified(modules: &[Module]) -> Vec<ValidationDiagnosti
                                     c,
                                     &table,
                                     None,
-                                    view.is_template,
+                                    view.template_header
+                                        .as_ref()
+                                        .map(|header| header.parent_alias.as_str()),
                                     &mut errors,
                                 );
                                 check_match_exhaustiveness(
@@ -600,7 +604,7 @@ fn check_binding_assignments(
     component: &ComponentDef,
     table: &SymbolTable,
     for_binding: Option<ForBinding<'_>>,
-    allow_template_parent: bool,
+    template_parent_alias: Option<&str>,
     errors: &mut ValidationErrors,
 ) {
     let target_info = table.resolve(from, &node.type_path);
@@ -632,6 +636,7 @@ fn check_binding_assignments(
                     component,
                     table,
                     &location,
+                    template_parent_alias,
                     errors,
                 );
             } else {
@@ -654,7 +659,7 @@ fn check_binding_assignments(
                     ViewExpr::Path(path) if path.len() == 2 => {
                         let owner = &path[0];
                         let property = &path[1];
-                        if allow_template_parent && owner == "templated_parent" {
+                        if template_parent_alias.is_some_and(|alias| owner == alias) {
                             match table.resolve(from, &component.name) {
                                 Some(info) if info.fields.contains_key(property) => {}
                                 Some(_) => errors.registry_dependent(format!(
@@ -673,14 +678,9 @@ fn check_binding_assignments(
                                         .attrs
                                         .iter()
                                         .any(|attr| matches!(attr, Attr::Bindable))
-                                        || (field.name == "templated_parent"
-                                            && strip_weak_wrapper(&field.ty) != field.ty.trim()) =>
+                                        =>
                                 {
-                                    let owner_ty = if field.name == "templated_parent" {
-                                        strip_weak_wrapper(&field.ty)
-                                    } else {
-                                        strip_rc_wrapper(&field.ty)
-                                    };
+                                    let owner_ty = strip_rc_wrapper(&field.ty);
                                     match table.resolve(from, owner_ty) {
                                         Some(info) if info.fields.contains_key(property) => {}
                                         Some(_) => errors.registry_dependent(format!(
@@ -722,7 +722,7 @@ fn check_binding_assignments(
             component,
             table,
             for_binding,
-            allow_template_parent,
+            template_parent_alias,
             errors,
         );
     }
@@ -734,7 +734,7 @@ fn check_binding_assignments(
                 component,
                 table,
                 for_binding,
-                allow_template_parent,
+                template_parent_alias,
                 errors,
             ),
             ChildEntry::Ref(_) => {}
@@ -750,7 +750,7 @@ fn check_binding_assignments(
                         component,
                         table,
                         for_binding,
-                        allow_template_parent,
+                        template_parent_alias,
                         errors,
                     );
                 }
@@ -763,7 +763,7 @@ fn check_binding_assignments(
                         component,
                         table,
                         for_binding,
-                        allow_template_parent,
+                        template_parent_alias,
                         errors,
                     );
                 }
@@ -783,7 +783,7 @@ fn check_binding_assignments(
                             name: binding,
                             collection,
                         }),
-                        allow_template_parent,
+                        template_parent_alias,
                         errors,
                     );
                 }
@@ -799,6 +799,7 @@ fn check_for_item_two_way_target(
     component: &ComponentDef,
     table: &SymbolTable,
     location: &str,
+    template_parent_alias: Option<&str>,
     errors: &mut ValidationErrors,
 ) {
     let ViewExpr::Path(path) = expr else {
@@ -825,7 +826,13 @@ fn check_for_item_two_way_target(
         return;
     }
 
-    let item_info = match resolve_for_item_info(for_binding.collection, from, component, table) {
+    let item_info = match resolve_for_item_info(
+        for_binding.collection,
+        from,
+        component,
+        table,
+        template_parent_alias,
+    ) {
         Ok(info) => info,
         Err((dependency, reason)) => {
             let message = format!(
@@ -863,6 +870,7 @@ fn resolve_for_item_info<'a>(
     from: &Module,
     component: &ComponentDef,
     table: &'a SymbolTable,
+    template_parent_alias: Option<&str>,
 ) -> Result<&'a crate::codegen::TypeInfo, (ValidationDependency, String)> {
     let (collection_ty, is_viewmodel_observable) = match collection {
         ViewExpr::Path(path) if path.len() == 1 => {
@@ -882,34 +890,32 @@ fn resolve_for_item_info<'a>(
         ViewExpr::Path(path) if path.len() == 2 => {
             let owner = &path[0];
             let name = &path[1];
-            let owner_field = component
-                .fields
-                .iter()
-                .find(|field| &field.name == owner)
-                .ok_or_else(|| {
-                    (
-                        ValidationDependency::ItemLocal,
-                        format!("collection owner `{owner}` is not a component field"),
-                    )
-                })?;
-            let is_templated_parent = owner_field.name == "templated_parent"
-                && strip_weak_wrapper(&owner_field.ty) != owner_field.ty.trim();
-            if !owner_field
-                .attrs
-                .iter()
-                .any(|attr| matches!(attr, Attr::Bindable))
-                && !is_templated_parent
-            {
-                return Err((
-                    ValidationDependency::ItemLocal,
-                    format!("collection owner `{owner}` is not #[bindable]"),
-                ));
-            }
-            let owner_ty = if is_templated_parent {
-                strip_weak_wrapper(&owner_field.ty)
-            } else {
-                strip_rc_wrapper(&owner_field.ty)
-            };
+            let (owner_ty, owner_is_viewmodel) =
+                if template_parent_alias.is_some_and(|alias| owner == alias) {
+                    (component.name.as_str(), false)
+                } else {
+                    let owner_field = component
+                        .fields
+                        .iter()
+                        .find(|field| &field.name == owner)
+                        .ok_or_else(|| {
+                            (
+                                ValidationDependency::ItemLocal,
+                                format!("collection owner `{owner}` is not a component field"),
+                            )
+                        })?;
+                    if !owner_field
+                        .attrs
+                        .iter()
+                        .any(|attr| matches!(attr, Attr::Bindable))
+                    {
+                        return Err((
+                            ValidationDependency::ItemLocal,
+                            format!("collection owner `{owner}` is not #[bindable]"),
+                        ));
+                    }
+                    (strip_rc_wrapper(&owner_field.ty), true)
+                };
             let owner_info = table.resolve(from, owner_ty).ok_or_else(|| {
                 (
                     ValidationDependency::RegistryDependent,
@@ -924,7 +930,8 @@ fn resolve_for_item_info<'a>(
             })?;
             (
                 collection_ty.as_str(),
-                owner_info.is_viewmodel
+                owner_is_viewmodel
+                    && owner_info.is_viewmodel
                     && matches!(owner_info.fields.get(name), Some(FieldKind::Observable)),
             )
         }
@@ -1045,7 +1052,7 @@ fn check_binding_assignment_child(
     component: &ComponentDef,
     table: &SymbolTable,
     for_binding: Option<ForBinding<'_>>,
-    allow_template_parent: bool,
+    template_parent_alias: Option<&str>,
     errors: &mut ValidationErrors,
 ) {
     if let ChildEntry::Literal(element) = child {
@@ -1055,7 +1062,7 @@ fn check_binding_assignment_child(
             component,
             table,
             for_binding,
-            allow_template_parent,
+            template_parent_alias,
             errors,
         );
     } else {
@@ -1072,7 +1079,7 @@ fn check_binding_assignment_child(
             component,
             table,
             for_binding,
-            allow_template_parent,
+            template_parent_alias,
             errors,
         );
     }
@@ -1084,7 +1091,7 @@ fn check_binding_assignments_in_expr(
     component: &ComponentDef,
     table: &SymbolTable,
     for_binding: Option<ForBinding<'_>>,
-    allow_template_parent: bool,
+    template_parent_alias: Option<&str>,
     errors: &mut ValidationErrors,
 ) {
     match expr {
@@ -1094,7 +1101,7 @@ fn check_binding_assignments_in_expr(
             component,
             table,
             for_binding,
-            allow_template_parent,
+            template_parent_alias,
             errors,
         ),
         ViewExpr::Closure {
@@ -1106,7 +1113,7 @@ fn check_binding_assignments_in_expr(
             component,
             table,
             for_binding,
-            allow_template_parent,
+            template_parent_alias,
             errors,
         ),
         _ => {}
@@ -1264,7 +1271,7 @@ fn find_vm_fields<'a>(
 ) -> HashMap<&'a str, &'a str> {
     let mut vm_fields = HashMap::new();
     for f in fields {
-        let ty = if f.name == "templated_parent" {
+        let ty = if f.name == "__view_owner" {
             strip_weak_wrapper(&f.ty)
         } else {
             strip_rc_wrapper(&f.ty)
@@ -3488,9 +3495,9 @@ mod tests {
         let view = crate::ast::ViewDef {
             target: "Foo".to_string(),
             is_template: false,
-            template_instance: false,
             on_mount,
             on_unmount,
+            template_header: None,
             on_update,
             lets,
             root,

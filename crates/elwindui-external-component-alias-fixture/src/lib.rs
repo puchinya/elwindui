@@ -8,9 +8,7 @@ use elwindui::component;
 pub struct AliasedExternalProbe {
     #[param]
     label: String,
-    template: template_view! {
-        TextBlock { text: label }
-    },
+    template: template_view!(|templated_parent: Self| { TextBlock { text: label } }),
 }
 
 #[component]

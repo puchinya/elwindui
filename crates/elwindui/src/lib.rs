@@ -19,8 +19,7 @@ pub use elwindui_i18n as i18n;
 /// `match`/`if let` exhaustiveness checking a DSL-text `enum` always got — see
 /// `elwindui_macros::dsl_enum`'s own doc comment.
 pub use elwindui_macros::{
-    class, component, control_template, dsl_enum, environment_key, main, new, store, template_view,
-    theme, viewmodel,
+    class, component, dsl_enum, environment_key, main, new, store, template_view, theme, viewmodel,
 };
 /// SVG loading (`load_svg_file`/`load_svg_bytes`/`load_svg_str`, `SvgLoader`) — backends never
 /// depend on this crate directly, only on the `elwindui_core::graphics::VectorImage` it produces
@@ -91,22 +90,127 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// use elwindui::ui::{Control, TextArea};
 ///
 /// #[component(inherits Control)]
-/// struct ReadOnlyTwoWayProbe {
+/// struct ReadOnlyTwoWayProbe { // CF9
 ///     #[prop(default = String::from("source"))]
 ///     source: String,
 ///
 ///     #[computed(expr = source.clone())]
 ///     read_only_value: String,
 ///
-///     template: template_view! {
+///     template: template_view!(|probe: Self| {
 ///         TextArea {
-///             text <=> templated_parent.read_only_value
+///             text <=> probe.read_only_value
 ///         }
-///     },
+///     }),
 /// }
 ///
 /// #[component]
 /// impl ReadOnlyTwoWayProbe {}
+///
+/// fn main() {}
+/// ```
+///
+/// The target is declared in the lambda-style header; the old headerless and inferred forms are
+/// rejected:
+///
+/// ```compile_fail
+/// use elwindui::template_view;
+/// use elwindui::ui::TextBlock;
+///
+/// fn main() {
+///     let _ = template_view!({ TextBlock { text: "missing target" } }); // CF1
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use elwindui::template_view;
+/// use elwindui::ui::TextBlock;
+///
+/// fn main() {
+///     let _ = template_view!(|control| { TextBlock { text: "missing type" } }); // CF2
+/// }
+/// ```
+///
+/// The header has exactly one identifier and one target type:
+///
+/// ```compile_fail
+/// use elwindui::template_view;
+/// use elwindui::ui::{Control, TextBlock};
+///
+/// fn main() {
+///     let _ = template_view!(|first: Control, second: Control| { // CF3
+///         TextBlock { text: "two parameters" }
+///     });
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use elwindui::template_view;
+/// use elwindui::ui::{Control, TextBlock};
+///
+/// fn main() {
+///     let _ = template_view!(|(control,): Control| { // CF4
+///         TextBlock { text: "destructured parameter" }
+///     });
+/// }
+/// ```
+///
+/// `Self` is reserved for a component's default `template:` pseudo-field, while that field must
+/// use `Self` rather than a concrete component type:
+///
+/// ```compile_fail
+/// use elwindui::template_view;
+/// use elwindui::core::ui::{Control, ControlTemplate, TextBlock};
+///
+/// fn standalone_template() -> ControlTemplate<Control> { // CF5
+///     template_view!(|control: Self| { TextBlock { text: "standalone Self" } })
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// ```compile_fail
+/// use elwindui::{component, template_view};
+/// use elwindui::ui::{Control, TextBlock};
+///
+/// #[component(inherits Control)]
+/// struct ConcreteDefaultTargetProbe { // CF6
+///     template: template_view!(|control: Control| {
+///         TextBlock { text: "concrete component target" }
+///     }),
+/// }
+///
+/// #[component]
+/// impl ConcreteDefaultTargetProbe {}
+///
+/// fn main() {}
+/// ```
+///
+/// The former marker attribute is not part of the public API:
+///
+/// ```compile_fail
+/// #[elwindui::control_template] // CF7
+/// fn removed_control_template_api() {}
+///
+/// fn main() {}
+/// ```
+///
+/// Only the alias declared in the header is reserved inside the template body:
+///
+/// ```compile_fail
+/// use elwindui::{component, template_view};
+/// use elwindui::ui::{Control, TextBlock};
+///
+/// #[component(inherits Control)]
+/// struct AliasShadowProbe { // CF8
+///     template: template_view!(|control: Self| {
+///         let control = TextBlock {};
+///         TextBlock { text: "shadowed alias" }
+///     }),
+/// }
+///
+/// #[component]
+/// impl AliasShadowProbe {}
 ///
 /// fn main() {}
 /// ```
@@ -118,22 +222,22 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// use elwindui::ui::{Control, TextBlock};
 ///
 /// #[component(inherits Control)]
-/// struct ReadOnlyEventWriteProbe {
+/// struct ReadOnlyEventWriteProbe { // CF10
 ///     #[prop(default = String::from("source"))]
 ///     source: String,
 ///
 ///     #[computed(expr = source.clone())]
 ///     read_only_value: String,
 ///
-///     template: template_view! {
+///     template: template_view!(|probe: Self| {
 ///         TextBlock {
-///             text: templated_parent.read_only_value,
+///             text: probe.read_only_value,
 ///             on_tapped: |_event| {
-///                 templated_parent
+///                 probe
 ///                     .set_read_only_value(String::from("illegal"));
 ///             }
 ///         }
-///     },
+///     }),
 /// }
 ///
 /// #[component]
@@ -149,9 +253,22 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// use elwindui::core::ui::{Control, ControlTemplate, TextBlock};
 ///
 /// fn main() {
-///     let _: ControlTemplate<Control> = template_view! {
+///     let _: ControlTemplate<Control> = template_view!(|control: Control| {
 ///         TextBlock { text: "framework target" }
-///     };
+///     });
+/// }
+/// ```
+///
+/// A target that is not a valid `ControlExt` target is rejected at the public boundary:
+///
+/// ```compile_fail
+/// use elwindui::template_view;
+/// use elwindui::core::ui::{ControlTemplate, TextBlock};
+///
+/// fn main() {
+///     let _: ControlTemplate<String> = template_view!(|value: String| { // CF11
+///         TextBlock { text: "invalid target" }
+///     });
 /// }
 /// ```
 ///
@@ -238,7 +355,7 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 ///     #[prop(default = Vec::new())]
 ///     labels: Vec<String>,
 ///
-///     template: template_view! {
+///     template: template_view!(|probe: Self| {
 ///         elwindui_external_component_fixture::DerivedExternalTabs {
 ///             for label in labels {
 ///                 elwindui_external_component_fixture::ExternalProbeItem {
@@ -246,7 +363,7 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 ///                 }
 ///             }
 ///         }
-///     },
+///     }),
 /// }
 ///
 /// #[component]

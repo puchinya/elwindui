@@ -182,7 +182,7 @@ impl ExternalControlsHost {}
 struct ExternalDynamicIfTemplateHost {
     #[prop(default = true)]
     show_first: bool,
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         elwindui_external_component_fixture::ExternalProbeTabs {
             if show_first {
                 elwindui_external_component_fixture::ExternalProbeItem {
@@ -194,7 +194,7 @@ struct ExternalDynamicIfTemplateHost {
                 }
             }
         }
-    },
+    }),
 }
 
 #[component]
@@ -228,7 +228,7 @@ impl ExternalAliasHost {}
 struct ExternalDynamicForTemplateHost {
     #[prop(default = Vec::new())]
     labels: Vec<String>,
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         elwindui_external_component_fixture::ExternalProbeTabs {
             for label in labels {
                 elwindui_external_component_fixture::ExternalProbeItem {
@@ -236,7 +236,7 @@ struct ExternalDynamicForTemplateHost {
                 }
             }
         }
-    },
+    }),
 }
 
 #[component]

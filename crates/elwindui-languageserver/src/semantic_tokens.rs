@@ -18,9 +18,10 @@
 //!
 //! Locating those ranges needs real source positions, which `syn::parse_file`'s AST doesn't carry by
 //! default — enabled here via `proc-macro2`'s `span-locations` feature (`Cargo.toml`), which gives
-//! accurate `Span::byte_range()`s even outside a real proc-macro invocation (this crate is an
-//! ordinary binary, never itself expanding as a proc-macro) — verified empirically before relying on
-//! it here.
+//! accurate `Span::start()` locations even outside a real proc-macro invocation (this crate is an
+//! ordinary binary, never itself expanding as a proc-macro). The final token's end is derived from
+//! that start location plus its source spelling because rust-analyzer's proc-macro model exposes
+//! the start position but not the range helpers.
 
 use lsp_types::{SemanticToken, SemanticTokenType};
 use std::ops::Range;
@@ -69,7 +70,7 @@ pub fn semantic_tokens_for_file(src: &str) -> Vec<SemanticToken> {
     let Ok(file) = syn::parse_file(src) else {
         return Vec::new();
     };
-    let ranges = view_body_ranges(&file);
+    let ranges = view_body_ranges(src, &file);
     encode(tokenize(src, &ranges))
 }
 
@@ -77,7 +78,7 @@ pub fn semantic_tokens_for_file(src: &str) -> Vec<SemanticToken> {
 /// `is_view_macro_field` check — mirrors that module's flat, non-recursive-into-`mod` walk of
 /// `file.items` (a `view!` field only ever appears on a top-level `#[elwindui::component] struct`,
 /// same convention `component_frontend::modules_from_file` already relies on).
-fn view_body_ranges(file: &syn::File) -> Vec<Range<usize>> {
+fn view_body_ranges(src: &str, file: &syn::File) -> Vec<Range<usize>> {
     let mut ranges: Vec<Range<usize>> = file
         .items
         .iter()
@@ -92,7 +93,7 @@ fn view_body_ranges(file: &syn::File) -> Vec<Range<usize>> {
         .flat_map(|named| named.named.iter())
         .filter_map(|field| match &field.ty {
             syn::Type::Macro(tm) if tm.mac.path.is_ident("view") => {
-                token_stream_byte_range(&tm.mac.tokens)
+                token_stream_byte_range(src, &tm.mac.tokens)
             }
             _ => None,
         })
@@ -103,16 +104,39 @@ fn view_body_ranges(file: &syn::File) -> Vec<Range<usize>> {
 
 /// The byte range spanning every token in `tokens` (a `view!` macro's own content, i.e. between —
 /// not including — its own `{`/`}` delimiters), from the first token's start to the last token's
-/// end. `None` for an empty `view! {}` (nothing to highlight).
-fn token_stream_byte_range(tokens: &proc_macro2::TokenStream) -> Option<Range<usize>> {
+/// end. `None` for an empty `view! {}` (nothing to highlight). `proc_macro2::Span` exposes the
+/// starting line/column on rust-analyzer's analysis model even when its range methods are
+/// unavailable, so derive the final token's byte end from its source position and token text.
+fn token_stream_byte_range(src: &str, tokens: &proc_macro2::TokenStream) -> Option<Range<usize>> {
     let mut iter = tokens.clone().into_iter();
     let first = iter.next()?;
-    let start = first.span().byte_range().start;
-    let end = iter
-        .last()
-        .map(|last| last.span().byte_range().end)
-        .unwrap_or_else(|| first.span().byte_range().end);
+    let start = line_column_byte_offset(src, first.span().start());
+    let last = iter.last().unwrap_or_else(|| first.clone());
+    let last_start = token_start_byte_offset(src, &last);
+    let end = last_start
+        .saturating_add(last.to_string().len())
+        .min(src.len());
     Some(start..end)
+}
+
+fn token_start_byte_offset(src: &str, token: &proc_macro2::TokenTree) -> usize {
+    let location = match token {
+        proc_macro2::TokenTree::Group(group) => group.span().start(),
+        proc_macro2::TokenTree::Ident(ident) => ident.span().start(),
+        proc_macro2::TokenTree::Punct(punct) => punct.span().start(),
+        proc_macro2::TokenTree::Literal(literal) => literal.span().start(),
+    };
+    line_column_byte_offset(src, location)
+}
+
+fn line_column_byte_offset(src: &str, location: proc_macro2::LineColumn) -> usize {
+    let line_index = location.line.saturating_sub(1) as usize;
+    let line_start = src
+        .split_inclusive('\n')
+        .take(line_index)
+        .map(str::len)
+        .sum::<usize>();
+    line_start.saturating_add(location.column).min(src.len())
 }
 
 fn in_ranges(ranges: &[Range<usize>], pos: usize) -> bool {
@@ -128,7 +152,7 @@ struct RawToken {
 
 /// Cursor over `char`s tracking (line, UTF-16 column, byte offset) so token spans line up with
 /// LSP's default position encoding (UTF-16 code units) while still being comparable against
-/// `ranges`' byte offsets (`proc_macro2::Span::byte_range()`'s own unit).
+/// `ranges`' byte offsets (converted from `proc_macro2::Span` line/column locations).
 struct Scanner<'a> {
     iter: std::iter::Peekable<std::str::CharIndices<'a>>,
     line: u32,

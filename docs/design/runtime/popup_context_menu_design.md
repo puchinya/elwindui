@@ -310,10 +310,10 @@ before `codegen::build_symbol_table`/code emission ever run — see step 1's own
    `docs/design/tools/codegen_design.md` §3.35 for the exact derivation rule). The original
    `context_popup` attribute value is replaced with a `ViewExpr::DeferredView` marker referencing
    the hidden component by name.
-2. **Weak-owner codegen** (reusing, not duplicating, `ControlTemplate`'s own `templated_parent`
+2. **Weak-owner codegen** (reusing, not duplicating, the template parent's declared-alias
    weak-owner mechanism — see `docs/design/runtime/view_factory_design.md` §3's "why `Weak`, never
    `Rc`" and `is_template_or_deferred_scope`): the hidden component's generated code treats
-   `__view_owner` exactly like `templated_parent` for bindable-owner and Environment-propagation
+   `__view_owner` exactly like a template parent for bindable-owner and Environment-propagation
    purposes (`docs/agents/class-model.md`'s "no second binding system" principle — see also
    `synthesize_external_base_fields`'s explicit `implicit_owner.is_some()` exemption, which stops
    bare names resolved against the *enclosing* Component's own scope from being mistaken for

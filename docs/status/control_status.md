@@ -1,6 +1,6 @@
 # Control implementation status
 
-Snapshot: 2026-08-27. Public behavior is defined by [`../specs/ui_spec.md`](../specs/ui_spec.md).
+Snapshot: 2026-08-30. Public behavior is defined by [`../specs/ui_spec.md`](../specs/ui_spec.md).
 
 | Control | AppKit | WinUI 3 | GTK4 | Notes |
 |---|---|---|---|---|
@@ -20,12 +20,12 @@ Snapshot: 2026-08-27. Public behavior is defined by [`../specs/ui_spec.md`](../s
 | TabView / TabViewItem | ✅ | ✅ | ⬜ | hosted page activation and native child reconciliation; AppKit tab chrome (layerless chip drawing, system-symbol close/new-tab, closable live sync, shrink-to-fit overflow) screenshot-verified on `controls-demo`/`notepad` ([#167](https://github.com/puchinya/elwindui/issues/167)) — Accessibility-driven interaction verification (`find`/`click`) not run, no Accessibility permission granted to the verification environment |
 | Rectangle / Ellipse / Image | ✅ | ✅ | ⬜ | backend-neutral self-rendered controls |
 | IconElement / IconSourceElement | ✅ | ✅ | ⬜ | backend-neutral self-rendered icon base/value wrapper; Core unit and cross-crate DSL tests, no backend-specific control path ([#176](https://github.com/puchinya/elwindui/issues/176)) |
-| ControlTemplate / ContentPresenter | ✅ | ✅ | ⬜ | mount-time typed Environment selection, explicit `template: template_view! { ... }` defaults, and logical/Visual separation; backend-neutral runtime; ordinary view/template planner-emitter is shared, with readable `TemplateProperty<KEY>` and setter-only `WritableTemplateProperty<KEY>` bridges (including inherited base delegation); property-free templates accept valid raw `ControlExt` targets, while property paths remain capability-gated and raw framework/class-managed property bridges are not guaranteed; template roots use private template-root ownership while caller bare content remains the inherited `content` slot |
+| ControlTemplate / ContentPresenter | ✅ | ✅ | ⬜ | mount-time typed Environment selection, explicit `template_view!(|alias: Self| { ... })` defaults, and logical/Visual separation; backend-neutral runtime; ordinary view/template planner-emitter is shared, with readable `TemplateProperty<KEY>` and setter-only `WritableTemplateProperty<KEY>` bridges (including inherited base delegation); standalone/reusable forms require an explicit concrete target and reusable templates are ordinary Rust functions; property-free templates accept valid raw `ControlExt` targets, while property paths remain capability-gated and raw framework/class-managed property bridges are not guaranteed; template roots use private template-root ownership while caller bare content remains the inherited `content` slot |
 
 ## Current gaps
 
 - Runtime re-template、per-instance template property、TemplatePart、VisualStateは初期`ControlTemplate`の対象外である ([#83](https://github.com/puchinya/elwindui/issues/83))。
-- ContentControl-derived components declare their default visual template with `template: template_view! { ... }`; a static `ContentPresenter` is opt-in in that template, while raw `ContentControl` retains direct presentation. Caller bare children remain the inherited logical `content` slot.
+- ContentControl-derived components declare their default visual template with `template: template_view!(|alias: Self| { ... })`; standalone/reusable templates declare a concrete target in the same header, and reusable templates are ordinary Rust functions. A static `ContentPresenter` is opt-in in that template, while raw `ContentControl` retains direct presentation. Caller bare children remain the inherited logical `content` slot.
 - `tooltip` is implemented for NativeControl descendants, not backend-neutral self-rendered elements.
 - Native control support has no GTK4 implementation.
 - Accessibility scaffolds and the NavigationHost/VirtualList/ErrorBoundary surface require an explicit public-contract decision ([#85](https://github.com/puchinya/elwindui/issues/85)).
@@ -33,4 +33,16 @@ Snapshot: 2026-08-27. Public behavior is defined by [`../specs/ui_spec.md`](../s
 
 ## Verification
 
-`examples/controls-demo` covers TextBox, PasswordBox, ScrollView, Button, selection controls, Dropdown, Slider, existing TextArea/Button regressions, and (Context Menu tab) `MenuItem.icon` — Native `SystemIcon` items, a Native user-vector-icon item, a Custom Context Menu mixing a `SystemIcon` item, a disabled `SystemIcon` item, a user raster `IconSource::Image` item, a user vector `IconSource::Image` item, and an icon-less item to verify leading-column alignment. `examples/control-template-demo` covers typed Environment override, capturing factory, reactive `templated_parent`, and `ContentPresenter`. `examples/mascot-demo` covers a draggable transparent always-on-top Window with a real alpha PNG. AppKit uses `tools/macos-ui-driver`; WinUI 3 verification uses Windows UI Automation and real input.
+`examples/controls-demo` covers TextBox, PasswordBox, ScrollView, Button, selection controls, Dropdown, Slider, existing TextArea/Button regressions, and (Context Menu tab) `MenuItem.icon` — Native `SystemIcon` items, a Native user-vector-icon item, a Custom Context Menu mixing a `SystemIcon` item, a disabled `SystemIcon` item, a user raster `IconSource::Image` item, a user vector `IconSource::Image` item, and an icon-less item to verify leading-column alignment. `examples/control-template-demo` covers typed Environment override, capturing factory, reactive declared parent alias, and `ContentPresenter`. `examples/mascot-demo` covers a draggable transparent always-on-top Window with a real alpha PNG. AppKit uses `tools/macos-ui-driver`; WinUI 3 verification uses Windows UI Automation and real input.
+
+PR #200's final remediation keeps the demo on the public path: the reusable
+template is parameterized and installed directly, and logical content is
+provided as a Window constructor Param so it reaches the target before the
+target's template mount. The public `control_template` acceptance tests cover
+default/override selection, alias resync, ContentPresenter ownership, layout,
+and RenderTree descendants. On 2026-08-30, the rebuilt executable launched with
+`cargo run -p control-template-demo`; a Computer Use screenshot of that same
+executable showed `Captured: Environment override`, `Reactive parent alias
+label`, and `Logical content, visually hosted by ContentPresenter`. The
+default-only marker `Default template` was absent. This is AppKit runtime
+evidence; Windows and GTK4 remain unverified.

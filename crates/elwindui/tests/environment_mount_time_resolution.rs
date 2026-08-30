@@ -32,9 +32,7 @@ struct MountTimeResolutionNestedChild {
     #[param]
     label: String,
 
-    template: template_view! {
-        TextBlock { text: label }
-    },
+    template: template_view!(|templated_parent: Self| { TextBlock { text: label } }),
 }
 
 #[elwindui::component]

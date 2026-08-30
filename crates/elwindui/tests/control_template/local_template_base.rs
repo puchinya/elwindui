@@ -1,8 +1,10 @@
 #[elwindui::component(inherits ContentControl)]
 pub struct LocalTemplateBaseProbe {
-    template: template_view! {
-        TextBlock { text: "base header" }
-    },
+    template: template_view!(|templated_parent: Self| {
+        TextBlock {
+            text: "base header",
+        }
+    }),
 }
 
 #[elwindui::component]

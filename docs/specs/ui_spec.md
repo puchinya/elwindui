@@ -292,7 +292,7 @@ pub trait CoordinateHost {
 template-enabled派生型ではmount時に選択した単一template rootをVisual childとして保持し、logical childにはしない。
 typed factoryと選択規則は[ControlTemplate Specification](control_template_spec.md)で定義する。
 `Control` 自身は公開 content collection を持たない。`#[component(inherits Control)]` の
-`template: template_view! { ... }` が宣言する typed default template の単一 root は、private な
+`template: template_view!(|alias: Self| { ... })` が宣言する typed default template の単一 root は、private な
 `template_root` 経路を通じてVisual childとして接続される。templateのuse-siteで書かれたbare childは
 このtemplateとは独立してeffective `#[content(...)]`へlowerされる。collection childrenは`Layout`、
 単一のlogical contentは`ContentControl`、専用の複数項目は各specialized controlが所有する。

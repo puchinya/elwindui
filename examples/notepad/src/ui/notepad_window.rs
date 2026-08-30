@@ -15,7 +15,7 @@ struct CustomCheckBox {
     #[prop(default = String::new())]
     label: String,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         tab_stop: true
         #[shortcut("Ctrl+D")]
         on_tapped: |e| { is_checked = !is_checked }
@@ -39,7 +39,7 @@ struct CustomCheckBox {
             }
             TextBlock { text: label, foreground: "#ffffff" }
         }
-    },
+    }),
 }
 
 #[elwindui::component]

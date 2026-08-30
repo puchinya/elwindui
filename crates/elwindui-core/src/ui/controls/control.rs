@@ -4,7 +4,7 @@ use super::*;
 
 /// A composable, templated component base (WinUI3's `Control`). `Control` has no public collection
 /// content slot: its visual presentation is owned by the private template-root path. A component
-/// declaring `template: template_view! { ... }` supplies one typed default visual root, which is
+/// declaring `template: template_view!(|alias: Self| { ... })` supplies one typed default visual root, which is
 /// attached through that path; caller content remains independent and collection content belongs
 /// to `Layout`, while a single logical content slot belongs to `ContentControl`. `padding` shrinks the area its visual root is arranged into, the
 /// `Control`-level analog of `margin` on an individual element.

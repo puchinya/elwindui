@@ -16,7 +16,7 @@ summary from this document's own, narrower perspective.
 deliberate, not an oversight to unify later.
 
 `ControlTemplate<C>` carries Control-specific semantics that `ViewFactory` does not share:
-`templated_parent` (a strongly-typed `Weak<C>`), the `ContentPresenter`/logical-content vs.
+the declared template-parent alias (a strongly-typed `Weak<C>`), the `ContentPresenter`/logical-content vs.
 template-visual split, and template selection fixed for the owning Control's entire mount lifetime
 (selected once, in `mount()`, never re-evaluated). `ViewFactory` has none of these — it exists for
 content whose lifecycle is independent of any single owner's mount lifetime and may be built again on
@@ -82,11 +82,11 @@ The design question the original investigation (recorded on #162) identified was
 identifiers written inside `context_popup: view! { .. }` (e.g. `item: selected_item`, referencing the
 *enclosing* Component's own field) need to resolve exactly the way any other bare name inside an
 ordinary `view!` body already does — through the same `self`/`vm` accessor-rewriting mechanism
-ordinary nested elements already use — rather than through `ControlTemplate`'s
-`templated_parent.foo`-style *explicit*-qualification convention. The shipped solution lowers the
+ordinary nested elements already use — rather than through a template parent's declared-alias
+convention. The shipped solution lowers the
 whole `view! { .. }` block, at macro-expansion time, into its own hidden `ComponentDef`/`ViewDef` — a
 real, ordinary Component whose single synthetic field (`__view_owner: Weak<Owner>`) is treated exactly
-like `ControlTemplate`'s own `templated_parent` for weak-owner and Environment-propagation purposes.
+like a template's weak parent for weak-owner and Environment-propagation purposes.
 Because the lowered body is a genuinely ordinary Component, every existing *DSL-attribute-value*
 bare-name-resolution code path in `codegen.rs` (`emit_expr`'s own `ViewExpr::Path` handling —
 `on_mount`/`lets`/`if`/`match`/`for` as *structural* `view!` constructs, element/value codegen) already

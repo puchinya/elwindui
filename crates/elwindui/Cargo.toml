@@ -60,3 +60,9 @@ backend-gtk4 = ["dep:elwindui-backend-gtk4"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "control_template_window_rt4"
+path = "tests/control_template_window_rt4.rs"
+harness = false
+required-features = ["backend-appkit"]

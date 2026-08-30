@@ -6,7 +6,7 @@ use elwindui::core::ui::{
     ControlTemplate, TemplateProperty as _, UIElementExt as _, WritableTemplateProperty as _,
 };
 use elwindui::ui::{ContentControl, Control, ListExt as _, Rectangle, TextArea, TextBlock};
-use elwindui::{component, control_template, template_view};
+use elwindui::{component, template_view};
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -52,9 +52,11 @@ pub struct StandaloneTemplateEnvironmentText;
 struct TemplateProbe {
     #[prop]
     label: String,
-    template: template_view! {
-        TextBlock { text: templated_parent.label }
-    },
+    template: template_view!(|control: Self| {
+        TextBlock {
+            text: control.label,
+        }
+    }),
 }
 
 #[component]
@@ -64,9 +66,7 @@ impl TemplateProbe {}
 struct InheritedWritableTemplateBase {
     #[prop(default = String::from("base"))]
     value: String,
-    template: template_view! {
-        TextBlock { text: value }
-    },
+    template: template_view!(|templated_parent: Self| { TextBlock { text: value } }),
 }
 
 #[component]
@@ -74,38 +74,45 @@ impl InheritedWritableTemplateBase {}
 
 #[component(inherits crate::InheritedWritableTemplateBase)]
 struct InheritedWritableTemplateChild {
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         TextArea { text <=> templated_parent.value }
-    },
+    }),
 }
 
 #[component]
 impl InheritedWritableTemplateChild {}
 
-#[control_template(target = TemplateProbe)]
-struct NamedTemplateProbe {
-    template: template_view! {
+fn named_template_probe() -> ControlTemplate<TemplateProbe> {
+    template_view!(|button: TemplateProbe| {
         TextBlock {
-            text: templated_parent.label,
+            text: button.label,
             on_tapped: |_event| {
-                templated_parent.set_label("named-clicked".to_string());
+                button.set_label("named-clicked".to_string());
             },
         }
-    },
+    })
+}
+
+fn prefixed_template(prefix: String) -> ControlTemplate<TemplateProbe> {
+    template_view!(|owner: TemplateProbe| {
+        TextBlock {
+            text: format!("{}{}", prefix.as_str(), owner.label),
+        }
+    })
 }
 
 #[component(inherits Control)]
 struct DefaultEventTemplateProbe {
     #[prop]
     label: String,
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         TextBlock {
             text: templated_parent.label,
             on_tapped: |_event| {
                 templated_parent.set_label("default-clicked".to_string());
             },
         }
-    },
+    }),
 }
 
 #[component]
@@ -117,7 +124,7 @@ struct DynamicTemplateProbe {
     alternate: bool,
     #[prop(default = Vec::new())]
     items: Vec<String>,
-    template: template_view! { TextBlock { text: "default" } },
+    template: template_view!(|templated_parent: Self| { TextBlock { text: "default" } }),
 }
 
 #[component]
@@ -125,9 +132,11 @@ impl DynamicTemplateProbe {}
 
 #[component(inherits ContentControl)]
 struct TemplateEnvironmentChild {
-    template: template_view! {
-        TextBlock { text: environment_text }
-    },
+    template: template_view!(|templated_parent: Self| {
+        TextBlock {
+            text: environment_text,
+        }
+    }),
 
     #[environment(standalone_template_environment_text)]
     environment_text: String,
@@ -143,9 +152,11 @@ impl TemplateEnvironmentChild {}
 struct RequiredLabelChild {
     #[prop]
     label: String,
-    template: template_view! {
-        TextBlock { text: templated_parent.label }
-    },
+    template: template_view!(|templated_parent: Self| {
+        TextBlock {
+            text: templated_parent.label,
+        }
+    }),
 }
 
 #[component]
@@ -153,7 +164,7 @@ impl RequiredLabelChild {}
 
 #[component(inherits ContentControl)]
 struct UserScalarContentHost {
-    template: template_view! { TextBlock { text: "host" } },
+    template: template_view!(|templated_parent: Self| { TextBlock { text: "host" } }),
 }
 
 #[component]
@@ -224,7 +235,7 @@ impl elwindui::core::ui::ListExt<dyn elwindui::core::ui::UIElementExt>
 struct UserCollectionContentHost {
     #[prop(default = Rc::new(TestListExt::<dyn elwindui::core::ui::UIElementExt>::default()))]
     children: Rc<TestListExt<dyn elwindui::core::ui::UIElementExt>>,
-    template: template_view! { Rectangle {} },
+    template: template_view!(|templated_parent: Self| { Rectangle {} }),
 }
 
 #[component]
@@ -242,7 +253,7 @@ impl UserLayoutHost {}
 
 #[component(inherits Control)]
 struct LifecycleTemplateProbe {
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_mount {
             record_standalone_mount();
         }
@@ -250,7 +261,7 @@ struct LifecycleTemplateProbe {
             record_standalone_unmount();
         }
         TextBlock { text: "lifecycle" }
-    },
+    }),
 }
 
 #[component]
@@ -260,12 +271,12 @@ impl LifecycleTemplateProbe {}
 struct UpdateLifecycleTemplateProbe {
     #[prop]
     label: String,
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         on_update(label) {
             record_standalone_update();
         }
         TextBlock { text: templated_parent.label }
-    },
+    }),
 }
 
 #[component]
@@ -277,9 +288,11 @@ struct ReadOnlyComputedTemplateProbe {
     source: String,
     #[computed(expr = source.clone())]
     read_only_value: String,
-    template: template_view! {
-        TextBlock { text: templated_parent.read_only_value }
-    },
+    template: template_view!(|templated_parent: Self| {
+        TextBlock {
+            text: templated_parent.read_only_value,
+        }
+    }),
 }
 
 #[component]
@@ -288,9 +301,11 @@ impl ReadOnlyComputedTemplateProbe {}
 #[test]
 fn typed_template_view_can_be_passed_to_environment() {
     let environment = EnvironmentContext::root();
-    environment.set_control_template::<TemplateProbe>(Some(template_view! {
-        TextBlock { text: templated_parent.label }
-    }));
+    environment.set_control_template(Some(template_view!(|templated_parent: TemplateProbe| {
+        TextBlock {
+            text: templated_parent.label,
+        }
+    })));
     let _ = ControlTemplate::<TemplateProbe>::new(|context| {
         let _ = context.control.label();
         elwindui::core::ui::TextBlock::new()
@@ -298,10 +313,30 @@ fn typed_template_view_can_be_passed_to_environment() {
 }
 
 #[test]
+fn explicit_target_template_infers_result_without_expected_type_annotation() {
+    let template = template_view!(|owner: TemplateProbe| { TextBlock { text: owner.label } });
+    let probe = elwindui::new!(TemplateProbe(label: "initial".to_string()));
+    let root = template.__build(elwindui::core::ui::ControlTemplateContext {
+        control: probe.clone(),
+        environment: EnvironmentContext::root(),
+    });
+    let text = root
+        .as_any()
+        .downcast_ref::<TextBlock>()
+        .expect("explicit-target template root is TextBlock");
+    assert_eq!(text.text.borrow().as_str(), "initial");
+    probe.set_label("updated".to_string());
+    assert_eq!(text.text.borrow().as_str(), "updated");
+}
+
+#[test]
 fn standalone_template_view_uses_typed_templated_parent() {
-    let template: ControlTemplate<TemplateProbe> = template_view! {
-        TextBlock { text: templated_parent.label }
-    };
+    let template: ControlTemplate<TemplateProbe> =
+        template_view!(|templated_parent: TemplateProbe| {
+            TextBlock {
+                text: templated_parent.label,
+            }
+        });
     let probe = elwindui::new!(TemplateProbe(label: "initial".to_string()));
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
@@ -318,28 +353,36 @@ fn standalone_template_view_uses_typed_templated_parent() {
 
 #[test]
 fn standalone_template_view_without_parent_expression_is_typed_by_context() {
-    let _: ControlTemplate<DynamicTemplateProbe> = template_view! {
-        TextBlock { text: "plain" }
-    };
+    let _: ControlTemplate<DynamicTemplateProbe> =
+        template_view!(|templated_parent: DynamicTemplateProbe| { TextBlock { text: "plain" } });
     let environment = EnvironmentContext::root();
-    environment.set_control_template::<DynamicTemplateProbe>(Some(template_view! {
-        TextBlock { text: "environment plain" }
-    }));
+    environment.set_control_template::<DynamicTemplateProbe>(Some(template_view!(
+        |templated_parent: DynamicTemplateProbe| {
+            TextBlock {
+                text: "environment plain",
+            }
+        }
+    )));
 }
 
 #[test]
 fn property_free_template_view_accepts_raw_control_target() {
-    let _: ControlTemplate<Control> = template_view! {
-        TextBlock { text: "framework target" }
-    };
+    let _: ControlTemplate<Control> = template_view!(|templated_parent: Control| {
+        TextBlock {
+            text: "framework target",
+        }
+    });
 }
 
 #[test]
 fn standalone_template_view_can_capture_external_values() {
     let captured = String::from("captured");
-    let template: ControlTemplate<DynamicTemplateProbe> = template_view! {
-        TextBlock { text: format!("{}", captured) }
-    };
+    let template: ControlTemplate<DynamicTemplateProbe> =
+        template_view!(|templated_parent: DynamicTemplateProbe| {
+            TextBlock {
+                text: format!("{}", captured),
+            }
+        });
     let probe = DynamicTemplateProbe::__new_unmounted();
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
@@ -354,13 +397,14 @@ fn standalone_template_view_can_capture_external_values() {
 
 #[test]
 fn standalone_template_view_supports_deferred_view_values_through_shared_backend() {
-    let template: ControlTemplate<TemplateProbe> = template_view! {
-        TextBlock {
-            context_popup: view! {
-                TextBlock { text: "deferred" }
+    let template: ControlTemplate<TemplateProbe> =
+        template_view!(|templated_parent: TemplateProbe| {
+            TextBlock {
+                context_popup: view! {
+                    TextBlock { text: "deferred" }
+                },
             }
-        }
-    };
+        });
     let probe = elwindui::new!(TemplateProbe(label: "parent".to_string()));
     let environment = EnvironmentContext::root();
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
@@ -387,13 +431,14 @@ fn standalone_template_view_supports_deferred_view_values_through_shared_backend
 
 #[test]
 fn standalone_template_view_replaces_dynamic_root() {
-    let template: ControlTemplate<DynamicTemplateProbe> = template_view! {
-        if templated_parent.alternate {
-            TextBlock { text: "alternate" }
-        } else {
-            TextBlock { text: "initial" }
-        }
-    };
+    let template: ControlTemplate<DynamicTemplateProbe> =
+        template_view!(|templated_parent: DynamicTemplateProbe| {
+            if templated_parent.alternate {
+                TextBlock { text: "alternate" }
+            } else {
+                TextBlock { text: "initial" }
+            }
+        });
     let probe = DynamicTemplateProbe::__new_unmounted();
     use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
     probe.__prepare_template_presentation();
@@ -415,7 +460,7 @@ fn standalone_template_view_replaces_dynamic_root() {
 
 #[test]
 fn standalone_template_view_replaces_scalar_content_without_layout_host() {
-    let template: ControlTemplate<DynamicTemplateProbe> = template_view! {
+    let template: ControlTemplate<DynamicTemplateProbe> = template_view!(|templated_parent: DynamicTemplateProbe| {
         ContentControl {
             if templated_parent.alternate {
                 TextBlock { text: "alternate" }
@@ -423,7 +468,7 @@ fn standalone_template_view_replaces_scalar_content_without_layout_host() {
                 TextBlock { text: "initial" }
             }
         }
-    };
+    });
     let probe = DynamicTemplateProbe::__new_unmounted();
     use elwindui::core::ui::{ContentControlExt as _, ControlExt as _};
     probe.__prepare_template_presentation();
@@ -456,7 +501,7 @@ fn standalone_template_view_replaces_scalar_content_without_layout_host() {
 
 #[test]
 fn standalone_template_view_uses_user_scalar_content_metadata() {
-    let template: ControlTemplate<DynamicTemplateProbe> = template_view! {
+    let template: ControlTemplate<DynamicTemplateProbe> = template_view!(|templated_parent: DynamicTemplateProbe| {
         UserScalarContentHost {
             if templated_parent.alternate {
                 TextBlock { text: "user-alternate" }
@@ -464,7 +509,7 @@ fn standalone_template_view_uses_user_scalar_content_metadata() {
                 TextBlock { text: "user-initial" }
             }
         }
-    };
+    });
     let probe = DynamicTemplateProbe::__new_unmounted();
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
@@ -503,7 +548,7 @@ fn standalone_template_view_uses_user_scalar_content_metadata() {
 
 #[test]
 fn standalone_template_view_uses_non_layout_collection_content_metadata() {
-    let template: ControlTemplate<DynamicTemplateProbe> = template_view! {
+    let template: ControlTemplate<DynamicTemplateProbe> = template_view!(|templated_parent: DynamicTemplateProbe| {
         UserCollectionContentHost {
             TextBlock { text: "static" }
             if templated_parent.alternate {
@@ -512,7 +557,7 @@ fn standalone_template_view_uses_non_layout_collection_content_metadata() {
                 TextBlock { text: "B" }
             }
         }
-    };
+    });
     let probe = DynamicTemplateProbe::__new_unmounted();
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
@@ -544,12 +589,15 @@ fn standalone_template_view_uses_non_layout_collection_content_metadata() {
 
 #[test]
 fn standalone_template_view_supports_match_root() {
-    let template: ControlTemplate<DynamicTemplateProbe> = template_view! {
-        match templated_parent.alternate {
-            true => TextBlock { text: "match-true" },
-            false => TextBlock { text: "match-false" },
-        }
-    };
+    let template: ControlTemplate<DynamicTemplateProbe> =
+        template_view!(|templated_parent: DynamicTemplateProbe| {
+            match templated_parent.alternate {
+                true => TextBlock { text: "match-true" },
+                false => TextBlock {
+                    text: "match-false",
+                },
+            }
+        });
     let probe = DynamicTemplateProbe::__new_unmounted();
     use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
     probe.__prepare_template_presentation();
@@ -586,7 +634,7 @@ fn standalone_template_view_supports_match_root() {
 
 #[test]
 fn standalone_template_view_supports_nested_dynamic_child() {
-    let template: ControlTemplate<DynamicTemplateProbe> = template_view! {
+    let template: ControlTemplate<DynamicTemplateProbe> = template_view!(|templated_parent: DynamicTemplateProbe| {
         VerticalLayout {
             if templated_parent.alternate {
                 TextBlock { text: "nested-true" }
@@ -594,7 +642,7 @@ fn standalone_template_view_supports_nested_dynamic_child() {
                 TextBlock { text: "nested-false" }
             }
         }
-    };
+    });
     let probe = DynamicTemplateProbe::__new_unmounted();
     use elwindui::core::ui::{ControlExt as _, LayoutExt as _};
     probe.__prepare_template_presentation();
@@ -633,14 +681,14 @@ fn standalone_template_view_supports_nested_dynamic_child() {
 
 #[test]
 fn standalone_template_view_supports_nested_match_child() {
-    let template: ControlTemplate<DynamicTemplateProbe> = template_view! {
+    let template: ControlTemplate<DynamicTemplateProbe> = template_view!(|templated_parent: DynamicTemplateProbe| {
         VerticalLayout {
             match templated_parent.alternate {
                 true => TextBlock { text: "nested-match-true" },
                 false => TextBlock { text: "nested-match-false" },
             }
         }
-    };
+    });
     let probe = DynamicTemplateProbe::__new_unmounted();
     use elwindui::core::ui::{ControlExt as _, LayoutExt as _};
     probe.__prepare_template_presentation();
@@ -677,11 +725,11 @@ fn standalone_template_mounts_nested_components_with_context_environment() {
     let application = EnvironmentContext::root();
     let environment = application.derive();
     environment.set::<StandaloneTemplateEnvironmentText>("derived".to_string());
-    let template: ControlTemplate<DynamicTemplateProbe> = template_view! {
+    let template: ControlTemplate<DynamicTemplateProbe> = template_view!(|templated_parent: DynamicTemplateProbe| {
         VerticalLayout {
             TemplateEnvironmentChild {}
         }
-    };
+    });
     let probe = DynamicTemplateProbe::__new_unmounted();
     use elwindui::core::ui::{ControlExt as _, LayoutExt as _, UIElementExt as _};
     probe.__prepare_template_presentation();
@@ -715,13 +763,13 @@ fn standalone_template_mounts_nested_components_with_context_environment() {
 
 #[test]
 fn standalone_template_view_supports_nested_for_children() {
-    let template: ControlTemplate<DynamicTemplateProbe> = template_view! {
+    let template: ControlTemplate<DynamicTemplateProbe> = template_view!(|templated_parent: DynamicTemplateProbe| {
         VerticalLayout {
             for item in templated_parent.items {
                 TextBlock { text: format!("{}", item) }
             }
         }
-    };
+    });
     let probe = DynamicTemplateProbe::__new_unmounted();
     probe.set_items(vec!["one".to_string(), "two".to_string()]);
     use elwindui::core::ui::{ControlExt as _, LayoutExt as _};
@@ -758,10 +806,13 @@ fn standalone_template_view_supports_nested_for_children() {
 
 #[test]
 fn standalone_template_view_supports_template_local_let_references() {
-    let template: ControlTemplate<TemplateProbe> = template_view! {
-        let heading = TextBlock { text: templated_parent.label };
-        VerticalLayout { heading }
-    };
+    let template: ControlTemplate<TemplateProbe> =
+        template_view!(|templated_parent: TemplateProbe| {
+            let heading = TextBlock {
+                text: templated_parent.label,
+            };
+            VerticalLayout { heading }
+        });
     let probe = elwindui::new!(TemplateProbe(label: "let-value".to_string()));
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
@@ -789,9 +840,12 @@ fn standalone_template_view_supports_template_local_let_references() {
 
 #[test]
 fn standalone_template_view_constructs_user_component_with_required_property() {
-    let template: ControlTemplate<TemplateProbe> = template_view! {
-        RequiredLabelChild { label: templated_parent.label }
-    };
+    let template: ControlTemplate<TemplateProbe> =
+        template_view!(|templated_parent: TemplateProbe| {
+            RequiredLabelChild {
+                label: templated_parent.label,
+            }
+        });
     let probe = elwindui::new!(TemplateProbe(label: "child".to_string()));
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
@@ -808,7 +862,7 @@ fn standalone_template_view_constructs_user_component_with_required_property() {
 
 #[test]
 fn standalone_template_view_uses_user_layout_as_dynamic_child_host() {
-    let template: ControlTemplate<DynamicTemplateProbe> = template_view! {
+    let template: ControlTemplate<DynamicTemplateProbe> = template_view!(|templated_parent: DynamicTemplateProbe| {
         UserLayoutHost {
             if templated_parent.alternate {
                 TextBlock { text: "true" }
@@ -816,7 +870,7 @@ fn standalone_template_view_uses_user_layout_as_dynamic_child_host() {
                 TextBlock { text: "false" }
             }
         }
-    };
+    });
     let probe = DynamicTemplateProbe::__new_unmounted();
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
@@ -847,14 +901,15 @@ fn standalone_template_view_uses_user_layout_as_dynamic_child_host() {
 
 #[test]
 fn standalone_template_view_event_closure_can_update_templated_parent() {
-    let template: ControlTemplate<TemplateProbe> = template_view! {
-        TextBlock {
-            text: templated_parent.label,
-            on_tapped: |_event| {
-                templated_parent.set_label("clicked".to_string());
-            },
-        }
-    };
+    let template: ControlTemplate<TemplateProbe> =
+        template_view!(|templated_parent: TemplateProbe| {
+            TextBlock {
+                text: templated_parent.label,
+                on_tapped: |_event| {
+                    templated_parent.set_label("clicked".to_string());
+                },
+            }
+        });
     let probe = elwindui::new!(TemplateProbe(label: "initial".to_string()));
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
@@ -874,9 +929,9 @@ fn standalone_template_view_event_closure_can_update_templated_parent() {
 }
 
 #[test]
-fn named_control_template_uses_the_shared_event_backend() {
+fn reusable_template_function_returns_control_template_and_uses_shared_event_backend() {
     let probe = elwindui::new!(TemplateProbe(label: "initial".to_string()));
-    let root = NamedTemplateProbe::template().__build(elwindui::core::ui::ControlTemplateContext {
+    let root = named_template_probe().__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
         environment: EnvironmentContext::root(),
     });
@@ -894,13 +949,46 @@ fn named_control_template_uses_the_shared_event_backend() {
 }
 
 #[test]
+fn reusable_template_function_captures_prefix_and_resyncs_typed_parent() {
+    let template = prefixed_template("P:".to_string());
+    let probe = elwindui::new!(TemplateProbe(label: "A".to_string()));
+    let root = template.__build(elwindui::core::ui::ControlTemplateContext {
+        control: probe.clone(),
+        environment: EnvironmentContext::root(),
+    });
+    let text = root
+        .as_any()
+        .downcast_ref::<TextBlock>()
+        .expect("prefixed template root is TextBlock");
+    assert_eq!(text.text.borrow().as_str(), "P:A");
+    probe.set_label("B".to_string());
+    assert_eq!(text.text.borrow().as_str(), "P:B");
+}
+
+#[test]
+fn reusable_template_accepts_a_non_reserved_parent_alias() {
+    let template: ControlTemplate<TemplateProbe> =
+        template_view!(|owner: TemplateProbe| { TextBlock { text: owner.label } });
+    let probe = elwindui::new!(TemplateProbe(label: "alias".to_string()));
+    let root = template.__build(elwindui::core::ui::ControlTemplateContext {
+        control: probe,
+        environment: EnvironmentContext::root(),
+    });
+    let text = root
+        .as_any()
+        .downcast_ref::<TextBlock>()
+        .expect("aliased template root is TextBlock");
+    assert_eq!(text.text.borrow().as_str(), "alias");
+}
+
+#[test]
 fn standalone_template_view_two_way_binding_uses_shared_property_wiring() {
     // `TextArea::text` is a real two-way property.  Keeping this as a typed construction probe
     // exercises both halves of the common template backend: the initial `@set` and the target
     // props-macro `@set_on_change` callback that writes through `TemplateProperty`.
-    let _: ControlTemplate<TemplateProbe> = template_view! {
+    let _: ControlTemplate<TemplateProbe> = template_view!(|templated_parent: TemplateProbe| {
         TextArea { text <=> templated_parent.label }
-    };
+    });
 }
 
 #[test]
@@ -943,7 +1031,7 @@ fn component_default_template_event_closure_uses_shared_backend() {
 fn standalone_template_view_lifecycle_hooks_run_once() {
     STANDALONE_MOUNT_COUNT.with(|count| count.set(0));
     STANDALONE_UNMOUNT_COUNT.with(|count| count.set(0));
-    let template: ControlTemplate<LifecycleTemplateProbe> = template_view! {
+    let template: ControlTemplate<LifecycleTemplateProbe> = template_view!(|templated_parent: LifecycleTemplateProbe| {
         on_mount {
             record_standalone_mount();
         }
@@ -951,7 +1039,7 @@ fn standalone_template_view_lifecycle_hooks_run_once() {
             record_standalone_unmount();
         }
         TextBlock { text: "lifecycle" }
-    };
+    });
     let probe = LifecycleTemplateProbe::__new_unmounted();
     let root = template.__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
@@ -996,14 +1084,14 @@ fn component_default_template_reads_and_resyncs_computed_property() {
 #[test]
 fn standalone_template_view_on_update_uses_shared_lifecycle_subscription() {
     STANDALONE_UPDATE_COUNT.with(|count| count.set(0));
-    let template: ControlTemplate<UpdateLifecycleTemplateProbe> = template_view! {
+    let template: ControlTemplate<UpdateLifecycleTemplateProbe> = template_view!(|templated_parent: UpdateLifecycleTemplateProbe| {
         on_update(label) {
             record_standalone_update();
         }
         TextBlock {
             text: templated_parent.label
         }
-    };
+    });
 
     let probe = UpdateLifecycleTemplateProbe::__new_unmounted();
     probe.__set_initial_prop_label("initial".to_string());

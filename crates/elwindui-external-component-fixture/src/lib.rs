@@ -18,9 +18,7 @@ pub struct ExternalProbeItem {
     title: String,
     #[prop(default = true)]
     closable: bool,
-    template: template_view! {
-        TextBlock { text: title }
-    },
+    template: template_view!(|templated_parent: Self| { TextBlock { text: title } }),
 }
 
 #[component]
@@ -39,9 +37,11 @@ pub struct ExternalProbeTabs {
     selected_index_callback: Option<Rc<dyn Fn(usize)>>,
     #[computed(expr = children.len())]
     child_count: usize,
-    template: template_view! {
-        TextBlock { text: format!("{}", child_count) }
-    },
+    template: template_view!(|templated_parent: Self| {
+        TextBlock {
+            text: format!("{}", child_count),
+        }
+    }),
 }
 
 #[component]
@@ -78,9 +78,11 @@ pub struct ExternalShapeProbe {
     computed_value: usize,
     #[state(default = String::from("private"))]
     private_state: String,
-    template: template_view! {
-        TextBlock { text: format!("{}", computed_value) }
-    },
+    template: template_view!(|templated_parent: Self| {
+        TextBlock {
+            text: format!("{}", computed_value),
+        }
+    }),
 }
 
 #[component]
@@ -104,7 +106,7 @@ pub struct RequiredExternalCard {
     optional_fallback: String,
     #[prop]
     mutable_label: String,
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         VerticalLayout {
             TextBlock { text: title }
             match optional {
@@ -117,7 +119,7 @@ pub struct RequiredExternalCard {
             }
             TextBlock { text: mutable_label }
         }
-    },
+    }),
 }
 
 #[component]
@@ -131,9 +133,11 @@ impl RequiredExternalCard {}
 pub struct RequiredExternalTabs {
     #[prop]
     children: Vec<Rc<ExternalProbeItem>>,
-    template: template_view! {
-        TextBlock { text: "required external tabs" }
-    },
+    template: template_view!(|templated_parent: Self| {
+        TextBlock {
+            text: "required external tabs",
+        }
+    }),
 }
 
 #[component]
@@ -145,9 +149,11 @@ impl RequiredExternalTabs {}
 pub struct BaseExternalTabs {
     #[prop(default = Vec::new())]
     children: Vec<Rc<ExternalProbeItem>>,
-    template: template_view! {
-        TextBlock { text: "base external tabs" }
-    },
+    template: template_view!(|templated_parent: Self| {
+        TextBlock {
+            text: "base external tabs",
+        }
+    }),
 }
 
 #[component]
@@ -156,9 +162,11 @@ impl BaseExternalTabs {}
 /// Inherits the generated Vec content shape without redeclaring `children`.
 #[component(inherits crate::BaseExternalTabs)]
 pub struct DerivedExternalTabs {
-    template: template_view! {
-        TextBlock { text: "derived external tabs" }
-    },
+    template: template_view!(|templated_parent: Self| {
+        TextBlock {
+            text: "derived external tabs",
+        }
+    }),
 }
 
 #[component]
@@ -173,9 +181,7 @@ pub mod nested {
     pub struct NestedExternalProbe {
         #[param]
         label: String,
-        template: template_view! {
-            TextBlock { text: label }
-        },
+        template: template_view!(|templated_parent: Self| { TextBlock { text: label } }),
     }
 
     #[component]

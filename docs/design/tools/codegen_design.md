@@ -43,19 +43,22 @@ backend-independent Rust token generation
 
 `component_frontend` と `attr_frontend` は `struct`、`mod`、`enum` を共通ASTへ変換する。`view!` fieldの内側だけは `parser` がDSL grammarとして解析する。この境界より後のvalidationとgenerationは、どの属性macroから入力されたかに依存しない。
 
-`template_view!`、componentの`template:` pseudo-field、`#[control_template(target = T)]`は同じView ASTと
-template compilation contextへlowerする。contextはtyped `templated_parent`、selected
-`ControlTemplateContext.environment`、template-root ownershipを保持する。通常の`view!`とtemplateの
-両方が共有するplanner/emitterが、construction、metadata/property/content lowering、event・two-way・
-lifecycle wiring、dynamic-region reconciliation、ContentPresenter、EnvironmentScope、deferred view、
-let/reference、semantic Brush、cleanupを生成する。template-specific adapterはtyped parentの取得、
-`TemplateProperty`/`WritableTemplateProperty` capability bound、factory wrapping、template-root replacement
-だけを担当する。standalone `template_view!`は期待される`ControlTemplate<C>`型からtargetを推論でき、property
-参照は消去されないcompile-time `TemplateProperty<KEY>` boundへlowerされ、書込み経路は
-`WritableTemplateProperty<KEY>` boundへlowerされる。componentの`template:`はそのfactoryをtype-level
-defaultとして登録し、`#[control_template]`は同じlowererを使うnamed wrapperとして`Name::template()`を
-提供する。生成されたtemplate subtreeのcomponent descendantsはfactoryへ渡されたEnvironmentを明示的に
-mountへ伝播する。
+`template_view!(|alias: Target| { ... })`、componentの`template:` pseudo-field、通常のRust function
+returning `ControlTemplate<T>`は同じView ASTとtemplate compilation contextへlowerする。contextは宣言された
+parent alias、explicit target type、selected `ControlTemplateContext.environment`、template-root ownershipを
+保持する。通常の`view!`とtemplateの両方が共有するplanner/emitterが、construction、metadata/property/content
+lowering、event・two-way・lifecycle wiring、dynamic-region reconciliation、ContentPresenter、EnvironmentScope、
+deferred view、let/reference、semantic Brush、cleanupを生成する。template-specific adapterはtyped parentの
+取得、`TemplateProperty`/`WritableTemplateProperty` capability bound、factory wrapping、template-root
+replacementだけを担当する。targetはRustのexpected typeから推論せず、componentの`template:`だけが`Self`を
+許可し、standalone/reusable function formはconcrete targetをheaderに明記する。生成されたtemplate subtreeの
+component descendantsはfactoryへ渡されたEnvironmentを明示的にmountへ伝播する。
+
+Window host-composition components remain `Created` after `new()` and build
+their body only from the first `show()`. Consequently, generated `#[id]`
+accessors for body children are only valid after that mount; pre-mount content
+must flow through constructor Params or initial `content:` lowering so it is
+attached before the target component's own mount.
 
 Template propertyの`KEY`はfield-name literalから生成時に計算するcompile-time 64-bit FNV-1a-style token
 であり、runtime registryやstring lookupは持たない。衝突は同一targetへの重複trait impl/associated type
@@ -64,7 +67,7 @@ Template propertyの`KEY`はfield-name literalから生成時に計算するcomp
 
 `ControlTemplate<C>`のtarget boundは有効なnon-`NativeControl` `ControlExt + 'static`を受け入れるため、
 property-freeな`template_view!`はraw framework/class-managed `Control`/`ContentControl`にも使用できる。
-一方、typed `templated_parent.<property>`は`TemplateProperty<KEY>`、`set_<property>(...)`とtwo-wayは
+一方、typed `<alias>.<property>`は`TemplateProperty<KEY>`、`<alias>.set_<property>(...)`とtwo-wayは
 `WritableTemplateProperty<KEY>`を要求する。generated Control-derived `#[component]`はeffective property
 metadataからこのbridgeをexportするが、raw framework/class-managed `ControlExt`に同じbridgeを要求しない。
 したがってcapability不在はcompile-time boundaryであり、runtime reflection、string lookup、fake no-op
@@ -184,10 +187,13 @@ rust-analyzer
 - **通常rustc側のstrict semanticsは変更しない。** source上で本当にmissingなComponent struct/same-crate Environment Keyは、通常の`cargo build`/`cargo check`では引き続きcompile errorになる。「rust-analyzerで誤診断になるからstrict validationを削除する」は採らない。
 - **validationをitem-localとregistry依存の2種類に分ける。** attribute構文、対応不能なtarget item、`view!`構文異常などitem単体で判定できるerrorは、RA/rustc問わず常時diagnosticのままにする。Component structの登録有無やTheme参照先Environment Keyの存在などcross-item registry依存のerrorだけを、`#[cfg(not(rust_analyzer))]`側のreal expansionへ限定する。
 - **rust-analyzer shadowはIDEのname/type resolutionに必要な最小限の形状のみを提供する。** 型名、constructor/property/methodのsurfaceだけを生成し、runtime実装やcross-item semantic validationをshadow内で再現しない——それらの一部のcross-item errorはIDEではなくcargo checkでのみ確定するという意図的なtrade-offである。
+- **template capability shadowもsource-localな型形状だけを提供する。** `cfg(rust_analyzer)`側のComponent/class shadowは、通常のeffective property metadataから得た同じfield name/key/value typeを`TemplateProperty<KEY>`として公開し、通常のwritable fieldに限って`WritableTemplateProperty<KEY>`を追加する。shadowのassociated `Value`は実装側と一致させるが、getter/subscription/setter本体は`unreachable!()`の解析用形状であり、runtime construction・mount・subscription・lifecycleを実行しない。read-only fieldへwritable capabilityを与えず、name/key/typeを文字列反射や手書きのcomponent一覧で補わない。
 - **rust-analyzer検出はconsumer側生成Rust itemsの`cfg(rust_analyzer)`だけで行う。** proc-macroプロセス内でenvironment変数・process名等からRA/rustcを推測しない。同様にproc-macroからsource filesystemを走査してregistryの穴を埋めることもしない——両方ともincremental analysis・unsaved buffer・macro hygiene・workspace isolationを壊すため採用しない。
 - **同じsource item -> 同じshadow shape。** rust-analyzerのproc-macro-srvが同じitemを複数回展開しても、shadowの正しさはprocess-local registryの過去の状態に依存してはならない。
 
 Component struct halfとimpl halfは、runtime上「struct halfはmetadata登録のみ、impl halfが実型を生成する」という既存contractのまま変わらない。rust-analyzer shadowだけは例外で、struct half自身がown source fieldsから型・constructor・property shapeのshadowを出し(`build_component_struct_shadow`)、impl halfはregistry lookupより前のitem-local method parsingからmethod shadowを出す(`build_component_impl_shadow`)。両者が使うconstructor/getter/setter classificationは、real generatorとも共有する単一のsource-local helper(`component_public_shape`、`crates/elwindui-codegen/src/component_frontend.rs`)に集約し、別実装として複製しない。Themeはmarker型と`Theme` implの存在だけをIDEへ伝えれば十分なため、Environment Keyごとのreal `set::<K>()` bodyを再現しないno-op shadow(`build_theme_shadow`)を生成する。real側とshadow側のtop-level itemsは常に`cfg(not(rust_analyzer))`/`cfg(rust_analyzer)`で排他になるよう、`crates/elwindui-codegen/src/rust_analyzer_shadow.rs`の`gate_real_items_for_rustc`が一箇所でcfg付与を担う。
+
+Component shadowのclass surfaceも解析に必要な最小形状として含める。base field、`{Component}Ext`のancestor bound、同一crate/external baseが公開するinherit macroを組み合わせ、通常の`#[class]` expansionが提供するDeref・ancestor trait forwarding・generated constructor補助(`__new_unmounted`/`__mount`)・初期property setterの名前解決を`cfg(rust_analyzer)`側だけで再現する。bare `Window`をbaseにするhost componentだけは、backend concrete `Window`とcoreの`WindowExt`が別pathであるため、`WindowExt`のdispatch accessorを埋め込みbaseへforwardする。このshadowはtrait/method/type surfaceのためだけに存在し、実行時のclass dispatch、mount、subscription、lifecycleを実行しない。
 
 Environment Key/ViewModel/Store/DSL enumのdefining expansion(`#[elwindui::environment_key]`等)はそれ自身のdefinitionにprevious sibling registry lookupを必要としないため、shadow化の対象外とし、既存のself-contained expansionをそのまま維持する。
 
@@ -209,7 +215,7 @@ Environment Key/ViewModel/Store/DSL enumのdefining expansion(`#[elwindui::envir
 
 **own fieldについて、`writable_fields`はsetterの存在・パラメータ型・visibilityすべての権威である(PR #169レビュー是正、round 5、AD-R5-1)。** `own_writable_fields`から得た型文字列を`syn::Type`としてparseし、setterの`value: #setter_ty`パラメータへ直接使う。Propの`Option<T>`をinner `T`へ変換する旧来のdeferred処理は行わず、同じ宣言型をstorage・getter・setterへ通す。`FieldDef`はCell/RefCell、`recompute_<name>`、property-change通知など実装機構だけを選び、setterの公開membership・型・visibilityはshapeの決定を上書きしない。
 
-`#[elwindui::control_template]`は独自のRA shadow(`rust_analyzer_shadow::build_control_template_shadow`)を持つ——PR #169レビュー指摘A3: 隠しComponent struct半分の戻り値(RA shadowを含む)を`generate_control_template_from_item_struct`が破棄していたため、隠しComponent impl半分のRA shadowが宣言されない型を参照する状態になっていた。現在は隠しstruct半分の戻り値を保持しつつ、`TemplateName::template()`の公開宣言自体も`gate_real_items_for_rustc`で`cfg(not(rust_analyzer))`へ隔離し、専用のsignature-onlyなRA shadow(`__new_unmounted`/`mount`/`into_node`等、汎用Component shadowが決して持たないruntime専用methodを一切呼ばない)を別途生成する。
+templateのRust入力は専用のnamed-template markerやRA shadowを生成しない。再利用したいtemplateは通常のRust functionとして定義し、関数本体で`template_view!(|alias: ConcreteTarget| { ... })`を呼び出す。component defaultは`template: template_view!(|alias: Self| { ... })`として生成され、standaloneと同じshared lowererへ入る。
 
 真に外部(ローカル`TypeInfo`なし)なbaseを`inherits`し、自前の`view`内でbaseの属性を同名のまま裸参照している(`padding: padding`)component(Refs #90)については、baseの完全な field 一覧を持たないため、`resolve_effective_fields`は代わりにview自身の裸参照を唯一の証拠として当該fieldを合成する(`codegen.rs`の`synthesize_external_base_fields`)。合成されたfieldの型は具体的なRust型文字列ではなく、`{Base}!(@field_type {name})`という型位置macro呼び出し文字列——実際の型解決はconsumer crate側での`__elwindui_props_*!`展開(`class_macro_design.md`)まで遅延する、この節の冒頭の方針そのものの型情報版である。合成fieldの宣言元(`declaring_types`)は、辿れる祖先が存在しない以上、component自身とする。
 
@@ -227,7 +233,7 @@ validatorは [`dsl_spec.md`](../../specs/dsl_spec.md) のcompile-time ruleをAST
 
 macro processで完全に解決できないRust型やpathは、生成するRust構文によってrustcのtype checkとpattern exhaustiveness checkへ引き継ぐ。正しさを隠す合成的なwildcard armは生成しない。
 
-ControlTemplateのcross-crate target、Environment Key Value、`templated_parent` getter、
+ControlTemplateのcross-crate target、Environment Key Value、declared parent alias getter、
 `ContentPresenter` targetはそれぞれ生成した`ControlExt`、型一致、method resolution、`ContentControlExt` boundで検査する。
 
 ### 3.35 Deferred view lowering (`context_popup: view! { .. }`, #162)
@@ -236,10 +242,10 @@ ControlTemplateのcross-crate target、Environment Key Value、`templated_parent
 
 - 見つかった各`view! { .. }`ブロックを、独立した隠しComponent/View pair(`ContentControl`基底、`__ElwinduiViewFactoryInstanceFor<Owner>_<ordinal>`という決定的な名前)として抽出する。この隠しComponentは唯一の合成field `#[param] __view_owner: Weak<SourceComponent>`を持ち、`ViewDef::implicit_owner = Some(ImplicitOwnerDef { field_name: "__view_owner", readable_fields, writable_fields, reactive_fields, bindable_fields })`としてmarkされる(PR #165 final rereview remediation, A2、`reactive_fields`/`bindable_fields`はPR #165 post-final rereview remediation, A8/A9で追加)。`SourceComponent`は常に*元の*lexical source Componentであり、nesting深度に関わらず不変(`DeferredViewExpr::lexical_owner`、PR #165 A3)——`context_popup`の中にさらに`context_popup: view! { .. }`が入れ子になっている場合でも、両方の隠しComponentが同じ`SourceComponent`を`__view_owner`の型として持つ。schemaの4集合すべてがnesting深度に関わらず同一である(`codegen::implicit_owner_schema`がlowering前に一度だけ計算し、以降すべてのnesting levelへそのまま伝播する — 各levelの隠しComponent自身の(ほぼ空の)field listから再計算することは決してない)。生成された隠しComponent自身の名前だけがnesting levelごとに変わる。4集合は`SourceComponent`の*effective*field list(継承分を含む、`resolve_effective_fields`)から導出する: `readable_fields`は`Prop`/`State`/`Param`/`Computed`/`Environment`、`writable_fields`は`Prop`/`State`のみ、`reactive_fields`は`Prop`/`State`/`Computed`/`Environment`(`Param`は構築後に再代入されずPropertyChanged variantを持たないため除外——`generate_view`自身の`component_property_variants`構築が実際に検証済みの根拠)、`bindable_fields`は`Attr::Bindable`を持つfield(常に`FieldKind::Param`、`TypeInfo::bindable_fields`をそのまま再利用)。`Attached`(実体を持たないschema宣言)はいずれの集合にも含まれない。
 - 元の`context_popup`属性値は、抽出した隠しComponent名を参照する`ViewExpr::DeferredView`markerへ置き換わる。
-- 隠しComponentの本体のうち、通常の`view!`属性値・要素構築(DSL grammarの一部)は変換なしにそのまま既存pipelineへ流れる — 3.3のvalidation、3.4のdependency analysis、3.5のcode generationのいずれも、この隠しComponentを他の通常Componentと区別する特別な分岐を必要としない。唯一の例外は`__view_owner`(`implicit_owner.is_some()`)を`ControlTemplate`の`templated_parent`と同様にweak-owner/Environment伝播対象として扱う既存分岐(`is_template_or_deferred_scope`)であり、これも`templated_parent`向けに既に存在する仕組みの一般化であって新設ではない。DSL属性値内の裸名解決(`emit_expr`の`ViewExpr::Path`分岐)自体も、`implicit_owner.readable_fields`に実際に含まれる名前だけをowner fallback対象とする——下記のraw Rustパスと同じmembership判定を共有する。
+- 隠しComponentの本体のうち、通常の`view!`属性値・要素構築(DSL grammarの一部)は変換なしにそのまま既存pipelineへ流れる — 3.3のvalidation、3.4のdependency analysis、3.5のcode generationのいずれも、この隠しComponentを他の通常Componentと区別する特別な分岐を必要としない。唯一の例外は`__view_owner`(`implicit_owner.is_some()`)をtemplateのdeclared parentと同様にweak-owner/Environment伝播対象として扱う既存分岐(`is_template_or_deferred_scope`)であり、これもtemplate parent向けに既に存在する仕組みの一般化であって新設ではない。DSL属性値内の裸名解決(`emit_expr`の`ViewExpr::Path`分岐)自体も、`implicit_owner.readable_fields`に実際に含まれる名前だけをowner fallback対象とする——下記のraw Rustパスと同じmembership判定を共有する。
 - 一方、`on_mount`/`on_unmount`/`on_update`ブロックとevent handler closureの本体は、DSL grammarではなく**任意のRust文**であり、`view!`の属性値resolutionとは別の`syn::visit_mut::VisitMut`パス(`ViewClosureRewriter`)で書き換えられる。裸の1segment名の解決順序は次の通り:①現在のlexical scope stack(`let`/`if let`/`while let`/`match`/`for`/nested closureのbindingを実際のRust scopingと同じ深さで追跡する`ViewClosureRewriter::scopes`)上の実local/closure parameter、②隠しComponent自身のfield、③`implicit_owner.readable_fields`に含まれる既知のsource-owner field(`resolved_implicit_owner_field`、`<owner>.field()`へ変換)、④それ以外は通常のRust名としてそのまま残す。raw Rustは`view!`のDSL grammarと異なり任意のネストしたscopeを持ちうるため、単一のblock全体に対するflatなshadow setではなく、実際のRust lexical scopingに従うscope stackで追跡する——block-wide flatなmodelは、同一block内でouter fieldの読み取りと同名localのshadowingが混在するケースで意味論を変えてしまう既知のバグを持っていた(PR #165 review remediation round 1)。さらに、`implicit_owner`が設定されていて①②に該当しないというだけで無条件にowner fallbackするmodelは、そのComponentのfieldでも何でもない自由なRust名(module定数、`None`、他所のfree function呼び出し等)まで誤って`__view_owner`経由のgetter呼び出しに書き換えてしまう欠陥を持っていた(PR #165 final rereview remediation, A2)——③のmembership判定はこれを防ぐ。書込み(`x = rhs`という代入の左辺が裸の1segment名の場合)も同じ優先順位で解決する: 隠しComponent自身のmutable own fieldなら`self.set_x(rhs)`、それ以外で`implicit_owner.writable_fields`に含まれる場合(`Prop`/`State`のみ)は`resolved_implicit_owner_setter`経由で`<owner>.set_x(rhs)`、どちらでもなければ通常のRust代入としてそのまま残す。
 
-**PR #165 post-final rereview remediation、A8**(source-qualified 2segment path): 上記①〜④は裸の1segment名の話であり、`vm.label`/`vm.save`のような2segment pathには別の欠陥があった——`emit_path_get`/`emit_setter`は元々owner segment(`vm`)を無条件に`self.vm`(または裸の`vm`、construction mode時)として emitしていたため、隠しComponent自身が物理的に`vm` fieldを持たない場合(常にそう)、構文的には正しいが`rustc`が「no field `vm`」で拒否する不正なコードを生成していた(`assert_valid_rust`の`syn::parse2`のみのcheckでは検出できない)。共有resolver `path_owner_value_tokens`が両関数の前段に入り: ①`owner` segmentが現在生成中Component自身の実fieldなら(`ctx.own_fields`、`__view_owner`自身や`ControlTemplate`の`templated_parent`を含む)従来通り、②実fieldでなくかつ`implicit_owner.bindable_fields`に含まれるなら`__view_owner`をupgradeしその`vm()` getterを経由してbridgeする(`<upgraded>.vm().label()`)、③どちらでもなければ元の(無条件)挙動へfall backする。raw Rust側(`ViewClosureRewriter`)の2segment `Expr::Path`分岐にも対称的な`resolved_implicit_bindable_owner`を追加している。
+**PR #165 post-final rereview remediation、A8**(source-qualified 2segment path): 上記①〜④は裸の1segment名の話であり、`vm.label`/`vm.save`のような2segment pathには別の欠陥があった——`emit_path_get`/`emit_setter`は元々owner segment(`vm`)を無条件に`self.vm`(または裸の`vm`、construction mode時)として emitしていたため、隠しComponent自身が物理的に`vm` fieldを持たない場合(常にそう)、構文的には正しいが`rustc`が「no field `vm`」で拒否する不正なコードを生成していた(`assert_valid_rust`の`syn::parse2`のみのcheckでは検出できない)。共有resolver `path_owner_value_tokens`が両関数の前段に入り: ①`owner` segmentが現在生成中Component自身の実fieldなら(`ctx.own_fields`、`__view_owner`自身やtemplateのdeclared parent aliasを含む)従来通り、②実fieldでなくかつ`implicit_owner.bindable_fields`に含まれるなら`__view_owner`をupgradeしその`vm()` getterを経由してbridgeする(`<upgraded>.vm().label()`)、③どちらでもなければ元の(無条件)挙動へfall backする。raw Rust側(`ViewClosureRewriter`)の2segment `Expr::Path`分岐にも対称的な`resolved_implicit_bindable_owner`を追加している。
 
 **PR #165 post-final rereview remediation、A9**(direct source-field/qualified-pathのreactive追跡): 依存追跡3関数(`collect_view_expr_owner_properties`/`view_expr_has_reactive_dependency`/`view_expr_depends_on`)は元々`ctx.mutable_own_fields`(隠しComponent自身のmutable own field、通常ほぼ空)しか見ておらず、直接の裸source field参照(`TextBlock { text: label }`)もsource-qualified path(`vm.label`)も、生成時点で正しく読めても`__resync___view_owner`/`__resync_vm`のmatch armに一切登録されないため、popupが開いている間ライブ更新されなかった。3関数それぞれへ`implicit_owner.reactive_fields`(裸の1segment名を`(__view_owner, field)`という正準dependency identityへ変換)と`implicit_owner.bindable_fields`(2segment pathの`owner`側判定)を考慮する分岐を追加した——`format!`マクロの inline capture分岐も同様に拡張済み。`vm`のような論理bindable ownerは物理fieldではないため、既存の`bind_owners`(物理field専用)には追加できない——別途`implicit_bind_owners`(`ctx.own_fields`に同名の実fieldが無い`bindable_fields`のみ)を導出し、`property_resync_methods_for`を*変更なしに*再利用して(この関数自体は`owner_name`を単純な文字列一致でしか見ておらず、物理fieldかどうかを区別しない)`__resync_vm`相当のmethodを生成し、`subscribe_stmts`側にのみ新しいbridging code(`__view_owner`をupgrade→`.vm()`→その値へ`ObservableExt::subscribe_property_changed`)を追加している——第二の購読engineではなく、既存機構の並行適用である。
 
@@ -291,6 +297,12 @@ component自身のauthored presentationと、componentを使用する側のbare 
 なり、mount時にtyped Environment lookupでdefaultまたはoverrideを選択する。使用側のbare childは
 template lowererを経由せず、effective `#[content(...)]`のscalar/collection loweringへ送られる。
 この区別はtype-name dispatchやhidden presentation metadataではなく、authoring slotの種類から決まる。
+
+テンプレートを持つgenerated componentがexternal shapeのscalar content slotを継承する場合、そのslotは
+component自身のeffective field listに重複してコピーしない。使用側の名前付き`content:`値だけを、継承元
+shapeのexported `@set` protocolへ渡し、generated componentが`__mount`する前にlogical contentを設定する。
+値のtrait-object化は宣言側shape macroの型情報で一度だけ行うため、consumer側にreflectionや別の
+content-binding engineは導入しない。
 
 #### Component override bridge
 

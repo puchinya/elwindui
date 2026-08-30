@@ -1,10 +1,10 @@
 # Tooling status
 
-Snapshot: 2026-08-29. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-08-30. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
 
 | Tool | State | Current capability / gap |
 |---|---|---|
-| `elwindui-codegen` | 🚧 | component/ViewModel/enum/ControlTemplate frontend, parser, diagnostics, and one shared semantic planner/emitter for ordinary `view!` plus template construction, property/content lowering, lifecycle, bindings, dynamic regions, ownership, Environment propagation, deferred views, and cleanup; `body: view!` remains ordinary composition, while `template: template_view!` and standalone `template_view!` expressions compile to typed `ControlTemplate<C>` values through the same lowerer. Template-only work is limited to typed-parent acquisition, capability bounds, factory wrapping, and template-root replacement. Property-free templates accept raw `ControlExt` targets; typed parent property paths are emitted only through `TemplateProperty`/`WritableTemplateProperty` capability bounds, and raw framework/class-managed property bridges are not synthesized. Bare children and dynamic regions lower from effective `#[content(field)]` metadata plus field shape (scalar setter or collection surface); Layout is not a special host category. Control-specific type-name lowering, standalone compiler/type lists, and hidden body-presentation metadata are absent. |
+| `elwindui-codegen` | 🚧 | component/ViewModel/enum/ControlTemplate frontend, parser, diagnostics, and one shared semantic planner/emitter for ordinary `view!` plus template construction, property/content lowering, lifecycle, bindings, dynamic regions, ownership, Environment propagation, deferred views, and cleanup; `body: view!` remains ordinary composition, while explicit-target `template_view!(|alias: Target| { ... })` and component `template: template_view!(|alias: Self| { ... })` compile to typed `ControlTemplate<T>` values through the same lowerer. Template-only work is limited to declared-parent acquisition, capability bounds, factory wrapping, and template-root replacement. Targets are not inferred from expected types, `Self` is component-default-only, and reusable templates are ordinary Rust functions; the public `#[control_template]` marker API is absent. Property-free templates accept raw `ControlExt` targets; typed parent property paths are emitted only through `TemplateProperty`/`WritableTemplateProperty` capability bounds, with source-local analysis-only shadows preserving exact associated value types and writable/read-only capability; raw framework/class-managed property bridges are not synthesized. Bare children and dynamic regions lower from effective `#[content(field)]` metadata plus field shape (scalar setter or collection surface); Layout is not a special host category. Control-specific type-name lowering, standalone compiler/type lists, and hidden body-presentation metadata are absent. |
 | `elwindui-languageserver` | 🚧 | single-file diagnostics, member completion, and DSL semantic tokens; no cross-file resolution, hover, or generated-code preview |
 | Preview | ⬜ | design exists; no workspace preview application |
 | `elwindui-hotreload` | 🚧 | tested Patch/Remount decision helper exists; artifact loading and live replacement pipeline are absent |
@@ -16,6 +16,15 @@ Snapshot: 2026-08-29. Tool architecture is indexed in [`../design/README.md`](..
 Implemented commands cover launching/locating a process or window, waiting for window state, bringing a window to the front, querying the Accessibility tree, setting supported values, and invoking supported actions. Accessibility permission and foreground restrictions remain environment constraints.
 
 The command catalog and operational precautions belong in [`../agents/appkit.md`](../agents/appkit.md) and [`../../tools/macos-ui-driver/README.md`](../../tools/macos-ui-driver/README.md), not in status.
+
+On 2026-08-30, `cargo run -p control-template-demo` reached executable
+startup after the public-path remediation. Computer Use then captured the same
+rebuilt executable in an inspectable AppKit bundle: the screenshot showed
+`Captured: Environment override`, `Reactive parent alias label`, and
+`Logical content, visually hosted by ContentPresenter`; `Default template` was
+absent. This is an objective AppKit visual PASS. The repository
+`macos-ui-driver` doctor still reports unavailable Accessibility and Screen
+Recording permissions in this environment, so no AX-tree evidence is claimed.
 
 ## External generated-component DSL (#191/#193/#194)
 

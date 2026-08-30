@@ -34,13 +34,13 @@ struct ForItemTwoWayHost {
     #[bindable]
     vm: Rc<RowsViewModel>,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         VerticalLayout {
             for row in vm.rows {
                 TextArea { text <=> row.content }
             }
         }
-    },
+    }),
 }
 
 #[elwindui::component]

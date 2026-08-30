@@ -10,13 +10,13 @@ struct ScalarControlProbe {
     #[prop(default = false)]
     alternate: bool,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         if alternate {
             TextBlock { text: "A" }
         } else {
             TextBlock { text: "B" }
         }
-    },
+    }),
 }
 
 #[elwindui::component]

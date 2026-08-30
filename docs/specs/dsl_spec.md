@@ -28,7 +28,7 @@ Rustの構文・慣習に寄せることで学習コストを下げつつ、機�
 
 ElwindUILは通常のRustファイル中で属性マクロ`#[elwindui::component]`を使って書く。**これが唯一サポートされる記法であり、Rustのソースファイル以外の独自テキスト形式は存在しない。** 要素はRustの構造体リテラルに似た記法で記述し、ネストがそのまま親子関係になる。
 
-`body: view!`は通常のcomponent compositionであり、`template: template_view! { ... }`は
+`body: view!`は通常のcomponent compositionであり、`template: template_view!(|alias: Self| { ... })`は
 Control-derived componentの型レベルdefault `ControlTemplate<Self>`宣言である。両者は別の
 authoring slotであり、同じcomponentに同時に指定できない。Control-derivedのvisual chromeは
 `template`で宣言し、`body`はmigration diagnosticでrejectする。Layout-derived componentの
@@ -57,7 +57,7 @@ impl Greeting {}
 - 属性は `key: value` 形式
 - カンマ・改行はどちらも区切りとして等価
 - 単純な識別子・リテラルの参照は `${}` 不要。演算や結合を含む式のみ `format!` 等を使う
-- `view!`は通常のcomponent compositionを記述する`body`型位置で使い、通常のRustコードから単独macroとして呼び出すことはできない。`template_view!`は別の式macroであり、期待型に応じた`ControlTemplate<C>`値を生成する
+- `view!`は通常のcomponent compositionを記述する`body`型位置で使い、通常のRustコードから単独macroとして呼び出すことはできない。`template_view!`は別の式macroであり、`|alias: Target|`ヘッダーで明示したtargetの`ControlTemplate<Target>`値を生成する
 - **`#[elwindui::component] impl Name {}` は、メソッドが1つも無くても常に必須。** 省略すると`Name`というcomponent型は成立しない。本書の以降のコード例は空`impl`も省略しない
 
 ```rust
@@ -202,7 +202,7 @@ module path、Cargo alias、およびeffective inheritanceの既存の保証は�
 | 書く内容 | 型・制約・初期値のみ | `if`/`for`/`match`による要素ツリーの組み立て |
 | 変更頻度 | 低い(型は安定) | 高い(レイアウト調整で頻繁に変わる) |
 
-**`body: view! { .. }` フィールドを持つcomponentは、必ず`inherits`(次項)で何らかのbaseを指定する。** これは単なる制限ではなく、`view!`の中身の書き込み先そのものがbaseに依存するためである——`view!`のトップレベルの属性設定(`padding: padding`のような`key: value`行)はbaseが持つ同名フィールドへの設定・バインディングであり、属性名を書かない裸のネスト子要素は、baseの**実効**`#[content(field_name)]` metadataが指定するフィールドへ lower される。destination の型が scalar なら `set_<field>(child)` に、collection なら collection surface への順序付き挿入になる。`Control`を継承するcomponentのvisual chromeは`body`ではなく`template: template_view! { ... }`で宣言する。テンプレートの既定rootはtyped `ControlTemplate<Self>`としてprivateなtemplate-root経路へ接続され、これは公開`children` collectionではない。一方、`template`のuse-siteで書かれた裸の子要素は、baseの**実効**`#[content(field_name)]` metadataが指定する通常のcontent destinationへlowerされる。`inherits`で指定するbaseが無ければ、このどちらにも書き込み先が存在しない。したがってbase無しで自分自身の視覚ツリーを一から組み立てるcomponentは現状サポートされない——`view`を持つcomponentは常に何らかの合成可能なbase(`VerticalLayout`/`HorizontalLayout`等、または他のユーザー定義component)の上に構築する。子要素を並べたいだけの単純なcomponentは、`inherits VerticalLayout`/`inherits HorizontalLayout`(次項の2番目のケース、シェイプ合成)を使うのが最も基本的な書き方になる——この場合`view`の中身がそのままそのレイアウトの子要素になるため、ラッパー要素を書く必要もない。`view!`/`template_view!`を持たないcomponent(データ定義のみ、§4参照)にはこの制約はない。
+**`body: view! { .. }` フィールドを持つcomponentは、必ず`inherits`(次項)で何らかのbaseを指定する。** これは単なる制限ではなく、`view!`の中身の書き込み先そのものがbaseに依存するためである——`view!`のトップレベルの属性設定(`padding: padding`のような`key: value`行)はbaseが持つ同名フィールドへの設定・バインディングであり、属性名を書かない裸のネスト子要素は、baseの**実効**`#[content(field_name)]` metadataが指定するフィールドへ lower される。destination の型が scalar なら `set_<field>(child)` に、collection なら collection surface への順序付き挿入になる。`Control`を継承するcomponentのvisual chromeは`body`ではなく`template: template_view!(|alias: Self| { ... })`で宣言する。テンプレートの既定rootはtyped `ControlTemplate<Self>`としてprivateなtemplate-root経路へ接続され、これは公開`children` collectionではない。一方、`template`のuse-siteで書かれた裸の子要素は、baseの**実効**`#[content(field_name)]` metadataが指定する通常のcontent destinationへlowerされる。`inherits`で指定するbaseが無ければ、このどちらにも書き込み先が存在しない。したがってbase無しで自分自身の視覚ツリーを一から組み立てるcomponentは現状サポートされない——`view`を持つcomponentは常に何らかの合成可能なbase(`VerticalLayout`/`HorizontalLayout`等、または他のユーザー定義component)の上に構築する。子要素を並べたいだけの単純なcomponentは、`inherits VerticalLayout`/`inherits HorizontalLayout`(次項の2番目のケース、シェイプ合成)を使うのが最も基本的な書き方になる——この場合`view`の中身がそのままそのレイアウトの子要素になるため、ラッパー要素を書く必要もない。`view!`/`template_view!`を持たないcomponent(データ定義のみ、§4参照)にはこの制約はない。
 
 ```rust
 #[elwindui::component(inherits VerticalLayout)]
@@ -293,7 +293,7 @@ impl Dashboard {}
 
 1. **`Base`が`NativeControl`マーカー** — 純粋なカテゴリタグ(フィールド継承なし)。ネイティブ実装を持つ末端要素(`Button`等)であることを示すのみ。
 2. **`Base`が`view`を持たないプリミティブ形状ファミリー**(例:`Control`/`Rectangle`)、または**`Base`自身が既にシェイプ合成されているDSLコンポーネント**、または**`Base`が`view`を持たないネイティブ実装のホスト**(例:`Window`) — `Base`の`#[param]`/propフィールドを**再宣言なしに自動継承**し、さらに`Name`自身の`view`の中身は**常に暗黙に`Base`自身の属性・子要素**になる(ラッパー要素は書かない——`Base { ... }`という入れ子は書かず、`Base`の属性・子要素を`view`の`{}`直下にそのまま書く)。シェイプ合成/ホスト合成(`docs/specs/ui_spec.md`参照)。
-3. **`Base`が自前の通常`body`を持つ論理コンポーネント**(builtinでもユーザー定義でも) — フィールドと通常のcomponent compositionを既存の継承規則に従って扱う。Control-derived componentの既定の視覚ツリーはこの暗黙継承では作らず、`template: template_view! { ... }`で型付き`ControlTemplate<Self>`を明示する。基底型のControlTemplateを派生型へ共変変換したり、基底型Environment slotを派生型へ自動適用したりしない。
+3. **`Base`が自前の通常`body`を持つ論理コンポーネント**(builtinでもユーザー定義でも) — フィールドと通常のcomponent compositionを既存の継承規則に従って扱う。Control-derived componentの既定の視覚ツリーはこの暗黙継承では作らず、`template: template_view!(|alias: Self| { ... })`で型付き`ControlTemplate<Self>`を明示する。基底型のControlTemplateを派生型へ共変変換したり、基底型Environment slotを派生型へ自動適用したりしない。
 4. **`Base`がネイティブ実装のみの末端要素**(例:`Button`) — 継承不可。生成されるRustコードを持たないため、委譲先が存在しない。
 
 `Base`の書き方は、それが組み込み(builtin)かユーザー定義かで異なる:組み込みは裸の名前(`inherits Control`/`inherits ContentControl`のように)、ユーザー定義コンポーネントはクレートルート起点の完全修飾パス(`inherits crate::ui::LabeledPanel`)で書く。これは`#[elwindui_macros::class]`の`inherits = ..`引数が同一クレート内でも常に完全修飾パスを要求するのと同じ理由による(`docs/specs/macro_class_spec.md`§7)——生成される`__elwindui_inherit_*!`マクロ連鎖が別モジュールから展開される可能性があるため、裸名は解決できない。ユーザー定義の`Base`を裸名で書くと静的エラーになる。あわせて、`Base`を公開するモジュールは名前を列挙した再エクスポートではなく、必ずグロブ再エクスポート(`pub use some_module::*;`)にすること——`#[class]`は`Base`と同じ位置に伴走する`__elwindui_macros_of_{Base}`エイリアスを生成するため、名前を列挙した再エクスポートではそれが取り残される。
@@ -305,19 +305,19 @@ struct ContentWrapper {
     label: String,
     // padding は Control から自動的に継承される — 再宣言不要、self.padding() がそのまま使える
 
-    template: template_view! {
+    template: template_view!(|control: Self| {
         Grid {
             padding: padding
             TextBlock { text: label }
         }
-    }
+    })
 }
 
 #[elwindui::component]
 impl ContentWrapper {}
 ```
 
-ここで`Control`は`elwindui::ui::Control`(ビルトイン、裸名で参照)である。`template_view!`の結果は期待型から`ControlTemplate<ContentWrapper>`として型付けされ、インスタンスごとの`template`プロパティにはならない。caller側で`ContentWrapper { TextBlock { ... } }`のように書いたbare childは、templateとは独立した実効`#[content(...)]`へlowerされる。
+ここで`Control`は`elwindui::ui::Control`(ビルトイン、裸名で参照)である。`template_view!(|control: ContentWrapper| { ... })`のようにtargetをヘッダーへ明記した結果は`ControlTemplate<ContentWrapper>`として型付けされ、インスタンスごとの`template`プロパティにはならない。caller側で`ContentWrapper { TextBlock { ... } }`のように書いたbare childは、templateとは独立した実効`#[content(...)]`へlowerされる。
 
 `Control`派生componentのvisual chromeは`body: view!`ではなく`template: template_view!`で宣言する。これは内部の`__prepare_template_presentation()`/`__set_template_root()`経路へ接続される型レベルの既定templateであり、hiddenなbody-presentation metadataではない。EnvironmentContextの`set_control_template::<ContentWrapper>(...)`でmount前のoverrideを指定でき、lookupは対象型のTypeIdに対して完全一致する。`ContentPresenter`をtemplate内に静的に1つ置いた場合だけ、callerのlogical contentがそのvisual subtreeへpresentされる。
 
@@ -382,7 +382,7 @@ body: view! {
 
 - `on_mount`はcomponentがUI treeへ初めて接続された直後に一度だけ実行する
 - `on_unmount`はcomponentがUI treeから切り離される直前に一度だけ実行する
-- `on_update(field, ...)`は列挙した`#[prop]`または`#[computed]`のいずれかが変更された後に実行する
+- `on_update(field, ...)`は列挙した`#[prop]`または`#[computed]`のいずれかが変更された後に実行する。ここで列挙するselectorは`label`/`source`のような**非修飾のfield名**であり、`on_update(alias.label)`のようなparent alias付きpathは書かない(値の参照やsetterをbody内で行う場合だけ`alias.label`を使う)
 - 引数なしの`on_update`は任意の`#[prop]`変更を監視する
 - 初期構築時の値設定は`on_update`として数えない
 - hookは通常のRust blockであり、副作用を実行できる
@@ -723,9 +723,10 @@ impl DocumentTabs {}
 ### `template_view!`: typed ControlTemplate value
 
 normative contractは[`control_template_spec.md`](control_template_spec.md)に分離する。
-`template_view! { ... }`は単独のRust式として`ControlTemplate<C>`を生成し、期待される型から`C`を
-推論する。template内の`templated_parent`は`ControlTemplateContext<C>`のtyped targetであり、
-通常のgetter/event wiringを使う。
+`template_view!(|alias: Target| { ... })`は単独のRust式として`ControlTemplate<Target>`を生成する。
+headerの`alias`がtemplate parentの名前、`Target`がexact target typeであり、期待される型からtargetを
+推論しない。componentのdefaultだけは`Target`に`Self`を指定でき、standalone/reusable function form
+ではconcrete targetを指定する。
 
 ```rust
 #[elwindui::component(inherits ContentControl)]
@@ -733,18 +734,18 @@ struct RoundedPanel {
     #[prop(default = String::new())]
     label: String,
 
-    template: template_view! {
+    template: template_view!(|panel: Self| {
         VerticalLayout {
-            TextBlock { text: templated_parent.label }
+            TextBlock { text: panel.label }
             ContentPresenter {}
         }
-    },
+    }),
 }
 
 let environment = application_environment();
-environment.set_control_template::<RoundedPanel>(Some(template_view! {
-    Border { TextBlock { text: templated_parent.label } }
-}));
+environment.set_control_template::<RoundedPanel>(Some(template_view!(|panel: RoundedPanel| {
+    Border { TextBlock { text: panel.label } }
+})));
 ```
 
 `template:`はcomponentの型レベルdefault factoryであり、`#[prop]`やinstance propertyではない。
@@ -753,8 +754,9 @@ environment.set_control_template::<RoundedPanel>(Some(template_view! {
 `ControlTemplate<Base>`は`ControlTemplate<Derived>`へ自動変換されない。旧
 `#[component(template = key)]`はmigration diagnosticでrejectする。
 
-`#[elwindui::control_template(target = RoundedPanel)]`はnamed reusable templateとして残るが、その
-宣言bodyは同じ`template_view!` compiler、validator、factory、`templated_parent` semanticsを共有する。
+named reusable templateは通常のRust functionとして定義する。そのbodyは同じ
+`template_view!(|alias: ConcreteTarget| { ... })` compiler、validator、factory、parent-alias semanticsを
+共有する。専用の`#[control_template]` marker APIやnamed marker struct APIはない。
 `ContentPresenter`は静的に0個または1個だけ許可し、dynamic region内や複数配置はrejectする。
 `NativeControl`、非`Control` target、instance-level template、runtime re-template、TemplatePart、
 VisualStateManagerは対象外である。
@@ -786,7 +788,7 @@ struct DocumentTabs {
 ```
 
 - ブロック内は通常の`view!`本体と全く同じ文法(`on_mount`/`lets`/`if`/`match`/`for`を含む)であり、専用の制限は無い。
-- ブロック内の裸の識別子は、そのブロックを**字句的に囲むComponent自身**の以下の範囲に対して、通常の`view!`本体と同じ名前解決規則で解決される——`ControlTemplate`の`templated_parent.foo`のような明示的修飾は不要であり、また使えない:
+- ブロック内の裸の識別子は、そのブロックを**字句的に囲むComponent自身**の以下の範囲に対して、通常の`view!`本体と同じ名前解決規則で解決される。これはControlTemplateの宣言済みparent aliasによる明示的修飾とは別の規則である:
   - enclosing Component自身の`field`/`state`/`param`/`computed`/`environment`値(裸の一段名、例: `selected_label`)。
   - enclosing Component自身の`#[bindable]`ownerを経由した二段パス(例: `vm.selected_label`、`vm.close_tab`)。
   - enclosing Component自身の書込み可能な(`prop`/`state`の)field/state値への代入——生成されたsetterへ経路付けられる。
@@ -1367,15 +1369,16 @@ impl SaveButton {}
 23. `VirtualList`に`key`が指定されていない状態で`items`の順序が変わる更新が行われる → 警告(`docs/specs/ui_spec.md`参照。挿入位置ベースの再利用にフォールバックし、リコンサイル効率が低下する可能性がある)。一般の `for` は `Vec<Rc<T>>` のとき各要素の `Rc<T>` ポインタ同一性で子を再利用し、その他の collection は当該範囲を再構築する(`docs/specs/ui_spec.md`参照)。`TabView` は `TabViewItem` を子として指定する。
 24. `on_foreground`/`on_background`/`on_terminate`(`docs/design/runtime/ui_tree_design.md`)が、アプリのエントリポイント(ルート)コンポーネント以外で宣言されている → 警告(OSレベルのライフサイクルは単一箇所への集約を推奨)
 25. コールバック型のフィールドで `Rc<dyn Fn(...)>` / `Box<dyn Fn(...)>` のような型消去表現を直接使用している(`fn(...)` 糖衣構文を使っていない) → エラー(4章「コールバック型フィールド」参照)
-26. `template: template_view! { ... }`または`#[control_template(target = T)]`の`T`が`ControlExt`を実装しない(`NativeControl`を含む) → エラー
+26. `template_view!(|alias: Target| { ... })`の`Target`が`ControlExt`を実装しない(`NativeControl`を含む) → エラー
 27. `body`と`template`を同じcomponentに宣言する → エラー。`body`は通常composition、`template`はtyped default ControlTemplateであり、どちらか一方だけを使う。
-28. `template: template_view! { ... }`をControl-derivedでないcomponentに宣言する、またはControl-derived componentのvisual chromeを`body: view!`で宣言する → migration guidance付きエラー
-29. `#[component(template = key)]`を使用する → `template: template_view! { ... }`と`EnvironmentContext::set_control_template::<Target>(...)`への移行案内付きエラー
-30. templateが複数の`ContentPresenter`を含む、またはdynamic region内に`ContentPresenter`を含む → エラー
-31. `#[shortcut(...)]` が `#[routed]` でない属性に付与されている → エラー(12章「`#[shortcut(...)]`」参照。`on_click`等のコールバック属性以外に付けても意味を持たない)
-31. `#[shortcut(...)]` に指定されたキー表記(修飾キー名/キー名)が不正 → エラー(`docs/design/runtime/input_focus_design.md`参照。`codegen::parse_shortcut_spec`と同じパーサーで検査するため、ここを通れば必ずコード生成もパースに成功する)
-32. `elwindui::core::graphics::Brush`/`Color`(または`Option<..>`)型のフィールドへ文字列リテラルを代入する場合(例: `Rectangle { fill: "#3a3a3c" }`)、その文字列が`"#rrggbb"`/`"#rrggbbaa"`(`#`省略可)のいずれの形式にも一致しない → コード生成時エラー(`codegen::coerce_color_literal`。動的な`String`式には適用されない——`Brush`/`Color`型の値を直接渡す必要がある)。`foreground`/`background`/`fill`/`stroke`は`BrushStyle`も受け付け、effective Environmentから解決した後に同じsetter/clear contractへ接続する。
-33. `#[environment(...)]` が同一フィールドの `#[param]`/`#[prop]`/`#[state]`/`#[bindable]` と併用されている → エラー(4章「`#[environment(name)]`」参照)
+28. `template: template_view!(|alias: Self| { ... })`をControl-derivedでないcomponentに宣言する、component defaultのtargetに`Self`以外を指定する、またはControl-derived componentのvisual chromeを`body: view!`で宣言する → migration guidance付きエラー
+29. `#[component(template = key)]`を使用する → `template: template_view!(|alias: Self| { ... })`と`EnvironmentContext::set_control_template::<Target>(...)`への移行案内付きエラー
+30. standalone `template_view!(|alias: Self| { ... })`を使用する、またはtemplate body内で宣言済みparent aliasをlocal bindingとしてshadowする → エラー
+31. templateが複数の`ContentPresenter`を含む、またはdynamic region内に`ContentPresenter`を含む → エラー
+32. `#[shortcut(...)]` が `#[routed]` でない属性に付与されている → エラー(12章「`#[shortcut(...)]`」参照。`on_click`等のコールバック属性以外に付けても意味を持たない)
+32. `#[shortcut(...)]` に指定されたキー表記(修飾キー名/キー名)が不正 → エラー(`docs/design/runtime/input_focus_design.md`参照。`codegen::parse_shortcut_spec`と同じパーサーで検査するため、ここを通れば必ずコード生成もパースに成功する)
+33. `elwindui::core::graphics::Brush`/`Color`(または`Option<..>`)型のフィールドへ文字列リテラルを代入する場合(例: `Rectangle { fill: "#3a3a3c" }`)、その文字列が`"#rrggbb"`/`"#rrggbbaa"`(`#`省略可)のいずれの形式にも一致しない → コード生成時エラー(`codegen::coerce_color_literal`。動的な`String`式には適用されない——`Brush`/`Color`型の値を直接渡す必要がある)。`foreground`/`background`/`fill`/`stroke`は`BrushStyle`も受け付け、effective Environmentから解決した後に同じsetter/clear contractへ接続する。
+34. `#[environment(...)]` が同一フィールドの `#[param]`/`#[prop]`/`#[state]`/`#[bindable]` と併用されている → エラー(4章「`#[environment(name)]`」参照)
 34. `#[environment(name)]` の `name` が、解決可能な `#[elwindui::environment_key]` 定義または組み込みEnvironment Key名(Semantic Style Key、`theme_environment_spec.md`§7、または`popup_dismiss`、同spec§2)を持たない → エラー。bare識別子(同一crate内解決または組み込みKey fallback)の場合はコード生成時の`compile_error!`。完全修飾クレートパス(Issue #129、クレート境界を越えた解決)の場合は、生成コードが実際にコンパイルされた時点の`rustc`自身の「マクロが見つからない」エラー——proc-macro展開からは他クレートが何をエクスポートしているか分からないため、`elwindui-codegen`側の早期検査は原理的に行えない(`docs/design/tools/environment_key_macro_design.md`参照)。
 35. `EnvironmentScope { key: value .. }` の `key` が、解決可能な `#[elwindui::environment_key]` 定義または**書き込み可能な**組み込みEnvironment Key名(Semantic Style Key、`theme_environment_spec.md`§7——ルール34の読み取り専用集合とは別で、`popup_dismiss`を含まない。4章「`#[environment(name)]`」の書き込み側解決規則を参照)を持たない、または `value` の型がそのKeyの `Value` 型と一致しない → エラー(5章「`EnvironmentScope`」参照)。名前解決エラーの検出方式(コード生成時`compile_error!` vs 実コンパイル時`rustc`エラー)はルール34と同じ、bare/完全修飾の別で決まる。`value`の型不一致はどちらの形式でも常に通常の`rustc`型エラー。`popup_dismiss`を`EnvironmentScope`で上書きしようとした場合は、書き込み可能な集合に含まれないため、bare識別子の「未解決」と同じコード生成時`compile_error!`となる。
 36. `#[elwindui::theme] struct Name { #[theme(value = ..)] field: Type, .. }` の `field` の識別子が、解決可能な `#[elwindui::environment_key]` 定義または**書き込み可能な**組み込みsemantic Key名を持たない → コード生成時エラー(`docs/specs/theme_environment_spec.md`§2/§3/§4/§7参照。ルール35の`EnvironmentScope`と同じ書き込み側解決規則——`#[environment(name)]`の読み取り側解決規則とは異なり、`popup_dismiss`は含まない)

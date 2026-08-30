@@ -18,7 +18,7 @@ use quote::{format_ident, quote};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use syn::visit::Visit as _;
 /// Stable compile-time token used by the generic `template_view!` property bridge.  This is a
 /// 64-bit FNV-1a-style hash of the field-name literal, calculated during code generation; it is a
 /// code-generation key, not a runtime property lookup.  The generated component implements the
@@ -27,7 +27,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// distinct properties in one target collide, Rust reports the duplicate `TemplateProperty<KEY>`
 /// implementation/associated-type conflict at compile time; the collision is never resolved
 /// silently.
-pub(crate) const fn template_property_key(name: &str) -> u64 {
+#[doc(hidden)]
+pub const fn template_property_key(name: &str) -> u64 {
     let bytes = name.as_bytes();
     let mut hash = 0xcbf29ce484222325u64;
     let mut index = 0;
@@ -210,21 +211,29 @@ pub fn generate_dsl_enum_from_item_enum(
 /// declaration-order requirement). A `view!` body routinely references
 /// `Window`/`VerticalLayout`/etc. too, but those resolve with no `Module` chained in for them at all —
 /// see `testdata`'s own doc comment on why, and `codegen::emit_external_construction`.
-/// Low-level expansion used by the public `template_view!` proc macro.
-///
-/// The standalone frontend deliberately only acquires the expected target type here.  Once that
-/// type is known, the generated factory uses the same ControlTemplate lifecycle and the same
-/// compile-time property/notification protocol as component and named templates; there is no
-/// second runtime template representation or textual `templated_parent` detection.
-pub fn generate_template_view_expression(body: &str) -> Result<TokenStream, String> {
-    let (on_mount, on_unmount, on_update, lets, parsed_root) = parser::parse_view_body(body)
-        .map_err(|error| format!("invalid `template_view! {{ ... }}` body: {error}"))?;
+/// Low-level expansion used by the public lambda-style `template_view!` proc macro.
+pub fn generate_template_view_expression(input: TokenStream) -> Result<TokenStream, String> {
+    let invocation = parser::parse_template_view_invocation(input)
+        .map_err(|error| format!("invalid `template_view!` header: {error}"))?;
+    let target_type = match &invocation.header.target {
+        ast::TemplateTarget::Concrete(target) => quote! { #target },
+        ast::TemplateTarget::SelfType => {
+            return Err(
+                "standalone `template_view!` requires a concrete target type; `Self` is only valid in a component default template"
+                    .into(),
+            )
+        }
+    };
+    let (on_mount, on_unmount, on_update, lets, parsed_root) =
+        parser::parse_view_body(&invocation.body.to_string()).map_err(|error| {
+            format!("invalid `template_view!(|alias: Target| {{ ... }})` body: {error}")
+        })?;
     let validation_view = ast::ViewDef {
         target: "__standalone_template_view".to_string(),
         is_template: true,
-        template_instance: false,
         on_mount: on_mount.clone(),
         on_unmount: on_unmount.clone(),
+        template_header: Some(invocation.header.clone()),
         on_update: on_update.clone(),
         lets: lets.clone(),
         root: parsed_root.clone(),
@@ -257,23 +266,23 @@ pub fn generate_template_view_expression(body: &str) -> Result<TokenStream, Stri
         on_update.as_ref(),
         from,
         table,
-        quote! { C },
+        target_type.clone(),
+        invocation.header.parent_alias.clone(),
         HashSet::new(),
     )?;
-    let factory = emit_standalone_template_factory(&compiled);
-    Ok(quote! {{ #factory }})
+    let factory = emit_compiled_template_factory(&compiled, target_type, true);
+    Ok(quote! { { #factory } })
 }
 
-static TEMPLATE_VIEW_FACTORY_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-/// The semantic result of compiling a template body.  All three template frontends (a component
-/// default, a named `#[control_template]`, and the expression-form `template_view!`) use this
+/// The semantic result of compiling a template body.  Component defaults and expression-form
+/// `template_view!` values use this
 /// representation before wrapping it in their respective factory/declaration shells.  Keeping
 /// the root, lifecycle, dependency, and lexical-binding output together prevents a frontend from
 /// quietly implementing a second property/dynamic/lifecycle compiler.
 pub(crate) struct CompiledTemplateBody {
     root: TokenStream,
     let_statements: TokenStream,
+    captured_names: Vec<syn::Ident>,
     refresh: TokenStream,
     property_bounds: Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
     writable_properties: BTreeSet<u64>,
@@ -298,8 +307,17 @@ pub(crate) fn compile_template_body(
     from: ast::Module,
     table: codegen::SymbolTable,
     target_type: TokenStream,
+    parent_alias: String,
     bare_parent_fields: HashSet<String>,
 ) -> Result<CompiledTemplateBody, String> {
+    validate_template_parent_alias_shadowing(
+        body,
+        lets,
+        on_mount,
+        on_unmount,
+        on_update,
+        &parent_alias,
+    )?;
     let lowered = codegen::lower_template_body(
         body,
         lets,
@@ -309,8 +327,18 @@ pub(crate) fn compile_template_body(
         &from,
         &table,
         target_type.clone(),
+        parent_alias.clone(),
         bare_parent_fields.clone(),
     )?;
+    let captured_names = collect_template_capture_names(
+        body,
+        lets,
+        on_mount,
+        on_unmount,
+        on_update,
+        &parent_alias,
+        &bare_parent_fields,
+    );
     let template_parent_ident = format_ident!("__elwindui_template_parent");
     let on_mount_tokens = on_mount.map(|block| {
         codegen::emit_template_event_closure_body_for_target_with_fields(
@@ -319,6 +347,7 @@ pub(crate) fn compile_template_body(
             &template_parent_ident,
             &lowered.property_bounds,
             target_type.clone(),
+            parent_alias.clone(),
             bare_parent_fields.clone(),
         )
     });
@@ -329,6 +358,7 @@ pub(crate) fn compile_template_body(
             &template_parent_ident,
             &lowered.property_bounds,
             target_type.clone(),
+            parent_alias.clone(),
             bare_parent_fields.clone(),
         )
     });
@@ -339,18 +369,31 @@ pub(crate) fn compile_template_body(
             &template_parent_ident,
             &lowered.property_bounds,
             target_type.clone(),
+            parent_alias.clone(),
             bare_parent_fields.clone(),
         )
     });
     let mut lifecycle_keys = BTreeSet::new();
     if let Some(block) = on_mount {
-        codegen::collect_template_rust_block_property_keys(block, &mut lifecycle_keys);
+        codegen::collect_template_rust_block_property_keys(
+            block,
+            &parent_alias,
+            &mut lifecycle_keys,
+        );
     }
     if let Some(block) = on_unmount {
-        codegen::collect_template_rust_block_property_keys(block, &mut lifecycle_keys);
+        codegen::collect_template_rust_block_property_keys(
+            block,
+            &parent_alias,
+            &mut lifecycle_keys,
+        );
     }
     if let Some(hook) = on_update {
-        codegen::collect_template_rust_block_property_keys(&hook.block, &mut lifecycle_keys);
+        codegen::collect_template_rust_block_property_keys(
+            &hook.block,
+            &parent_alias,
+            &mut lifecycle_keys,
+        );
         if let Some(fields) = &hook.fields {
             lifecycle_keys.extend(
                 fields
@@ -362,6 +405,7 @@ pub(crate) fn compile_template_body(
     Ok(CompiledTemplateBody {
         root: lowered.root,
         let_statements: lowered.let_statements,
+        captured_names,
         refresh: lowered.refresh,
         property_bounds: lowered.property_bounds,
         writable_properties: lowered.writable_properties,
@@ -373,6 +417,793 @@ pub(crate) fn compile_template_body(
         has_deferred_views: lowered.has_deferred_views,
         requires_parent: lowered.requires_parent,
     })
+}
+
+/// Classifies whether a component base is known to be Control-derived without consulting the
+/// same-crate component registry.
+enum ControlTargetKnowledge {
+    KnownControl,
+    KnownNonControl,
+    NeedsSameCrateRegistry,
+}
+
+fn control_target_knowledge(base: Option<&str>) -> ControlTargetKnowledge {
+    match base {
+        None => ControlTargetKnowledge::KnownNonControl,
+        Some("Control") | Some("ContentControl") => ControlTargetKnowledge::KnownControl,
+        Some("UIElement")
+        | Some("Layout")
+        | Some("Shape")
+        | Some("NativeControl")
+        | Some("Window") => ControlTargetKnowledge::KnownNonControl,
+        Some(_) => ControlTargetKnowledge::NeedsSameCrateRegistry,
+    }
+}
+
+fn same_crate_control_target(name: &str) -> Option<bool> {
+    fn visit(name: &str, visited: &mut HashSet<String>) -> Option<bool> {
+        match name {
+            "Control" | "ContentControl" => return Some(true),
+            "UIElement" | "Layout" | "Shape" | "NativeControl" | "Window" | "VerticalLayout"
+            | "HorizontalLayout" | "Grid" | "TextBlock" | "Rectangle" | "Ellipse" => {
+                return Some(false);
+            }
+            _ => {}
+        }
+        if !visited.insert(name.to_string()) {
+            return None;
+        }
+        let (component, _) = component_frontend::registered_component_parts(name)?;
+        let base = component.base.as_deref()?;
+        visit(base, visited).or_else(|| component.base_path.is_none().then_some(false))
+    }
+
+    visit(name, &mut HashSet::new())
+}
+
+fn validate_replaceable_template_view(view: &ast::ViewDef) -> Result<(), String> {
+    if view.lets.iter().any(|binding| binding.id.is_some()) {
+        return Err("#[id(...)] is not supported inside a replaceable ControlTemplate".to_string());
+    }
+
+    fn is_presenter(type_path: &str) -> bool {
+        type_path.rsplit("::").next() == Some("ContentPresenter")
+    }
+
+    fn visit_expr(
+        expr: &ast::ViewExpr,
+        dynamic: bool,
+        presenters: &mut usize,
+    ) -> Result<(), String> {
+        match expr {
+            ast::ViewExpr::Element(element) => visit_element(element, dynamic, presenters),
+            ast::ViewExpr::Closure { body, .. } => match body {
+                ast::ClosureBody::Element(element) => visit_element(element, dynamic, presenters),
+                ast::ClosureBody::Expr(expr) => visit_expr(expr, dynamic, presenters),
+                ast::ClosureBody::Block(_) => Ok(()),
+            },
+            ast::ViewExpr::TFluent(_, args) => {
+                for (_, expr) in args {
+                    visit_expr(expr, dynamic, presenters)?;
+                }
+                Ok(())
+            }
+            ast::ViewExpr::Path(_) | ast::ViewExpr::Expr(_) | ast::ViewExpr::DeferredView(_) => {
+                Ok(())
+            }
+        }
+    }
+
+    fn visit_element(
+        element: &ast::ElementNode,
+        dynamic: bool,
+        presenters: &mut usize,
+    ) -> Result<(), String> {
+        if is_presenter(&element.type_path) {
+            if dynamic {
+                return Err(
+                    "ContentPresenter is not supported inside a dynamic template region"
+                        .to_string(),
+                );
+            }
+            *presenters += 1;
+            if *presenters > 1 {
+                return Err(
+                    "a ControlTemplate may contain at most one ContentPresenter".to_string()
+                );
+            }
+        }
+        for attribute in &element.attributes {
+            visit_expr(&attribute.value, dynamic, presenters)?;
+        }
+        for child in &element.children {
+            visit_child(child, dynamic, presenters)?;
+        }
+        Ok(())
+    }
+
+    fn visit_child(
+        child: &ast::ChildEntry,
+        dynamic: bool,
+        presenters: &mut usize,
+    ) -> Result<(), String> {
+        match child {
+            ast::ChildEntry::Literal(element) => visit_element(element, dynamic, presenters),
+            ast::ChildEntry::Ref(_) => Ok(()),
+            ast::ChildEntry::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                visit_expr(condition, dynamic, presenters)?;
+                for child in then_branch.iter().chain(else_branch) {
+                    visit_child(child, true, presenters)?;
+                }
+                Ok(())
+            }
+            ast::ChildEntry::Match { value, arms } => {
+                visit_expr(value, dynamic, presenters)?;
+                for arm in arms {
+                    for child in &arm.body {
+                        visit_child(child, true, presenters)?;
+                    }
+                }
+                Ok(())
+            }
+            ast::ChildEntry::For {
+                collection, body, ..
+            } => {
+                visit_expr(collection, dynamic, presenters)?;
+                for child in body {
+                    visit_child(child, true, presenters)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    let mut presenters = 0;
+    for binding in &view.lets {
+        visit_element(&binding.element, false, &mut presenters)?;
+    }
+    for child in &view.root.children {
+        visit_child(child, false, &mut presenters)?;
+    }
+    Ok(())
+}
+
+/// Rejects bindings that would hide the explicitly declared template-parent alias.  This is a
+/// structural reservation check: ordinary Rust expression rewriting still owns lexical scope
+/// resolution, while this pass only visits binding positions and reports the public template
+/// diagnostic before lowering can accidentally reinterpret the alias as a local value.
+pub(crate) fn validate_template_parent_alias_shadowing(
+    body: &ast::ViewBody,
+    lets: &[ast::LetBinding],
+    on_mount: Option<&syn::Block>,
+    on_unmount: Option<&syn::Block>,
+    on_update: Option<&ast::OnUpdateHook>,
+    alias: &str,
+) -> Result<(), String> {
+    let error = || {
+        format!(
+            "template parent alias `{alias}` cannot be shadowed inside this template; choose a different local name"
+        )
+    };
+
+    struct BindingVisitor<'a> {
+        alias: &'a str,
+        found: bool,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for BindingVisitor<'_> {
+        fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
+            if pattern.ident == self.alias {
+                self.found = true;
+            }
+            syn::visit::visit_pat_ident(self, pattern);
+        }
+    }
+
+    fn block_contains_binding(block: &syn::Block, alias: &str) -> bool {
+        let mut visitor = BindingVisitor {
+            alias,
+            found: false,
+        };
+        syn::visit::Visit::visit_block(&mut visitor, block);
+        visitor.found
+    }
+
+    fn expr_contains_binding(expr: &syn::Expr, alias: &str) -> bool {
+        let mut visitor = BindingVisitor {
+            alias,
+            found: false,
+        };
+        syn::visit::Visit::visit_expr(&mut visitor, expr);
+        visitor.found
+    }
+
+    fn pat_contains_binding(pattern: &syn::Pat, alias: &str) -> bool {
+        let mut visitor = BindingVisitor {
+            alias,
+            found: false,
+        };
+        syn::visit::Visit::visit_pat(&mut visitor, pattern);
+        visitor.found
+    }
+
+    fn pattern_contains_binding(pattern: &str, alias: &str) -> bool {
+        syn::parse::Parser::parse_str(syn::Pat::parse_single, pattern)
+            .map(|pattern| pat_contains_binding(&pattern, alias))
+            .unwrap_or(false)
+    }
+
+    fn view_body_contains_binding(
+        body: &ast::ViewBody,
+        lets: &[ast::LetBinding],
+        on_mount: Option<&syn::Block>,
+        on_unmount: Option<&syn::Block>,
+        on_update: Option<&ast::OnUpdateHook>,
+        alias: &str,
+    ) -> bool {
+        if lets.iter().any(|binding| binding.name == alias)
+            || on_mount.is_some_and(|block| block_contains_binding(block, alias))
+            || on_unmount.is_some_and(|block| block_contains_binding(block, alias))
+            || on_update.is_some_and(|hook| block_contains_binding(&hook.block, alias))
+        {
+            return true;
+        }
+        body.attributes
+            .iter()
+            .any(|attribute| view_expr_contains_binding(&attribute.value, alias))
+            || body
+                .attached
+                .iter()
+                .any(|(_, _, value)| view_expr_contains_binding(value, alias))
+            || body
+                .children
+                .iter()
+                .any(|child| child_contains_binding(child, alias))
+    }
+
+    fn view_expr_contains_binding(expr: &ast::ViewExpr, alias: &str) -> bool {
+        match expr {
+            ast::ViewExpr::Path(_) => false,
+            ast::ViewExpr::TFluent(_, args) => args
+                .iter()
+                .any(|(_, value)| view_expr_contains_binding(value, alias)),
+            ast::ViewExpr::Expr(expr) => expr_contains_binding(expr, alias),
+            ast::ViewExpr::Closure { params, body } => {
+                params.iter().any(|param| param == alias)
+                    || match body {
+                        ast::ClosureBody::Expr(expr) => view_expr_contains_binding(expr, alias),
+                        ast::ClosureBody::Element(element) => {
+                            element_contains_binding(element, alias)
+                        }
+                        ast::ClosureBody::Block(block) => block_contains_binding(block, alias),
+                    }
+            }
+            ast::ViewExpr::Element(element) => element_contains_binding(element, alias),
+            ast::ViewExpr::DeferredView(deferred) => view_body_contains_binding(
+                &deferred.body.root,
+                &deferred.body.lets,
+                deferred.body.on_mount.as_ref(),
+                deferred.body.on_unmount.as_ref(),
+                deferred.body.on_update.as_ref(),
+                alias,
+            ),
+        }
+    }
+
+    fn element_contains_binding(element: &ast::ElementNode, alias: &str) -> bool {
+        element
+            .attributes
+            .iter()
+            .any(|attribute| view_expr_contains_binding(&attribute.value, alias))
+            || element
+                .attached
+                .iter()
+                .any(|(_, _, value)| view_expr_contains_binding(value, alias))
+            || element
+                .children
+                .iter()
+                .any(|child| child_contains_binding(child, alias))
+    }
+
+    fn child_contains_binding(child: &ast::ChildEntry, alias: &str) -> bool {
+        match child {
+            ast::ChildEntry::Literal(element) => element_contains_binding(element, alias),
+            ast::ChildEntry::Ref(_) => false,
+            ast::ChildEntry::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                view_expr_contains_binding(condition, alias)
+                    || then_branch
+                        .iter()
+                        .chain(else_branch)
+                        .any(|child| child_contains_binding(child, alias))
+            }
+            ast::ChildEntry::Match { value, arms } => {
+                view_expr_contains_binding(value, alias)
+                    || arms.iter().any(|arm| {
+                        pattern_contains_binding(&arm.pattern, alias)
+                            || arm
+                                .body
+                                .iter()
+                                .any(|child| child_contains_binding(child, alias))
+                    })
+            }
+            ast::ChildEntry::For {
+                binding,
+                collection,
+                body,
+            } => {
+                binding == alias
+                    || view_expr_contains_binding(collection, alias)
+                    || body
+                        .iter()
+                        .any(|child| child_contains_binding(child, alias))
+            }
+        }
+    }
+
+    if view_body_contains_binding(body, lets, on_mount, on_unmount, on_update, alias) {
+        Err(error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Finds ordinary Rust values referenced by a template body so the generated `Fn` factory can
+/// clone them once per build before the refresh callback moves its local copy.  A
+/// `ControlTemplate`/`ViewFactory` factory is callable more than once; moving a call-site capture
+/// directly into the nested `move` refresh callback would otherwise make an otherwise valid
+/// `Fn` factory fail with E0507 (for example, a reusable template that captures a `String`).
+///
+/// This deliberately scans only real Rust expressions.  DSL paths are resolved by the shared
+/// template lowerer (`owner.field`, bare parent fields, and view-model paths) and therefore must
+/// not be treated as ambient captures here.  Binding names are collected in a separate pass so
+/// generated `let`/`for` locals and Rust closure/block locals are not cloned before they exist.
+fn collect_template_capture_names(
+    body: &ast::ViewBody,
+    lets: &[ast::LetBinding],
+    on_mount: Option<&syn::Block>,
+    on_unmount: Option<&syn::Block>,
+    on_update: Option<&ast::OnUpdateHook>,
+    parent_alias: &str,
+    bare_parent_fields: &HashSet<String>,
+) -> Vec<syn::Ident> {
+    fn collect_block_bindings(block: &syn::Block, bindings: &mut HashSet<String>) {
+        struct BindingCollector<'a> {
+            bindings: &'a mut HashSet<String>,
+        }
+
+        impl<'ast> syn::visit::Visit<'ast> for BindingCollector<'_> {
+            fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
+                self.bindings.insert(pattern.ident.to_string());
+                syn::visit::visit_pat_ident(self, pattern);
+            }
+        }
+
+        BindingCollector { bindings }.visit_block(block);
+    }
+
+    fn collect_pattern_bindings(pattern: &str, bindings: &mut HashSet<String>) {
+        if let Ok(pattern) = syn::parse::Parser::parse_str(syn::Pat::parse_single, pattern) {
+            struct BindingCollector<'a> {
+                bindings: &'a mut HashSet<String>,
+            }
+
+            impl<'ast> syn::visit::Visit<'ast> for BindingCollector<'_> {
+                fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
+                    self.bindings.insert(pattern.ident.to_string());
+                    syn::visit::visit_pat_ident(self, pattern);
+                }
+            }
+
+            BindingCollector { bindings }.visit_pat(&pattern);
+        }
+    }
+
+    fn collect_view_expr_bindings(expr: &ast::ViewExpr, bindings: &mut HashSet<String>) {
+        match expr {
+            ast::ViewExpr::Path(_) => {}
+            ast::ViewExpr::TFluent(_, args) => {
+                for (_, value) in args {
+                    collect_view_expr_bindings(value, bindings);
+                }
+            }
+            ast::ViewExpr::Expr(expr) => collect_block_or_expr_bindings(expr, bindings),
+            ast::ViewExpr::Closure { params, body } => {
+                bindings.extend(params.iter().cloned());
+                match body {
+                    ast::ClosureBody::Expr(expr) => collect_view_expr_bindings(expr, bindings),
+                    ast::ClosureBody::Element(element) => {
+                        collect_element_bindings(element, bindings)
+                    }
+                    ast::ClosureBody::Block(block) => collect_block_bindings(block, bindings),
+                }
+            }
+            ast::ViewExpr::Element(element) => collect_element_bindings(element, bindings),
+            ast::ViewExpr::DeferredView(deferred) => {
+                collect_view_body_bindings(
+                    &deferred.body.root,
+                    &deferred.body.lets,
+                    deferred.body.on_mount.as_ref(),
+                    deferred.body.on_unmount.as_ref(),
+                    deferred.body.on_update.as_ref(),
+                    bindings,
+                );
+            }
+        }
+    }
+
+    fn collect_block_or_expr_bindings(expr: &syn::Expr, bindings: &mut HashSet<String>) {
+        struct BindingCollector<'a> {
+            bindings: &'a mut HashSet<String>,
+        }
+
+        impl<'ast> syn::visit::Visit<'ast> for BindingCollector<'_> {
+            fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
+                self.bindings.insert(pattern.ident.to_string());
+                syn::visit::visit_pat_ident(self, pattern);
+            }
+        }
+
+        BindingCollector { bindings }.visit_expr(expr);
+    }
+
+    fn collect_element_bindings(element: &ast::ElementNode, bindings: &mut HashSet<String>) {
+        for attribute in &element.attributes {
+            collect_view_expr_bindings(&attribute.value, bindings);
+        }
+        for (_, _, value) in &element.attached {
+            collect_view_expr_bindings(value, bindings);
+        }
+        for child in &element.children {
+            collect_child_bindings(child, bindings);
+        }
+    }
+
+    fn collect_view_body_bindings(
+        body: &ast::ViewBody,
+        lets: &[ast::LetBinding],
+        on_mount: Option<&syn::Block>,
+        on_unmount: Option<&syn::Block>,
+        on_update: Option<&ast::OnUpdateHook>,
+        bindings: &mut HashSet<String>,
+    ) {
+        bindings.extend(lets.iter().map(|binding| binding.name.clone()));
+        for binding in lets {
+            collect_element_bindings(&binding.element, bindings);
+        }
+        if let Some(block) = on_mount {
+            collect_block_bindings(block, bindings);
+        }
+        if let Some(block) = on_unmount {
+            collect_block_bindings(block, bindings);
+        }
+        if let Some(hook) = on_update {
+            collect_block_bindings(&hook.block, bindings);
+        }
+        for attribute in &body.attributes {
+            collect_view_expr_bindings(&attribute.value, bindings);
+        }
+        for (_, _, value) in &body.attached {
+            collect_view_expr_bindings(value, bindings);
+        }
+        for child in &body.children {
+            collect_child_bindings(child, bindings);
+        }
+    }
+
+    fn collect_child_bindings(child: &ast::ChildEntry, bindings: &mut HashSet<String>) {
+        match child {
+            ast::ChildEntry::Literal(element) => collect_element_bindings(element, bindings),
+            ast::ChildEntry::Ref(_) => {}
+            ast::ChildEntry::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                collect_view_expr_bindings(condition, bindings);
+                for child in then_branch.iter().chain(else_branch) {
+                    collect_child_bindings(child, bindings);
+                }
+            }
+            ast::ChildEntry::Match { value, arms } => {
+                collect_view_expr_bindings(value, bindings);
+                for arm in arms {
+                    collect_pattern_bindings(&arm.pattern, bindings);
+                    for child in &arm.body {
+                        collect_child_bindings(child, bindings);
+                    }
+                }
+            }
+            ast::ChildEntry::For {
+                binding,
+                collection,
+                body,
+            } => {
+                bindings.insert(binding.clone());
+                collect_view_expr_bindings(collection, bindings);
+                for child in body {
+                    collect_child_bindings(child, bindings);
+                }
+            }
+        }
+    }
+
+    struct CandidateCollector<'a> {
+        names: &'a mut Vec<String>,
+        seen: &'a mut HashSet<String>,
+    }
+
+    impl CandidateCollector<'_> {
+        fn add_name(&mut self, name: String) {
+            if self.seen.insert(name.clone()) {
+                self.names.push(name);
+            }
+        }
+
+        fn add_path(&mut self, path: &syn::Path) {
+            if let Some(ident) = path.get_ident() {
+                self.add_name(ident.to_string());
+            }
+        }
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for CandidateCollector<'_> {
+        fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
+            self.add_path(&expression.path);
+            syn::visit::visit_expr_path(self, expression);
+        }
+
+        fn visit_expr_call(&mut self, expression: &'ast syn::ExprCall) {
+            // A bare function path is a callee, not a captured value.  Visit arguments explicitly
+            // so `make_value(prefix)` still records `prefix`.
+            for argument in &expression.args {
+                self.visit_expr(argument);
+            }
+        }
+
+        fn visit_expr_macro(&mut self, expression: &'ast syn::ExprMacro) {
+            let macro_name = expression
+                .mac
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string());
+            if !matches!(
+                macro_name.as_deref(),
+                Some("format" | "format_args" | "vec")
+            ) {
+                return;
+            }
+            let arguments = syn::parse::Parser::parse2(
+                syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+                expression.mac.tokens.clone(),
+            );
+            let Ok(arguments) = arguments else {
+                return;
+            };
+            if matches!(macro_name.as_deref(), Some("format" | "format_args")) {
+                if let Some(syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(format),
+                    ..
+                })) = arguments.first()
+                {
+                    for name in template_format_inline_idents(&format.value()) {
+                        self.add_name(name);
+                    }
+                }
+            }
+            for argument in arguments {
+                if let syn::Expr::Assign(assign) = &argument {
+                    self.visit_expr(&assign.right);
+                } else {
+                    self.visit_expr(&argument);
+                }
+            }
+        }
+    }
+
+    fn collect_view_expr_candidates(
+        expr: &ast::ViewExpr,
+        names: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) {
+        match expr {
+            ast::ViewExpr::Path(_) => {}
+            ast::ViewExpr::TFluent(_, args) => {
+                for (_, value) in args {
+                    collect_view_expr_candidates(value, names, seen);
+                }
+            }
+            ast::ViewExpr::Expr(expr) => CandidateCollector { names, seen }.visit_expr(expr),
+            ast::ViewExpr::Closure { body, .. } => match body {
+                ast::ClosureBody::Expr(expr) => collect_view_expr_candidates(expr, names, seen),
+                ast::ClosureBody::Element(element) => {
+                    collect_element_candidates(element, names, seen)
+                }
+                ast::ClosureBody::Block(block) => {
+                    CandidateCollector { names, seen }.visit_block(block)
+                }
+            },
+            ast::ViewExpr::Element(element) => collect_element_candidates(element, names, seen),
+            ast::ViewExpr::DeferredView(deferred) => collect_view_body_candidates(
+                &deferred.body.root,
+                &deferred.body.lets,
+                deferred.body.on_mount.as_ref(),
+                deferred.body.on_unmount.as_ref(),
+                deferred.body.on_update.as_ref(),
+                names,
+                seen,
+            ),
+        }
+    }
+
+    fn collect_element_candidates(
+        element: &ast::ElementNode,
+        names: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) {
+        for attribute in &element.attributes {
+            collect_view_expr_candidates(&attribute.value, names, seen);
+        }
+        for (_, _, value) in &element.attached {
+            collect_view_expr_candidates(value, names, seen);
+        }
+        for child in &element.children {
+            collect_child_candidates(child, names, seen);
+        }
+    }
+
+    fn collect_view_body_candidates(
+        body: &ast::ViewBody,
+        lets: &[ast::LetBinding],
+        on_mount: Option<&syn::Block>,
+        on_unmount: Option<&syn::Block>,
+        on_update: Option<&ast::OnUpdateHook>,
+        names: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) {
+        for binding in lets {
+            collect_element_candidates(&binding.element, names, seen);
+        }
+        for block in [on_mount, on_unmount] {
+            if let Some(block) = block {
+                CandidateCollector { names, seen }.visit_block(block);
+            }
+        }
+        if let Some(hook) = on_update {
+            CandidateCollector { names, seen }.visit_block(&hook.block);
+        }
+        for attribute in &body.attributes {
+            collect_view_expr_candidates(&attribute.value, names, seen);
+        }
+        for (_, _, value) in &body.attached {
+            collect_view_expr_candidates(value, names, seen);
+        }
+        for child in &body.children {
+            collect_child_candidates(child, names, seen);
+        }
+    }
+
+    fn collect_child_candidates(
+        child: &ast::ChildEntry,
+        names: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) {
+        match child {
+            ast::ChildEntry::Literal(element) => collect_element_candidates(element, names, seen),
+            ast::ChildEntry::Ref(_) => {}
+            ast::ChildEntry::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                collect_view_expr_candidates(condition, names, seen);
+                for child in then_branch.iter().chain(else_branch) {
+                    collect_child_candidates(child, names, seen);
+                }
+            }
+            ast::ChildEntry::Match { value, arms } => {
+                collect_view_expr_candidates(value, names, seen);
+                for arm in arms {
+                    for child in &arm.body {
+                        collect_child_candidates(child, names, seen);
+                    }
+                }
+            }
+            ast::ChildEntry::For {
+                collection, body, ..
+            } => {
+                collect_view_expr_candidates(collection, names, seen);
+                for child in body {
+                    collect_child_candidates(child, names, seen);
+                }
+            }
+        }
+    }
+
+    fn template_format_inline_idents(value: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut chars = value.chars().peekable();
+        while let Some(character) = chars.next() {
+            if character != '{' {
+                if character == '}' && chars.peek() == Some(&'}') {
+                    chars.next();
+                }
+                continue;
+            }
+            if chars.peek() == Some(&'{') {
+                chars.next();
+                continue;
+            }
+            let mut name = String::new();
+            while matches!(chars.peek(), Some(next) if *next != '}' && *next != ':') {
+                name.push(chars.next().unwrap());
+            }
+            for next in chars.by_ref() {
+                if next == '}' {
+                    break;
+                }
+            }
+            if !name.is_empty()
+                && (name
+                    .starts_with(|character: char| character.is_alphabetic() || character == '_'))
+                && name
+                    .chars()
+                    .all(|character| character.is_alphanumeric() || character == '_')
+            {
+                names.push(name);
+            }
+        }
+        names
+    }
+
+    let mut bindings = HashSet::new();
+    collect_view_body_bindings(body, lets, on_mount, on_unmount, on_update, &mut bindings);
+
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    collect_view_body_candidates(
+        body, lets, on_mount, on_unmount, on_update, &mut names, &mut seen,
+    );
+    names
+        .into_iter()
+        .filter(|name| {
+            !bindings.contains(name)
+                && name != parent_alias
+                && !bare_parent_fields.contains(name)
+                && !matches!(
+                    name.as_str(),
+                    "self"
+                        | "Self"
+                        | "crate"
+                        | "super"
+                        | "this"
+                        | "__environment"
+                        | "__subscriptions"
+                        | "__root"
+                )
+                // Uppercase single-segment paths conventionally denote `static`/`const` items,
+                // not values owned by the caller.  In particular, cloning a `thread_local!`
+                // `LocalKey` such as `TARGET_MOUNTS` is both unnecessary and invalid.
+                && name.chars().any(|character| character.is_lowercase())
+                && !name.starts_with("__elwindui_")
+        })
+        .map(|name| format_ident!("{name}"))
+        .collect()
+}
+
+fn template_capture_clones(names: &[syn::Ident]) -> TokenStream {
+    names
+        .iter()
+        .map(|name| quote! { let #name = #name.clone(); })
+        .collect()
 }
 
 /// Emits the property-change subscriptions shared by every typed template factory.  Property
@@ -415,29 +1246,30 @@ fn emit_template_property_subscriptions(
         .collect()
 }
 
-/// Wraps a compiled semantic template body in a concrete `ControlTemplate<T>` factory.  The
-/// factory shell is intentionally kept separate from [`compile_template_body`]: component and
-/// named-template frontends need only choose their target type and declaration shape, while
-/// construction, binding, dynamic regions, lifecycle hooks, and cleanup are emitted once by the
-/// shared body compiler.
+/// Wraps a compiled semantic template body in a concrete `ControlTemplate<T>` factory. The
+/// factory shell is intentionally kept separate from [`compile_template_body`]: the component
+/// default and standalone expression frontends provide only their explicit target and declaration
+/// shape, while construction, binding, dynamic regions, lifecycle hooks, and cleanup are emitted
+/// once by the shared body compiler.
 pub(crate) fn emit_compiled_template_factory(
     body: &CompiledTemplateBody,
     target_type: TokenStream,
+    allow_environment_only: bool,
 ) -> TokenStream {
-    // A standalone template whose body never reads a property from the typed parent can still
-    // capture ordinary Rust values.  Keep that value-capturing path on `ControlTemplate`'s
-    // environment-only constructor; a generic function item cannot capture the caller's locals.
-    // Parent-dependent templates use the generic typed factory below, where `_` is resolved by
-    // the expected `ControlTemplate<C>` type at the call site.
-    if target_type.to_string() == "_"
-        && body.property_bounds.borrow().is_empty()
-        && body.iterable_properties.is_empty()
-        && body.lifecycle_keys.is_empty()
-        && body.writable_properties.is_empty()
-        && !body.requires_parent
-    {
+    // A template whose body never reads a property from the typed parent can still capture
+    // ordinary Rust values. Keep that value-capturing path on `ControlTemplate<T>`'s
+    // environment-only constructor; the parent-dependent path below needs the typed control
+    // context for property subscriptions and resync.
+    let parent_dependent = !body.property_bounds.borrow().is_empty()
+        || !body.iterable_properties.is_empty()
+        || !body.lifecycle_keys.is_empty()
+        || !body.writable_properties.is_empty()
+        || body.has_deferred_views
+        || body.requires_parent;
+    if allow_environment_only && !parent_dependent {
         let root = &body.root;
         let let_statements = &body.let_statements;
+        let capture_clones = template_capture_clones(&body.captured_names);
         let on_mount_hook = body
             .on_mount
             .clone()
@@ -473,12 +1305,13 @@ pub(crate) fn emit_compiled_template_factory(
             })
             .unwrap_or_default();
         return quote! {
-            elwindui::core::ui::ControlTemplate::from_environment(move |__environment| {
+            elwindui::core::ui::ControlTemplate::<#target_type>::from_environment(move |__environment| {
                 use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
                 use elwindui::ui::*;
                 let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
                     Vec::<elwindui::core::reactive::Subscription>::new(),
                 ));
+                #capture_clones
                 #let_statements
                 let __root = #root;
                 #on_mount_hook
@@ -490,6 +1323,7 @@ pub(crate) fn emit_compiled_template_factory(
 
     let root = &body.root;
     let let_statements = &body.let_statements;
+    let capture_clones = template_capture_clones(&body.captured_names);
     let refresh = &body.refresh;
     let property_subscriptions =
         emit_template_property_subscriptions(&target_type, &body.property_bounds);
@@ -583,6 +1417,7 @@ pub(crate) fn emit_compiled_template_factory(
             let __elwindui_template_refresh_cell_for_callback =
                 std::rc::Rc::clone(&__elwindui_template_refresh_cell);
             let this = __elwindui_template_parent.clone();
+            #capture_clones
             #let_statements
             let __root = #root;
             let __elwindui_template_refresh_callback: std::rc::Rc<dyn Fn()> =
@@ -621,6 +1456,7 @@ fn emit_view_factory(
 ) -> TokenStream {
     let root = &body.root;
     let let_statements = &body.let_statements;
+    let capture_clones = template_capture_clones(&body.captured_names);
     let refresh = &body.refresh;
     let property_subscriptions =
         emit_template_property_subscriptions(&target_type, &body.property_bounds);
@@ -717,6 +1553,7 @@ fn emit_view_factory(
                 let __elwindui_template_refresh_cell_for_callback =
                     std::rc::Rc::clone(&__elwindui_template_refresh_cell);
                 let this = __elwindui_template_parent.clone();
+                #capture_clones
                 #let_statements
                 let __root = #root;
                 let __elwindui_template_refresh_callback: std::rc::Rc<dyn Fn()> =
@@ -743,241 +1580,6 @@ fn emit_view_factory(
                 Some(__root)
             })
         }
-    }
-}
-
-/// Emits the standalone `template_view!` factory shell.  A template that reads the typed parent
-/// must be represented by a generic function item so Rust can infer `C` from the surrounding
-/// `ControlTemplate<C>` expected type.  A parent-independent template instead uses the capturing
-/// environment constructor, preserving ordinary Rust captures (which function items cannot
-/// close over).  Both shells execute the same [`CompiledTemplateBody`] produced by the shared
-/// backend above.
-fn emit_standalone_template_factory(body: &CompiledTemplateBody) -> TokenStream {
-    let parent_dependent = !body.property_bounds.borrow().is_empty()
-        || !body.iterable_properties.is_empty()
-        || !body.lifecycle_keys.is_empty()
-        || !body.writable_properties.is_empty()
-        || body.has_deferred_views
-        || body.requires_parent;
-    let root = &body.root;
-    let let_statements = &body.let_statements;
-
-    if !parent_dependent {
-        let on_mount_hook = body
-            .on_mount
-            .clone()
-            .map(|body| {
-                quote! {
-                    {
-                        let __template_mount_environment = __environment.clone();
-                        let __template_mount_subscriptions = __subscriptions.clone();
-                        elwindui::core::ui::UIElementExt::add_mount_hook(
-                            &*__root,
-                            Box::new(move || {
-                                let __environment = __template_mount_environment.clone();
-                                let __subscriptions = __template_mount_subscriptions.clone();
-                                #body
-                            }),
-                        );
-                    }
-                }
-            })
-            .unwrap_or_default();
-        let on_unmount_hook = body
-            .on_unmount
-            .clone()
-            .map(|body| {
-                quote! {
-                    elwindui::core::ui::UIElementExt::add_unmount_hook(
-                        &*__root,
-                        Box::new(move || {
-                            #body
-                        }),
-                    );
-                }
-            })
-            .unwrap_or_default();
-        return quote! {
-            elwindui::core::ui::ControlTemplate::from_environment(move |__environment| {
-                use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
-                use elwindui::ui::*;
-                let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
-                    Vec::<elwindui::core::reactive::Subscription>::new(),
-                ));
-                #let_statements
-                let __root = #root;
-                #on_mount_hook
-                #on_unmount_hook
-                __root
-            })
-        };
-    }
-
-    let bounds: Vec<_> = body
-        .property_bounds
-        .borrow()
-        .iter()
-        .map(|(key, expected)| match expected {
-            Some(expected) => quote! {
-                elwindui::core::ui::TemplateProperty<#key, Value = #expected>
-            },
-            None => quote! { elwindui::core::ui::TemplateProperty<#key> },
-        })
-        .collect();
-    let writable_bounds: Vec<_> = body
-        .writable_properties
-        .iter()
-        .map(|key| quote! { elwindui::core::ui::WritableTemplateProperty<#key> })
-        .collect();
-    let template_bounds =
-        bounds
-            .into_iter()
-            .chain(writable_bounds)
-            .fold(TokenStream::new(), |mut tokens, bound| {
-                tokens.extend(quote! { + #bound });
-                tokens
-            });
-    let iterable_bounds: Vec<_> = body
-        .iterable_properties
-        .iter()
-        .map(|key| {
-            quote! {
-                <C as elwindui::core::ui::TemplateProperty<#key>>::Value: IntoIterator,
-                <<C as elwindui::core::ui::TemplateProperty<#key>>::Value as IntoIterator>::Item:
-                    std::fmt::Display
-            }
-        })
-        .collect();
-    let factory_ident = format_ident!(
-        "__elwindui_template_factory_{}",
-        TEMPLATE_VIEW_FACTORY_COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
-    let refresh = &body.refresh;
-    let property_subscriptions =
-        emit_template_property_subscriptions(&quote! { C }, &body.property_bounds);
-    let update_subscriptions: TokenStream = if let Some(update_body) = body.on_update.clone() {
-        body.lifecycle_keys
-            .iter()
-            .map(|key| {
-                let weak_parent = format_ident!("__elwindui_template_update_weak_{key}");
-                let parent = format_ident!("__elwindui_template_parent");
-                quote! {
-                    {
-                        let #weak_parent = std::rc::Rc::downgrade(&#parent);
-                        __subscriptions.borrow_mut().push(
-                            <C as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
-                                &*#parent,
-                                move || {
-                                    if let Some(#parent) = #weak_parent.upgrade() {
-                                        let this = #parent.clone();
-                                        #update_body
-                                    }
-                                },
-                            ),
-                        );
-                    }
-                }
-            })
-            .collect()
-    } else {
-        TokenStream::new()
-    };
-    let on_unmount_hook = body
-        .on_unmount
-        .clone()
-        .map(|body| {
-            let weak_parent = format_ident!("__elwindui_template_unmount_weak");
-            let parent = format_ident!("__elwindui_template_parent");
-            quote! {
-                {
-                    let #weak_parent = std::rc::Rc::downgrade(&#parent);
-                    elwindui::core::ui::UIElementExt::add_unmount_hook(
-                        &*__root,
-                        Box::new(move || {
-                            if let Some(#parent) = #weak_parent.upgrade() {
-                                let this = #parent.clone();
-                                #body
-                            }
-                        }),
-                    );
-                }
-            }
-        })
-        .unwrap_or_default();
-    let on_mount_hook = body
-        .on_mount
-        .clone()
-        .map(|body| {
-            let weak_parent = format_ident!("__elwindui_template_mount_weak");
-            let parent = format_ident!("__elwindui_template_parent");
-            quote! {
-                {
-                    let #weak_parent = std::rc::Rc::downgrade(&#parent);
-                    let __template_mount_environment = __environment.clone();
-                    let __template_mount_subscriptions = __subscriptions.clone();
-                    elwindui::core::ui::UIElementExt::add_mount_hook(
-                        &*__root,
-                        Box::new(move || {
-                            if let Some(#parent) = #weak_parent.upgrade() {
-                                let this = #parent.clone();
-                                let __environment = __template_mount_environment.clone();
-                                let __subscriptions = __template_mount_subscriptions.clone();
-                                #body
-                            }
-                        }),
-                    );
-                }
-            }
-        })
-        .unwrap_or_default();
-    quote! {
-        fn #factory_ident<C>(
-            context: elwindui::core::ui::ControlTemplateContext<C>,
-        ) -> std::rc::Rc<dyn elwindui::core::ui::UIElementExt>
-        where
-            C: elwindui::core::ui::ControlExt + 'static #template_bounds,
-            #(#iterable_bounds,)*
-        {
-            use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
-            use elwindui::ui::*;
-            let __elwindui_template_parent = context.control.clone();
-            let __environment = context.environment.clone();
-            let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
-                Vec::<elwindui::core::reactive::Subscription>::new(),
-            ));
-            let __elwindui_template_refresh_cell = std::rc::Rc::new(
-                std::cell::RefCell::new(None::<std::rc::Rc<dyn Fn()>>),
-            );
-            let __elwindui_template_refresh_parent = __elwindui_template_parent.clone();
-            let __elwindui_template_refresh_environment = __environment.clone();
-            let __elwindui_template_refresh_cell_for_callback =
-                std::rc::Rc::clone(&__elwindui_template_refresh_cell);
-            let this = __elwindui_template_parent.clone();
-            #let_statements
-            let __root = #root;
-            let __elwindui_template_refresh_callback: std::rc::Rc<dyn Fn()> =
-                std::rc::Rc::new(move || {
-                    let __elwindui_template_parent =
-                        __elwindui_template_refresh_parent.clone();
-                    let this = __elwindui_template_parent.clone();
-                    let __environment = __elwindui_template_refresh_environment.clone();
-                    #refresh
-                });
-            *__elwindui_template_refresh_cell_for_callback.borrow_mut() =
-                Some(__elwindui_template_refresh_callback);
-            #property_subscriptions
-            #on_mount_hook
-            #update_subscriptions
-            #on_unmount_hook
-            let __template_subscriptions_for_cleanup = __subscriptions.clone();
-            let __template_target_for_cleanup = __elwindui_template_parent.clone();
-            __template_target_for_cleanup.add_unmount_hook(Box::new(move || {
-                __template_subscriptions_for_cleanup.borrow_mut().clear();
-            }));
-            __root
-        }
-
-        elwindui::core::ui::ControlTemplate::new(#factory_ident::<_>)
     }
 }
 
@@ -1151,11 +1753,7 @@ fn register_component_struct_real(
         }
         validate_replaceable_template_view(view_def.as_ref().unwrap())
             .map_err(ComponentGenerationFailure::ItemLocal)?;
-    } else if view_def
-        .as_ref()
-        .is_some_and(|view| !view.template_instance)
-        && view_def.is_some()
-    {
+    } else if view_def.as_ref().is_some_and(|view| !view.is_template) && view_def.is_some() {
         let is_control = match control_target_knowledge(component_def.base.as_deref()) {
             ControlTargetKnowledge::KnownControl => Some(true),
             ControlTargetKnowledge::KnownNonControl => Some(false),
@@ -1166,7 +1764,7 @@ fn register_component_struct_real(
         };
         if is_control == Some(true) {
             return Err(ComponentGenerationFailure::ItemLocal(format!(
-                "`{name}`: Control-derived components must declare visual chrome with `template: template_view! {{ ... }}`; `body: view! {{ ... }}` is ordinary component composition"
+                "`{name}`: Control-derived components must declare visual chrome with `template: template_view!(|alias: Self| {{ ... }})`; `body: view! {{ ... }}` is ordinary component composition"
             )));
         }
     }
@@ -1683,604 +2281,41 @@ fn lower_deferred_views_in_element_lets_and_body(
     );
 }
 
-/// Generates the private component instance and typed factory for
-/// `#[elwindui::control_template(target = Target)] struct Name { template: template_view! { .. } }`.
-pub fn generate_control_template_from_item_struct(
-    target: &syn::Path,
-    item_struct: &syn::ItemStruct,
-) -> Result<proc_macro2::TokenStream, String> {
-    let target_name = target
-        .segments
-        .last()
-        .expect("a syn::Path always has at least one segment")
-        .ident
-        .to_string();
-    if same_crate_control_target(&target_name) == Some(false) {
-        return Err(format!(
-            "target `{target_name}` is not a Control-derived component; NativeControl and non-Control targets cannot be templated"
-        ));
-    }
-    if !item_struct.generics.params.is_empty() {
-        return Err("ControlTemplate declarations cannot be generic".to_string());
-    }
-    let syn::Fields::Named(fields) = &item_struct.fields else {
-        return Err("expected a struct with exactly `template: template_view! { .. }`".to_string());
-    };
-    let mut fields_iter = fields.named.iter();
-    let Some(body) = fields_iter.next() else {
-        return Err("expected `template: template_view! { .. }`".to_string());
-    };
-    if fields_iter.next().is_some()
-        || body.ident.as_ref().is_none_or(|ident| ident != "template")
-        || !matches!(
-            &body.ty,
-            syn::Type::Macro(mac)
-                if mac.mac.path.segments.last().is_some_and(|segment| segment.ident == "template_view")
-        )
-    {
-        return Err("expected exactly one field: `template: template_view! { .. }`".to_string());
-    }
-
-    let (_, authored_view) = component_frontend::component_and_view_from_item_struct(
-        Some("Control".to_string()),
-        item_struct,
-    )?;
-    validate_replaceable_template_view(
-        authored_view
-            .as_ref()
-            .ok_or_else(|| "expected `template: template_view! { .. }`".to_string())?,
-    )?;
-
-    let name = &item_struct.ident;
-    // Named templates use the same semantic backend as component defaults and the expression-form
-    // `template_view!` frontend.  The public declaration remains a zero-sized marker; its factory
-    // is built directly for the requested target type rather than through a hidden component.
-    let authored_view = authored_view
-        .as_ref()
-        .expect("validated control template must have an authored template view");
-    let from = ast::Module {
-        path: Vec::new(),
-        uses: Vec::new(),
-        items: Vec::new(),
-        is_builtin: false,
-        allows_external_builtins: true,
-    };
-    let modules: Vec<_> = std::iter::once(from.clone())
-        .chain(component_frontend::sibling_component_modules(
-            &name.to_string(),
-        ))
-        .chain(component_frontend::sibling_viewmodel_modules())
-        .chain(component_frontend::sibling_store_modules())
-        .chain(component_frontend::sibling_enum_modules())
-        .collect();
-    let table = codegen::build_symbol_table(&modules);
-    let compiled = compile_template_body(
-        &authored_view.root,
-        &authored_view.lets,
-        authored_view.on_mount.as_ref(),
-        authored_view.on_unmount.as_ref(),
-        authored_view.on_update.as_ref(),
-        from,
-        table,
-        quote! { #target },
-        HashSet::new(),
-    )?;
-    let template_factory = emit_compiled_template_factory(&compiled, quote! { #target });
-
-    let attrs = &item_struct.attrs;
-    let vis = &item_struct.vis;
-    // Keep the rust-analyzer split for the public marker/signature. The real declaration invokes the
-    // shared factory directly; no hidden runtime component or standalone-only owner is emitted.
-    let real = rust_analyzer_shadow::gate_real_items_for_rustc(quote::quote! {
-        #(#attrs)*
-        #vis struct #name;
-
-        impl #name {
-            pub fn template() -> elwindui::core::ui::ControlTemplate<#target> {
-                #template_factory
-            }
-        }
-    })?;
-    let shadow = rust_analyzer_shadow::build_control_template_shadow(item_struct, target)?;
-
-    Ok(quote::quote! {
-        #real
-        #shadow
-    })
-}
-
-/// PR #169 review remediation, round 2 (AD-R2-2): whether a template-enabled Component's `inherits`
-/// base is decidable as Control-derived (or not) purely from the current item plus the fixed set of
-/// builtin category-tag names `same_crate_control_target` itself already resolves without any
-/// same-crate registry lookup, or whether deciding requires resolving a same-crate user-defined base
-/// through the Component registry (`same_crate_control_target`'s own recursive
-/// `registered_component_parts` walk).
-enum ControlTargetKnowledge {
-    KnownControl,
-    KnownNonControl,
-    NeedsSameCrateRegistry,
-}
-
-/// Classifies `base` (a template-enabled Component's own `inherits` target, if any) into
-/// [`ControlTargetKnowledge`]. A base-less Component and every fixed builtin category-tag name
-/// (`Control`/`ContentControl`/`UIElement`/`Layout`/`Shape`/`NativeControl`/`Window`) are decidable
-/// from the current item alone; only a name outside that fixed set — necessarily a same-crate user
-/// Component, since a builtin ancestor is always one of these tags — needs the registry.
-fn control_target_knowledge(base: Option<&str>) -> ControlTargetKnowledge {
-    match base {
-        None => ControlTargetKnowledge::KnownNonControl,
-        Some("Control") | Some("ContentControl") => ControlTargetKnowledge::KnownControl,
-        Some("UIElement")
-        | Some("Layout")
-        | Some("Shape")
-        | Some("NativeControl")
-        | Some("Window") => ControlTargetKnowledge::KnownNonControl,
-        Some(_) => ControlTargetKnowledge::NeedsSameCrateRegistry,
-    }
-}
-
 #[cfg(test)]
-mod control_target_knowledge_tests {
-    use super::*;
-
-    /// PR #169 review remediation, round 2, T-R2-4 (AD-R2-2): a fixed builtin category-tag name
-    /// known to be non-Control (`NativeControl`, e.g.) is decidable from the current item alone —
-    /// no same-crate registry lookup needed — so `register_component_struct_real` must reject it
-    /// with an unconditional `ItemLocal` failure, never a registry-dependent one.
-    #[test]
-    fn t_r2_4_known_non_control_builtin_base_needs_no_registry() {
-        assert!(matches!(
-            control_target_knowledge(Some("NativeControl")),
-            ControlTargetKnowledge::KnownNonControl
-        ));
-        assert!(matches!(
-            control_target_knowledge(Some("Control")),
-            ControlTargetKnowledge::KnownControl
-        ));
-        assert!(matches!(
-            control_target_knowledge(None),
-            ControlTargetKnowledge::KnownNonControl
-        ));
-    }
-
-    /// PR #169 review remediation, round 2, T-R2-5 (AD-R2-2): a same-crate user-defined base name
-    /// (outside the fixed builtin category-tag set) can only be resolved as Control-derived or not
-    /// through `same_crate_control_target`'s own registry walk — `control_target_knowledge` must
-    /// route it to `NeedsSameCrateRegistry` rather than guessing.
-    #[test]
-    fn t_r2_5_same_crate_user_base_needs_registry() {
-        assert!(matches!(
-            control_target_knowledge(Some("SomeUserDefinedComponent")),
-            ControlTargetKnowledge::NeedsSameCrateRegistry
-        ));
-    }
-}
-
-fn same_crate_control_target(name: &str) -> Option<bool> {
-    fn visit(name: &str, visited: &mut std::collections::HashSet<String>) -> Option<bool> {
-        match name {
-            "Control" | "ContentControl" => return Some(true),
-            "UIElement" | "Layout" | "Shape" | "NativeControl" | "Window" | "VerticalLayout"
-            | "HorizontalLayout" | "Grid" | "TextBlock" | "Rectangle" | "Ellipse" => {
-                return Some(false);
-            }
-            _ => {}
-        }
-        if !visited.insert(name.to_string()) {
-            return None;
-        }
-        let (component, _) = component_frontend::registered_component_parts(name)?;
-        let base = component.base.as_deref()?;
-        visit(base, visited).or_else(|| component.base_path.is_none().then_some(false))
-    }
-
-    visit(name, &mut std::collections::HashSet::new())
-}
-
-fn validate_replaceable_template_view(view: &ast::ViewDef) -> Result<(), String> {
-    if view.lets.iter().any(|binding| binding.id.is_some()) {
-        return Err("#[id(...)] is not supported inside a replaceable ControlTemplate".to_string());
-    }
-
-    fn is_presenter(type_path: &str) -> bool {
-        type_path.rsplit("::").next() == Some("ContentPresenter")
-    }
-
-    fn visit_expr(
-        expr: &ast::ViewExpr,
-        dynamic: bool,
-        presenters: &mut usize,
-    ) -> Result<(), String> {
-        match expr {
-            ast::ViewExpr::Element(element) => visit_element(element, dynamic, presenters),
-            ast::ViewExpr::Closure { body, .. } => match body {
-                ast::ClosureBody::Element(element) => visit_element(element, dynamic, presenters),
-                ast::ClosureBody::Expr(expr) => visit_expr(expr, dynamic, presenters),
-                ast::ClosureBody::Block(_) => Ok(()),
-            },
-            ast::ViewExpr::TFluent(_, args) => {
-                for (_, expr) in args {
-                    visit_expr(expr, dynamic, presenters)?;
-                }
-                Ok(())
-            }
-            // A deferred view is its own independent nested scope (lowered to its own hidden
-            // Component, Issue #162) — its `ContentPresenter`/`#[id]` usage is no more this
-            // `ControlTemplate`'s concern than an ordinary nested Component's own view would be.
-            ast::ViewExpr::Path(_) | ast::ViewExpr::Expr(_) | ast::ViewExpr::DeferredView(_) => {
-                Ok(())
-            }
-        }
-    }
-
-    fn visit_element(
-        element: &ast::ElementNode,
-        dynamic: bool,
-        presenters: &mut usize,
-    ) -> Result<(), String> {
-        if is_presenter(&element.type_path) {
-            if dynamic {
-                return Err(
-                    "ContentPresenter is not supported inside a dynamic template region"
-                        .to_string(),
-                );
-            }
-            *presenters += 1;
-            if *presenters > 1 {
-                return Err(
-                    "a ControlTemplate may contain at most one ContentPresenter".to_string()
-                );
-            }
-        }
-        for attribute in &element.attributes {
-            visit_expr(&attribute.value, dynamic, presenters)?;
-        }
-        for child in &element.children {
-            visit_child(child, dynamic, presenters)?;
-        }
-        Ok(())
-    }
-
-    fn visit_child(
-        child: &ast::ChildEntry,
-        dynamic: bool,
-        presenters: &mut usize,
-    ) -> Result<(), String> {
-        match child {
-            ast::ChildEntry::Literal(element) => visit_element(element, dynamic, presenters),
-            ast::ChildEntry::Ref(_) => Ok(()),
-            ast::ChildEntry::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                visit_expr(condition, dynamic, presenters)?;
-                for child in then_branch.iter().chain(else_branch) {
-                    visit_child(child, true, presenters)?;
-                }
-                Ok(())
-            }
-            ast::ChildEntry::Match { value, arms } => {
-                visit_expr(value, dynamic, presenters)?;
-                for arm in arms {
-                    for child in &arm.body {
-                        visit_child(child, true, presenters)?;
-                    }
-                }
-                Ok(())
-            }
-            ast::ChildEntry::For {
-                collection, body, ..
-            } => {
-                visit_expr(collection, dynamic, presenters)?;
-                for child in body {
-                    visit_child(child, true, presenters)?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    let mut presenters = 0;
-    for binding in &view.lets {
-        visit_element(&binding.element, false, &mut presenters)?;
-    }
-    for child in &view.root.children {
-        visit_child(child, false, &mut presenters)?;
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod template_view_expression_tests {
+mod template_view_header_tests {
     use super::*;
 
     #[test]
-    fn standalone_expression_reuses_control_template_presenter_validation() {
-        let error = generate_template_view_expression(
-            r#"
-                VerticalLayout {
-                    ContentPresenter {}
-                    ContentPresenter {}
-                }
-            "#,
-        )
-        .expect_err("a template cannot contain multiple ContentPresenter nodes");
-        assert!(
-            error.contains("multiple") || error.contains("ContentPresenter"),
-            "{error}"
-        );
-
-        let error = generate_template_view_expression(
-            r#"
-                VerticalLayout {
-                    if show_content {
-                        ContentPresenter {}
-                    }
-                }
-            "#,
-        )
-        .expect_err("a dynamic ContentPresenter is not supported");
-        assert!(
-            error.contains("dynamic") || error.contains("ContentPresenter"),
-            "{error}"
+    fn standalone_self_target_is_rejected_with_migration_guidance() {
+        let error = generate_template_view_expression(quote! {
+            |control: Self| { TextBlock {} }
+        })
+        .expect_err("standalone Self target should be rejected");
+        assert_eq!(
+            error,
+            "standalone `template_view!` requires a concrete target type; `Self` is only valid in a component default template"
         );
     }
 
     #[test]
-    fn standalone_dynamic_external_host_uses_exported_content_shape_dispatch() {
-        let generated = generate_template_view_expression(
-            r#"
-                ExternalCollectionHost {
-                    if true {
-                        TextBlock { text: "a" }
-                    } else {
-                        TextBlock { text: "b" }
-                    }
-                }
-            "#,
-        )
-        .expect("an unresolved host should defer content-shape selection to its props macro");
-        let generated = generated.to_string();
-        assert!(
-            generated.contains("@ content_shape") || generated.contains("@content_shape"),
-            "{generated}"
-        );
-        assert!(
-            !generated.contains("LayoutExt :: children"),
-            "external dynamic hosts must not default to LayoutExt: {generated}"
-        );
-
-        let qualified = generate_template_view_expression(
-            r#"
-                external_widgets::ExternalCollectionHost {
-                    if true {
-                        TextBlock { text: "a" }
-                    } else {
-                        TextBlock { text: "b" }
-                    }
-                }
-            "#,
-        )
-        .expect("qualified external dynamic hosts should use the same resolver");
-        let qualified = qualified.to_string();
-        assert!(
-            qualified.contains("external_widgets :: __elwindui_props_ExternalCollectionHost"),
-            "qualified external dynamic hosts must resolve the props macro at the defining crate root: {qualified}"
-        );
-        assert!(
-            qualified.contains("external_widgets :: ExternalCollectionHost"),
-            "qualified external dynamic hosts must retain the authored construction path: {qualified}"
+    fn declared_parent_alias_shadowing_uses_the_public_diagnostic() {
+        let (_, _, _, lets, body) = parser::parse_view_body("for button in items { TextBlock {} }")
+            .expect("template body should parse");
+        let error =
+            validate_template_parent_alias_shadowing(&body, &lets, None, None, None, "button")
+                .expect_err("the declared alias must be reserved");
+        assert_eq!(
+            error,
+            "template parent alias `button` cannot be shadowed inside this template; choose a different local name"
         );
     }
 
     #[test]
-    fn standalone_scalar_content_rejects_for_with_a_compile_time_diagnostic() {
-        let generated = generate_template_view_expression(
-            r#"
-                ContentControl {
-                    for item in templated_parent.items {
-                        TextBlock { text: item }
-                    }
-                }
-            "#,
-        )
-        .expect("the scalar-content diagnostic is emitted in the generated expression");
-        let generated = generated.to_string();
-        assert!(
-            generated.contains("for` region cannot be the sole content")
-                || generated.contains("for region cannot be the sole content"),
-            "{generated}"
-        );
-    }
-
-    #[test]
-    fn standalone_template_property_reads_and_writes_use_separate_capabilities() {
-        let key = crate::template_property_key("label");
-        let readable = generate_template_view_expression(
-            r#"
-                TextBlock { text: templated_parent.label }
-            "#,
-        )
-        .expect("a readable template property should generate")
-        .to_string();
-        assert!(
-            readable.contains(&format!("TemplateProperty < {key}u64 >")),
-            "readable access must carry the read capability: {readable}"
-        );
-        assert!(
-            !readable.contains("WritableTemplateProperty"),
-            "a one-way read must not request the write capability: {readable}"
-        );
-
-        let two_way = generate_template_view_expression(
-            r#"
-                TextArea { text <=> templated_parent.label }
-            "#,
-        )
-        .expect("a two-way template property should generate a writable bound")
-        .to_string();
-        assert!(
-            two_way.contains(&format!("WritableTemplateProperty < {key}u64 >")),
-            "two-way access must carry the write capability: {two_way}"
-        );
-
-        let event_write = generate_template_view_expression(
-            r#"
-                TextBlock {
-                    on_tapped: |_event| {
-                        templated_parent.set_label("clicked".to_string());
-                    }
-                }
-            "#,
-        )
-        .expect("an event write should generate a writable bound")
-        .to_string();
-        assert!(
-            event_write.contains(&format!("WritableTemplateProperty < {key}u64 >")),
-            "event writes must carry the write capability: {event_write}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod control_template_tests {
-    use super::*;
-
-    fn author(src: &str) -> Result<String, String> {
-        author_for("Control", src)
-    }
-
-    fn author_for(target: &str, src: &str) -> Result<String, String> {
-        let item: syn::ItemStruct = syn::parse_str(src).expect("template struct should parse");
-        let target: syn::Path = syn::parse_str(target).unwrap();
-        generate_control_template_from_item_struct(&target, &item).map(|tokens| tokens.to_string())
-    }
-
-    #[test]
-    fn authoring_generates_a_typed_factory_without_hidden_instance() {
-        let generated = author(
-            r#"
-            struct CodegenControlTemplateValidA {
-                template: template_view! { TextBlock { text: "ok" } },
-            }
-            "#,
-        )
-        .expect("valid template should generate");
-        assert!(generated.contains("ControlTemplate < Control >"));
-        assert!(generated.contains("ControlTemplate :: < Control > :: new"));
-        assert!(!generated.contains("Weak < Control >"));
-        assert!(!generated.contains("__ElwinduiControlTemplateInstanceFor"));
-    }
-
-    /// The named-template frontend keeps separate rustc/rust-analyzer declarations, while its
-    /// runtime branch directly invokes the shared typed template factory.  No hidden component
-    /// instance is synthesized for named templates.
-    #[test]
-    fn t12_output_contains_real_and_shadow_branches_with_no_discarded_hidden_shadow() {
-        let generated = author(
-            r#"
-            struct CodegenControlTemplateT12 {
-                template: template_view! { TextBlock { text: "ok" } },
-            }
-            "#,
-        )
-        .expect("valid template should generate");
-
-        // Real: gated, with the real shared-factory body.
-        assert!(
-            generated.contains("cfg (not (rust_analyzer))"),
-            "{generated}"
-        );
-        assert!(
-            generated.contains("struct CodegenControlTemplateT12 ;"),
-            "{generated}"
-        );
-        assert!(
-            generated.contains("ControlTemplate :: < Control > :: new")
-                && !generated.contains("__new_unmounted")
-                && !generated.contains("into_node"),
-            "the real template() body must invoke the shared factory directly: {generated}"
-        );
-
-        // Shadow: gated, signature-only (no hidden-instance construction).
-        assert!(generated.contains("cfg (rust_analyzer)"), "{generated}");
-        assert!(
-            generated.contains(
-                "fn template () -> elwindui :: core :: ui :: ControlTemplate < Control > { unreachable ! () }"
-            ),
-            "the shadow template() must be signature-only, never calling the real hidden-instance \
-             construction: {generated}"
-        );
-
-        // No hidden Component is part of the unified named-template output.
-        assert!(
-            !generated.contains("__ElwinduiControlTemplateInstanceFor"),
-            "named templates must not synthesize a hidden Component: {generated}"
-        );
-    }
-
-    #[test]
-    fn authoring_rejects_ids_multiple_presenters_and_dynamic_presenters() {
-        let id = author(
-            r#"
-            struct CodegenControlTemplateIdB {
-                template: template_view! {
-                    #[id("part")]
-                    let part = TextBlock { text: "x" };
-                    part
-                },
-            }
-            "#,
-        )
-        .expect_err("replaceable template ids must be rejected");
-        assert!(id.contains("#[id"), "error: {id}");
-
-        let multiple = author(
-            r#"
-            struct CodegenControlTemplateMultipleB {
-                template: template_view! {
-                    VerticalLayout { ContentPresenter {} ContentPresenter {} }
-                },
-            }
-            "#,
-        )
-        .expect_err("multiple presenters must be rejected");
-        assert!(
-            multiple.contains("at most one ContentPresenter"),
-            "error: {multiple}"
-        );
-
-        let dynamic = author(
-            r#"
-            struct CodegenControlTemplateDynamicB {
-                template: template_view! {
-                    VerticalLayout { if true { ContentPresenter {} } }
-                },
-            }
-            "#,
-        )
-        .expect_err("dynamic presenters must be rejected");
-        assert!(
-            dynamic.contains("dynamic template region"),
-            "error: {dynamic}"
-        );
-    }
-
-    #[test]
-    fn same_crate_non_control_and_native_control_targets_are_rejected_early() {
-        let template = r#"
-            struct CodegenControlTemplateInvalidTargetD {
-                template: template_view! { TextBlock { text: "x" } },
-            }
-        "#;
-        let non_control = author_for("VerticalLayout", template)
-            .expect_err("same-crate non-Control target must be rejected");
-        assert!(non_control.contains("not a Control-derived"));
-
-        let native = author_for("NativeControl", template)
-            .expect_err("NativeControl target must be rejected");
-        assert!(native.contains("NativeControl"));
+    fn unrelated_local_binding_does_not_shadow_declared_parent_alias() {
+        let (_, _, _, lets, body) = parser::parse_view_body("for item in items { TextBlock {} }")
+            .expect("template body should parse");
+        validate_template_parent_alias_shadowing(&body, &lets, None, None, None, "button")
+            .expect("an unrelated local name is allowed");
     }
 }
 
@@ -3793,13 +3828,13 @@ mod user_base_inherits_tests {
     fn derived_from_a_user_component_builds_with_a_qualified_path() {
         declare(
             Some("ContentControl"),
-            r#"struct UbBase { template: template_view! { TextBlock { text: "x" } }, }"#,
+            r#"struct UbBase { template: template_view!(|templated_parent: Self| { TextBlock { text: "x" } }), }"#,
         )
         .expect("base struct");
         build(r#"impl UbBase { }"#).expect("base impl");
         declare(
             Some("crate::UbBase"),
-            r#"struct UbDerived { template: template_view! { UbBase { } }, }"#,
+            r#"struct UbDerived { template: template_view!(|templated_parent: Self| { UbBase { } }), }"#,
         )
         .expect("derived struct");
         let out = build(r#"impl UbDerived { }"#)
@@ -3820,13 +3855,13 @@ mod user_base_inherits_tests {
     fn derived_from_a_user_component_with_a_bare_base_name_is_rejected() {
         declare(
             Some("ContentControl"),
-            r#"struct UbBareBase { template: template_view! { TextBlock { text: "x" } }, }"#,
+            r#"struct UbBareBase { template: template_view!(|templated_parent: Self| { TextBlock { text: "x" } }), }"#,
         )
         .expect("base struct");
         build(r#"impl UbBareBase { }"#).expect("base impl");
         declare(
             Some("UbBareBase"),
-            r#"struct UbBareDerived { template: template_view! { UbBareBase { } }, }"#,
+            r#"struct UbBareDerived { template: template_view!(|templated_parent: Self| { UbBareBase { } }), }"#,
         )
         .expect("derived struct");
         let err = expect_generation_error(build(r#"impl UbBareDerived { }"#));
@@ -3842,7 +3877,7 @@ mod user_base_inherits_tests {
     fn derived_from_a_builtin_base_still_emits_the_builtin_path() {
         declare(
             Some("ContentControl"),
-            r#"struct UbBuiltinDerived { template: template_view! { TextBlock { text: "x" } }, }"#,
+            r#"struct UbBuiltinDerived { template: template_view!(|templated_parent: Self| { TextBlock { text: "x" } }), }"#,
         )
         .expect("derived struct");
         let out = build(r#"impl UbBuiltinDerived { }"#)

@@ -18,7 +18,7 @@ struct RoundedPanel {
     // and would silently freeze the very first value forever.
     label: String,
 
-    template: template_view! {
+    template: template_view!(|templated_parent: Self| {
         Grid {
             rows: [elwindui::core::layout::GridLength::Star(1.0)]
             columns: [elwindui::core::layout::GridLength::Star(1.0)]
@@ -31,7 +31,7 @@ struct RoundedPanel {
                 text_alignment: elwindui::core::ui::TextAlignment::Center
             }
         }
-    },
+    }),
 }
 
 #[elwindui::component]

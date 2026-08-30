@@ -25,7 +25,7 @@ The component frontend recognizes two mutually exclusive pseudo-fields:
 body: view! { ... }
     -> ordinary component composition
 
-template: template_view! { ... }
+template: template_view!(|alias: Self| { ... })
     -> typed ControlTemplate<Self> default factory
 ```
 
@@ -37,27 +37,33 @@ propagation. There is no recursive `TemplateBackend` compiler. Only the
 template adapter differs: it acquires the typed parent, records the
 `TemplateProperty`/`WritableTemplateProperty` capability bounds, wraps the
 compiled body in the deferred factory, and performs template-root replacement.
-Standalone expressions acquire a typed target from Rust's expected type,
-while component defaults and named templates already have a concrete target;
-all produce the same deferred factory semantics. `#[control_template(target = T)]`
-remains a thin named-template frontend over that path.
+Standalone expressions declare their target in the same lambda header:
+`template_view!(|alias: ConcreteTarget| { ... })`. Component defaults use
+`Self` in that position. A reusable template is an ordinary Rust function
+returning `ControlTemplate<ConcreteTarget>`; there is no separate named-template
+frontend or marker attribute. All forms produce the same deferred factory
+semantics and do not infer the target from Rust's expected type.
 
-The standalone expression frontend acquires its `ControlTemplate<C>` target
-from Rust's expected type and then enters that same template compilation
-context. Its property reads are statically keyed `TemplateProperty` bounds on
-`C`; updates use the same subscription/resync contract as component and named
+The template body uses the declared parent alias. Its property reads are
+statically keyed `TemplateProperty` bounds on the explicit target; updates use
+the same subscription/resync contract as component defaults and standalone
 templates. Write sites add the stronger `WritableTemplateProperty` bound, so a
 read-only target fails at compile time. Dynamic `if`/`match`/supported `for`
 regions, root replacement, ContentPresenter validation, lifecycle hooks, and
 nested component mounting are not separate runtime features of the standalone
 form.
 
+`on_update(field, ...)` keeps the existing unqualified selector list: `field` is
+the property name such as `label`, not a parent-alias path such as
+`alias.label`. Alias-qualified paths remain the syntax for reads, setters, and
+bindings in the template body.
+
 The target bound remains `C: ControlExt + 'static` for any valid non-
 `NativeControl` target. A property-free template can therefore target a raw
 framework/class-managed `Control` or `ContentControl`. A typed
-`templated_parent.<property>` path additionally requires the matching
-`TemplateProperty<KEY>`, while `templated_parent.set_<property>(...)` and
-two-way bindings require `WritableTemplateProperty<KEY>`. Generated
+`<alias>.<property>` path additionally requires the matching
+`TemplateProperty<KEY>`, while `<alias>.set_<property>(...)` and two-way
+bindings require `WritableTemplateProperty<KEY>`. Generated
 Control-derived `#[component]` types provide these bridges from effective
 property metadata; raw framework/class-managed `ControlExt` types are not
 required to provide them in #187. No fake non-reactive bridge, runtime
@@ -107,13 +113,28 @@ validator allows zero or one static presenter and rejects multiple or dynamic
 presenters. Content replacement and pre-mount transitions remain handled by the
 existing weak/cancelable subscription and template-root paths.
 
+When the target is nested in a Window host-composition body, the Window stays
+unmounted until its first `show()`, and its generated named child accessors are
+not readable during that interval. A demo or application that needs logical
+content pre-mount passes it through the initial `content:`/Param construction
+path; the target receives it before this template's mount-time selection. This
+preserves the lifecycle boundary instead of adding a special pre-mount
+template-accessor path.
+
+For a generated component whose scalar content slot is supplied by an external
+base shape, codegen forwards a named `content:` value through that shape's
+exported setter protocol before the generated component mounts. The slot is not
+duplicated into local component metadata, and the defining shape performs the
+single concrete-to-trait conversion.
+
 ## 5. Validation boundaries
 
 Frontend validation rejects body/template coexistence, template on a non-
-Control or NativeControl target, legacy `#[component(template = key)]`, and
-invalid ContentPresenter placement. Control-derived `body` declarations get a
-migration diagnostic. Cross-crate trait and getter resolution remains a normal
-generated-Rust/rustc constraint; no type-name dispatch is introduced.
+Control or NativeControl target, `Self` in a standalone template, legacy
+`#[component(template = key)]`, and invalid ContentPresenter placement.
+Control-derived `body` declarations get a migration diagnostic. Cross-crate
+trait and getter resolution remains a normal generated-Rust/rustc constraint;
+no type-name dispatch is introduced.
 
 ## 6. Removed protocol
 
@@ -126,8 +147,8 @@ separate issue if an independent generic use is proven.
 ## 7. Lifetime and dynamic content
 
 Template instances use the existing weak-owner dependency and property
-resynchronization machinery. `templated_parent.foo` is a typed getter with the
-same notification wiring as ordinary view bindings; the corresponding
+resynchronization machinery. The declared parent alias followed by `.foo` is a
+typed getter with the same notification wiring as ordinary view bindings; the corresponding
 `WritableTemplateProperty<KEY>` setter capability is emitted only when the
 effective property has a real setter. Dynamic `if`/`match` and
 supported `for` subtrees use the established ControlTemplate reconciliation;

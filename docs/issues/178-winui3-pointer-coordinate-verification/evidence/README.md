@@ -28,7 +28,7 @@ Source inspection confirmed that the renderer proxy sets `IsHitTestVisible(false
 | `cargo run --manifest-path .agent-state/issues/178/verification-app/Cargo.toml` | FAIL | Probe compilation stopped at the same backend blocker; no window launched. |
 | `cargo fmt --all` | PASS | No formatting changes. |
 | `cargo fmt --all -- --check` | PASS | Clean. |
-| `rust-analyzer diagnostics .` | FAIL | Exited 1 with actionable `E0282` inference errors, inactive-code `WeakWarning`s, and lint warnings. |
+| `rust-analyzer diagnostics .` | FAIL | Exited 1 with 373 actionable `E0282` inference errors, 117 allowed inactive-code `WeakWarning`s, and 16 rustc-lint warnings. |
 | `cargo check --workspace` | FAIL | Same 49 WinUI3 backend compile errors. |
 | `cargo build --workspace` | FAIL | Same 49 WinUI3 backend compile errors. |
 | `cargo test --workspace` | FAIL | Same 49 WinUI3 backend compile errors. |

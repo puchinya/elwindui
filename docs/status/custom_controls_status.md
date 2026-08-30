@@ -1,6 +1,6 @@
 # Custom controls status
 
-Snapshot: 2026-08-30. The public contract is
+Snapshot: 2026-08-31. The public contract is
 [`../specs/custom_controls_spec.md`](../specs/custom_controls_spec.md).
 
 ## Implemented
@@ -33,6 +33,15 @@ Snapshot: 2026-08-30. The public contract is
   while the authored `template_view!` root owns the tab header presentation.
   The two ownership paths use the shared typed component-template path delivered
   by [#188](https://github.com/puchinya/elwindui/pull/188).
+- The component source topology is explicit: `lib.rs` is a facade/module root,
+  each component has its own source file, shared event/value types are in
+  `types.rs`, and cross-cutting weak-owner support is in `support.rs`.
+- Weak callback owners derive a temporary typed `Rc<T>` from the Visual owner,
+  downgrade it, and drop that temporary strong reference normally. No leaked
+  strong reference, raw-pointer registry, or strong callback is used.
+- `TextStyleOwner::Foreground` is paint-only (`Render` invalidation). The close
+  glyph is a constant `TextBlock` `×`; hover toggles only its transparent/cleared
+  foreground, while `Never` changes the slot visibility and may invalidate layout.
 - The generated class shape forwards own `#[prop]` and `#[content]` metadata
   across the crate boundary, so a real declarative `view!` can construct
   `CustomTabView { CustomTabViewItem { ... TextBlock { ... } } }` while
@@ -45,24 +54,20 @@ Snapshot: 2026-08-30. The public contract is
 
 ## Verification
 
-The focused custom-controls suite passes with 31 tests and no ignored tests.
-The workspace formatter, rust-analyzer, companion shadow check, workspace
-build/check, and diff checks are recorded against the final head. The focused
-custom-controls suite passes with 31 tests and no ignored tests. The required
-`cargo test --workspace --quiet` currently stops at the existing AppKit
-Window-host RT4 executable (`control_template_window_rt4`: zero arranged
-height under the active host, then SIGABRT); a follow-up workspace run without
-the `elwindui` package reaches three existing Core Image SVG-golden failures
-because `+[CIContext context]` returns NULL. These failures are outside this
-branch's changed Core/backend files. `rust-analyzer diagnostics .` reports
-zero Error, Warning, and non-exempt WeakWarning diagnostics; 131 permitted
-`Ra("inactive-code", WeakWarning)` records remain for intentional
-`#[cfg(...)]` branches. The diagnostics CLI still terminates with its generic
-`diagnostic error detected` status after emitting those permitted records.
-Windows and GTK4 runtime interaction have not been run. Interactive AppKit
-verification of the custom-controls demo has been captured with
-`tools/macos-ui-driver`; frontmost interaction remains environment-limited
-when another agent application owns the foreground.
+The focused custom-controls suite passes with 35 tests and no ignored tests.
+`cargo fmt --all` and its check pass. `RUSTFLAGS="--cfg rust_analyzer" cargo
+check --workspace`, `cargo check --workspace`, `cargo build --workspace`,
+`cargo check -p custom-controls-demo`, `cargo test --workspace --quiet`, and
+`git diff --check` pass with the remediation changes. The actual command
+`rust-analyzer diagnostics .` reports zero `Error`, zero `Warning`, and zero
+non-exempt `WeakWarning` diagnostics, with 132 permitted
+`Ra("inactive-code", WeakWarning)` records for intentional `#[cfg(...)]`
+branches, but exits 1 with the generic diagnostics failure status. Per the
+verification contract this is not a PASS and remains the outstanding gate.
+Windows and GTK4 runtime interaction have not been run. The existing
+interactive AppKit smoke evidence was captured with `tools/macos-ui-driver`;
+individual pointer behavior remains covered by the Core PointerDispatcher
+host-path tests.
 
 ## Follow-up
 

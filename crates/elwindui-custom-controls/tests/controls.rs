@@ -1,6 +1,6 @@
 use elwindui_custom_controls::core::base::{Point, Size};
 use elwindui_custom_controls::core::graphics::{
-    IconSource, RenderCommand, RenderGroup, RenderTree, SystemIcon,
+    Brush, IconSource, RenderCommand, RenderGroup, RenderTree, SystemIcon,
 };
 use elwindui_custom_controls::core::input::{
     KeyModifiers, MouseButton, PointerEventArgs, RawPointerEvent, RawPointerEventKind,
@@ -8,6 +8,7 @@ use elwindui_custom_controls::core::input::{
 };
 use elwindui_custom_controls::core::ui::{
     ContentControlExt, ListExt, UIElementExt, dispatch_routed, hit_test, layout_root,
+    unmount_subtree,
 };
 use elwindui_custom_controls::{
     CloseButtonPresentation, CustomSplitter, CustomSplitterExt, CustomTabView, CustomTabViewExt,
@@ -50,6 +51,24 @@ fn rendered_texts(tree: &RenderTree) -> Vec<String> {
         .into_iter()
         .filter_map(|command| match command {
             RenderCommand::Text { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn visible_rendered_texts(tree: &RenderTree) -> Vec<String> {
+    let mut commands = Vec::new();
+    render_commands(&tree.root, &mut commands);
+    commands
+        .into_iter()
+        .filter_map(|command| match command {
+            RenderCommand::Text {
+                content,
+                foreground,
+                ..
+            } if !matches!(foreground, Some(Brush::Solid(color)) if color.a == 0) => {
+                Some(content.clone())
+            }
             _ => None,
         })
         .collect()
@@ -125,6 +144,45 @@ fn tab_view_owns_ordered_items_and_exposes_public_presentation_properties() {
     assert!(first.visual_parent().is_none());
     assert!(second.visual_parent().is_none());
     assert!(replacement.visual_parent().is_some());
+}
+
+#[test]
+fn mounted_public_controls_release_after_external_owners_drop() {
+    let item = CustomTabViewItem::new_item();
+    let view = CustomTabView::new_view();
+    view.set_children(vec![item.clone()]);
+    let splitter = CustomSplitter::new_splitter();
+    let root: Rc<dyn UIElementExt> = view.clone();
+    let splitter_root: Rc<dyn UIElementExt> = splitter.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    layout_root(
+        &splitter_root,
+        Size {
+            width: 240.0,
+            height: 6.0,
+        },
+    );
+
+    let item_weak = Rc::downgrade(&item);
+    let view_weak = Rc::downgrade(&view);
+    let splitter_weak = Rc::downgrade(&splitter);
+    unmount_subtree(&root);
+    unmount_subtree(&splitter_root);
+    drop(root);
+    drop(splitter_root);
+    drop(item);
+    drop(view);
+    drop(splitter);
+
+    assert!(item_weak.upgrade().is_none());
+    assert!(view_weak.upgrade().is_none());
+    assert!(splitter_weak.upgrade().is_none());
 }
 
 #[test]
@@ -484,8 +542,20 @@ fn pointer_over_hover_changes_close_template_without_width_jitter() {
             height: 120.0,
         },
     );
-    let width_before = item.arranged_width();
-    let texts_before = rendered_texts(&RenderTree::new::<()>(&root));
+    let item_measure_before = item.measured_size();
+    let item_arranged_before = (
+        item.arranged_width(),
+        item.arranged_height(),
+        item.arranged_offset(),
+    );
+    let close: Rc<dyn UIElementExt> = item.close_button();
+    let close_measure_before = close.measured_size();
+    let close_arranged_before = (
+        close.arranged_width(),
+        close.arranged_height(),
+        close.arranged_offset(),
+    );
+    let texts_before = visible_rendered_texts(&RenderTree::new::<()>(&root));
     assert!(!texts_before.iter().any(|text| text == "×"));
 
     let target: Rc<dyn UIElementExt> = item.clone();
@@ -496,28 +566,61 @@ fn pointer_over_hover_changes_close_template_without_width_jitter() {
         &args,
         &RoutedEventArgs::default(),
     );
-    dispatch_routed(
-        &target,
-        "on_pointer_moved",
-        &args,
-        &RoutedEventArgs::default(),
+    assert_eq!(item.measured_size(), item_measure_before);
+    assert_eq!(
+        (
+            item.arranged_width(),
+            item.arranged_height(),
+            item.arranged_offset()
+        ),
+        item_arranged_before
     );
-    layout_root(
-        &root,
-        Size {
-            width: 240.0,
-            height: 120.0,
-        },
+    assert_eq!(close.measured_size(), close_measure_before);
+    assert_eq!(
+        (
+            close.arranged_width(),
+            close.arranged_height(),
+            close.arranged_offset()
+        ),
+        close_arranged_before
     );
-    let texts_hovered = rendered_texts(&RenderTree::new::<()>(&root));
+    let texts_hovered = visible_rendered_texts(&RenderTree::new::<()>(&root));
     assert!(texts_hovered.iter().any(|text| text == "×"));
-    assert_eq!(item.arranged_width(), width_before);
     dispatch_routed(
         &target,
         "on_pointer_exited",
         &args,
         &RoutedEventArgs::default(),
     );
+    assert_eq!(item.measured_size(), item_measure_before);
+    assert_eq!(
+        (
+            item.arranged_width(),
+            item.arranged_height(),
+            item.arranged_offset()
+        ),
+        item_arranged_before
+    );
+    assert_eq!(close.measured_size(), close_measure_before);
+    assert_eq!(
+        (
+            close.arranged_width(),
+            close.arranged_height(),
+            close.arranged_offset()
+        ),
+        close_arranged_before
+    );
+    let texts_after = visible_rendered_texts(&RenderTree::new::<()>(&root));
+    assert!(!texts_after.iter().any(|text| text == "×"));
+}
+
+#[test]
+fn collapsing_close_slot_from_hover_presentation_invalidates_measure() {
+    let item = CustomTabViewItem::new_item();
+    let view = CustomTabView::new_view();
+    view.set_close_button_presentation(CloseButtonPresentation::OnPointerOver);
+    view.set_children(vec![item.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
     layout_root(
         &root,
         Size {
@@ -525,9 +628,25 @@ fn pointer_over_hover_changes_close_template_without_width_jitter() {
             height: 120.0,
         },
     );
-    let texts_after = rendered_texts(&RenderTree::new::<()>(&root));
-    assert!(!texts_after.iter().any(|text| text == "×"));
-    assert_eq!(item.arranged_width(), width_before);
+    assert!(item.measured_size().is_some());
+    let close: Rc<dyn UIElementExt> = item.close_button();
+    let slot = close
+        .visual_children()
+        .into_iter()
+        .next()
+        .expect("close button slot is not mounted");
+    assert!(slot.measured_size().is_some());
+
+    view.set_close_button_presentation(CloseButtonPresentation::Never);
+
+    assert!(
+        slot.measured_size().is_none(),
+        "collapsing the close slot must retain the slot's measure invalidation"
+    );
+    assert_eq!(
+        slot.visibility(),
+        elwindui_custom_controls::core::layout::Visibility::Collapsed
+    );
 }
 
 #[test]
@@ -1185,7 +1304,11 @@ fn close_affordance_is_composed_and_respects_presentation() {
     );
     let never_width = item.arranged_width().expect("tab width");
     let never = RenderTree::new::<()>(&root);
-    assert!(!rendered_texts(&never).iter().any(|text| text == "×"));
+    assert!(
+        !visible_rendered_texts(&never)
+            .iter()
+            .any(|text| text == "×")
+    );
     assert_eq!(always_width, never_width + 20.0);
 
     view.set_close_button_presentation(CloseButtonPresentation::OnPointerOver);

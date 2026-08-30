@@ -30,6 +30,11 @@ is introduced. Generated component setters retain their owned Rust field types;
 the shape metadata marks that conversion boundary separately from the borrowed
 string setters of hand-written builtins.
 
+Each `#[component]` in `elwindui-custom-controls` is maintained in its own source
+file. `lib.rs` is the public facade and module root, shared event/value types
+live in `types.rs`, and non-component cross-cutting implementation support is
+limited to `support.rs`.
+
 The tab view template is a `Grid` with two rows. Its declarative content field
 is exactly `#[content(children)] children: Vec<Rc<CustomTabViewItem>>`. The private
 `CustomTabStripPresenter` is a `HorizontalLayout` that owns the ordered item
@@ -64,9 +69,12 @@ Each item header is a composed `Grid` containing a header row with an optional
 `CustomTabCloseButton`. A `Rectangle` in a fixed two-pixel slot is the selected
 indicator; the slot remains present for unselected items. The close helper uses
 a fixed 20-pixel slot and a composed `TextBlock` `×` glyph. `Always` and
-`OnPointerOver` reserve identical width; only glyph visibility changes for
-hover. `Never` collapses the slot. No SystemIcon geometry or direct close-X
-drawing is duplicated here.
+`OnPointerOver` reserve identical width; hover changes only the glyph's paint,
+so it does not invalidate the item's measured or arranged geometry. The glyph's
+text remains structurally present and is hidden with a transparent solid
+foreground; showing it clears that local foreground. `Never` collapses the
+slot and is allowed to invalidate normal measure/arrange state. No SystemIcon
+geometry or direct close-X drawing is duplicated here.
 
 The item binds routed pointer handlers on its header root. The close helper
 handles its own press/release first and marks the routed event handled, so a

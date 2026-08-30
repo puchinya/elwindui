@@ -51,6 +51,11 @@ resolution; it cannot become a runtime panic or silent no-op. Inherited
 writable fields delegate through the composed base's existing typed setter,
 without duplicating storage.
 
+The `on_update(field, ...)` selector list remains an unqualified list of field
+names such as `label` or `source`; a parent alias path such as
+`on_update(button.label, ...)` is not a selector form. Alias-qualified paths
+are used inside the template body for reads, setters, and bindings.
+
 `KEY` is a compile-time 64-bit FNV-1a-style token derived from the field-name
 literal. It is not a runtime registry or string lookup. A collision is an
 explicit compile-time duplicate-implementation/associated-type error and is

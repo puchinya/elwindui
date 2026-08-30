@@ -2968,6 +2968,90 @@ fn build_props_macro(
     }
 }
 
+/// `Button` -> `__elwindui_template_capabilities_Button`: the analysis-only capability surface
+/// consumed by a generated Component shadow. It is separate from `__elwindui_props_Button!` so the
+/// existing runtime/property lowering protocol remains unchanged.
+fn template_capability_macro_ident(bare_name: &str) -> Ident {
+    format_ident!("__elwindui_template_capabilities_{bare_name}")
+}
+
+/// Builds the source-local, `cfg(rust_analyzer)` capability macro for one class declaration.
+///
+/// The class declaration is the authoritative source for builtin property names, keys, value
+/// types, and writable membership. A component shadow can therefore forward inherited builtin
+/// capabilities without a compiler-side builtin registry or a runtime implementation. Parent
+/// forwarding uses the same `$crate`/external-path rules as the existing exported property macros.
+fn build_template_capability_macro(
+    bare_name: &str,
+    shape: &PropDecls,
+    parent: Option<(&str, &Type)>,
+) -> TokenStream2 {
+    let macro_ident = template_capability_macro_ident(bare_name);
+    let framework_path = exported_framework_path();
+    let target = quote! { $target };
+    let own_impls: TokenStream2 = shape
+        .props
+        .iter()
+        .filter(|prop| !prop.attached && !prop.routed)
+        .map(|prop| {
+            let key = elwindui_codegen::template_property_key(&prop.name.to_string());
+            let prop_ty = &prop.ty;
+            let value_type = rewrite_crate_segment(quote! { #prop_ty });
+            let writable = !prop.attached && !prop.routed;
+            let writable_impl = writable.then(|| {
+                quote! {
+                    impl #framework_path::ui::WritableTemplateProperty<#key> for #target {
+                        fn __template_set(&self, _value: Self::Value) {
+                            unreachable!()
+                        }
+                    }
+                }
+            });
+            quote! {
+                impl #framework_path::ui::TemplateProperty<#key> for #target {
+                    type Value = #value_type;
+
+                    fn __template_get(&self) -> Self::Value {
+                        unreachable!()
+                    }
+
+                    fn __template_subscribe(
+                        &self,
+                        _listener: impl Fn() + 'static,
+                    ) -> #framework_path::reactive::Subscription {
+                        unreachable!()
+                    }
+                }
+                #writable_impl
+            }
+        })
+        .collect();
+    let parent_impls = parent.map(|(parent_bare, parent_ty)| {
+        let parent_macro = inherit_macro_self_ref_path(
+            parent_bare,
+            parent_ty,
+            template_capability_macro_ident(parent_bare),
+        );
+        quote! {
+            #parent_macro!(@impl $target);
+        }
+    });
+
+    quote! {
+        #[doc(hidden)]
+        #[cfg(rust_analyzer)]
+        #[allow(unexpected_cfgs)]
+        #[macro_export]
+        #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+        macro_rules! #macro_ident {
+            (@impl $target:ty) => {
+                #own_impls
+                #parent_impls
+            };
+        }
+    }
+}
+
 /// A `#[prop(routed, on_x: fn(T0, ...))]`'s payload type — mirrors
 /// `elwindui_codegen::codegen::callback_param_types`, operating directly on the already-parsed
 /// `syn::Type` this macro has instead of a re-parsed type string. `fn()` (no parameters) has payload
@@ -3825,6 +3909,18 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
             is_elwindui_core_crate(),
         )
     });
+    let template_capability_macro =
+        (prop_decls.is_declared() || args.inherits.is_some()).then(|| {
+            let parent = args
+                .inherits
+                .as_ref()
+                .and_then(|ty| last_segment_name(ty).map(|name| (name, ty)));
+            build_template_capability_macro(
+                &class_name.to_string(),
+                &prop_decls,
+                parent.as_ref().map(|(name, ty)| (name.as_str(), *ty)),
+            )
+        });
 
     let deref_shadow = args.inherits.as_ref().map(|ty| {
         quote! {
@@ -3845,6 +3941,7 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
         }
         #deref_shadow
         #shape_macro
+        #template_capability_macro
     }
 }
 
@@ -4004,6 +4101,18 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
             is_elwindui_core_crate(),
         )
     });
+    let template_capability_macro =
+        (prop_decls.is_declared() || args.inherits.is_some()).then(|| {
+            let parent = args
+                .inherits
+                .as_ref()
+                .and_then(|ty| last_segment_name(ty).map(|name| (name, ty)));
+            build_template_capability_macro(
+                &bare_name,
+                &prop_decls,
+                parent.as_ref().map(|(name, ty)| (name.as_str(), *ty)),
+            )
+        });
 
     quote! {
         #(#attrs)*
@@ -4013,6 +4122,7 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
         }
         #inherit_macros_and_bridge
         #shape_macro
+        #template_capability_macro
     }
 }
 

@@ -53,6 +53,11 @@ regions, root replacement, ContentPresenter validation, lifecycle hooks, and
 nested component mounting are not separate runtime features of the standalone
 form.
 
+`on_update(field, ...)` keeps the existing unqualified selector list: `field` is
+the property name such as `label`, not a parent-alias path such as
+`alias.label`. Alias-qualified paths remain the syntax for reads, setters, and
+bindings in the template body.
+
 The target bound remains `C: ControlExt + 'static` for any valid non-
 `NativeControl` target. A property-free template can therefore target a raw
 framework/class-managed `Control` or `ContentControl`. A typed

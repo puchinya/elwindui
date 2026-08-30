@@ -93,6 +93,14 @@ fn named_template_probe() -> ControlTemplate<TemplateProbe> {
     })
 }
 
+fn prefixed_template(prefix: String) -> ControlTemplate<TemplateProbe> {
+    template_view!(|owner: TemplateProbe| {
+        TextBlock {
+            text: format!("{}{}", prefix.as_str(), owner.label),
+        }
+    })
+}
+
 #[component(inherits Control)]
 struct DefaultEventTemplateProbe {
     #[prop]
@@ -293,17 +301,32 @@ impl ReadOnlyComputedTemplateProbe {}
 #[test]
 fn typed_template_view_can_be_passed_to_environment() {
     let environment = EnvironmentContext::root();
-    environment.set_control_template::<TemplateProbe>(Some(template_view!(
-        |templated_parent: TemplateProbe| {
-            TextBlock {
-                text: templated_parent.label,
-            }
+    environment.set_control_template(Some(template_view!(|templated_parent: TemplateProbe| {
+        TextBlock {
+            text: templated_parent.label,
         }
-    )));
+    })));
     let _ = ControlTemplate::<TemplateProbe>::new(|context| {
         let _ = context.control.label();
         elwindui::core::ui::TextBlock::new()
     });
+}
+
+#[test]
+fn explicit_target_template_infers_result_without_expected_type_annotation() {
+    let template = template_view!(|owner: TemplateProbe| { TextBlock { text: owner.label } });
+    let probe = elwindui::new!(TemplateProbe(label: "initial".to_string()));
+    let root = template.__build(elwindui::core::ui::ControlTemplateContext {
+        control: probe.clone(),
+        environment: EnvironmentContext::root(),
+    });
+    let text = root
+        .as_any()
+        .downcast_ref::<TextBlock>()
+        .expect("explicit-target template root is TextBlock");
+    assert_eq!(text.text.borrow().as_str(), "initial");
+    probe.set_label("updated".to_string());
+    assert_eq!(text.text.borrow().as_str(), "updated");
 }
 
 #[test]
@@ -906,7 +929,7 @@ fn standalone_template_view_event_closure_can_update_templated_parent() {
 }
 
 #[test]
-fn named_control_template_uses_the_shared_event_backend() {
+fn reusable_template_function_returns_control_template_and_uses_shared_event_backend() {
     let probe = elwindui::new!(TemplateProbe(label: "initial".to_string()));
     let root = named_template_probe().__build(elwindui::core::ui::ControlTemplateContext {
         control: probe.clone(),
@@ -923,6 +946,39 @@ fn named_control_template_uses_the_shared_event_backend() {
         &routed_args,
     );
     assert_eq!(probe.label(), "named-clicked");
+}
+
+#[test]
+fn reusable_template_function_captures_prefix_and_resyncs_typed_parent() {
+    let template = prefixed_template("P:".to_string());
+    let probe = elwindui::new!(TemplateProbe(label: "A".to_string()));
+    let root = template.__build(elwindui::core::ui::ControlTemplateContext {
+        control: probe.clone(),
+        environment: EnvironmentContext::root(),
+    });
+    let text = root
+        .as_any()
+        .downcast_ref::<TextBlock>()
+        .expect("prefixed template root is TextBlock");
+    assert_eq!(text.text.borrow().as_str(), "P:A");
+    probe.set_label("B".to_string());
+    assert_eq!(text.text.borrow().as_str(), "P:B");
+}
+
+#[test]
+fn reusable_template_accepts_a_non_reserved_parent_alias() {
+    let template: ControlTemplate<TemplateProbe> =
+        template_view!(|owner: TemplateProbe| { TextBlock { text: owner.label } });
+    let probe = elwindui::new!(TemplateProbe(label: "alias".to_string()));
+    let root = template.__build(elwindui::core::ui::ControlTemplateContext {
+        control: probe,
+        environment: EnvironmentContext::root(),
+    });
+    let text = root
+        .as_any()
+        .downcast_ref::<TextBlock>()
+        .expect("aliased template root is TextBlock");
+    assert_eq!(text.text.borrow().as_str(), "alias");
 }
 
 #[test]

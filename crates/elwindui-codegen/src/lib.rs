@@ -18,6 +18,7 @@ use quote::{format_ident, quote};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::rc::Rc;
+use syn::visit::Visit as _;
 /// Stable compile-time token used by the generic `template_view!` property bridge.  This is a
 /// 64-bit FNV-1a-style hash of the field-name literal, calculated during code generation; it is a
 /// code-generation key, not a runtime property lookup.  The generated component implements the
@@ -26,7 +27,8 @@ use std::rc::Rc;
 /// distinct properties in one target collide, Rust reports the duplicate `TemplateProperty<KEY>`
 /// implementation/associated-type conflict at compile time; the collision is never resolved
 /// silently.
-pub(crate) const fn template_property_key(name: &str) -> u64 {
+#[doc(hidden)]
+pub const fn template_property_key(name: &str) -> u64 {
     let bytes = name.as_bytes();
     let mut hash = 0xcbf29ce484222325u64;
     let mut index = 0;
@@ -280,6 +282,7 @@ pub fn generate_template_view_expression(input: TokenStream) -> Result<TokenStre
 pub(crate) struct CompiledTemplateBody {
     root: TokenStream,
     let_statements: TokenStream,
+    captured_names: Vec<syn::Ident>,
     refresh: TokenStream,
     property_bounds: Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
     writable_properties: BTreeSet<u64>,
@@ -327,6 +330,15 @@ pub(crate) fn compile_template_body(
         parent_alias.clone(),
         bare_parent_fields.clone(),
     )?;
+    let captured_names = collect_template_capture_names(
+        body,
+        lets,
+        on_mount,
+        on_unmount,
+        on_update,
+        &parent_alias,
+        &bare_parent_fields,
+    );
     let template_parent_ident = format_ident!("__elwindui_template_parent");
     let on_mount_tokens = on_mount.map(|block| {
         codegen::emit_template_event_closure_body_for_target_with_fields(
@@ -393,6 +405,7 @@ pub(crate) fn compile_template_body(
     Ok(CompiledTemplateBody {
         root: lowered.root,
         let_statements: lowered.let_statements,
+        captured_names,
         refresh: lowered.refresh,
         property_bounds: lowered.property_bounds,
         writable_properties: lowered.writable_properties,
@@ -742,6 +755,457 @@ pub(crate) fn validate_template_parent_alias_shadowing(
     }
 }
 
+/// Finds ordinary Rust values referenced by a template body so the generated `Fn` factory can
+/// clone them once per build before the refresh callback moves its local copy.  A
+/// `ControlTemplate`/`ViewFactory` factory is callable more than once; moving a call-site capture
+/// directly into the nested `move` refresh callback would otherwise make an otherwise valid
+/// `Fn` factory fail with E0507 (for example, a reusable template that captures a `String`).
+///
+/// This deliberately scans only real Rust expressions.  DSL paths are resolved by the shared
+/// template lowerer (`owner.field`, bare parent fields, and view-model paths) and therefore must
+/// not be treated as ambient captures here.  Binding names are collected in a separate pass so
+/// generated `let`/`for` locals and Rust closure/block locals are not cloned before they exist.
+fn collect_template_capture_names(
+    body: &ast::ViewBody,
+    lets: &[ast::LetBinding],
+    on_mount: Option<&syn::Block>,
+    on_unmount: Option<&syn::Block>,
+    on_update: Option<&ast::OnUpdateHook>,
+    parent_alias: &str,
+    bare_parent_fields: &HashSet<String>,
+) -> Vec<syn::Ident> {
+    fn collect_block_bindings(block: &syn::Block, bindings: &mut HashSet<String>) {
+        struct BindingCollector<'a> {
+            bindings: &'a mut HashSet<String>,
+        }
+
+        impl<'ast> syn::visit::Visit<'ast> for BindingCollector<'_> {
+            fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
+                self.bindings.insert(pattern.ident.to_string());
+                syn::visit::visit_pat_ident(self, pattern);
+            }
+        }
+
+        BindingCollector { bindings }.visit_block(block);
+    }
+
+    fn collect_pattern_bindings(pattern: &str, bindings: &mut HashSet<String>) {
+        if let Ok(pattern) = syn::parse::Parser::parse_str(syn::Pat::parse_single, pattern) {
+            struct BindingCollector<'a> {
+                bindings: &'a mut HashSet<String>,
+            }
+
+            impl<'ast> syn::visit::Visit<'ast> for BindingCollector<'_> {
+                fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
+                    self.bindings.insert(pattern.ident.to_string());
+                    syn::visit::visit_pat_ident(self, pattern);
+                }
+            }
+
+            BindingCollector { bindings }.visit_pat(&pattern);
+        }
+    }
+
+    fn collect_view_expr_bindings(expr: &ast::ViewExpr, bindings: &mut HashSet<String>) {
+        match expr {
+            ast::ViewExpr::Path(_) => {}
+            ast::ViewExpr::TFluent(_, args) => {
+                for (_, value) in args {
+                    collect_view_expr_bindings(value, bindings);
+                }
+            }
+            ast::ViewExpr::Expr(expr) => collect_block_or_expr_bindings(expr, bindings),
+            ast::ViewExpr::Closure { params, body } => {
+                bindings.extend(params.iter().cloned());
+                match body {
+                    ast::ClosureBody::Expr(expr) => collect_view_expr_bindings(expr, bindings),
+                    ast::ClosureBody::Element(element) => {
+                        collect_element_bindings(element, bindings)
+                    }
+                    ast::ClosureBody::Block(block) => collect_block_bindings(block, bindings),
+                }
+            }
+            ast::ViewExpr::Element(element) => collect_element_bindings(element, bindings),
+            ast::ViewExpr::DeferredView(deferred) => {
+                collect_view_body_bindings(
+                    &deferred.body.root,
+                    &deferred.body.lets,
+                    deferred.body.on_mount.as_ref(),
+                    deferred.body.on_unmount.as_ref(),
+                    deferred.body.on_update.as_ref(),
+                    bindings,
+                );
+            }
+        }
+    }
+
+    fn collect_block_or_expr_bindings(expr: &syn::Expr, bindings: &mut HashSet<String>) {
+        struct BindingCollector<'a> {
+            bindings: &'a mut HashSet<String>,
+        }
+
+        impl<'ast> syn::visit::Visit<'ast> for BindingCollector<'_> {
+            fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
+                self.bindings.insert(pattern.ident.to_string());
+                syn::visit::visit_pat_ident(self, pattern);
+            }
+        }
+
+        BindingCollector { bindings }.visit_expr(expr);
+    }
+
+    fn collect_element_bindings(element: &ast::ElementNode, bindings: &mut HashSet<String>) {
+        for attribute in &element.attributes {
+            collect_view_expr_bindings(&attribute.value, bindings);
+        }
+        for (_, _, value) in &element.attached {
+            collect_view_expr_bindings(value, bindings);
+        }
+        for child in &element.children {
+            collect_child_bindings(child, bindings);
+        }
+    }
+
+    fn collect_view_body_bindings(
+        body: &ast::ViewBody,
+        lets: &[ast::LetBinding],
+        on_mount: Option<&syn::Block>,
+        on_unmount: Option<&syn::Block>,
+        on_update: Option<&ast::OnUpdateHook>,
+        bindings: &mut HashSet<String>,
+    ) {
+        bindings.extend(lets.iter().map(|binding| binding.name.clone()));
+        for binding in lets {
+            collect_element_bindings(&binding.element, bindings);
+        }
+        if let Some(block) = on_mount {
+            collect_block_bindings(block, bindings);
+        }
+        if let Some(block) = on_unmount {
+            collect_block_bindings(block, bindings);
+        }
+        if let Some(hook) = on_update {
+            collect_block_bindings(&hook.block, bindings);
+        }
+        for attribute in &body.attributes {
+            collect_view_expr_bindings(&attribute.value, bindings);
+        }
+        for (_, _, value) in &body.attached {
+            collect_view_expr_bindings(value, bindings);
+        }
+        for child in &body.children {
+            collect_child_bindings(child, bindings);
+        }
+    }
+
+    fn collect_child_bindings(child: &ast::ChildEntry, bindings: &mut HashSet<String>) {
+        match child {
+            ast::ChildEntry::Literal(element) => collect_element_bindings(element, bindings),
+            ast::ChildEntry::Ref(_) => {}
+            ast::ChildEntry::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                collect_view_expr_bindings(condition, bindings);
+                for child in then_branch.iter().chain(else_branch) {
+                    collect_child_bindings(child, bindings);
+                }
+            }
+            ast::ChildEntry::Match { value, arms } => {
+                collect_view_expr_bindings(value, bindings);
+                for arm in arms {
+                    collect_pattern_bindings(&arm.pattern, bindings);
+                    for child in &arm.body {
+                        collect_child_bindings(child, bindings);
+                    }
+                }
+            }
+            ast::ChildEntry::For {
+                binding,
+                collection,
+                body,
+            } => {
+                bindings.insert(binding.clone());
+                collect_view_expr_bindings(collection, bindings);
+                for child in body {
+                    collect_child_bindings(child, bindings);
+                }
+            }
+        }
+    }
+
+    struct CandidateCollector<'a> {
+        names: &'a mut Vec<String>,
+        seen: &'a mut HashSet<String>,
+    }
+
+    impl CandidateCollector<'_> {
+        fn add_name(&mut self, name: String) {
+            if self.seen.insert(name.clone()) {
+                self.names.push(name);
+            }
+        }
+
+        fn add_path(&mut self, path: &syn::Path) {
+            if let Some(ident) = path.get_ident() {
+                self.add_name(ident.to_string());
+            }
+        }
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for CandidateCollector<'_> {
+        fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
+            self.add_path(&expression.path);
+            syn::visit::visit_expr_path(self, expression);
+        }
+
+        fn visit_expr_call(&mut self, expression: &'ast syn::ExprCall) {
+            // A bare function path is a callee, not a captured value.  Visit arguments explicitly
+            // so `make_value(prefix)` still records `prefix`.
+            for argument in &expression.args {
+                self.visit_expr(argument);
+            }
+        }
+
+        fn visit_expr_macro(&mut self, expression: &'ast syn::ExprMacro) {
+            let macro_name = expression
+                .mac
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string());
+            if !matches!(
+                macro_name.as_deref(),
+                Some("format" | "format_args" | "vec")
+            ) {
+                return;
+            }
+            let arguments = syn::parse::Parser::parse2(
+                syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+                expression.mac.tokens.clone(),
+            );
+            let Ok(arguments) = arguments else {
+                return;
+            };
+            if matches!(macro_name.as_deref(), Some("format" | "format_args")) {
+                if let Some(syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(format),
+                    ..
+                })) = arguments.first()
+                {
+                    for name in template_format_inline_idents(&format.value()) {
+                        self.add_name(name);
+                    }
+                }
+            }
+            for argument in arguments {
+                if let syn::Expr::Assign(assign) = &argument {
+                    self.visit_expr(&assign.right);
+                } else {
+                    self.visit_expr(&argument);
+                }
+            }
+        }
+    }
+
+    fn collect_view_expr_candidates(
+        expr: &ast::ViewExpr,
+        names: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) {
+        match expr {
+            ast::ViewExpr::Path(_) => {}
+            ast::ViewExpr::TFluent(_, args) => {
+                for (_, value) in args {
+                    collect_view_expr_candidates(value, names, seen);
+                }
+            }
+            ast::ViewExpr::Expr(expr) => CandidateCollector { names, seen }.visit_expr(expr),
+            ast::ViewExpr::Closure { body, .. } => match body {
+                ast::ClosureBody::Expr(expr) => collect_view_expr_candidates(expr, names, seen),
+                ast::ClosureBody::Element(element) => {
+                    collect_element_candidates(element, names, seen)
+                }
+                ast::ClosureBody::Block(block) => {
+                    CandidateCollector { names, seen }.visit_block(block)
+                }
+            },
+            ast::ViewExpr::Element(element) => collect_element_candidates(element, names, seen),
+            ast::ViewExpr::DeferredView(deferred) => collect_view_body_candidates(
+                &deferred.body.root,
+                &deferred.body.lets,
+                deferred.body.on_mount.as_ref(),
+                deferred.body.on_unmount.as_ref(),
+                deferred.body.on_update.as_ref(),
+                names,
+                seen,
+            ),
+        }
+    }
+
+    fn collect_element_candidates(
+        element: &ast::ElementNode,
+        names: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) {
+        for attribute in &element.attributes {
+            collect_view_expr_candidates(&attribute.value, names, seen);
+        }
+        for (_, _, value) in &element.attached {
+            collect_view_expr_candidates(value, names, seen);
+        }
+        for child in &element.children {
+            collect_child_candidates(child, names, seen);
+        }
+    }
+
+    fn collect_view_body_candidates(
+        body: &ast::ViewBody,
+        lets: &[ast::LetBinding],
+        on_mount: Option<&syn::Block>,
+        on_unmount: Option<&syn::Block>,
+        on_update: Option<&ast::OnUpdateHook>,
+        names: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) {
+        for binding in lets {
+            collect_element_candidates(&binding.element, names, seen);
+        }
+        for block in [on_mount, on_unmount] {
+            if let Some(block) = block {
+                CandidateCollector { names, seen }.visit_block(block);
+            }
+        }
+        if let Some(hook) = on_update {
+            CandidateCollector { names, seen }.visit_block(&hook.block);
+        }
+        for attribute in &body.attributes {
+            collect_view_expr_candidates(&attribute.value, names, seen);
+        }
+        for (_, _, value) in &body.attached {
+            collect_view_expr_candidates(value, names, seen);
+        }
+        for child in &body.children {
+            collect_child_candidates(child, names, seen);
+        }
+    }
+
+    fn collect_child_candidates(
+        child: &ast::ChildEntry,
+        names: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) {
+        match child {
+            ast::ChildEntry::Literal(element) => collect_element_candidates(element, names, seen),
+            ast::ChildEntry::Ref(_) => {}
+            ast::ChildEntry::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                collect_view_expr_candidates(condition, names, seen);
+                for child in then_branch.iter().chain(else_branch) {
+                    collect_child_candidates(child, names, seen);
+                }
+            }
+            ast::ChildEntry::Match { value, arms } => {
+                collect_view_expr_candidates(value, names, seen);
+                for arm in arms {
+                    for child in &arm.body {
+                        collect_child_candidates(child, names, seen);
+                    }
+                }
+            }
+            ast::ChildEntry::For {
+                collection, body, ..
+            } => {
+                collect_view_expr_candidates(collection, names, seen);
+                for child in body {
+                    collect_child_candidates(child, names, seen);
+                }
+            }
+        }
+    }
+
+    fn template_format_inline_idents(value: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut chars = value.chars().peekable();
+        while let Some(character) = chars.next() {
+            if character != '{' {
+                if character == '}' && chars.peek() == Some(&'}') {
+                    chars.next();
+                }
+                continue;
+            }
+            if chars.peek() == Some(&'{') {
+                chars.next();
+                continue;
+            }
+            let mut name = String::new();
+            while matches!(chars.peek(), Some(next) if *next != '}' && *next != ':') {
+                name.push(chars.next().unwrap());
+            }
+            for next in chars.by_ref() {
+                if next == '}' {
+                    break;
+                }
+            }
+            if !name.is_empty()
+                && (name
+                    .starts_with(|character: char| character.is_alphabetic() || character == '_'))
+                && name
+                    .chars()
+                    .all(|character| character.is_alphanumeric() || character == '_')
+            {
+                names.push(name);
+            }
+        }
+        names
+    }
+
+    let mut bindings = HashSet::new();
+    collect_view_body_bindings(body, lets, on_mount, on_unmount, on_update, &mut bindings);
+
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    collect_view_body_candidates(
+        body, lets, on_mount, on_unmount, on_update, &mut names, &mut seen,
+    );
+    names
+        .into_iter()
+        .filter(|name| {
+            !bindings.contains(name)
+                && name != parent_alias
+                && !bare_parent_fields.contains(name)
+                && !matches!(
+                    name.as_str(),
+                    "self"
+                        | "Self"
+                        | "crate"
+                        | "super"
+                        | "this"
+                        | "__environment"
+                        | "__subscriptions"
+                        | "__root"
+                )
+                // Uppercase single-segment paths conventionally denote `static`/`const` items,
+                // not values owned by the caller.  In particular, cloning a `thread_local!`
+                // `LocalKey` such as `TARGET_MOUNTS` is both unnecessary and invalid.
+                && name.chars().any(|character| character.is_lowercase())
+                && !name.starts_with("__elwindui_")
+        })
+        .map(|name| format_ident!("{name}"))
+        .collect()
+}
+
+fn template_capture_clones(names: &[syn::Ident]) -> TokenStream {
+    names
+        .iter()
+        .map(|name| quote! { let #name = #name.clone(); })
+        .collect()
+}
+
 /// Emits the property-change subscriptions shared by every typed template factory.  Property
 /// reads are lowered into `TemplateProperty<KEY>` accesses; the corresponding subscription merely
 /// schedules the same refresh closure used by event wiring and dynamic regions.  Keeping this in
@@ -805,6 +1269,7 @@ pub(crate) fn emit_compiled_template_factory(
     if allow_environment_only && !parent_dependent {
         let root = &body.root;
         let let_statements = &body.let_statements;
+        let capture_clones = template_capture_clones(&body.captured_names);
         let on_mount_hook = body
             .on_mount
             .clone()
@@ -846,6 +1311,7 @@ pub(crate) fn emit_compiled_template_factory(
                 let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
                     Vec::<elwindui::core::reactive::Subscription>::new(),
                 ));
+                #capture_clones
                 #let_statements
                 let __root = #root;
                 #on_mount_hook
@@ -857,6 +1323,7 @@ pub(crate) fn emit_compiled_template_factory(
 
     let root = &body.root;
     let let_statements = &body.let_statements;
+    let capture_clones = template_capture_clones(&body.captured_names);
     let refresh = &body.refresh;
     let property_subscriptions =
         emit_template_property_subscriptions(&target_type, &body.property_bounds);
@@ -950,6 +1417,7 @@ pub(crate) fn emit_compiled_template_factory(
             let __elwindui_template_refresh_cell_for_callback =
                 std::rc::Rc::clone(&__elwindui_template_refresh_cell);
             let this = __elwindui_template_parent.clone();
+            #capture_clones
             #let_statements
             let __root = #root;
             let __elwindui_template_refresh_callback: std::rc::Rc<dyn Fn()> =
@@ -988,6 +1456,7 @@ fn emit_view_factory(
 ) -> TokenStream {
     let root = &body.root;
     let let_statements = &body.let_statements;
+    let capture_clones = template_capture_clones(&body.captured_names);
     let refresh = &body.refresh;
     let property_subscriptions =
         emit_template_property_subscriptions(&target_type, &body.property_bounds);
@@ -1084,6 +1553,7 @@ fn emit_view_factory(
                 let __elwindui_template_refresh_cell_for_callback =
                     std::rc::Rc::clone(&__elwindui_template_refresh_cell);
                 let this = __elwindui_template_parent.clone();
+                #capture_clones
                 #let_statements
                 let __root = #root;
                 let __elwindui_template_refresh_callback: std::rc::Rc<dyn Fn()> =

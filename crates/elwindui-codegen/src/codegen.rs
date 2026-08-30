@@ -308,6 +308,58 @@ fn dsl_props_macro_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream
     }
 }
 
+/// Resolves the source-local `rust_analyzer` template-capability macro for a component/class
+/// target. The macro is exported at the defining crate root, so qualified paths retain only their
+/// crate boundary (`some_crate::widgets::Thing` -> `some_crate::__elwindui_template_capabilities_Thing`).
+/// This is intentionally separate from the runtime/property-shape macro: the capability macro is
+/// emitted only for analysis and its impl bodies are `unreachable!()`.
+pub(crate) fn dsl_template_capability_macro_path(type_path: &str) -> TokenStream {
+    let ident = format_ident!(
+        "__elwindui_template_capabilities_{}",
+        dsl_type_ident(type_path)
+    );
+    match dsl_type_origin(type_path, None) {
+        DslTypeOrigin::Builtin | DslTypeOrigin::UnresolvedUnqualified => {
+            quote! { elwindui::core::#ident }
+        }
+        DslTypeOrigin::Local => quote! { crate::#ident },
+        DslTypeOrigin::ExternalQualified { crate_prefix } => {
+            quote! { #crate_prefix::#ident }
+        }
+    }
+}
+
+/// Macro-body form of [`dsl_template_capability_macro_path`]. A local component's exported macro
+/// may be invoked from another crate, so its self-reference must use `$crate`; external crate
+/// prefixes remain unchanged.
+pub(crate) fn dsl_template_capability_macro_self_ref_path(type_path: &str) -> TokenStream {
+    rewrite_crate_tokens(dsl_template_capability_macro_path(type_path))
+}
+
+/// Rewrites `crate` path segments for tokens embedded inside an exported `macro_rules!` body.
+/// `$crate` is the only spelling that continues to refer to the defining crate when a local
+/// component's capability macro is invoked by a downstream crate.
+fn rewrite_crate_tokens(tokens: TokenStream) -> TokenStream {
+    let mut out = TokenStream::new();
+    for token in tokens {
+        match token {
+            proc_macro2::TokenTree::Ident(ident) if ident == "crate" => {
+                out.extend(quote! { $crate });
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                let mut rewritten = proc_macro2::Group::new(
+                    group.delimiter(),
+                    rewrite_crate_tokens(group.stream()),
+                );
+                rewritten.set_span(group.span());
+                out.extend(std::iter::once(proc_macro2::TokenTree::Group(rewritten)));
+            }
+            other => out.extend(std::iter::once(other)),
+        }
+    }
+    out
+}
+
 /// Resolves the defining crate's exported constructor-shape macro.  Unlike the props-shape
 /// protocol, this is deliberately present only for an authored qualified external path: local
 /// generated components use the same-crate registry, while builtin and unresolved-unqualified
@@ -5943,35 +5995,12 @@ fn generate_view(
             // dispatch path.
             .is_some_and(|info| info.composed_shape.as_deref() == Some("Control"))
     {
-        // The bridge's writable capability follows the generated public shape and the actual
-        // setter value type, not merely effective `Prop`/`State` membership. A full `Option<T>` Prop
-        // keeps that same `Option<T>` type in both the readable and writable template surface.
-        // Private state is likewise absent from the external public shape. Inherited generated
-        // properties remain eligible through their real inherited `Prop` field type.
-        let own_writable_property_types: HashMap<String, String> = own_field_shape
-            .writable_fields
-            .iter()
-            .filter(|(_, _, visibility)| {
-                *visibility == crate::component_frontend::ShadowVisibility::Public
-            })
-            .map(|(name, ty, _)| (name.clone(), ty.clone()))
-            .collect();
-        let writable_property_types: HashMap<String, String> = component
-            .fields
-            .iter()
-            .filter_map(|field| {
-                if declared_own_field_names.contains(field.name.as_str()) {
-                    own_writable_property_types
-                        .get(&field.name)
-                        .cloned()
-                        .map(|ty| (field.name.clone(), ty))
-                } else if field.kind == FieldKind::Prop {
-                    Some((field.name.clone(), field.ty.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Keep the real bridge's readable/writable membership and associated `Value` type in the
+        // same metadata object consumed by the rust-analyzer shadow. A full `Option<T>` Prop keeps
+        // that same `Option<T>` type in both surfaces; private state and fixed Params remain
+        // read-only or absent exactly as `component_public_shape` says.
+        let template_capabilities =
+            crate::component_frontend::template_capability_shapes(source_component, component);
         let notified_property_names: HashSet<String> = component_property_variants
             .iter()
             .map(ToString::to_string)
@@ -5994,27 +6023,12 @@ fn generate_view(
         } else {
             None
         };
-        let mut readable: HashMap<String, syn::Type> = HashMap::new();
-        for field in &component.fields {
-            if field.name.starts_with("on_") {
-                continue;
-            }
-            if matches!(
-                field.kind,
-                FieldKind::Attached
-                    | FieldKind::Action
-                    | FieldKind::Observable
-                    | FieldKind::AsyncComputed
-            ) {
-                continue;
-            }
-            let ty = syn::parse_str::<syn::Type>(&field.ty)
-                .expect("template property field type must parse");
-            readable.entry(field.name.clone()).or_insert(ty);
-        }
-        readable
+        template_capabilities
             .into_iter()
-            .map(|(name, ty)| {
+            .map(|capability| {
+                let name = capability.name;
+                let ty = syn::parse_str::<syn::Type>(&capability.value_type)
+                    .expect("template property field type must parse");
                 let ident = format_ident!("{name}");
                 let key = crate::template_property_key(&name);
                 let getter = &ident;
@@ -6041,12 +6055,7 @@ fn generate_view(
                 } else {
                     quote! { self.#getter() }
                 };
-                let setter_available = writable_property_types
-                    .get(&name)
-                    .and_then(|setter_ty| syn::parse_str::<syn::Type>(setter_ty).ok())
-                    .is_some_and(|setter_ty| {
-                        quote!(#setter_ty).to_string() == quote!(#ty).to_string()
-                    });
+                let setter_available = capability.writable;
                 let setter_body = if setter_available {
                     let setter = format_ident!("set_{name}");
                     if inherited_owner.is_some() {

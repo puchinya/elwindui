@@ -90,7 +90,7 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// use elwindui::ui::{Control, TextArea};
 ///
 /// #[component(inherits Control)]
-/// struct ReadOnlyTwoWayProbe {
+/// struct ReadOnlyTwoWayProbe { // CF9
 ///     #[prop(default = String::from("source"))]
 ///     source: String,
 ///
@@ -110,6 +110,111 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// fn main() {}
 /// ```
 ///
+/// The target is declared in the lambda-style header; the old headerless and inferred forms are
+/// rejected:
+///
+/// ```compile_fail
+/// use elwindui::template_view;
+/// use elwindui::ui::TextBlock;
+///
+/// fn main() {
+///     let _ = template_view!({ TextBlock { text: "missing target" } }); // CF1
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use elwindui::template_view;
+/// use elwindui::ui::TextBlock;
+///
+/// fn main() {
+///     let _ = template_view!(|control| { TextBlock { text: "missing type" } }); // CF2
+/// }
+/// ```
+///
+/// The header has exactly one identifier and one target type:
+///
+/// ```compile_fail
+/// use elwindui::template_view;
+/// use elwindui::ui::{Control, TextBlock};
+///
+/// fn main() {
+///     let _ = template_view!(|first: Control, second: Control| { // CF3
+///         TextBlock { text: "two parameters" }
+///     });
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use elwindui::template_view;
+/// use elwindui::ui::{Control, TextBlock};
+///
+/// fn main() {
+///     let _ = template_view!(|(control,): Control| { // CF4
+///         TextBlock { text: "destructured parameter" }
+///     });
+/// }
+/// ```
+///
+/// `Self` is reserved for a component's default `template:` pseudo-field, while that field must
+/// use `Self` rather than a concrete component type:
+///
+/// ```compile_fail
+/// use elwindui::template_view;
+/// use elwindui::core::ui::{Control, ControlTemplate, TextBlock};
+///
+/// fn standalone_template() -> ControlTemplate<Control> { // CF5
+///     template_view!(|control: Self| { TextBlock { text: "standalone Self" } })
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// ```compile_fail
+/// use elwindui::{component, template_view};
+/// use elwindui::ui::{Control, TextBlock};
+///
+/// #[component(inherits Control)]
+/// struct ConcreteDefaultTargetProbe { // CF6
+///     template: template_view!(|control: Control| {
+///         TextBlock { text: "concrete component target" }
+///     }),
+/// }
+///
+/// #[component]
+/// impl ConcreteDefaultTargetProbe {}
+///
+/// fn main() {}
+/// ```
+///
+/// The former marker attribute is not part of the public API:
+///
+/// ```compile_fail
+/// #[elwindui::control_template] // CF7
+/// fn removed_control_template_api() {}
+///
+/// fn main() {}
+/// ```
+///
+/// Only the alias declared in the header is reserved inside the template body:
+///
+/// ```compile_fail
+/// use elwindui::{component, template_view};
+/// use elwindui::ui::{Control, TextBlock};
+///
+/// #[component(inherits Control)]
+/// struct AliasShadowProbe { // CF8
+///     template: template_view!(|control: Self| {
+///         let control = TextBlock {};
+///         TextBlock { text: "shadowed alias" }
+///     }),
+/// }
+///
+/// #[component]
+/// impl AliasShadowProbe {}
+///
+/// fn main() {}
+/// ```
+///
 /// An event setter against the same computed field is rejected before runtime as well:
 ///
 /// ```compile_fail
@@ -117,7 +222,7 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// use elwindui::ui::{Control, TextBlock};
 ///
 /// #[component(inherits Control)]
-/// struct ReadOnlyEventWriteProbe {
+/// struct ReadOnlyEventWriteProbe { // CF10
 ///     #[prop(default = String::from("source"))]
 ///     source: String,
 ///
@@ -150,6 +255,19 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// fn main() {
 ///     let _: ControlTemplate<Control> = template_view!(|control: Control| {
 ///         TextBlock { text: "framework target" }
+///     });
+/// }
+/// ```
+///
+/// A target that is not a valid `ControlExt` target is rejected at the public boundary:
+///
+/// ```compile_fail
+/// use elwindui::template_view;
+/// use elwindui::core::ui::{ControlTemplate, TextBlock};
+///
+/// fn main() {
+///     let _: ControlTemplate<String> = template_view!(|value: String| { // CF11
+///         TextBlock { text: "invalid target" }
 ///     });
 /// }
 /// ```

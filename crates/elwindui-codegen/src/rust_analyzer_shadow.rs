@@ -41,6 +41,10 @@
 //! A shadow's own body is never a runtime reimplementation — every method here is `unreachable!()`.
 //! It exists purely to give rust-analyzer's name/type resolution a self-contained, always-succeeding
 //! surface; real behavior is exclusively what `cfg(not(rust_analyzer))` generation already produces.
+//! For Control-derived targets that surface includes analysis-only
+//! `TemplateProperty<KEY>`/`WritableTemplateProperty<KEY>` impls with the exact associated `Value`
+//! from the shared component metadata. Those impls never construct, mount, subscribe, or run
+//! lifecycle code; read-only fields receive no writable impl.
 
 use crate::ast::{self, ComponentDef};
 // `ComponentPublicShape` is not named directly in this file (only `component_public_shape`'s return
@@ -48,7 +52,8 @@ use crate::ast::{self, ComponentDef};
 // (`docs/design/tools/codegen_design.md` §3.2a) alongside the function/enum this file does use.
 #[allow(unused_imports)]
 pub(crate) use crate::component_frontend::{
-    ComponentConstructorReturn, ComponentPublicShape, ShadowVisibility, component_public_shape,
+    ComponentConstructorReturn, ComponentPublicShape, ShadowVisibility, TemplateCapabilityOrigin,
+    TemplateCapabilityShape, component_public_shape, template_capability_shapes,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -154,6 +159,58 @@ fn parse_type(ty: &str) -> Result<syn::Type, String> {
     })
 }
 
+/// Emits the analysis-only `TemplateProperty` capability for the supplied component metadata.
+/// The same helper is used for the component itself and for the token macro that forwards the
+/// component's own capabilities to a derived shadow. Every method is intentionally inert: this
+/// surface exists only so rust-analyzer can normalize the associated `Value` type and select the
+/// writable trait without pretending to implement runtime template behavior.
+fn template_capability_impls(
+    shapes: &[TemplateCapabilityShape],
+    target: TokenStream,
+) -> Result<TokenStream, String> {
+    let mut out = TokenStream::new();
+    for capability in shapes {
+        // A valid computed override has the same capability as its ancestor. Let the inherited
+        // forwarding macro provide that one impl, avoiding duplicate `(Target, KEY)` impls while
+        // preserving the derived field's exact type in normal rustc generation.
+        if capability.overridden {
+            continue;
+        }
+        let ty = parse_type(&capability.value_type)?;
+        let key = crate::template_property_key(&capability.name);
+        out.extend(quote! {
+            impl elwindui::core::ui::TemplateProperty<#key> for #target {
+                type Value = #ty;
+
+                fn __template_get(&self) -> Self::Value {
+                    unreachable!()
+                }
+
+                fn __template_subscribe(
+                    &self,
+                    _listener: impl Fn() + 'static,
+                ) -> elwindui::core::reactive::Subscription {
+                    unreachable!()
+                }
+            }
+        });
+        if capability.writable {
+            out.extend(quote! {
+                impl elwindui::core::ui::WritableTemplateProperty<#key> for #target {
+                    fn __template_set(&self, _value: Self::Value) {
+                        unreachable!()
+                    }
+                }
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn template_capability_macro_ident(name: &str) -> syn::Ident {
+    format_ident!("__elwindui_template_capabilities_{name}")
+}
+
 /// The rust-analyzer-only Component struct shadow (Issue #146, `docs/design/tools/codegen_design.md`
 /// §3.2a) — built entirely from `item_struct`/`component`'s own source, independent of the same-crate
 /// Component registry (`component_frontend::same_crate_components`) real generation depends on, so it
@@ -225,6 +282,40 @@ pub(crate) fn build_component_struct_shadow(
         });
     }
 
+    let capability_shapes = template_capability_shapes(component, component);
+    let direct_capability_impls = template_capability_impls(&capability_shapes, quote! { #ident })?;
+    let macro_capability_impls = template_capability_impls(&capability_shapes, quote! { $target })?;
+    let capability_macro_ident = template_capability_macro_ident(&ident.to_string());
+    let parent_capability_macro = base.map(|base_name| {
+        let base_type_path = component.base_path.as_deref().unwrap_or(base_name);
+        crate::codegen::dsl_template_capability_macro_path(base_type_path)
+    });
+    let parent_capability_macro_self_ref = base.map(|base_name| {
+        let base_type_path = component.base_path.as_deref().unwrap_or(base_name);
+        crate::codegen::dsl_template_capability_macro_self_ref_path(base_type_path)
+    });
+    let parent_capability_in_macro = parent_capability_macro_self_ref.as_ref().map(|path| {
+        quote! {
+            #path!(@impl $target);
+        }
+    });
+    let parent_capability_invocation = parent_capability_macro.as_ref().map(|path| {
+        quote! {
+            #path!(@impl #ident);
+        }
+    });
+    let capability_macro = quote! {
+        #[doc(hidden)]
+        #[macro_export]
+        #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+        macro_rules! #capability_macro_ident {
+            (@impl $target:ty) => {
+                #macro_capability_impls
+                #parent_capability_in_macro
+            };
+        }
+    };
+
     let deref_shadow = match base {
         Some(base_name) => {
             let target = base_type_path(component, base_name);
@@ -246,6 +337,9 @@ pub(crate) fn build_component_struct_shadow(
         }
 
         #deref_shadow
+        #direct_capability_impls
+        #parent_capability_invocation
+        #capability_macro
     })
 }
 
@@ -611,6 +705,85 @@ mod tests {
             s.contains("pub fn set_label (& self , value : String)"),
             "{s}"
         );
+    }
+
+    /// RA1/RA2/RA3/RA4: the analysis-only template capability surface uses the same exact value
+    /// type and writable classification as the real bridge, while an effective inherited Prop is
+    /// forwarded as writable and a computed field remains read-only.
+    #[test]
+    fn template_capability_shapes_drive_shadow_value_and_writable_surface() {
+        let mut source = demo_component(None);
+        source.fields.push(FieldDef {
+            name: "label".to_string(),
+            ty: "String".to_string(),
+            kind: FieldKind::Prop,
+            attrs: Vec::new(),
+            initializer: Some(Initializer::Expr(syn::parse_quote!(String::new()))),
+        });
+        source.fields.push(FieldDef {
+            name: "read_only".to_string(),
+            ty: "String".to_string(),
+            kind: FieldKind::Computed,
+            attrs: Vec::new(),
+            initializer: Some(Initializer::Expr(syn::parse_quote!(String::new()))),
+        });
+        let mut effective = source.clone();
+        effective.fields.insert(
+            0,
+            FieldDef {
+                name: "base_value".to_string(),
+                ty: "String".to_string(),
+                kind: FieldKind::Prop,
+                attrs: Vec::new(),
+                initializer: Some(Initializer::Expr(syn::parse_quote!(String::new()))),
+            },
+        );
+
+        let capabilities = template_capability_shapes(&source, &effective);
+        let inherited = capabilities
+            .iter()
+            .find(|capability| capability.name == "base_value")
+            .expect("inherited capability should be present");
+        assert_eq!(inherited.origin, TemplateCapabilityOrigin::Inherited);
+        assert!(inherited.writable);
+        let read_only = capabilities
+            .iter()
+            .find(|capability| capability.name == "read_only")
+            .expect("computed capability should be present");
+        assert_eq!(read_only.origin, TemplateCapabilityOrigin::Own);
+        assert_eq!(read_only.value_type, "String");
+        assert!(!read_only.writable);
+
+        let item_struct: syn::ItemStruct = syn::parse_quote! {
+            pub struct ShadowDemo {
+                #[prop]
+                label: String,
+                #[computed(expr = String::new())]
+                read_only: String,
+            }
+        };
+        let shadow = build_component_struct_shadow(None, &item_struct, &source, None)
+            .expect("struct shadow should build")
+            .to_string();
+        let label_key = crate::template_property_key("label");
+        let read_only_key = crate::template_property_key("read_only");
+        assert!(
+            shadow.contains(&format!("TemplateProperty < {label_key}u64")),
+            "label capability must be emitted: {shadow}"
+        );
+        assert!(
+            shadow.contains("type Value = String"),
+            "capability associated type must preserve the declared type: {shadow}"
+        );
+        assert!(
+            shadow.contains(&format!("WritableTemplateProperty < {label_key}u64")),
+            "writable Prop capability must be emitted: {shadow}"
+        );
+        assert!(
+            !shadow.contains(&format!("WritableTemplateProperty < {read_only_key}u64")),
+            "computed capability must stay read-only: {shadow}"
+        );
+        parses_as_items(&shadow.parse().expect("shadow string should tokenize"));
     }
 
     /// T3: the impl shadow builds from `item_impl` alone, independent of the struct registry.

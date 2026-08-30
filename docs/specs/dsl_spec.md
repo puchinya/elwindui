@@ -57,7 +57,7 @@ impl Greeting {}
 - 属性は `key: value` 形式
 - カンマ・改行はどちらも区切りとして等価
 - 単純な識別子・リテラルの参照は `${}` 不要。演算や結合を含む式のみ `format!` 等を使う
-- `view!`は通常のcomponent compositionを記述する`body`型位置で使い、通常のRustコードから単独macroとして呼び出すことはできない。`template_view!`は別の式macroであり、期待型に応じた`ControlTemplate<C>`値を生成する
+- `view!`は通常のcomponent compositionを記述する`body`型位置で使い、通常のRustコードから単独macroとして呼び出すことはできない。`template_view!`は別の式macroであり、`|alias: Target|`ヘッダーで明示したtargetの`ControlTemplate<Target>`値を生成する
 - **`#[elwindui::component] impl Name {}` は、メソッドが1つも無くても常に必須。** 省略すると`Name`というcomponent型は成立しない。本書の以降のコード例は空`impl`も省略しない
 
 ```rust
@@ -317,7 +317,7 @@ struct ContentWrapper {
 impl ContentWrapper {}
 ```
 
-ここで`Control`は`elwindui::ui::Control`(ビルトイン、裸名で参照)である。`template_view!`の結果は期待型から`ControlTemplate<ContentWrapper>`として型付けされ、インスタンスごとの`template`プロパティにはならない。caller側で`ContentWrapper { TextBlock { ... } }`のように書いたbare childは、templateとは独立した実効`#[content(...)]`へlowerされる。
+ここで`Control`は`elwindui::ui::Control`(ビルトイン、裸名で参照)である。`template_view!(|control: ContentWrapper| { ... })`のようにtargetをヘッダーへ明記した結果は`ControlTemplate<ContentWrapper>`として型付けされ、インスタンスごとの`template`プロパティにはならない。caller側で`ContentWrapper { TextBlock { ... } }`のように書いたbare childは、templateとは独立した実効`#[content(...)]`へlowerされる。
 
 `Control`派生componentのvisual chromeは`body: view!`ではなく`template: template_view!`で宣言する。これは内部の`__prepare_template_presentation()`/`__set_template_root()`経路へ接続される型レベルの既定templateであり、hiddenなbody-presentation metadataではない。EnvironmentContextの`set_control_template::<ContentWrapper>(...)`でmount前のoverrideを指定でき、lookupは対象型のTypeIdに対して完全一致する。`ContentPresenter`をtemplate内に静的に1つ置いた場合だけ、callerのlogical contentがそのvisual subtreeへpresentされる。
 
@@ -382,7 +382,7 @@ body: view! {
 
 - `on_mount`はcomponentがUI treeへ初めて接続された直後に一度だけ実行する
 - `on_unmount`はcomponentがUI treeから切り離される直前に一度だけ実行する
-- `on_update(field, ...)`は列挙した`#[prop]`または`#[computed]`のいずれかが変更された後に実行する
+- `on_update(field, ...)`は列挙した`#[prop]`または`#[computed]`のいずれかが変更された後に実行する。ここで列挙するselectorは`label`/`source`のような**非修飾のfield名**であり、`on_update(alias.label)`のようなparent alias付きpathは書かない(値の参照やsetterをbody内で行う場合だけ`alias.label`を使う)
 - 引数なしの`on_update`は任意の`#[prop]`変更を監視する
 - 初期構築時の値設定は`on_update`として数えない
 - hookは通常のRust blockであり、副作用を実行できる

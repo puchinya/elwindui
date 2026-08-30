@@ -237,9 +237,12 @@ pub(crate) fn build_component_struct_shadow(
     component: &ComponentDef,
     view: Option<&ast::ViewDef>,
 ) -> Result<TokenStream, String> {
-    let vis = &item_struct.vis;
     let ident = &item_struct.ident;
     let shape = component_public_shape(component, view);
+    let base_field = base.map(|base_name| {
+        let base_type = base_type_path(component, base_name);
+        quote! { pub base: #base_type, }
+    });
 
     let mut ctor_params = TokenStream::new();
     for (name, ty) in &shape.constructor_params {
@@ -265,6 +268,45 @@ pub(crate) fn build_component_struct_shadow(
             }
         },
     });
+    if shape.constructor_return == ComponentConstructorReturn::RcSelf {
+        methods.extend(quote! {
+            #[doc(hidden)]
+            pub fn __new_unmounted(#ctor_params) -> std::rc::Rc<Self> {
+                unreachable!()
+            }
+
+            #[doc(hidden)]
+            pub fn __mount(
+                self: &std::rc::Rc<Self>,
+                _environment: elwindui::core::environment::EnvironmentContext,
+            ) {
+                unreachable!()
+            }
+        });
+    }
+    for (name, ty) in &shape.defaulted_params {
+        let setter_ident = format_ident!("__set_initial_param_{name}");
+        let ty = parse_type(ty)?;
+        methods.extend(quote! {
+            #[doc(hidden)]
+            pub fn #setter_ident(&self, _value: #ty) {}
+        });
+    }
+    for (name, ty, _) in &shape.writable_fields {
+        let is_prop = component
+            .fields
+            .iter()
+            .any(|field| field.name == *name && field.kind == ast::FieldKind::Prop);
+        if !is_prop {
+            continue;
+        }
+        let setter_ident = format_ident!("__set_initial_prop_{name}");
+        let ty = parse_type(ty)?;
+        methods.extend(quote! {
+            #[doc(hidden)]
+            pub fn #setter_ident(&self, _value: #ty) {}
+        });
+    }
     for (name, ty, visibility) in &shape.readable_fields {
         let field_ident = format_ident!("{name}");
         let ty = parse_type(ty)?;
@@ -282,15 +324,25 @@ pub(crate) fn build_component_struct_shadow(
         });
     }
 
-    let capability_shapes = template_capability_shapes(component, component);
+    // A `Window` host is not a Control and therefore does not have a template-property bridge.
+    // Its `content` field is a native host slot; emitting both the host's capability and an own
+    // component field with the same name would create two `TemplateProperty<KEY>` impls on the
+    // same shadow target.  This mirrors `generate_view`'s structural Control-only condition.
+    let is_window_host =
+        base.is_some_and(|base_name| component.base_path.is_none() && base_name == "Window");
+    let capability_shapes = if is_window_host {
+        Vec::new()
+    } else {
+        template_capability_shapes(component, component)
+    };
     let direct_capability_impls = template_capability_impls(&capability_shapes, quote! { #ident })?;
     let macro_capability_impls = template_capability_impls(&capability_shapes, quote! { $target })?;
     let capability_macro_ident = template_capability_macro_ident(&ident.to_string());
-    let parent_capability_macro = base.map(|base_name| {
+    let parent_capability_macro = base.filter(|_| !is_window_host).map(|base_name| {
         let base_type_path = component.base_path.as_deref().unwrap_or(base_name);
         crate::codegen::dsl_template_capability_macro_path(base_type_path)
     });
-    let parent_capability_macro_self_ref = base.map(|base_name| {
+    let parent_capability_macro_self_ref = base.filter(|_| !is_window_host).map(|base_name| {
         let base_type_path = component.base_path.as_deref().unwrap_or(base_name);
         crate::codegen::dsl_template_capability_macro_self_ref_path(base_type_path)
     });
@@ -329,14 +381,122 @@ pub(crate) fn build_component_struct_shadow(
         None => None,
     };
 
+    // The real component class expansion contributes its own `{Component}Ext` trait.  The
+    // component frontend deliberately gates that class expansion away from rust-analyzer, so the
+    // source-local shadow has to retain the trait name and the inherited bound as well.  Keep the
+    // trait intentionally small: ordinary authored methods are already exposed as inherent methods
+    // by `build_component_impl_shadow`, while the actual runtime dispatch/default-method chain is
+    // still exclusively owned by `#[class]` on the non-rust-analyzer path.
+    let component_extension_shadow = base.map(|base_name| {
+        let component_ext_ident = format_ident!("{ident}Ext");
+        let component_node_ident = format_ident!(
+            "into_{}_node",
+            snake_case_ident(&ident.to_string())
+        );
+        let base_trait = base_ext_trait_path(component, base_name);
+        quote! {
+            pub trait #component_ext_ident: #base_trait {
+                fn #component_node_ident(self: std::rc::Rc<Self>) -> std::rc::Rc<dyn #component_ext_ident>
+                where
+                    Self: Sized + 'static,
+                {
+                    self
+                }
+            }
+
+            impl #component_ext_ident for #ident {}
+        }
+    });
+
+    // `Window` is a virtual/core trait whose concrete backend façade has the same bare name and
+    // therefore cannot be reached through the normal component-parent inherit macro.  A host
+    // component still has to coerce to `Rc<dyn WindowExt>` (for example, the mascot demo keeps a
+    // window trait object), so forward the trait's analysis-only dispatch accessors through the
+    // embedded backend façade.  The same helper is reused by this component's exported inherit
+    // macro for a future component inheriting the host component.
+    let window_extension_forward = base
+        .filter(|base_name| component.base_path.is_none() && *base_name == "Window")
+        .map(|_| window_extension_forward_impl(quote! { #ident }));
+
+    let component_inherit_macro = base.map(|base_name| {
+        let component_ext_ident = format_ident!("{ident}Ext");
+        let component_inherit_ident = format_ident!("__elwindui_inherit_{ident}");
+        let component_macro_mod_ident = format_ident!("__elwindui_macros_of_{ident}");
+        let base_trait = base_ext_trait_path(component, base_name);
+        let base_forward = if component.base_path.is_none() && base_name == "Window" {
+            window_extension_forward_impl(quote! { $SubType })
+        } else {
+            let base_macro = base_inherit_macro_path(component, base_name);
+            let base_alias = base_own_trait_alias_path(component, base_name);
+            let base_concrete = base_type_path(component, base_name);
+            quote! {
+                #base_macro!(
+                    $SubType,
+                    #base_alias,
+                    #base_concrete,
+                    #base_concrete,
+                    #base_trait;
+                );
+            }
+        };
+        quote! {
+            #[doc(hidden)]
+            #[macro_export]
+            #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+            macro_rules! #component_inherit_ident {
+                ($SubType:ty, $OwnTrait:path, $OwnConcrete:path, $RootConcrete:path, $BridgePath:path; $($overrides:tt)*) => {
+                    impl $OwnTrait for $SubType {}
+                    #base_forward
+                };
+            }
+
+            #[doc(hidden)]
+            #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+            pub mod #component_macro_mod_ident {
+                pub use crate::#component_inherit_ident;
+                pub use super::#component_ext_ident as __ElwindUIOwnExt;
+            }
+        }
+    });
+
+    // A composed component's real `#[class]` expansion implements the immediate ancestor's
+    // extension trait and recursively forwards the rest of the class hierarchy.  The real class
+    // items are intentionally hidden from rust-analyzer by the component frontend, so replay that
+    // existing, metadata-free forwarding protocol in the source-local shadow.  The class-generated
+    // inherit macro emits only inert trait/accessor glue here; it never constructs, mounts, or
+    // subscribes anything.
+    let base_hierarchy_shadow = base
+        .filter(|base_name| *base_name != "Window")
+        .map(|base_name| {
+            let base_path = base_type_path(component, base_name);
+            let base_trait = base_ext_trait_path(component, base_name);
+            let inherit_macro = base_inherit_macro_path(component, base_name);
+            let own_trait_alias = base_own_trait_alias_path(component, base_name);
+            quote! {
+                #inherit_macro!(
+                    #ident,
+                    #own_trait_alias,
+                    #base_path,
+                    #base_path,
+                    #base_trait;
+                );
+            }
+        });
+
     gate_shadow_items(quote! {
-        #vis struct #ident;
+        pub struct #ident {
+            #base_field
+        }
 
         impl #ident {
             #methods
         }
 
         #deref_shadow
+        #window_extension_forward
+        #component_extension_shadow
+        #base_hierarchy_shadow
+        #component_inherit_macro
         #direct_capability_impls
         #parent_capability_invocation
         #capability_macro
@@ -364,6 +524,99 @@ fn base_type_path(component: &ComponentDef, base_name: &str) -> TokenStream {
     }
     let ident = format_ident!("{base_name}");
     quote! { elwindui::ui::#ident }
+}
+
+/// `base_name`'s extension-trait path for the analysis-only component class surface.  The real
+/// `#[class(inherits = Base)]` expansion derives `BaseExt` from the same concrete path; preserve
+/// qualified same-crate/external paths and only replace the final segment here.
+fn base_ext_trait_path(component: &ComponentDef, base_name: &str) -> TokenStream {
+    // `Window` is the one virtual builtin whose concrete backend façade deliberately shares the
+    // same name as the core `trait_only` declaration.  Host composition stores the façade from
+    // `elwindui::ui`, while its implemented extension trait is the core interface from
+    // `elwindui::core::ui` (the real generator makes this distinction before invoking `#[class]`).
+    if component.base_path.is_none() && base_name == "Window" {
+        return quote! { elwindui::core::ui::WindowExt };
+    }
+    let mut path: syn::Path = if let Some(path) = component.base_path.as_deref() {
+        syn::parse_str(path).expect("component base path must parse as a Rust path")
+    } else {
+        let ident = format_ident!("{base_name}");
+        syn::parse_quote! { elwindui::ui::#ident }
+    };
+    if let Some(last) = path.segments.last_mut() {
+        last.ident = format_ident!("{}Ext", last.ident);
+    }
+    quote! { #path }
+}
+
+fn base_inherit_macro_path(component: &ComponentDef, base_name: &str) -> TokenStream {
+    let prefix = base_macro_module_prefix(component, base_name);
+    let ident = format_ident!("__elwindui_inherit_{base_name}");
+    quote! { #prefix :: #ident }
+}
+
+fn base_own_trait_alias_path(component: &ComponentDef, base_name: &str) -> TokenStream {
+    let prefix = base_macro_module_prefix(component, base_name);
+    quote! { #prefix :: __ElwindUIOwnExt }
+}
+
+fn base_macro_module_prefix(component: &ComponentDef, base_name: &str) -> TokenStream {
+    let mut path: syn::Path = if let Some(path) = component.base_path.as_deref() {
+        syn::parse_str(path).expect("component base path must parse as a Rust path")
+    } else {
+        let ident = format_ident!("{base_name}");
+        syn::parse_quote! { elwindui::ui::#ident }
+    };
+    path.segments.pop();
+    path.segments.push(syn::PathSegment::from(format_ident!(
+        "__elwindui_macros_of_{base_name}"
+    )));
+    quote! { #path }
+}
+
+fn snake_case_ident(name: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() && index > 0 {
+            out.push('_');
+        }
+        out.extend(ch.to_lowercase());
+    }
+    out
+}
+
+fn window_extension_forward_impl(target: TokenStream) -> TokenStream {
+    quote! {
+        impl elwindui::core::ui::WindowExt for #target {
+            fn __dyn_window(&self) -> &dyn elwindui::core::ui::WindowExt {
+                elwindui::core::ui::WindowExt::__dyn_window(&self.base)
+            }
+
+            fn __dyn_x_for_show(&self) -> &dyn elwindui::core::ui::WindowExt {
+                elwindui::core::ui::WindowExt::__dyn_x_for_show(&self.base)
+            }
+
+            fn __dyn_x_for_hide(&self) -> &dyn elwindui::core::ui::WindowExt {
+                elwindui::core::ui::WindowExt::__dyn_x_for_hide(&self.base)
+            }
+
+            fn __dyn_x_for_close(&self) -> &dyn elwindui::core::ui::WindowExt {
+                elwindui::core::ui::WindowExt::__dyn_x_for_close(&self.base)
+            }
+
+            fn __dyn_x_for_mount_override(
+                &self,
+            ) -> &dyn elwindui::core::ui::WindowExt {
+                elwindui::core::ui::WindowExt::__dyn_x_for_mount_override(&self.base)
+            }
+
+            fn __dyn_x_for_unmount_override(
+                &self,
+            ) -> &dyn elwindui::core::ui::WindowExt {
+                elwindui::core::ui::WindowExt::__dyn_x_for_unmount_override(&self.base)
+            }
+        }
+    }
 }
 
 /// The rust-analyzer-only Component impl shadow (Issue #146) — a plain inherent `impl Name { .. }`

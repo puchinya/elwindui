@@ -143,7 +143,7 @@ pub trait FocusHost {
 #[prop(routed, on_tapped: fn(crate::input::TappedEventArgs))]
 #[prop(routed, on_double_tapped: fn(crate::input::TappedEventArgs))]
 #[prop(routed, on_right_tapped: fn(crate::input::TappedEventArgs))]
-#[prop(context_menu: Option<Rc<dyn crate::ui::MenuExt>>)]
+#[prop(context_menu: Option<std::rc::Rc<dyn crate::ui::MenuExt>>)]
 #[prop(context_menu_presentation: crate::ui::ContextMenuPresentation)]
 #[prop(context_popup: Option<crate::ui::ViewFactory>)]
 pub struct UIElement {

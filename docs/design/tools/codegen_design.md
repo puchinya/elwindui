@@ -193,6 +193,8 @@ rust-analyzer
 
 Component struct halfとimpl halfは、runtime上「struct halfはmetadata登録のみ、impl halfが実型を生成する」という既存contractのまま変わらない。rust-analyzer shadowだけは例外で、struct half自身がown source fieldsから型・constructor・property shapeのshadowを出し(`build_component_struct_shadow`)、impl halfはregistry lookupより前のitem-local method parsingからmethod shadowを出す(`build_component_impl_shadow`)。両者が使うconstructor/getter/setter classificationは、real generatorとも共有する単一のsource-local helper(`component_public_shape`、`crates/elwindui-codegen/src/component_frontend.rs`)に集約し、別実装として複製しない。Themeはmarker型と`Theme` implの存在だけをIDEへ伝えれば十分なため、Environment Keyごとのreal `set::<K>()` bodyを再現しないno-op shadow(`build_theme_shadow`)を生成する。real側とshadow側のtop-level itemsは常に`cfg(not(rust_analyzer))`/`cfg(rust_analyzer)`で排他になるよう、`crates/elwindui-codegen/src/rust_analyzer_shadow.rs`の`gate_real_items_for_rustc`が一箇所でcfg付与を担う。
 
+Component shadowのclass surfaceも解析に必要な最小形状として含める。base field、`{Component}Ext`のancestor bound、同一crate/external baseが公開するinherit macroを組み合わせ、通常の`#[class]` expansionが提供するDeref・ancestor trait forwarding・generated constructor補助(`__new_unmounted`/`__mount`)・初期property setterの名前解決を`cfg(rust_analyzer)`側だけで再現する。bare `Window`をbaseにするhost componentだけは、backend concrete `Window`とcoreの`WindowExt`が別pathであるため、`WindowExt`のdispatch accessorを埋め込みbaseへforwardする。このshadowはtrait/method/type surfaceのためだけに存在し、実行時のclass dispatch、mount、subscription、lifecycleを実行しない。
+
 Environment Key/ViewModel/Store/DSL enumのdefining expansion(`#[elwindui::environment_key]`等)はそれ自身のdefinitionにprevious sibling registry lookupを必要としないため、shadow化の対象外とし、既存のself-contained expansionをそのまま維持する。
 
 #### item-local/registry依存の分類実装(PR #169レビュー是正)

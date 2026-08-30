@@ -705,6 +705,21 @@ impl<'a> Parser<'a> {
         // Detected via lookahead (parse one identifier, see if `::` immediately follows) so a plain
         // bind reference or bare identifier is never mistaken for one.
         if self.looks_like_qualified_path() {
+            // `TokenStream::to_string()` removes the source newline between a simple qualified
+            // path value and the following child (`background: BrushStyle::Background TextBlock {
+            // .. }`). Recognize that self-delimiting path before falling back to the raw `syn`
+            // expression capture. Do not put this lookahead in `take_expr_until_line_end_or`:
+            // enum-variant struct expressions such as `ShapeKind::RoundedRect { .. }` are also
+            // qualified paths, and their own path must be consumed before checking for a child.
+            let save = self.pos;
+            let path = self.parse_type_path()?;
+            self.skip_trivia();
+            if self.looks_like_element_path() {
+                let expr = syn::parse_str::<syn::Expr>(&path)
+                    .map_err(|e| format!("invalid expression `{path}`: {e}"))?;
+                return Ok(ViewExpr::Expr(expr));
+            }
+            self.pos = save;
             let expr_src = self.take_expr_until_line_end_or(&[',', '}'])?;
             let expr = syn::parse_str::<syn::Expr>(expr_src.trim())
                 .map_err(|e| format!("invalid expression `{}`: {e}", expr_src.trim()))?;
@@ -2012,6 +2027,22 @@ Button {
         assert_eq!(name, "on_click");
         assert_eq!(chords, &[(None, "Ctrl+S".to_string())]);
         assert_eq!(*scope, ShortcutScope::Global);
+    }
+
+    #[test]
+    fn parses_qualified_attribute_before_token_recovered_child_without_separator() {
+        // `component_frontend.rs` recovers a `view! { .. }` field's macro tokens with
+        // `TokenStream::to_string()`, which removes the source newline between an attribute and
+        // the next child. A simple qualified path must still stop before that child.
+        let src = r#"VerticalLayout { background : BrushStyle :: Background TextBlock { text : "background" } }"#;
+        let (_, _, _, _, root) = parse_view_body(src).expect("qualified attribute should parse");
+        let element = literal(&root.children[0]);
+        assert!(matches!(
+            &element.attributes[0].value,
+            ViewExpr::Expr(syn::Expr::Path(_))
+        ));
+        assert_eq!(element.children.len(), 1);
+        assert_eq!(literal(&element.children[0]).type_path, "TextBlock");
     }
 
     #[test]

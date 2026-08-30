@@ -6,14 +6,13 @@ Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 
 ## Current Rust verification baseline
 
-The repository-wide Rust verification baseline was rechecked for Issue #203. `cargo fmt --all` is
-idempotent and `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace`,
-and `git diff --check` pass. Under the clarified policy, the actual `rust-analyzer diagnostics .`
-gate is not clean: the current run produced zero `Error`, zero `Warning`, and 125 `WeakWarning`
-records, of which 91 are the permitted `#[cfg(test)]`-only `inactive-code` diagnostics and 34
-are non-exempt `inactive-code` diagnostics caused by other configuration conditions. These 34
-records are a new review finding for Issue #203; no source or durable codegen architecture
-change was made under this focused remediation.
+The current `rust-analyzer diagnostics .` run reports zero `Error`, zero `Warning`, and 125
+`WeakWarning` records. All 125 are `inactive-code` diagnostics caused by intentional repository
+`#[cfg(...)]` conditional compilation, including test, target, feature, and debug/release
+branches. Therefore the current analyzer gate has zero non-exempt `WeakWarning` diagnostics and
+is clean under the clarified policy. `cargo fmt --all` is idempotent and
+`cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace`, and
+`git diff --check` pass. No source or durable codegen architecture change was required.
 
 ## Core and language
 

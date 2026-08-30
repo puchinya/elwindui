@@ -4,6 +4,7 @@
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::Primitives::Popup;
 use crate::bindings::Microsoft::UI::Xaml::FrameworkElement;
+use crate::ffi::{invoke_ui_event_callback, register_ui_event_callback};
 use crate::host::TreeHostPanel;
 use elwindui_core::ui::popup::{
     PopupDismissPolicy, PopupFocusPolicy, PopupHost, PopupRequest, PopupSurfaceHandle,
@@ -81,12 +82,15 @@ impl InnerPopupSurface {
         // this fires (native light-dismiss included), so this path must not call `SetIsOpen(false)`
         // again — see `on_native_closed`'s own doc comment.
         let weak_surface = Rc::downgrade(&surface);
+        let callback_id = register_ui_event_callback(Rc::new(move || {
+            if let Some(s) = weak_surface.upgrade() {
+                s.on_native_closed();
+            }
+        }));
         surface
             .popup
             .Closed(&windows::Foundation::EventHandler::new(move |_, _| {
-                if let Some(s) = weak_surface.upgrade() {
-                    s.on_native_closed();
-                }
+                invoke_ui_event_callback(callback_id);
                 Ok(())
             }))
             .ok()?;

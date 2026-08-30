@@ -22,7 +22,6 @@ pub(crate) use check_box::InnerCheckBox;
 pub(crate) use dropdown::InnerDropdown;
 pub(crate) use dropdown_item::InnerDropdownItem;
 pub(crate) use menu::{InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem};
-pub(crate) use popup::InnerPopupSurface;
 pub use popup::{WinUI3PopupHandle, WinUI3PopupHost};
 pub(crate) use radio_button::InnerRadioButton;
 pub(crate) use scroll_view::InnerScrollView;

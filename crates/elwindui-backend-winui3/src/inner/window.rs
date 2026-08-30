@@ -4,6 +4,7 @@ use super::InnerMenuBar;
 use crate::bindings;
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 use crate::bindings::Microsoft::UI::Xaml::{SizeChangedEventHandler, Window as XamlWindow};
+use crate::ffi::{UiCallbackRegistryOwner, invoke_ui_bool_event_callback};
 use crate::host::TreeHostPanel;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -63,6 +64,7 @@ pub(crate) struct InnerWindow {
     /// `InnerWindow` itself (this struct is embedded by value inside the generated component's
     /// own `base` field, never `Rc`-wrapped on its own).
     close_request_handler: Rc<RefCell<Option<Rc<dyn Fn() -> bool>>>>,
+    callback_owner: UiCallbackRegistryOwner,
     /// Issue #162 §3.22: `AppWindow` may not exist yet when `new()` runs (before the window has
     /// ever been shown) — `true` once `AppWindow.Closing` has actually been registered, so `show`
     /// only retries when construction's own best-effort attempt didn't already succeed.
@@ -87,6 +89,7 @@ impl InnerWindow {
             retained: Cell::new(false),
             always_on_top: Cell::new(false),
             close_request_handler: Rc::new(RefCell::new(None)),
+            callback_owner: UiCallbackRegistryOwner::default(),
             closing_registered: Cell::new(false),
             framework_initiated_close: Rc::new(Cell::new(false)),
         };
@@ -107,26 +110,32 @@ impl InnerWindow {
         };
         let close_request_handler = Rc::clone(&self.close_request_handler);
         let framework_initiated_close = Rc::clone(&self.framework_initiated_close);
-        let handler = windows::Foundation::TypedEventHandler::new(move |_, args: &Option<_>| {
-            let args: &Option<
-                crate::bindings::Microsoft::UI::Windowing::AppWindowClosingEventArgs,
-            > = args;
-            let Some(args) = args else {
-                return Ok(());
-            };
+        let callback_id = self.callback_owner.register_bool_event(Rc::new(move || {
             let handler = close_request_handler.borrow().clone();
             match decide_native_close(framework_initiated_close.get(), handler.is_some()) {
-                NativeCloseDecision::AllowNativeDefault => {}
+                NativeCloseDecision::AllowNativeDefault => false,
                 NativeCloseDecision::InvokeHandler => {
                     let handler = handler
                         .expect("InvokeHandler is only returned when handler_installed was true");
-                    if should_veto_native_close(handler()) {
-                        let _ = args.SetCancel(true);
-                    }
+                    should_veto_native_close(handler())
                 }
             }
-            Ok(())
-        });
+        }));
+        let handler = windows::Foundation::TypedEventHandler::new(
+            move |_sender,
+                  args: windows::core::Ref<
+                '_,
+                crate::bindings::Microsoft::UI::Windowing::AppWindowClosingEventArgs,
+            >| {
+                let Some(args) = args.as_ref() else {
+                    return Ok(());
+                };
+                if invoke_ui_bool_event_callback(callback_id) {
+                    let _ = args.SetCancel(true);
+                }
+                Ok(())
+            },
+        );
         if app_window.Closing(&handler).is_ok() {
             self.closing_registered.set(true);
         }

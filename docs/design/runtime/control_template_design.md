@@ -113,6 +113,14 @@ validator allows zero or one static presenter and rejects multiple or dynamic
 presenters. Content replacement and pre-mount transitions remain handled by the
 existing weak/cancelable subscription and template-root paths.
 
+When the target is nested in a Window host-composition body, the Window stays
+unmounted until its first `show()`, and its generated named child accessors are
+not readable during that interval. A demo or application that needs logical
+content pre-mount passes it through the initial `content:`/Param construction
+path; the target receives it before this template's mount-time selection. This
+preserves the lifecycle boundary instead of adding a special pre-mount
+template-accessor path.
+
 ## 5. Validation boundaries
 
 Frontend validation rejects body/template coexistence, template on a non-

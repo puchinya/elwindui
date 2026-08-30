@@ -3,9 +3,8 @@
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
-use elwindui::core::ui::{ContentControlExt as _, TextBlock, TextBlockExt as _, WindowExt};
+use elwindui::core::ui::{TextBlock, TextBlockExt as _, WindowExt};
 use elwindui::template_view;
-use std::rc::Rc;
 
 #[elwindui::component(inherits ContentControl)]
 struct DemoPanel {
@@ -25,11 +24,13 @@ struct DemoPanel {
 #[elwindui::component]
 impl DemoPanel {}
 
-fn compact_demo_panel_template() -> elwindui::core::ui::ControlTemplate<DemoPanel> {
+fn compact_demo_panel_template(prefix: String) -> elwindui::core::ui::ControlTemplate<DemoPanel> {
     template_view!(|panel: DemoPanel| {
         VerticalLayout {
             spacing: 4.0
-            TextBlock { text: "Environment override" }
+            TextBlock {
+                text: format!("{} Environment override", prefix)
+            }
             TextBlock { text: panel.label }
             ContentPresenter { }
         }
@@ -38,9 +39,18 @@ fn compact_demo_panel_template() -> elwindui::core::ui::ControlTemplate<DemoPane
 
 #[elwindui::component(inherits Window)]
 struct ControlTemplateDemoWindow {
+    // Window::new() intentionally remains unmounted until show(), so its #[id] accessor is not
+    // available while the window is being prepared. Passing this value as a Param lets the panel
+    // receive its logical content before the panel's own template mount.
+    #[param]
+    logical_content: std::rc::Rc<TextBlock>,
+
     body: view! {
         #[id("panel")]
-        let panel = DemoPanel { label: "Reactive parent alias label" };
+        let panel = DemoPanel {
+            label: "Reactive parent alias label"
+            content: logical_content
+        };
 
         title: "elwindui ControlTemplate Demo"
         width: 520.0
@@ -54,19 +64,11 @@ impl ControlTemplateDemoWindow {}
 
 #[elwindui::main]
 fn main() {
-    let capture = Rc::new("capturing closure".to_string());
     let environment = elwindui::core::environment::application_environment();
-    let authored = compact_demo_panel_template();
-    environment.set_control_template::<DemoPanel>(Some(elwindui::core::ui::ControlTemplate::new(
-        move |context| {
-            let _captured_value = capture.clone();
-            authored.__build(context)
-        },
-    )));
+    environment.set_control_template(Some(compact_demo_panel_template("Captured:".to_string())));
 
-    let window = ControlTemplateDemoWindow::new();
-    window.show();
     let content = TextBlock::new();
     content.set_text("Logical content, visually hosted by ContentPresenter");
-    window.panel().set_content(content);
+    let window = ControlTemplateDemoWindow::new(content);
+    window.show();
 }

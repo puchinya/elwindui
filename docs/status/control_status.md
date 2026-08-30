@@ -1,6 +1,6 @@
 # Control implementation status
 
-Snapshot: 2026-08-27. Public behavior is defined by [`../specs/ui_spec.md`](../specs/ui_spec.md).
+Snapshot: 2026-08-30. Public behavior is defined by [`../specs/ui_spec.md`](../specs/ui_spec.md).
 
 | Control | AppKit | WinUI 3 | GTK4 | Notes |
 |---|---|---|---|---|
@@ -34,3 +34,12 @@ Snapshot: 2026-08-27. Public behavior is defined by [`../specs/ui_spec.md`](../s
 ## Verification
 
 `examples/controls-demo` covers TextBox, PasswordBox, ScrollView, Button, selection controls, Dropdown, Slider, existing TextArea/Button regressions, and (Context Menu tab) `MenuItem.icon` — Native `SystemIcon` items, a Native user-vector-icon item, a Custom Context Menu mixing a `SystemIcon` item, a disabled `SystemIcon` item, a user raster `IconSource::Image` item, a user vector `IconSource::Image` item, and an icon-less item to verify leading-column alignment. `examples/control-template-demo` covers typed Environment override, capturing factory, reactive declared parent alias, and `ContentPresenter`. `examples/mascot-demo` covers a draggable transparent always-on-top Window with a real alpha PNG. AppKit uses `tools/macos-ui-driver`; WinUI 3 verification uses Windows UI Automation and real input.
+
+PR #200's final remediation keeps the demo on the public path: the reusable
+template is parameterized and installed directly, and logical content is
+provided as a Window constructor Param so it reaches the target before the
+target's template mount. The public `control_template` acceptance tests cover
+default/override selection, alias resync, ContentPresenter ownership, layout,
+and RenderTree descendants. The demo executable launched on 2026-08-30 after
+the cleanup, but Accessibility/screenshot inspection was blocked because the
+Mac was locked; the demo is therefore not marked runtime-verified here.

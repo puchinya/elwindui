@@ -1,6 +1,6 @@
 # Tooling status
 
-Snapshot: 2026-08-29. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-08-30. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
 
 | Tool | State | Current capability / gap |
 |---|---|---|
@@ -16,6 +16,12 @@ Snapshot: 2026-08-29. Tool architecture is indexed in [`../design/README.md`](..
 Implemented commands cover launching/locating a process or window, waiting for window state, bringing a window to the front, querying the Accessibility tree, setting supported values, and invoking supported actions. Accessibility permission and foreground restrictions remain environment constraints.
 
 The command catalog and operational precautions belong in [`../agents/appkit.md`](../agents/appkit.md) and [`../../tools/macos-ui-driver/README.md`](../../tools/macos-ui-driver/README.md), not in status.
+
+On 2026-08-30, `cargo run -p control-template-demo` reached executable
+startup after the public-path remediation. Computer Use could not inspect the
+window because the Mac was locked and automatic unlock failed; no screenshot or
+Accessibility-tree result was recorded, so this run is `BLOCKED`, not a runtime
+PASS.
 
 ## External generated-component DSL (#191/#193/#194)
 

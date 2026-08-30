@@ -204,6 +204,14 @@ logical construction
 `ContentControl::__prepare_template_presentation()` remains the virtual hook.
 No second root store or hidden body-presentation protocol exists.
 
+For a Window host-composition component, `Window::new()` remains in the
+`Created` state until the first `show()`. Generated `#[id]` child accessors are
+therefore unavailable before that mount. Pre-mount logical content is supplied
+through the initial construction/content path (for example, a constructor
+Param forwarded to the target's `content:` field), so the target owns the
+content before its template is selected; application code must not bypass this
+lifecycle by reading a child accessor before `show()`.
+
 ## 6. ContentControl and ContentPresenter
 
 Raw `ContentControl` direct mode remains compatible: logical content is also a

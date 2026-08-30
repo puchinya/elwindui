@@ -54,6 +54,12 @@ replacementだけを担当する。targetはRustのexpected typeから推論せ�
 許可し、standalone/reusable function formはconcrete targetをheaderに明記する。生成されたtemplate subtreeの
 component descendantsはfactoryへ渡されたEnvironmentを明示的にmountへ伝播する。
 
+Window host-composition components remain `Created` after `new()` and build
+their body only from the first `show()`. Consequently, generated `#[id]`
+accessors for body children are only valid after that mount; pre-mount content
+must flow through constructor Params or initial `content:` lowering so it is
+attached before the target component's own mount.
+
 Template propertyの`KEY`はfield-name literalから生成時に計算するcompile-time 64-bit FNV-1a-style token
 であり、runtime registryやstring lookupは持たない。衝突は同一targetへの重複trait impl/associated type
 としてRustのcompile-time errorになる。effective `#[prop]`/`#[state]`に実setterがある場合だけ

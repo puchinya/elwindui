@@ -73,6 +73,14 @@ This directly reuses `ui_tree_design.md`'s existing "Construction / Mounting / U
 
 A logical Component may exist before its Visual subtree exists. No code anywhere in the codebase — generated or hand-written — may assume `Component exists ⇒ visual root exists`. Concretely: between `new()` returning and `mount()` completing, a Component's `#[prop]`/`#[state]` accessors must remain callable (they operate on backing fields that exist from `Created` onward), while any accessor that reaches into the Visual subtree (a generated child-element accessor, anything walking `visual_collection`) is illegal before `Mounted+Built` and must be rejected or deferred per CI-3 §24's "legal before mount" catalogue.
 
+This rule is observable for Window host-composition components: `Window::new()` deliberately leaves the
+Window in `Created` until the first `show()`, so an `#[id]` child accessor is not available between
+those calls. Pre-mount logical content must therefore be supplied through the component's initial
+content/Prop construction path (for example, a constructor Param forwarded to a child's `content:`
+field), rather than by reading that child accessor before `show()`. The child receives that content
+before its own mount and template selection; no lifecycle or template-root ownership exception is
+introduced for Window demos.
+
 ## 4. Resolving the `#[class]` `construct`/`on_constructed` seam (spec §5 in #80's unresolved questions)
 
 This is the central structural decision this document must make, because every later child issue's codegen work depends on it.

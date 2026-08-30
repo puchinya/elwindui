@@ -33,6 +33,8 @@
 
 use std::cell::Cell;
 
+use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
+
 thread_local! {
     static THEN_MOUNTS: Cell<u32> = Cell::new(0);
     static ELSE_MOUNTS: Cell<u32> = Cell::new(0);
@@ -91,6 +93,7 @@ impl ToggleHost {
 #[test]
 fn unreached_branch_is_never_constructed_and_switching_materializes_once() {
     let host = ToggleHost::new();
+    assert!(host.apply_template());
 
     assert_eq!(
         THEN_MOUNTS.with(|c| c.get()),

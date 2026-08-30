@@ -747,6 +747,7 @@ fn standalone_template_mounts_nested_components_with_context_environment() {
         .as_any()
         .downcast_ref::<TemplateEnvironmentChild>()
         .expect("nested template child keeps its concrete type");
+    assert!(child.apply_template());
     let text = child
         .visual_children()
         .into_iter()
@@ -1013,6 +1014,7 @@ fn inherited_writable_template_property_delegates_to_base() {
 fn component_default_template_event_closure_uses_shared_backend() {
     use elwindui::core::ui::UIElementExt as _;
     let probe = elwindui::new!(DefaultEventTemplateProbe(label: "initial".to_string()));
+    assert!(probe.apply_template());
     let root = probe.visual_children()[0].clone();
     let routed_args = elwindui::core::input::RoutedEventArgs::default();
     elwindui::core::ui::dispatch_routed(
@@ -1057,6 +1059,7 @@ fn standalone_template_view_lifecycle_hooks_run_once() {
 fn component_default_template_view_on_update_uses_shared_lifecycle_subscription() {
     STANDALONE_UPDATE_COUNT.with(|count| count.set(0));
     let probe = elwindui::new!(UpdateLifecycleTemplateProbe(label: "initial".to_string()));
+    assert!(probe.apply_template());
     assert_eq!(STANDALONE_UPDATE_COUNT.with(Cell::get), 0);
     probe.set_label("updated".to_string());
     assert_eq!(STANDALONE_UPDATE_COUNT.with(Cell::get), 1);
@@ -1067,6 +1070,7 @@ fn component_default_template_reads_and_resyncs_computed_property() {
     use elwindui::core::ui::UIElementExt as _;
 
     let probe = ReadOnlyComputedTemplateProbe::new();
+    assert!(probe.apply_template());
     let root = probe.visual_children()[0].clone();
     let text = root
         .as_any()

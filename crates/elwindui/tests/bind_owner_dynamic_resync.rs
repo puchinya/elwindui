@@ -32,6 +32,8 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use elwindui::core::ui::UIElementExt as _;
+
 thread_local! {
     static THEN_MOUNTS: Cell<u32> = Cell::new(0);
     static ELSE_MOUNTS: Cell<u32> = Cell::new(0);
@@ -94,6 +96,7 @@ impl BindOwnerToggleHost {}
 fn bind_owner_driven_if_condition_switches_on_property_change() {
     let vm = ToggleViewModel::new();
     let host = elwindui::new!(BindOwnerToggleHost(vm: Rc::clone(&vm)));
+    assert!(host.apply_template());
 
     assert_eq!(
         THEN_MOUNTS.with(|c| c.get()),

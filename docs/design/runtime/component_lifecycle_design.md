@@ -52,7 +52,7 @@ Created
    │
    │ mount(environment)
    ▼
-Mounted ──(initial build, performed by mount() itself)──▶ Built
+Mounted ──(ordinary view build / template-provider install)──▶ Built
    │
    ├─ layout / render / events / hide / show (existing reactive property updates continue to apply in place)
    │
@@ -64,14 +64,14 @@ Unmounted
 The internal representation does not need a literal `enum LifecycleState` field on every generated component (see §6, Performance) — what must remain true and distinguishable is:
 
 - **Created**: `__new_unmounted()` has returned an `Rc<Self>` and `mount()` has not yet run. No `view!` has been evaluated. No descendant Components exist. No Environment has been resolved or subscribed to. `__environment` (where present) is absent/unset. This is the temporary state used by `new!` and by explicit environment-scope construction; direct `Type::new(..)` normally advances past it immediately.
-- **Mounted+Built**: `mount(environment)` has run to completion. Per spec §5, "mount" and "initial build" are not separately invoked by generated/application code — `mount()` performs both, in that order, as one step. `__environment` is set. The view subtree exists. `on_mount` has fired. Direct generated `Type::new(..)` returns in this state.
+- **Mounted+Built**: `mount(environment)` has run to completion. Per spec §5, ordinary `view!` construction and mount wiring happen in this step, while a template-enabled `Control` installs only its typed provider and may remain without a template root until its first participating measure or explicit `UIElement::apply_template()`. `__environment` is set and the target's `on_mount` has fired. Direct generated `Type::new(..)` returns in this state.
 - **Unmounted**: subscriptions cancelled, Visual subtree released, native backend objects released where applicable. Re-mounting an unmounted Component is not part of this initiative's scope (§80's non-goals; nothing in the Codex Task spec requires resurrection).
 
 This directly reuses `ui_tree_design.md`'s existing "Construction / Mounting / Unmounting" terminology (`ui_tree_design.md:23-27`) rather than inventing new nouns; "Built" is introduced here as the sub-state `ui_tree_design.md` already implies ("Mounting attaches the subtree to a host and enables ... layout, rendering, input") without a separate public phase. `__new_unmounted()` is an internal construction seam, not a second public lifecycle model; `new!` is the only named API that intentionally exposes the Created interval to generated initialization code.
 
 ## 3. Ownership rule (spec §23)
 
-A logical Component may exist before its Visual subtree exists. No code anywhere in the codebase — generated or hand-written — may assume `Component exists ⇒ visual root exists`. Concretely: between `new()` returning and `mount()` completing, a Component's `#[prop]`/`#[state]` accessors must remain callable (they operate on backing fields that exist from `Created` onward), while any accessor that reaches into the Visual subtree (a generated child-element accessor, anything walking `visual_collection`) is illegal before `Mounted+Built` and must be rejected or deferred per CI-3 §24's "legal before mount" catalogue.
+A logical Component may exist before its Visual subtree exists. No code anywhere in the codebase — generated or hand-written — may assume `Component exists ⇒ visual root exists`. Concretely: between `new()` returning and `mount()` completing, and for a template-enabled `Control` after target mount but before first template application, a Component's `#[prop]`/`#[state]` accessors must remain callable (they operate on backing fields that exist from `Created` onward), while any accessor that reaches into the Visual subtree (a generated child-element accessor, anything walking `visual_collection`) is illegal until the relevant subtree has been built and must be rejected or deferred per CI-3 §24's "legal before mount" catalogue.
 
 This rule is observable for Window host-composition components: `Window::new()` deliberately leaves the
 Window in `Created` until the first `show()`, so an `#[id]` child accessor is not available between
@@ -181,14 +181,26 @@ Concretely, `show()`'s body: if `self.__mount_environment.get().is_none()` (this
 
 **PopupSurface consumer** (Issue #161): AppKit's and WinUI3's `InnerPopupSurface` (`crates/elwindui-backend-appkit`/`-winui3`'s `inner/popup.rs`) call `unmount_subtree` on the popup content root before the backend host's own native detach (`TreeHost::clear_tree()`), the same teardown-before-detach ordering as every other consumer here. The portable invariant this generic lifecycle machinery provides is unmount-before-ElwindUI-host-tree-detach — it does not, by itself, promise unmount-before-every-native-visibility-change on every path. Both backends' *framework-initiated* close (`close()`) additionally sequences unmount before the native visibility/detach call it itself issues (`removeChildWindow`/`orderOut` on AppKit, `SetIsOpen(false)` on WinUI3). WinUI3 has one backend-specific exception: a toolkit-originated post-dismiss notification (`Popup.Closed`, native light-dismiss) can arrive *after* WinUI has already changed `Popup.IsOpen` — ElwindUI is not notified in advance — so that one path (`on_native_closed`, distinct from `close()`) cannot offer the stronger native-visibility ordering, only the portable host-tree-detach one. See `docs/design/runtime/popup_context_menu_design.md` §6/§7 for the full sequence (including this branch) and `docs/design/runtime/view_factory_design.md` for the deferred-view type (`ViewFactory`) popup content is built from. This does not change the generic Component lifecycle state machine (`ComponentLifecycleState`, `unmount_subtree`) documented above — only how a *specific* `PopupSurfaceHandle` consumer schedules its own native calls around it.
 
-### 4h. ControlTemplate mount selection
+### 4h. ControlTemplate application after mount
 
-`template: template_view!(|alias: Self| { ... })`を宣言したcomponentは、own Environment field解決後、descendant
-construction前にtyped `ControlTemplateEnvironment<Self>`を一度読む。
-`Some(template)`ではdefault planを構築せず、typed factoryへtarget `Rc`と確定済みcontextを渡す。
-macro-authored template instanceは同じcontextでmountされ、その`on_mount`完了後にtargetの`on_mount`を実行する。
-`None`ではcomponentが宣言したdefault `template: template_view!(|alias: Self| { ... })` factoryを実行する。Key subscriptionとruntime re-templateは生成しない。
-詳細なownership/wiring順序は[`control_template_design.md`](control_template_design.md)を参照する。
+`template: template_view!(|alias: Self| { ... })`を宣言したcomponentは、own
+Environmentを確定したmount中に、最終的な具象component型へspecializeした
+`ControlTemplateProvider`だけを一度インストールする。mount中に
+`ControlTemplateEnvironment<Self>`をlookupしたり、default/override factoryを
+実行したり、template rootを構築したりはしない。したがってtargetの
+`on_mount`は`__template_root() == None`のまま完了し得る。
+
+template applicationは`UIElement::apply_template()`（`Control`のoverride）または参加する最初の
+`measure()`がCoreのstate machineを通じて行う。providerはその時点のeffective
+Environmentから最終具象型の`ControlTemplate<C>`を完全一致で選択し、
+`__prepare_template_presentation()`、factory build、root attachment、
+`on_apply_template`を所定順序で実行する。componentはMounted/Builtであっても
+template stateがUnappliedであり得るが、これはpublic component lifecycleへ
+新しい状態を追加するものではない。
+
+`Some`/local `None`、Weak target、reentrancy、pre-commit terminal failure、
+post-root hook panic、no-re-templateの詳細は
+[`control_template_design.md`](control_template_design.md)と正本specを参照する。
 
 ### 4i. Issue #162: `Window` `mount_override`/`unmount_override` hooks and native close routing
 

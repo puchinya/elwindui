@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use elwindui::component;
-use elwindui::core::ui::{ContentControlExt, UIElementExt as _, WindowExt};
+use elwindui::core::ui::{ContentControlExt, ControlExt as _, UIElementExt as _, WindowExt};
 use elwindui_external_component_fixture::{
     ExternalProbeItem, ExternalProbeItemExt, ExternalProbeTabs, ExternalProbeTabsExt,
     RequiredExternalCardExt,
@@ -203,9 +203,12 @@ impl ExternalDynamicIfTemplateHost {}
 #[component(inherits VerticalLayout)]
 struct ExternalNestedModuleHost {
     body: view! {
-        elwindui_external_component_fixture::nested::NestedExternalProbe {
+        #[id("nested")]
+        let nested = elwindui_external_component_fixture::nested::NestedExternalProbe {
             label: "nested"
-        }
+        };
+
+        nested
     },
 }
 
@@ -215,9 +218,12 @@ impl ExternalNestedModuleHost {}
 #[component(inherits VerticalLayout)]
 struct ExternalAliasHost {
     body: view! {
-        external_component_fixture_alias::AliasedExternalProbe {
+        #[id("item")]
+        let item = external_component_fixture_alias::AliasedExternalProbe {
             label: "alias"
-        }
+        };
+
+        item
     },
 }
 
@@ -342,6 +348,7 @@ fn qualified_external_components_preserve_properties_content_and_resync() {
     let host = ExternalControlsHost::new();
     let authored_item = host.item();
     let tabs = host.tabs();
+    assert!(authored_item.apply_template());
 
     assert_eq!(ExternalProbeItemExt::title(&*authored_item), "Document");
     assert!(!ExternalProbeItemExt::closable(&*authored_item));
@@ -390,6 +397,7 @@ fn qualified_external_components_preserve_properties_content_and_resync() {
 #[test]
 fn qualified_external_template_dynamic_if_replaces_collection_item() {
     let host = ExternalDynamicIfTemplateHost::new();
+    assert!(host.apply_template());
     let root = host
         .visual_children()
         .into_iter()
@@ -399,6 +407,7 @@ fn qualified_external_template_dynamic_if_replaces_collection_item() {
         .as_any()
         .downcast_ref::<ExternalProbeTabs>()
         .expect("template root is the external collection host");
+    assert!(tabs.apply_template());
 
     let initial = ExternalProbeTabsExt::children(tabs);
     assert_eq!(initial.len(), 1);
@@ -417,15 +426,8 @@ fn qualified_external_template_dynamic_if_replaces_collection_item() {
 #[test]
 fn qualified_external_nested_module_uses_root_props_macro() {
     let host = ExternalNestedModuleHost::new();
-    let nested = host
-        .visual_children()
-        .into_iter()
-        .next()
-        .expect("nested external component is attached");
-    let nested = nested
-        .as_any()
-        .downcast_ref::<elwindui_external_component_fixture::nested::NestedExternalProbe>()
-        .expect("nested external component retains its authored module path");
+    let nested = host.nested();
+    assert!(nested.apply_template());
     let text = nested
         .visual_children()
         .into_iter()
@@ -445,15 +447,8 @@ fn qualified_external_nested_module_uses_root_props_macro() {
 #[test]
 fn cargo_alias_external_component_uses_defining_crate_shape() {
     let host = ExternalAliasHost::new();
-    let item = host
-        .visual_children()
-        .into_iter()
-        .next()
-        .expect("aliased external component is attached");
-    let item = item
-        .as_any()
-        .downcast_ref::<external_component_fixture_alias::AliasedExternalProbe>()
-        .expect("aliased path constructs the external component type");
+    let item = host.item();
+    assert!(item.apply_template());
     assert_eq!(
         item.visual_children()
             .into_iter()
@@ -474,6 +469,7 @@ fn new_macro_constructs_cargo_aliased_external_component() {
     let item = elwindui::new!(external_component_fixture_alias::AliasedExternalProbe(
         label: "new alias"
     ));
+    assert!(item.apply_template());
     let text = item
         .visual_children()
         .into_iter()
@@ -491,6 +487,7 @@ fn new_macro_constructs_cargo_aliased_external_component() {
 #[test]
 fn qualified_external_template_dynamic_for_replaces_collection_items() {
     let host = ExternalDynamicForTemplateHost::new();
+    assert!(host.apply_template());
     let root = host
         .visual_children()
         .into_iter()
@@ -500,6 +497,7 @@ fn qualified_external_template_dynamic_for_replaces_collection_items() {
         .as_any()
         .downcast_ref::<ExternalProbeTabs>()
         .expect("template root is the external collection host");
+    assert!(tabs.apply_template());
     assert!(ExternalProbeTabsExt::children(tabs).is_empty());
 
     host.set_labels(vec![String::from("A"), String::from("B")]);
@@ -551,6 +549,7 @@ fn qualified_external_shape_preserves_scalar_and_option_props() {
 #[test]
 fn external_dynamic_reconciliation_publishes_one_children_commit_and_updates_dependents() {
     let host = ExternalDynamicForTemplateHost::new();
+    assert!(host.apply_template());
     let root = host
         .visual_children()
         .into_iter()
@@ -560,6 +559,7 @@ fn external_dynamic_reconciliation_publishes_one_children_commit_and_updates_dep
         .as_any()
         .downcast_ref::<ExternalProbeTabs>()
         .expect("template root is the external collection host");
+    assert!(tabs.apply_template());
 
     let children_commits = Rc::new(std::cell::Cell::new(0));
     let commits = Rc::clone(&children_commits);

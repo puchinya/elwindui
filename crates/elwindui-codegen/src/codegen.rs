@@ -5335,11 +5335,13 @@ fn generate_view(
     // Component default bodies are compiled through the same semantic backend used by standalone
     // `template_view!(|alias: Target| { ... })`. The surrounding component generation still owns
     // storage/class wiring; only the template's visual factory is supplied by this shared layer.
+    // A component's authored `on_mount` is the target lifecycle hook, so it is emitted by the
+    // generated component mount path below rather than duplicated as a template-root mount hook.
     let shared_template_body = view.is_template.then(|| {
         crate::compile_template_body(
             &view.root,
             &view.lets,
-            view.on_mount.as_ref(),
+            None,
             view.on_unmount.as_ref(),
             view.on_update.as_ref(),
             from.clone(),
@@ -7351,10 +7353,10 @@ fn generate_view(
         }
     };
 
-    // §3/docs/design/runtime/ui_tree_design.md's lifecycle hooks. `on_mount` is spliced directly into `new()` (against the local
-    // `this: Rc<Self>`, the same receiver `base::on_mount()` rewrites to — see below); `on_unmount`
-    // is codegen'd as a real (if presently uncalled) `__run_on_unmount` method — `elwindui::core::ui`
-    // has no detach/teardown hook yet to wire it to, see docs/design/runtime/ui_tree_design.md.
+    // §3/docs/design/runtime/ui_tree_design.md's lifecycle hooks. `on_mount` is spliced directly
+    // into `__build_view` (against the local `self` receiver, the same one `base::on_mount()`
+    // rewrites to — see below); `on_unmount` is codegen'd as a real `__run_on_unmount` method for
+    // ordinary views and as a template-root hook for standalone template views.
     //
     // A `base::on_mount()`/`base::on_unmount()` call is only meaningful when *this* component wrote
     // its own `view` (an override of an inherited template) — a component with no `view` of its own
@@ -8166,38 +8168,24 @@ fn generate_view(
                 // the outer most-derived Rc, so this component must not install its own template
                 // root (the outer component's template is authoritative).  The old generated
                 // path naturally skipped this branch when no Environment override existed; keep
-                // the same ownership rule while using the shared default factory.
+                // the same ownership rule while using the shared default factory. Mount only
+                // installs the typed provider; Core Control selects/builds its root on first
+                // application.
                 let __template_target = self
                     .__self_weak
                     .borrow()
                     .upgrade()
                     .and_then(|value| value.downcast::<#target>().ok());
                 if let Some(this) = __template_target {
-                    self.__prepare_template_presentation();
-                    let __environment_template = self
-                        .__mount_environment
-                        .get()
-                        .expect("template selection: component is not yet mounted")
-                        .__control_template::<#target>();
-                    let __selected_template = __environment_template
-                        .clone()
-                        .unwrap_or_else(|| #default_template);
-                    let __template_root = __selected_template.__build(
-                        elwindui::core::ui::ControlTemplateContext {
-                            control: this.clone(),
-                            environment: self
-                                .__mount_environment
-                                .get()
-                                .expect("template selection: component is not yet mounted")
-                                .clone(),
-                        },
-                    );
-                    self.__set_template_root(__template_root);
+                    let __template_provider =
+                        elwindui::core::ui::__make_control_template_provider(
+                            std::rc::Rc::downgrade(&this),
+                            #default_template,
+                        );
+                    self.__set_control_template_provider(__template_provider);
                     #template_unmount_hook_attach
                     #own_environment_subscribe_stmts
-                    if __environment_template.is_some() {
-                        #on_mount_stmt
-                    }
+                    #on_mount_stmt
                 }
                 return;
             }

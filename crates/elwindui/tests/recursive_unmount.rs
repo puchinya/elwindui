@@ -15,6 +15,8 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
+use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
+
 thread_local! {
     static UNMOUNT_EVENTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
     static CHILD_PROP_CHANGED_COUNT: Cell<u32> = const { Cell::new(0) };
@@ -56,7 +58,10 @@ struct MiddleParent {
         on_unmount {
             record_unmount("MiddleParent");
         }
-        LeafChild { }
+        #[id("leaf")]
+        let leaf = LeafChild { };
+
+        leaf
     },
 }
 
@@ -69,7 +74,10 @@ struct TopContainer {
         on_unmount {
             record_unmount("TopContainer");
         }
-        MiddleParent { }
+        #[id("middle")]
+        let middle = MiddleParent { };
+
+        middle
     },
 }
 
@@ -81,6 +89,9 @@ fn test_recursive_unmount_child_first_order() {
     clear_unmount_events();
 
     let top = TopContainer::new();
+    let middle = top.middle();
+    let leaf = middle.leaf();
+    assert!(leaf.apply_template());
     assert_eq!(get_unmount_events().len(), 0);
 
     top.unmount();
@@ -132,7 +143,10 @@ struct SubscribingParent {
         on_unmount {
             record_unmount("SubscribingParent");
         }
-        SubscribingChild { label: text }
+        #[id("child")]
+        let child = SubscribingChild { label: text };
+
+        child
     },
 }
 
@@ -145,6 +159,7 @@ fn test_unmount_cancels_property_subscriptions() {
     CHILD_PROP_CHANGED_COUNT.with(|c| c.set(0));
 
     let parent = elwindui::new!(SubscribingParent(text: "initial".to_string()));
+    assert!(parent.child().apply_template());
     let initial_count = CHILD_PROP_CHANGED_COUNT.with(|c| c.get());
 
     parent.set_text("second".to_string());
@@ -223,6 +238,7 @@ fn test_environment_listener_released_and_weak_drops() {
     env.set::<RecursiveUnmountThemeColor>("light".to_string());
 
     let parent = EnvParent::new();
+    assert!(parent.env_child().apply_template());
     let child_weak: Weak<EnvChild> = Rc::downgrade(&parent.env_child());
     let parent_weak: Weak<EnvParent> = Rc::downgrade(&parent);
 
@@ -289,6 +305,7 @@ fn test_reentrant_unmount_is_safe() {
     clear_unmount_events();
 
     let comp = ReentrantComponent::new();
+    assert!(comp.apply_template());
     REENTRANT_SELF.with(|cell| *cell.borrow_mut() = Some(comp.clone()));
 
     comp.unmount();
@@ -349,7 +366,17 @@ fn test_dynamic_if_branch_removal_triggers_unmount() {
     clear_unmount_events();
 
     let vm = DynamicSwitchViewModel::new();
-    let _host = elwindui::new!(DynamicIfHost(vm: vm.clone()));
+    let host = elwindui::new!(DynamicIfHost(vm: vm.clone()));
+    assert!(host.apply_template());
+    let child = elwindui::core::visual_tree::find_all::<DynamicIfChild>(host.as_ref())
+        .into_iter()
+        .next()
+        .expect("active dynamic if child");
+    let child = child
+        .as_any()
+        .downcast_ref::<DynamicIfChild>()
+        .expect("dynamic if child has its concrete type");
+    assert!(child.apply_template());
 
     assert_eq!(get_unmount_events().len(), 0);
 
@@ -400,6 +427,16 @@ fn test_plain_component_recursive_unmount() {
     clear_unmount_events();
 
     let parent = PlainParent::new();
+    assert!(parent.apply_template());
+    let child = elwindui::core::visual_tree::find_all::<PlainChild>(parent.as_ref())
+        .into_iter()
+        .next()
+        .expect("plain child");
+    let child = child
+        .as_any()
+        .downcast_ref::<PlainChild>()
+        .expect("plain child has its concrete type");
+    assert!(child.apply_template());
     assert_eq!(get_unmount_events().len(), 0);
 
     parent.unmount();
@@ -495,7 +532,15 @@ fn test_dynamic_for_removal_triggers_unmount() {
     vm.items_push(item_b.clone());
     vm.items_push(item_c.clone());
 
-    let _host = elwindui::new!(DynamicForHost(vm: vm.clone()));
+    let host = elwindui::new!(DynamicForHost(vm: vm.clone()));
+    assert!(host.apply_template());
+    for child in elwindui::core::visual_tree::find_all::<DynamicForChild>(host.as_ref()) {
+        let child = child
+            .as_any()
+            .downcast_ref::<DynamicForChild>()
+            .expect("dynamic for child has its concrete type");
+        assert!(child.apply_template());
+    }
 
     assert_eq!(get_unmount_events().len(), 0);
 
@@ -590,7 +635,17 @@ fn test_dynamic_match_branch_removal_triggers_unmount() {
     clear_unmount_events();
 
     let vm = DynamicMatchViewModel::new();
-    let _host = elwindui::new!(DynamicMatchHost(vm: vm.clone()));
+    let host = elwindui::new!(DynamicMatchHost(vm: vm.clone()));
+    assert!(host.apply_template());
+    let child = elwindui::core::visual_tree::find_all::<MatchFirstChild>(host.as_ref())
+        .into_iter()
+        .next()
+        .expect("active match child");
+    let child = child
+        .as_any()
+        .downcast_ref::<MatchFirstChild>()
+        .expect("match child has its concrete type");
+    assert!(child.apply_template());
 
     assert_eq!(get_unmount_events().len(), 0);
 
@@ -641,6 +696,16 @@ fn test_on_unmount_runs_before_visual_and_logical_detach() {
     HAD_PARENT_DURING_UNMOUNT.with(|c| c.set(false));
 
     let parent = TreeConnectionParent::new();
+    assert!(parent.apply_template());
+    let child = elwindui::core::visual_tree::find_all::<TreeConnectionChild>(parent.as_ref())
+        .into_iter()
+        .next()
+        .expect("tree connection child");
+    let child = child
+        .as_any()
+        .downcast_ref::<TreeConnectionChild>()
+        .expect("tree connection child has its concrete type");
+    assert!(child.apply_template());
     assert!(!HAD_PARENT_DURING_UNMOUNT.with(|c| c.get()));
 
     parent.unmount();
@@ -694,6 +759,16 @@ fn test_ancestor_reentrant_unmount_is_safe_and_preserves_child_first_order() {
     clear_unmount_events();
 
     let parent = AncestorReentrantParent::new();
+    assert!(parent.apply_template());
+    let child = elwindui::core::visual_tree::find_all::<AncestorReentrantChild>(parent.as_ref())
+        .into_iter()
+        .next()
+        .expect("ancestor reentrant child");
+    let child = child
+        .as_any()
+        .downcast_ref::<AncestorReentrantChild>()
+        .expect("ancestor reentrant child has its concrete type");
+    assert!(child.apply_template());
     ANCESTOR_PARENT_REF.with(|r| *r.borrow_mut() = Some(parent.clone()));
 
     assert_eq!(get_unmount_events().len(), 0);
@@ -822,6 +897,26 @@ fn test_intermediate_ancestor_reentry_from_subtree_traversal_is_safe() {
     INTERMEDIATE_PARENT_REF.with(|r| *r.borrow_mut() = None);
 
     let grand_parent = IntermediateGrandParentComponent::new();
+    assert!(grand_parent.apply_template());
+    let parent =
+        elwindui::core::visual_tree::find_all::<IntermediateParentComponent>(grand_parent.as_ref())
+            .into_iter()
+            .next()
+            .expect("intermediate parent");
+    let parent = parent
+        .as_any()
+        .downcast_ref::<IntermediateParentComponent>()
+        .expect("intermediate parent has its concrete type");
+    assert!(parent.apply_template());
+    let child = elwindui::core::visual_tree::find_all::<IntermediateChildComponent>(parent)
+        .into_iter()
+        .next()
+        .expect("intermediate child");
+    let child = child
+        .as_any()
+        .downcast_ref::<IntermediateChildComponent>()
+        .expect("intermediate child has its concrete type");
+    assert!(child.apply_template());
     assert!(INTERMEDIATE_PARENT_REF.with(|r| r.borrow().is_some()));
     assert_eq!(get_unmount_events().len(), 0);
 

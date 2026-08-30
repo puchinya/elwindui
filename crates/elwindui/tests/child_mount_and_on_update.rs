@@ -9,6 +9,8 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
+
 thread_local! {
     static MOUNT_ORDER: Cell<u32> = const { Cell::new(0) };
     static CHILD_A_MOUNT_ORDER: Cell<u32> = const { Cell::new(0) };
@@ -139,6 +141,7 @@ fn on_update_fires_after_prop_change_but_not_on_initial_construction() {
         "the initial construction-time value-set must not count as an on_update"
     );
 
+    assert!(probe.apply_template());
     probe.set_label("world".to_string());
     assert_eq!(ON_UPDATE_COUNT.with(|c| c.get()), 1);
 

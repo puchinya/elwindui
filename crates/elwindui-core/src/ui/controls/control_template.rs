@@ -1,9 +1,10 @@
-//! Typed control-template values selected from an effective Environment during mount.
+//! Typed control-template values selected from an effective Environment at first application.
 
 use super::*;
 use crate::environment::{EnvironmentContext, EnvironmentKey};
 use crate::reactive::Subscription;
 use std::marker::PhantomData;
+use std::rc::Weak;
 
 /// TypeId-scoped Environment slot for the default/override template of `C`.
 ///
@@ -82,6 +83,74 @@ pub trait WritableTemplateProperty<const KEY: u64>: TemplateProperty<KEY> {
     fn __template_set(&self, value: Self::Value);
 }
 
+/// Type-erased internal operations for one typed ControlTemplate provider.
+///
+/// The provider deliberately erases only the operation closure at the Core boundary.  The
+/// generated constructor remains monomorphized over the concrete control type, and the provider
+/// retains only a `Weak` target so installing it cannot keep the control alive.
+#[doc(hidden)]
+pub struct ControlTemplateProvider {
+    prepare: Box<dyn Fn()>,
+    build: Box<dyn Fn(EnvironmentContext) -> Rc<dyn UIElementExt>>,
+    on_applied: Box<dyn Fn()>,
+}
+
+impl ControlTemplateProvider {
+    pub(crate) fn prepare(&self) {
+        (self.prepare)();
+    }
+
+    pub(crate) fn build(&self, environment: EnvironmentContext) -> Rc<dyn UIElementExt> {
+        (self.build)(environment)
+    }
+
+    pub(crate) fn on_applied(&self) {
+        (self.on_applied)();
+    }
+}
+
+/// Creates the Core-owned provider used by generated template-enabled controls.
+///
+/// The default factory and all Environment lookup remain typed by `C`; the returned provider is
+/// only the private lifecycle bridge consumed by [`Control`](crate::ui::Control).  The target is
+/// weakly captured, so provider installation does not create a control/provider ownership cycle.
+#[doc(hidden)]
+pub fn __make_control_template_provider<C: ControlExt + 'static>(
+    control: Weak<C>,
+    default_template: ControlTemplate<C>,
+) -> ControlTemplateProvider {
+    let prepare_control = control.clone();
+    let build_control = control.clone();
+    let applied_control = control;
+
+    ControlTemplateProvider {
+        prepare: Box::new(move || {
+            let target = prepare_control
+                .upgrade()
+                .expect("ControlTemplate target was dropped before preparation");
+            target.__prepare_template_presentation();
+        }),
+        build: Box::new(move |environment| {
+            let target = build_control
+                .upgrade()
+                .expect("ControlTemplate target was dropped before build");
+            let selected = environment
+                .__control_template::<C>()
+                .unwrap_or_else(|| default_template.clone());
+            selected.__build(ControlTemplateContext {
+                control: target,
+                environment,
+            })
+        }),
+        on_applied: Box::new(move || {
+            let target = applied_control
+                .upgrade()
+                .expect("ControlTemplate target was dropped before apply hook");
+            target.on_apply_template();
+        }),
+    }
+}
+
 /// The context supplied to a [`ControlTemplate`] factory.
 ///
 /// The control is strongly owned only for the duration chosen by the factory. Template
@@ -90,14 +159,14 @@ pub trait WritableTemplateProperty<const KEY: u64>: TemplateProperty<KEY> {
 pub struct ControlTemplateContext<C: ControlExt + 'static> {
     /// The typed control whose Visual subtree is being built.
     pub control: Rc<C>,
-    /// The effective mount-time Environment inherited by the template subtree.
+    /// The effective Environment visible when the template is first applied.
     pub environment: EnvironmentContext,
 }
 
 /// A cloneable, typed factory for the Visual subtree of an ElwindUI-rendered [`Control`].
 ///
-/// Selection is performed by generated component mount code. The value itself does not subscribe
-/// to Environment changes and therefore does not implement runtime re-template.
+/// Selection is performed by Core `Control` on the first successful application. The value itself
+/// does not subscribe to Environment changes and therefore does not implement runtime re-template.
 ///
 /// Non-`Control` targets are rejected by the public type bound:
 ///
@@ -142,7 +211,7 @@ impl<C: ControlExt + 'static> ControlTemplate<C> {
         Self::new(move |context| factory(context.environment))
     }
 
-    /// Builds the template root once for generated mount code.
+    /// Builds the template root once for Core template application.
     #[doc(hidden)]
     pub fn __build(&self, context: ControlTemplateContext<C>) -> Rc<dyn UIElementExt> {
         self.factory
@@ -152,9 +221,10 @@ impl<C: ControlExt + 'static> ControlTemplate<C> {
 }
 
 impl EnvironmentContext {
-    /// Installs a mount-time template override for the exact control type `C` at this context.
+    /// Installs a template override for the exact control type `C` at this context.
     ///
-    /// `Some(template)` overrides the component default for subsequently mounted instances.
+    /// `Some(template)` overrides the component default when a subsequently mounted instance is
+    /// first applied, whether by an explicit call or a participating measure.
     /// `None` deliberately shadows an inherited value and selects the component default; it does
     /// not remove this context's Environment cell.
     pub fn set_control_template<C: ControlExt + 'static>(

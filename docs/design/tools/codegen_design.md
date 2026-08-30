@@ -294,9 +294,11 @@ specialized control の typed `children` はすべて同じ metadata-driven rule
 
 component自身のauthored presentationと、componentを使用する側のbare childは別のlowering siteである。
 `template: template_view!`はshared semantic lowerer/planner/emitterを通じてtyped `ControlTemplate<Self>` factoryに
-なり、mount時にtyped Environment lookupでdefaultまたはoverrideを選択する。使用側のbare childは
-template lowererを経由せず、effective `#[content(...)]`のscalar/collection loweringへ送られる。
-この区別はtype-name dispatchやhidden presentation metadataではなく、authoring slotの種類から決まる。
+なり、generated mountは最終具象型に特化したproviderをインストールするだけである。Environmentのexact lookup、
+default/override選択、prepare、factory build、template-root attachment、`on_apply_template`の順序とstateは
+Core `Control`がfirst application時に一度だけ所有・実行する。使用側のbare childはtemplate lowererを経由せず、
+effective `#[content(...)]`のscalar/collection loweringへ送られる。この区別はtype-name dispatchやhidden
+presentation metadataではなく、authoring slotの種類から決まる。
 
 テンプレートを持つgenerated componentがexternal shapeのscalar content slotを継承する場合、そのslotは
 component自身のeffective field listに重複してコピーしない。使用側の名前付き`content:`値だけを、継承元

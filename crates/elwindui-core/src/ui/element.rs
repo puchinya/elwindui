@@ -639,6 +639,14 @@ impl UIElement {
             height: 0.0,
         }
     }
+    /// Attempts to apply this element's template before a participating measure pass.
+    ///
+    /// Ordinary elements have no template and return `false`. `Control` overrides this virtual
+    /// method with its Core-owned typed-template application state machine.
+    #[overridable]
+    fn apply_template(&self) -> bool {
+        false
+    }
     /// Arranges this element's own children (in this element's own local coordinate space), given
     /// the final size this element itself was assigned (WinUI3's `ArrangeOverride`) — calls
     /// `child.arrange(..)` itself for each child it has, rather than returning a rect list for a
@@ -924,6 +932,7 @@ impl UIElement {
                 height: 0.0,
             }
         } else {
+            let _ = self.apply_template();
             let inner_available = constrain(self, shrink_by_margin(available, self.margin()));
             let desired = constrain(self, self.measure_override(inner_available));
             grow_by_margin(desired, self.margin())

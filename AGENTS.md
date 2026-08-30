@@ -21,6 +21,15 @@ For a new repository-changing request with no existing Issue, `phase:requirement
 
 Research-only means the requested deliverable itself is analysis, explanation, code reading, or exploratory discussion and no repository modification has been requested or approved. If the user later requests or approves a repository change, run this bootstrap at that point before planning or continuing repository-changing work.
 
+## Instruction input modes
+
+Repository-changing work supports two input modes through the same Issue-driven workflow:
+
+- **Direct request**: Follow the normal mandatory bootstrap and requirements/design/implementation/review phases.
+- **Supplied Implementation Contract**: Treat the contract as a compressed implementation handoff, not as a replacement for the repository workflow. Before editing, associate it with the owning Issue and check it against the approved Issue, normative specifications, and durable design. If it conflicts with repository authority or contains a material unapproved requirement or design decision, return to the appropriate requirements/design gate. When it is compatible with the approved Issue, treat its architecture and behavioral decisions as resolved inputs; inspect referenced artifacts for implementation details, but do not broadly re-derive the architecture unless new evidence conflicts with the contract.
+
+Both input modes use the same branch, verification, delivery, and review requirements.
+
 ## Communication
 
 When asking the user a question (clarifying questions, plan checkpoints, or approval requests), always ask in Japanese.
@@ -38,6 +47,17 @@ When asking the user a question (clarifying questions, plan checkpoints, or appr
   - `phase:review` / open PR: [`docs/agent-workflow/review.md`](docs/agent-workflow/review.md)
 - Read [`docs/agent-workflow/checkpoint.md`](docs/agent-workflow/checkpoint.md) only when pausing/resuming and [`docs/agent-workflow/evidence.md`](docs/agent-workflow/evidence.md) only when capturing evidence.
 - Any Rust-affecting task must pass the mandatory Rust verification gate defined in [`docs/agents/testing.md`](docs/agents/testing.md) before Pull Request delivery. A failed or skipped mandatory check prevents reporting the implementation as complete.
+
+## Delivery completion gate
+
+An implementation task is not implementation-phase complete until all of the following have succeeded:
+
+- the changes are committed;
+- the working branch is pushed;
+- a Pull Request exists and contains `Closes #<issue-number>`;
+- the Issue has transitioned to `phase:review` and the review workflow has been entered.
+
+Do not report implementation completion at edit, test, commit, or push. If Pull Request creation or the phase transition fails, report the result as blocked with the exact blocker and relevant command/error. Overall Issue completion remains governed by [`docs/agent-workflow/review.md`](docs/agent-workflow/review.md).
 
 ## Document authority
 
@@ -81,10 +101,25 @@ Rules:
 
 ## Context minimization and routing
 
+- Keep an Issue-scoped working set containing only:
+  - the owning Issue or Pull Request;
+  - the active phase workflow document;
+  - the relevant documentation router/category README;
+  - only the required specification, design, and status sections;
+  - target source/test symbols and directly relevant dependencies;
+  - the current relevant diff.
 - Start at [`docs/README.md`](docs/README.md), then one category README, then the smallest relevant document set.
 - Start code investigation from target symbols. This is an investigation strategy, not a source-of-truth rule for desired behavior.
 - Search headings/symbols first and read only relevant ranges. Do not begin by scanning all specs, designs, or status files.
 - Do not inspect sibling backend code unless cross-backend parity or shared behavior is in scope.
+- After the working set is established, do not restart broad repository scans unless new evidence shows that the approved scope or architecture is insufficient.
+- Do not repeatedly reread unchanged whole documents or source files merely to reconstruct context; reopen only the specific ranges or symbols needed.
+- Use bounded, scoped search and diff output. Use the narrowest relevant check or test during iteration, then run the required broad verification once the change is stable.
+- When full or high-volume command output must be retained, store it under `.agent-state/issues/<issue-number>/logs/` and inspect only bounded failure or relevant excerpts.
+- Never paste full build or test logs into the active conversation, Issue, Pull Request, or checkpoint.
+- Use the existing checkpoint mechanism when pausing, resuming, or creating a compact continuation or handoff.
+- Do not create a separate persistent context document that duplicates Issue, contract, or checkpoint state.
+- Context reduction must never suppress required errors, acceptance evidence, or final verification.
 - Do not load `docs_only_human/` during ordinary Agent tasks. It is a human overview and cannot be the only source of a required contract, architecture invariant, command, or current status.
 
 ## Technical domain guides

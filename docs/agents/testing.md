@@ -2,19 +2,71 @@
 
 Guidelines for AI agents verifying code changes in `elwindui`.
 
-## Cargo Workspace Commands
+## Canonical Rust verification gate
+
+This file is the canonical command authority for Rust verification. The gate applies to every
+task that changes Rust source (`*.rs`), Cargo or build configuration that affects Rust
+compilation, proc-macro or codegen behavior, or generated Rust API/output semantics.
+
+Run the complete gate from the repository root before creating or updating a Pull Request, and
+repeat it after any Rust-affecting review remediation:
+
+1. Apply the repository formatter and keep its result in the working tree:
+
+   ```text
+   cargo fmt --all
+   ```
+
+   The mutating formatter result is repository source state and must be included in the
+   implementation. A changed-file-only `rustfmt --check` is insufficient.
+
+2. Verify the workspace formatter is clean and idempotent:
+
+   ```text
+   cargo fmt --all -- --check
+   ```
+
+3. Run actual rust-analyzer diagnostics, from the repository root:
+
+   ```text
+   rust-analyzer diagnostics .
+   ```
+
+   `cargo check` or `RUSTFLAGS="--cfg rust_analyzer" cargo check --workspace` is not a
+   replacement for this command. The latter is an additive deterministic companion check when
+   proc-macro, codegen, or rust-analyzer-shadow behavior changes.
+
+4. Fix every actionable rust-analyzer Error and Warning. The accepted exception is limited to
+   the informational, non-Warning/non-Error `inactive-code` diagnostic for code under
+   `#[cfg(test)]` when rust-analyzer is analyzing the non-test configuration. An inactive-code
+   item reported at Warning or Error severity must be fixed; no broader exception is allowed.
+
+5. The task is not verification-complete if either mandatory formatter command or actual
+   rust-analyzer diagnostics is skipped or fails. If a required tool cannot run, report the task
+   as unverified/blocked rather than treating the check as optional.
+
+6. Record the exact command and result in the Pull Request verification report. Review-time
+   Rust edits require rerunning this same complete gate; an earlier pass before remediation is
+   not sufficient.
+
+Do not manufacture a pass by disabling rust-analyzer diagnostics, hiding them in editor or
+workspace settings, adding a repository-wide ignore list, adding blanket `#[allow(...)]`
+attributes, downgrading diagnostic severity, or replacing actual rust-analyzer verification with
+Cargo compilation.
+
+## Other Cargo workspace commands
 
 - `cargo build --workspace` — Build all workspace crates and examples.
+- `cargo check --workspace` — Check all workspace crates and examples.
 - `cargo test --workspace` — Run tests across all workspace crates.
 - `cargo run -p <example-name>` — Run a specific example app from `examples/`.
 
-## IDE Verification with rust-analyzer
+When proc-macro, codegen, or rust-analyzer-shadow behavior changes, also run the additive
+companion check:
 
-`cargo build` passing is not sufficient for proc-macro workspace verification. After code changes:
-
-1. Run `rust-analyzer diagnostics .` from the repository root.
-2. Fix actionable errors and lints (`unused_variables`, unnecessary code, etc.).
-3. Ignore `"inactive-code"` diagnostics on `#[cfg(test)]` blocks (normal rust-analyzer behavior outside test analysis mode).
+```text
+RUSTFLAGS="--cfg rust_analyzer" cargo check --workspace
+```
 
 ## Visual & UI Verification
 

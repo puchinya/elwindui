@@ -21,6 +21,8 @@ The Issue remains the approved specification. The Pull Request describes the act
 
 ## Review handling
 
+If review remediation changes Rust-affecting files or generation semantics, rerun the complete mandatory Rust verification gate defined in [`docs/agents/testing.md`](../agents/testing.md) before review can be considered complete. Review completion must not rely on a pass obtained before the remediation.
+
 1. Inspect all review submissions, inline threads, and required CI checks.
    Also verify the root `AGENTS.md` synchronization order: public changes have an approved spec, architecture changes have an updated design, current-state changes have an updated status, and no removed document path remains.
 2. For each actionable comment:

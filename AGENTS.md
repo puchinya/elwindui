@@ -37,6 +37,7 @@ When asking the user a question (clarifying questions, plan checkpoints, or appr
   - `phase:ready` / `phase:implementation`: [`docs/agent-workflow/implementation.md`](docs/agent-workflow/implementation.md)
   - `phase:review` / open PR: [`docs/agent-workflow/review.md`](docs/agent-workflow/review.md)
 - Read [`docs/agent-workflow/checkpoint.md`](docs/agent-workflow/checkpoint.md) only when pausing/resuming and [`docs/agent-workflow/evidence.md`](docs/agent-workflow/evidence.md) only when capturing evidence.
+- Any Rust-affecting task must pass the mandatory Rust verification gate defined in [`docs/agents/testing.md`](docs/agents/testing.md) before Pull Request delivery. A failed or skipped mandatory check prevents reporting the implementation as complete.
 
 ## Document authority
 

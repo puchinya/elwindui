@@ -6,8 +6,8 @@ Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 
 ## Current Rust verification baseline
 
-The current `rust-analyzer diagnostics .` run reports zero `Error`, zero `Warning`, and 125
-`WeakWarning` records. All 125 are `inactive-code` diagnostics caused by intentional repository
+The current `rust-analyzer diagnostics .` run reports zero `Error`, zero `Warning`, and 126
+`WeakWarning` records. All 126 are `inactive-code` diagnostics caused by intentional repository
 `#[cfg(...)]` conditional compilation, including test, target, feature, and debug/release
 branches. Therefore the current analyzer gate has zero non-exempt `WeakWarning` diagnostics and
 is clean under the clarified policy. `cargo fmt --all` is idempotent and

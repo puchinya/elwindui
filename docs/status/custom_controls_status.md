@@ -1,7 +1,8 @@
 # Custom controls status
 
-Snapshot: 2026-08-31. Final verified remediation implementation commit:
-`f31ad651f2e4fd9b7c89a7e90f89baad294c3b63`. The public contract is
+Snapshot: 2026-09-01. Prerequisite [PR #213](https://github.com/puchinya/elwindui/pull/213)
+was merged as `73ab47fc149756d0b1220ebe297adb98745b132f`; the verified PR #184
+implementation/rebase snapshot is `e04c54b9ef91e8ac4b96be8e83bb5a4273beba9f`. The public contract is
 [`../specs/custom_controls_spec.md`](../specs/custom_controls_spec.md).
 
 ## Implemented
@@ -68,28 +69,24 @@ Snapshot: 2026-08-31. Final verified remediation implementation commit:
 The focused custom-controls suite passes with 35 tests and no ignored tests;
 the external `declarative_content` regression passes with 1 test. `cargo fmt
 --all`, `cargo fmt --all -- --check`, and `git diff --check` pass.
-`cargo check -p custom-controls-demo`, `cargo check --workspace`, and `cargo
-build --workspace` exit 0, but they emit respectively 5, 22, and 22 compiler
-warnings. All remaining warnings are `unreachable statement` diagnostics
-originating in the component proc-macro expansion; 17 of the workspace
-locations are already present on clean `origin/master` and 5 are the custom
-controls' corresponding expansions. The `SystemIcon::ALL` warning was removed
-by keeping that test-only constant under `cfg(test)`. The warning-free Issue
-acceptance is therefore blocked; no warning suppression or codegen change was
-introduced.
+`cargo check -p elwindui-custom-controls` and `cargo check -p
+custom-controls-demo` both exit 0 with 0 rustc warnings. `cargo check
+--workspace` and `cargo build --workspace` both exit 0 with 0 rustc errors and
+0 rustc warnings. No component-expansion `unreachable statement` warnings
+remain. The warning-free component-expansion acceptance blocker from Issue
+#173 is resolved by merged PR #213.
 
-The exact `rust-analyzer diagnostics .` command exits 0 on the final
-implementation snapshot with 0 `Error`, 0 `Warning`, 133 permitted
-`Ra("inactive-code", WeakWarning)` records, and 0 non-exempt
-`WeakWarning` records. Against clean `origin/master`
-(`f2412f7ea807e66d780be57480c5be86453f07e6`) in the same environment it also
-exits 0 with 0 `Error`, 0 `Warning`, 125 permitted inactive-code
-`WeakWarning` records, and 0 non-exempt records. The rust-analyzer gate is
-resolved. `cargo test --workspace --quiet` passes; its test-target compilation
-still reports the same compiler warning family. Windows and GTK4 runtime
-interaction have not been run. The existing interactive AppKit smoke evidence
-was captured with `tools/macos-ui-driver`; individual pointer behavior remains
-covered by the Core PointerDispatcher host-path tests.
+The exact `rust-analyzer diagnostics .` command exits 0 on the verified
+post-prerequisite snapshot with 0 `Error`, 0 `Warning`, 133 permitted
+`Ra("inactive-code", WeakWarning)` records, and 0 non-exempt `WeakWarning`
+records. `RUSTFLAGS="--cfg rust_analyzer" cargo check --workspace` also exits
+0 with no new errors attributable to this implementation. `cargo test
+--workspace --quiet` passes; its test-target compilation still reports 10
+pre-existing unrelated warnings, with no `unreachable statement` warnings.
+Windows and GTK4 runtime interaction have not been run. The existing
+interactive AppKit smoke evidence was captured with `tools/macos-ui-driver`;
+individual pointer behavior remains covered by the Core PointerDispatcher
+host-path tests.
 
 ## Follow-up
 

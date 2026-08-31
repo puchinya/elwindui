@@ -1,0 +1,14 @@
+[package]
+name = "docking-demo"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+elwindui = { path = "../../crates/elwindui", features = ["backend-appkit", "backend-winui3"] }
+elwindui-custom-controls = { path = "../../crates/elwindui-custom-controls" }
+elwindui-docking = { path = "../../crates/elwindui-docking" }
+serde_json = "1"
+
+[lints]
+workspace = true

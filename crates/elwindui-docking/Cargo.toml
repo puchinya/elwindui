@@ -1,0 +1,16 @@
+[package]
+name = "elwindui-docking"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+elwindui-core = { path = "../elwindui-core" }
+elwindui-macros = { path = "../elwindui-macros" }
+elwindui-custom-controls = { path = "../elwindui-custom-controls" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

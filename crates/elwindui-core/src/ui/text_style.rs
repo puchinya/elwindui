@@ -185,7 +185,7 @@ pub trait TextStyleOwner: UIElementExt {
     /// else can affect measured size (a wider/heavier/larger glyph run).
     fn on_text_style_property_changed(&self, property: crate::graphics::TextStyleProperty) {
         match property {
-            crate::graphics::TextStyleProperty::Foreground => self.invalidate(),
+            crate::graphics::TextStyleProperty::Foreground => self.invalidate_render(),
             _ => self.invalidate_measure(),
         }
     }
@@ -240,6 +240,17 @@ pub fn inherited_text_style(base: &UIElement) -> crate::graphics::ComputedTextSt
 mod tests {
     use super::*;
     use crate::ui::testsupport::*;
+
+    #[derive(Default)]
+    struct KindRecordingHost {
+        kinds: std::cell::RefCell<Vec<crate::ui::InvalidationKind>>,
+    }
+
+    impl crate::ui::RelayoutHost for KindRecordingHost {
+        fn request_relayout(&self, _dirty_group_id: u64, kind: crate::ui::InvalidationKind) {
+            self.kinds.borrow_mut().push(kind);
+        }
+    }
 
     #[test]
     fn as_text_style_owner_is_none_for_non_owning_elements() {
@@ -339,9 +350,9 @@ mod tests {
     }
 
     #[test]
-    fn setting_font_size_invalidates_measure_but_foreground_only_invalidates_arrange() {
+    fn setting_font_size_invalidates_measure_but_foreground_only_invalidates_render() {
         let text_block = TextBlock::new();
-        let host = Rc::new(RecordingRelayoutHost::default());
+        let host = Rc::new(KindRecordingHost::default());
         text_block.set_invalidate_host(Some(host.clone() as Rc<dyn RelayoutHost>));
         layout_root(
             &(text_block.clone() as Rc<dyn UIElementExt>),
@@ -361,6 +372,7 @@ mod tests {
             size(100.0, 100.0),
         );
         assert!(text_block.measured_size().is_some());
+        host.kinds.borrow_mut().clear();
         text_block.set_foreground(Some(crate::graphics::Brush::Solid(
             crate::graphics::Color::white(),
         )));
@@ -368,7 +380,16 @@ mod tests {
             text_block.measured_size().is_some(),
             "a foreground-only change must not invalidate measure"
         );
-        assert!(text_block.arranged_width().is_none());
+        assert!(
+            text_block.arranged_width().is_some(),
+            "a foreground-only change must not invalidate arrange"
+        );
+        assert!(text_block.arranged_height().is_some());
+        assert!(text_block.arranged_offset().is_some());
+        assert_eq!(
+            &*host.kinds.borrow(),
+            &[crate::ui::InvalidationKind::Render]
+        );
     }
 
     #[test]

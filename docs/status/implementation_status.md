@@ -1,6 +1,6 @@
 # ElwindUI implementation status
 
-Snapshot: 2026-08-30. Desired behavior is defined by [`../specs/README.md`](../specs/README.md).
+Snapshot: 2026-08-31. Desired behavior is defined by [`../specs/README.md`](../specs/README.md).
 
 Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 
@@ -11,8 +11,11 @@ The current `rust-analyzer diagnostics .` run reports zero `Error`, zero `Warnin
 `#[cfg(...)]` conditional compilation, including test, target, feature, and debug/release
 branches. Therefore the current analyzer gate has zero non-exempt `WeakWarning` diagnostics and
 is clean under the clarified policy. `cargo fmt --all` is idempotent and
-`cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace`, and
-`git diff --check` pass. No source or durable codegen architecture change was required.
+`cargo fmt --all -- --check`, `cargo check --workspace`, `cargo build --workspace`,
+`cargo test --workspace`, and `git diff --check` pass. Issue [#210](https://github.com/puchinya/elwindui/issues/210)
+removes the generic component-expansion path that emitted statically unreachable statements by
+keeping specialized component-template and ordinary authored-view statement sequences structurally
+separate; the rust-analyzer shadow expansion remains unchanged.
 
 ## Core and language
 

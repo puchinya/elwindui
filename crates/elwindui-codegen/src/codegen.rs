@@ -8303,6 +8303,51 @@ fn generate_view(
                 );
             }
         });
+        // A component-level template takes the specialized path above and returns from
+        // `__build_view`; it has no ordinary authored-view construction to emit after that path.
+        // Keep the two generated statement sequences structurally separate so normal rustc never
+        // receives the ordinary sequence after an unconditional return. This preserves the
+        // existing template runtime behavior while avoiding an `unreachable_code` diagnostic.
+        let build_view_stmts = if view.is_template {
+            quote! {
+                #own_environment_resolve_stmts
+                #custom_template_branch
+            }
+        } else {
+            quote! {
+                #own_environment_resolve_stmts
+                #body_prepare_stmt
+                #child_construct_stmts
+                #content_attach_stmt
+                let __most_derived: Option<std::rc::Rc<#target>> = self
+                    .__self_weak
+                    .borrow()
+                    .upgrade()
+                    .expect("__build_view: object must already be Rc-constructed")
+                    .downcast::<#target>()
+                    .ok();
+                if let Some(this) = __most_derived.clone() {
+                    #wiring_stmts
+                    #unmount_hook_attach
+                }
+                <Self as #target_ext>::__refresh_dynamic_regions(self);
+                // Most widgets already read live model state at construction time, so this is a
+                // no-op for them. A widget whose own state only ever appears in `resync()` (e.g.
+                // a dynamic list, like `TabView`'s tabs) needs this call so state populated
+                // before construction (as `main.rs` does, calling `new_tab_execute()` first)
+                // appears immediately rather than waiting for the first unrelated user
+                // interaction.
+                self.resync();
+                if let Some(this) = __most_derived {
+                    #component_self_subscription
+                    #subscribe_stmts
+                    #own_environment_subscribe_stmts
+                    #semantic_brush_subscribe_stmts
+                    #own_on_update_subscription
+                    #on_mount_stmt
+                }
+            }
+        };
         // Every one of these is purely inherent (`resync`/`#[id(..)]` child accessors/user methods/
         // lifecycle shadow hooks) — none is part of `#target`'s own generated trait — so `mark_inherent`
         // tags each with `#[inherent]` and they all land in the single `#[elwindui::class] impl
@@ -8478,38 +8523,7 @@ fn generate_view(
                 // `mount()`, once, per the build-idempotency guard there.
                 #[doc(hidden)]
                 fn __build_view(&self) {
-                    #own_environment_resolve_stmts
-                    #custom_template_branch
-                    #body_prepare_stmt
-                    #child_construct_stmts
-                    #content_attach_stmt
-                    let __most_derived: Option<std::rc::Rc<#target>> = self
-                        .__self_weak
-                        .borrow()
-                        .upgrade()
-                        .expect("__build_view: object must already be Rc-constructed")
-                        .downcast::<#target>()
-                        .ok();
-                    if let Some(this) = __most_derived.clone() {
-                        #wiring_stmts
-                        #unmount_hook_attach
-                    }
-                    <Self as #target_ext>::__refresh_dynamic_regions(self);
-                    // Most widgets already read live model state at construction time, so this is a
-                    // no-op for them. A widget whose own state only ever appears in `resync()` (e.g.
-                    // a dynamic list, like `TabView`'s tabs) needs this call so state populated
-                    // before construction (as `main.rs` does, calling `new_tab_execute()` first)
-                    // appears immediately rather than waiting for the first unrelated user
-                    // interaction.
-                    self.resync();
-                    if let Some(this) = __most_derived {
-                        #component_self_subscription
-                        #subscribe_stmts
-                        #own_environment_subscribe_stmts
-                        #semantic_brush_subscribe_stmts
-                        #own_on_update_subscription
-                        #on_mount_stmt
-                    }
+                    #build_view_stmts
                 }
 
                 #own_class_methods

@@ -205,8 +205,9 @@ fn winui3_show_hide_show_builds_once_and_close_cascades_unmount() {
         builtin_window.close();
 
         // Part 1: close before show
-        let window1: Rc<MountHideCloseWindow> = MountHideCloseWindow::__new_unmounted();
-        window1.__set_initial_prop_subtitle("w1".to_string());
+        let window1: Rc<MountHideCloseWindow> = elwindui::new!(MountHideCloseWindow(
+            subtitle: "w1".to_string()
+        ));
         assert_eq!(BUILD_COUNT.with(Cell::get), 0);
         assert_eq!(get_unmount_events().len(), 0);
 
@@ -226,8 +227,9 @@ fn winui3_show_hide_show_builds_once_and_close_cascades_unmount() {
         assert_eq!(get_unmount_events().len(), 0);
 
         // Part 2: show -> hide -> show -> close
-        let window: Rc<MountHideCloseWindow> = MountHideCloseWindow::__new_unmounted();
-        window.__set_initial_prop_subtitle("initial".to_string());
+        let window: Rc<MountHideCloseWindow> = elwindui::new!(MountHideCloseWindow(
+            subtitle: "initial".to_string()
+        ));
         assert_eq!(
             BUILD_COUNT.with(Cell::get),
             0,

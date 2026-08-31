@@ -552,10 +552,10 @@ fn copy_win2d_runtime(out_dir: &str) {
         "microsoft.windowsappsdk.foundation",
     ] {
         let package = root.join(package_name);
-        for version in std::fs::read_dir(package)
-            .unwrap_or_else(|_| panic!("read {package_name} NuGet package"))
-            .flatten()
-        {
+        let Ok(versions) = std::fs::read_dir(&package) else {
+            continue;
+        };
+        for version in versions.flatten() {
             let dll = version
                 .path()
                 .join("runtimes")

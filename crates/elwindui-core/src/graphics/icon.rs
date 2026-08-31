@@ -50,6 +50,7 @@ pub enum SystemIcon {
 impl SystemIcon {
     /// Every currently-defined variant, in declaration order. `pub(crate)` only — exists for
     /// exhaustive internal/test coverage (e.g. mapping-completeness tests), not as public API.
+    #[cfg(test)]
     pub(crate) const ALL: [SystemIcon; 12] = [
         SystemIcon::Add,
         SystemIcon::Remove,

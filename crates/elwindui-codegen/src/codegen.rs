@@ -3938,10 +3938,24 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
             /// `documents_push(item: Rc<NestedViewModel>)` never needs a redundant caller-side
             /// `Rc::new(..)` around `NestedViewModel::new()`'s result.
             pub fn new() -> std::rc::Rc<Self> {
-                let instance = std::rc::Rc::new_cyclic(|__self_weak| {
+                // Keep the generic boundaries explicit in the generated source.  rustc infers
+                // these from the `Self { .. }` literal and the typed handler field, but current
+                // rust-analyzer versions can leave the `Rc`/`Weak` and `retain` closure element
+                // types unknown when this code arrives through an attribute macro expansion.
+                let instance: std::rc::Rc<Self> =
+                    std::rc::Rc::new_cyclic(|__self_weak: &std::rc::Weak<Self>| {
+                    let __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(
+                        std::rc::Rc<std::cell::Cell<bool>>,
+                        std::rc::Rc<dyn Fn(#property_enum)>,
+                    )>>> = std::rc::Rc::new(std::cell::RefCell::new(
+                        Vec::<(
+                            std::rc::Rc<std::cell::Cell<bool>>,
+                            std::rc::Rc<dyn Fn(#property_enum)>,
+                        )>::new(),
+                    ));
                     let instance = Self {
                         #ctor_fields
-                        __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                        __property_changed_handlers,
                         __self_weak: __self_weak.clone(),
                     };
                     #recompute_calls_after_new
@@ -3960,10 +3974,14 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 &self,
                 f: impl Fn(#property_enum) + 'static,
             ) -> elwindui::core::reactive::Subscription {
-                let active = std::rc::Rc::new(std::cell::Cell::new(true));
+                let active: std::rc::Rc<std::cell::Cell<bool>> =
+                    std::rc::Rc::new(std::cell::Cell::new(true));
                 let handler: std::rc::Rc<dyn Fn(#property_enum)> = std::rc::Rc::new(f);
                 self.__property_changed_handlers.borrow_mut().push((active.clone(), handler));
-                let handlers = std::rc::Rc::downgrade(&self.__property_changed_handlers);
+                let handlers: std::rc::Weak<std::cell::RefCell<Vec<(
+                    std::rc::Rc<std::cell::Cell<bool>>,
+                    std::rc::Rc<dyn Fn(#property_enum)>,
+                )>>> = std::rc::Rc::downgrade(&self.__property_changed_handlers);
                 elwindui::core::reactive::Subscription::new(move || {
                     active.set(false);
                     if let Some(handlers) = handlers.upgrade() {
@@ -18504,6 +18522,133 @@ struct NotepadWindow {
         if let Err(e) = syn::parse2::<syn::File>(ts.clone()) {
             panic!("{label} did not generate valid Rust: {e}\n---\n{ts}");
         }
+    }
+
+    fn generated_local_type(method: &syn::ImplItemFn, name: &str) -> syn::Type {
+        struct Finder<'a> {
+            name: &'a str,
+            found: Option<syn::Type>,
+        }
+
+        impl<'ast> syn::visit::Visit<'ast> for Finder<'_> {
+            fn visit_local(&mut self, local: &'ast syn::Local) {
+                if let syn::Pat::Type(pattern) = &local.pat {
+                    let is_target = matches!(
+                        pattern.pat.as_ref(),
+                        syn::Pat::Ident(identifier) if identifier.ident == self.name
+                    );
+                    if is_target {
+                        self.found = Some((*pattern.ty).clone());
+                    }
+                }
+                syn::visit::visit_local(self, local);
+            }
+        }
+
+        let mut finder = Finder { name, found: None };
+        syn::visit::Visit::visit_block(&mut finder, &method.block);
+        finder
+            .found
+            .unwrap_or_else(|| panic!("generated method has no typed local `{name}`"))
+    }
+
+    #[test]
+    fn viewmodel_constructor_and_subscription_keep_analysis_types_explicit() {
+        let module = viewmodel_module_from_rust(
+            r#"
+            mod AnalysisViewModel {
+                struct AnalysisViewModel {
+                    #[observable(default = false)]
+                    active: bool,
+                }
+            }
+        "#,
+        );
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        let file = syn::parse2::<syn::File>(generated).expect("generated viewmodel should parse");
+
+        let implementation = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Impl(item_impl)
+                    if matches!(&*item_impl.self_ty, syn::Type::Path(path) if path
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|segment| segment.ident == "AnalysisViewModel")) =>
+                {
+                    Some(item_impl)
+                }
+                _ => None,
+            })
+            .expect("generated viewmodel inherent impl should exist");
+
+        let method = |name: &str| {
+            implementation
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    syn::ImplItem::Fn(method) if method.sig.ident == name => Some(method),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("generated viewmodel method `{name}` should exist"))
+        };
+        let constructor = method("new");
+        let subscribe = method("subscribe_property_changed");
+
+        let expected_rc_self: syn::Type = syn::parse_str("std::rc::Rc<Self>").unwrap();
+        assert!(matches!(
+            &constructor.sig.output,
+            syn::ReturnType::Type(_, ty) if **ty == expected_rc_self
+        ));
+        assert_eq!(
+            generated_local_type(constructor, "instance"),
+            expected_rc_self,
+            "Rc::new_cyclic's result should remain explicit for rust-analyzer"
+        );
+
+        struct ClosureParamFinder {
+            found: Option<syn::Type>,
+        }
+
+        impl<'ast> syn::visit::Visit<'ast> for ClosureParamFinder {
+            fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
+                if self.found.is_none() {
+                    if let Some(syn::Pat::Type(pattern)) = closure.inputs.first() {
+                        if let syn::Pat::Ident(identifier) = pattern.pat.as_ref() {
+                            if identifier.ident == "__self_weak" {
+                                self.found = Some((*pattern.ty).clone());
+                            }
+                        }
+                    }
+                }
+                syn::visit::visit_expr_closure(self, closure);
+            }
+        }
+
+        let mut closure_param = ClosureParamFinder { found: None };
+        syn::visit::Visit::visit_block(&mut closure_param, &constructor.block);
+        let expected_weak_self: syn::Type =
+            syn::parse_str("&std::rc::Weak<Self>").expect("expected type should parse");
+        assert_eq!(
+            closure_param
+                .found
+                .expect("Rc::new_cyclic closure parameter should be typed"),
+            expected_weak_self
+        );
+
+        assert_eq!(
+            generated_local_type(subscribe, "active"),
+            syn::parse_str("std::rc::Rc<std::cell::Cell<bool>>").unwrap()
+        );
+        let handlers = generated_local_type(subscribe, "handlers");
+        let expected_handlers: syn::Type = syn::parse_str(
+            "std::rc::Weak<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<dyn Fn(AnalysisViewModelProperty)>,)>>>"
+        )
+        .unwrap();
+        assert_eq!(handlers, expected_handlers);
     }
 
     // --- Font/text-style codegen tests (指示書 §32) ---------------------------------------------

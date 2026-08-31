@@ -55,35 +55,39 @@ struct UiCallbackRegistryOwnerInner {
     registrations: RefCell<Vec<(UiCallbackKind, usize)>>,
 }
 
+fn remove_ui_callback(kind: UiCallbackKind, id: usize) {
+    let _ = match kind {
+        UiCallbackKind::Event => UI_EVENT_CALLBACKS.try_with(|callbacks| {
+            callbacks.borrow_mut().remove(&id);
+        }),
+        UiCallbackKind::BoolEvent => UI_BOOL_EVENT_CALLBACKS.try_with(|callbacks| {
+            callbacks.borrow_mut().remove(&id);
+        }),
+        UiCallbackKind::ContextEvent => UI_CONTEXT_EVENT_CALLBACKS.try_with(|callbacks| {
+            callbacks.borrow_mut().remove(&id);
+        }),
+        UiCallbackKind::PointerEvent => UI_POINTER_EVENT_CALLBACKS.try_with(|callbacks| {
+            callbacks.borrow_mut().remove(&id);
+        }),
+        UiCallbackKind::RightTapped => UI_RIGHT_TAPPED_CALLBACKS.try_with(|callbacks| {
+            callbacks.borrow_mut().remove(&id);
+        }),
+        UiCallbackKind::Index => UI_INDEX_EVENT_CALLBACKS.try_with(|callbacks| {
+            callbacks.borrow_mut().remove(&id);
+        }),
+        UiCallbackKind::Key => UI_KEY_EVENT_CALLBACKS.try_with(|callbacks| {
+            callbacks.borrow_mut().remove(&id);
+        }),
+        UiCallbackKind::Text => UI_TEXT_EVENT_CALLBACKS.try_with(|callbacks| {
+            callbacks.borrow_mut().remove(&id);
+        }),
+    };
+}
+
 impl Drop for UiCallbackRegistryOwnerInner {
     fn drop(&mut self) {
         for (kind, id) in self.registrations.get_mut().drain(..) {
-            let _ = match kind {
-                UiCallbackKind::Event => UI_EVENT_CALLBACKS.try_with(|callbacks| {
-                    callbacks.borrow_mut().remove(&id);
-                }),
-                UiCallbackKind::BoolEvent => UI_BOOL_EVENT_CALLBACKS.try_with(|callbacks| {
-                    callbacks.borrow_mut().remove(&id);
-                }),
-                UiCallbackKind::ContextEvent => UI_CONTEXT_EVENT_CALLBACKS.try_with(|callbacks| {
-                    callbacks.borrow_mut().remove(&id);
-                }),
-                UiCallbackKind::PointerEvent => UI_POINTER_EVENT_CALLBACKS.try_with(|callbacks| {
-                    callbacks.borrow_mut().remove(&id);
-                }),
-                UiCallbackKind::RightTapped => UI_RIGHT_TAPPED_CALLBACKS.try_with(|callbacks| {
-                    callbacks.borrow_mut().remove(&id);
-                }),
-                UiCallbackKind::Index => UI_INDEX_EVENT_CALLBACKS.try_with(|callbacks| {
-                    callbacks.borrow_mut().remove(&id);
-                }),
-                UiCallbackKind::Key => UI_KEY_EVENT_CALLBACKS.try_with(|callbacks| {
-                    callbacks.borrow_mut().remove(&id);
-                }),
-                UiCallbackKind::Text => UI_TEXT_EVENT_CALLBACKS.try_with(|callbacks| {
-                    callbacks.borrow_mut().remove(&id);
-                }),
-            };
+            remove_ui_callback(kind, id);
         }
     }
 }
@@ -100,6 +104,18 @@ impl Drop for UiCallbackRegistryOwnerInner {
 pub(crate) struct UiCallbackRegistryOwner(Rc<UiCallbackRegistryOwnerInner>);
 
 impl UiCallbackRegistryOwner {
+    /// Removes every callback owned by this lifetime group while keeping the owner itself alive.
+    ///
+    /// This is used when a native source reports its terminal event but its event delegate still
+    /// temporarily exists on the call stack. Clearing explicitly breaks the close-handler's
+    /// self-retaining cycle; the `Drop` implementation remains the fallback for all other owners.
+    pub(crate) fn clear(&self) {
+        let registrations = self.0.registrations.replace(Vec::new());
+        for (kind, id) in registrations {
+            remove_ui_callback(kind, id);
+        }
+    }
+
     /// Registers a no-argument callback owned by this lifetime group.
     pub(crate) fn register_event(&self, callback: Rc<dyn Fn()>) -> usize {
         let id = register_ui_event_callback(callback);
@@ -212,6 +228,11 @@ pub(crate) fn invoke_ui_event_callback(id: usize) {
     if let Some(callback) = callback {
         callback();
     }
+}
+
+#[cfg(test)]
+pub(crate) fn ui_event_callback_count() -> usize {
+    UI_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().len())
 }
 
 pub(crate) fn register_ui_bool_event_callback(callback: Rc<dyn Fn() -> bool>) -> usize {
@@ -728,5 +749,49 @@ mod tests {
         invoke_ui_text_event_callback(text_id, "ignored".to_string());
         assert_eq!(index_calls.get(), 7);
         assert_eq!(text_calls.get(), 3);
+    }
+
+    #[test]
+    fn callback_registry_owner_repeated_lifecycles_return_to_baseline() {
+        let baseline = ui_event_callback_count();
+
+        for _ in 0..8 {
+            let calls = Rc::new(Cell::new(0));
+            let calls_for_callback = calls.clone();
+            let owner = UiCallbackRegistryOwner::default();
+            let id = owner.register_event(Rc::new(move || {
+                calls_for_callback.set(calls_for_callback.get() + 1);
+            }));
+
+            assert_eq!(ui_event_callback_count(), baseline + 1);
+            invoke_ui_event_callback(id);
+            assert_eq!(calls.get(), 1);
+
+            drop(owner);
+            assert_eq!(ui_event_callback_count(), baseline);
+            invoke_ui_event_callback(id);
+            assert_eq!(calls.get(), 1);
+        }
+    }
+
+    #[test]
+    fn callback_invocation_can_register_and_remove_another_callback() {
+        let calls = Rc::new(Cell::new(0));
+        let nested_calls = Rc::clone(&calls);
+        let id = register_ui_event_callback(Rc::new(move || {
+            nested_calls.set(nested_calls.get() + 1);
+        }));
+        let callback_calls = Rc::clone(&calls);
+        let outer_id = register_ui_event_callback(Rc::new(move || {
+            callback_calls.set(callback_calls.get() + 1);
+            let nested_id = register_ui_event_callback(Rc::new(|| {}));
+            invoke_ui_event_callback(id);
+            remove_ui_callback(UiCallbackKind::Event, nested_id);
+        }));
+
+        invoke_ui_event_callback(outer_id);
+        assert_eq!(calls.get(), 2);
+        remove_ui_callback(UiCallbackKind::Event, id);
+        remove_ui_callback(UiCallbackKind::Event, outer_id);
     }
 }

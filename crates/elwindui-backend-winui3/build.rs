@@ -78,10 +78,20 @@ fn main() {
             args.push(path.to_string_lossy().into_owned());
         }
     }
-    if let Some(resources) = find_package_winmd(
-        "microsoft.windowsappsdk",
+    // Windows App SDK 1.8 ships this contract in the separate Foundation package. Keep the
+    // legacy runtime-package lookup as a fallback for older package layouts, but prefer the
+    // metadata directory used by the current package so the exact IResourceManager filter below
+    // is available to the no-deps projection.
+    if let Some(resources) = find_package_metadata_winmd(
+        "microsoft.windowsappsdk.foundation",
         "Microsoft.Windows.ApplicationModel.Resources.winmd",
-    ) {
+    )
+    .or_else(|| {
+        find_package_winmd(
+            "microsoft.windowsappsdk",
+            "Microsoft.Windows.ApplicationModel.Resources.winmd",
+        )
+    }) {
         args.push("--in".to_owned());
         args.push(resources.to_string_lossy().into_owned());
     }
@@ -534,19 +544,27 @@ fn copy_win2d_runtime(out_dir: &str) {
     println!("cargo:rerun-if-changed={}", source.display());
 
     let mut bootstrap_candidates = Vec::new();
-    let package = root.join("microsoft.windowsappsdk");
-    for version in std::fs::read_dir(package)
-        .expect("read Windows App SDK NuGet package")
-        .flatten()
-    {
-        let dll = version
-            .path()
-            .join("runtimes")
-            .join(arch)
-            .join("native")
-            .join("Microsoft.WindowsAppRuntime.Bootstrap.dll");
-        if dll.is_file() {
-            bootstrap_candidates.push(dll);
+    // Current Windows App SDK packages place the native bootstrap DLL in the Foundation package;
+    // older layouts placed it directly in Microsoft.WindowsAppSDK. Search both package owners so
+    // the local runtime copy follows the metadata package pair actually restored above.
+    for package_name in [
+        "microsoft.windowsappsdk",
+        "microsoft.windowsappsdk.foundation",
+    ] {
+        let package = root.join(package_name);
+        for version in std::fs::read_dir(package)
+            .unwrap_or_else(|_| panic!("read {package_name} NuGet package"))
+            .flatten()
+        {
+            let dll = version
+                .path()
+                .join("runtimes")
+                .join(arch)
+                .join("native")
+                .join("Microsoft.WindowsAppRuntime.Bootstrap.dll");
+            if dll.is_file() {
+                bootstrap_candidates.push(dll);
+            }
         }
     }
     bootstrap_candidates.sort();

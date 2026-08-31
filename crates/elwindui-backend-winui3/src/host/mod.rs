@@ -1822,8 +1822,9 @@ impl TreeHostPanel {
                             if let Ok(flyout) = winui_menu.create_flyout() {
                                 let fe: FrameworkElement =
                                     canvas.cast().expect("Canvas as FrameworkElement");
-                                let _ = flyout.ShowAt(&fe);
-                                return true;
+                                if flyout.show_at(&fe).is_ok() {
+                                    return true;
+                                }
                             }
                         }
                     }

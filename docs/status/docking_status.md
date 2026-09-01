@@ -2,35 +2,46 @@
 
 ## Implemented
 
-- Separate elwindui-docking crate with transparent DockItemId/DockGroupId newtypes.
-- Opaque immutable DockLayoutModel, typed placements/errors, default attachment, normalization,
-  generated group IDs, and version-1 serde snapshots.
-- Declarative DockingControl, DockSplitPanel, DockGroup, and DockItem components.
-- Stable item-wrapper registry and private model-to-CustomTabView/CustomSplitter realization
-  boundary, including transactional drag/preview, auto-hide, floating-host, and coordinate
-  registry seams.
-- Declarative docking-demo with two document tabs, two tool windows, and nested horizontal and
-  vertical split declarations.
+- `elwindui-docking` is a separate consumer crate with stable `DockItemId` and `DockGroupId`
+  registrations, authored-default metadata, and dynamic registration callbacks.
+- `DockLayoutModel` is an opaque immutable value for main/floating roots, selection, closed return
+  state, auto-hide state, generated groups, normalization, and version-1 snapshots.
+- `DockingControl` keeps authored declarations mounted but collapsed, installs one retained private
+  runtime host, applies the actual TwoWay layout update path, publishes an empty initial default
+  once, and suppresses source echoes/latest-only reentrant updates.
+- The runtime retains item wrappers, group views, split Grids, and splitter instances. It realizes
+  N-pane splits with N-1 `CustomSplitter`s and uses explicit detach-before-attach ownership.
+- CustomTabView selection/close/tab-drag callbacks and CustomSplitter callbacks are wired through
+  weak Docking owners. Drag preview is a real visual adornment and does not reparent page content.
+- Four custom auto-hide strips, icon/title entries, a single wrapper-hosting overlay pane, and pin
+  affordances are present per Dock surface.
+- AppKit and WinUI3 have private native floating Window adapters with logical bounds, retained
+  surface content, close interception, and empty-host cleanup. GTK model floating remains valid but
+  interactive native floating reports `FloatingHostUnavailable` because the baseline has no usable
+  Window implementation.
+- `examples/docking-demo` visibly composes documents, nested tools, and the retained DockingControl
+  runtime; it no longer only serializes an empty model.
 
-## Verification
+## Tests and verification state
 
-The focused model tests cover default/reset, activation, close/reopen, group and all four-side
-split/edge placement, floating/auto-hide, normalization, transparent IDs, snapshot round-trip,
-typed invalid values, and latest-only source queuing.
+Focused model/runtime tests cover default initialization/reset, activation, close/reopen, all four
+split/edge sides, snapshot round-trip, auto-hide state, typed invalid values, latest-only source
+logic, removed-authored-group repair, adjacent split-weight transformation, generated-group drag
+targets, retained runtime presentation, callback-driven selection/close, initial publication, and
+dynamic registration. Native GUI behavior still requires platform-host verification where noted
+below.
 
-- `cargo fmt --all -- --check`: PASS.
-- `rust-analyzer diagnostics .`: PASS; 0 Error, 0 Warning, and 0 non-exempt WeakWarning records.
-  The 142 reported `Ra("inactive-code", WeakWarning)` records are intentional conditional code.
-- `cargo check --workspace`, `cargo build --workspace`, and
-  `RUSTFLAGS="--cfg rust_analyzer" cargo check --workspace`: PASS.
-- `cargo check -p elwindui-docking -p docking-demo`, `cargo build -p elwindui-docking -p
-  docking-demo`, and `cargo test -p elwindui-docking`: PASS; 13 tests passed.
-- `cargo test --workspace`: FAIL in the existing AppKit `control_template_window_rt4` fixture:
-  its Window-hosted target reported `measured=229x48` and `arranged=1x0`, then aborted. This is
-  outside the changed files and prevents treating the workspace test command as fully passing.
-- AppKit GUI proof: NOT RUN. `macos-ui-driver doctor` succeeded but reported both Accessibility
-  and Screen Recording permissions as false; the demo launch consequently timed out waiting for a
-  window and `list-windows` returned no windows. WinUI3 and GTK4 interactive runs are also NOT RUN.
+The canonical command results are recorded in the PR #218 remediation report. Workspace failures
+are kept separate from Docking-specific results; in particular, the existing AppKit
+`control_template_window_rt4` fixture must not be treated as a Docking failure without change-specific
+evidence.
 
-Backend compilation and GUI interaction remain platform-dependent; compilation is not reported as
-GUI proof.
+## Platform boundaries
+
+- AppKit runtime interaction: run selection/close, tab drag targets/cancellation, splitter
+  completion/cancellation, pin/auto-hide/unpin, floating/re-dock, and native close accept/reject
+  when macOS UI permissions are available.
+- WinUI3 runtime interaction: run the equivalent matrix only when the separate Issue #207/#217
+  Windows integration state permits it; those fixes are not part of #172/#218.
+- GTK4: compile as required by the workspace. Do not claim native floating runtime support without a
+  real GTK Window implementation.

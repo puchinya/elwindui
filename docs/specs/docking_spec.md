@@ -1,45 +1,78 @@
 # Docking specification
 
-elwindui-docking provides a backend-neutral docking surface. The crate is separate from the
-elwindui facade and consumes the existing component, ContentControl, and custom-control APIs.
+`elwindui-docking` is a backend-neutral docking surface. It is a separate crate from the
+`elwindui` facade and uses the existing Core layout, input, ContentControl, Window, and
+custom-control contracts.
 
-## Authored surface
+## Authored declarations
 
-The public authored controls are:
+Applications author one `DockingControl` whose content is a `DockGroup` or `DockSplitPanel` tree.
+`DockGroup` registers a stable `DockGroupId`, tab-strip position, and authored weight. `DockItem`
+registers a stable `DockItemId`, title, optional `IconSource`, page content, and the capability
+flags `can_close`, `can_pin`, `can_float`, and `can_dock`.
 
-- DockingControl, whose layout: DockLayoutModel property is TwoWay and whose content is one
-  DockGroup or DockSplitPanel;
-- DockSplitPanel, with orientation, weight, and DockGroup/DockSplitPanel children;
-- DockGroup, with an authored DockGroupId, weight, tab_strip_position, and DockItem children;
-- DockItem, with an authored DockItemId, title, optional icon, capability flags, and content.
+The authored declaration remains mounted so registrations and dynamic `for` changes stay live, but
+its presenter is `Visibility::Collapsed`. It is not the visible workspace and a `DockItem` does
+not present a second copy of its page. The visible workspace is a retained private runtime host.
+Empty or duplicate IDs, unsupported declaration nodes, empty splits, and non-finite or non-positive
+weights are authoring errors.
 
-An empty or duplicate authored ID, an unsupported root, an empty split, or a non-positive/non-finite
-weight is a deterministic authoring error. IDs are not silently renamed.
+## Value model and source path
 
-## Value model
+`DockLayoutModel` is an opaque, cloneable, `PartialEq` value. It owns the main root, floating
+roots, auto-hide entries, closed return states, selection, and generated group identities. Model
+operations return a new value and validate placements before changing anything.
 
-DockLayoutModel is opaque, Clone, and PartialEq. It owns the main root, floating roots, auto-hide
-entries, closed entries, selection, and generated group identity. Model operations are immutable:
-activation, close/reopen, group/split/root-edge/floating/auto-hide moves, and reset all return a
-new model or a typed DockLayoutError.
+The bound `DockingControl.layout` property is the only source-assignment path. A source update
+normalizes against the current authored registrations, cancels transient gestures, reconciles the
+retained runtime, and never invokes `set_on_layout_change`. Reentrant source updates are latest-only.
+An initially empty bound value is initialized from the authored default and published once through
+the property and `set_on_layout_change`; a non-empty restored value wins without an initial echo.
 
-DockSide, DockTarget, and DockPlacement are backend-neutral. Programmatic weights and floating
-bounds must be finite and positive. A failed operation does not change the live value.
+## Runtime interaction
 
-## Capabilities and interaction
+Each registered item has one stable runtime `CustomTabViewItem`; selection, close requests, tab
+dragging, splitter resizing, auto-hide, floating, and re-docking preserve that wrapper and its page
+content identity. Runtime ownership changes use detach-before-attach.
 
-can_close, can_pin, can_float, and can_dock constrain user gestures. Selection remains possible for
-an item that cannot be docked. Center, four group split, and four outer-edge targets are distinct
-target kinds. A canceled drag, lost capture, unavailable coordinate conversion, or failed
-floating-host creation preserves the committed model.
+`CustomTabView` supplies selection, close, and tab-drag callbacks, including its existing threshold,
+capture, cancellation, root-relative position, and optional logical screen position. `CustomSplitter`
+supplies splitter gestures. Split nodes with N children realize as one retained Grid with N panes and
+N-1 six-pixel `CustomSplitter`s. Splitter movement changes only transient Grid tracks; a successful
+completion writes adjacent normalized weights once, while cancellation restores the original tracks.
 
-Splitter movement is transient until pointer completion and writes one normalized adjacent-weight
-update. Auto-hide keeps one open overlay, preserves its return group/index, and restores that
-position when unpinned. A floating root belongs to the same model as the main root.
+Drag movement changes only a custom drop-preview rectangle and candidate target. It never reparents
+page content or reconciles a preview model. Completion commits one normalized model, or cancels when
+there is no valid target. Outer surface bands provide four Dock targets; the deepest containing
+runtime group provides Center or four Split targets. Cross-window discovery uses only Core
+`screen_to_root`/`root_to_screen` conversions and arranged visual bounds.
 
-## Snapshot
+## Auto-hide and floating
 
-DockLayoutSnapshot::VERSION is 1. Snapshots contain current layout state only: authored content,
-capabilities, and UI element values are not serialized. Unknown versions and malformed
-weights/bounds/selection/return state produce typed errors without replacing live state. Generated
-group IDs resume above every restored generated identity.
+Every surface has four private custom-rendered auto-hide strips, a single overlay pane, a custom
+pin affordance, and a drop-preview layer. An auto-hide entry opens in the one overlay pane; opening
+another entry closes only the previous presentation. Pinning chooses the nearest surface edge with
+the deterministic order Left, Top, Right, Bottom. Unpinning restores the remembered group/index,
+then the current authored default, then the root fallback.
+
+On macOS and Windows, a floating model root is hosted by a real backend `Window` containing its
+retained `DockSurfaceView`. Bounds are the model's normalized logical desktop `Rect`. Native close
+requests are intercepted: any non-closeable contained item vetoes the close; otherwise all contained
+items are closed in one model transaction and the host is removed. A floating-host failure returns
+`DockLayoutError::FloatingHostUnavailable` and leaves the source ownership/model unchanged.
+
+The current GTK4 baseline has no equivalent usable `Window` surface. Pure model floating snapshots
+remain valid there, while an interactive request to create a floating native host reports
+`FloatingHostUnavailable`.
+
+## Snapshots and lifetime
+
+`DockLayoutSnapshot::VERSION` is 1. Snapshots contain model state only; authored controls,
+capabilities, runtime wrappers, native windows, callbacks, and surface registry state are not
+serialized. Removed authored groups are repaired during normalization: surviving items move to the
+current authored default or deterministic root fallback, including closed and auto-hide return
+states.
+
+Unmount cancels gestures, clears previews, clears native close handlers, closes floating hosts, and
+releases the surface registry. Runtime callbacks capture weak owners and do not form retained `Rc`
+cycles.

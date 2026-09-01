@@ -24,6 +24,20 @@ struct DockingDemoSurface {
     #[computed(expr = elwindui::core::layout::Orientation::Vertical)]
     vertical: elwindui::core::layout::Orientation,
     body: view! {
+        let title = TextBlock {
+            text: "ElwindUI Docking runtime"
+            font_size: 24.0
+            foreground: "#eef2f7"
+        };
+        let instructions = TextBlock {
+            text: "Drag a tab to a group edge or the surface edge; resize dividers; close, pin, and float pages."
+            foreground: "#abb7c4"
+        };
+        let status = TextBlock {
+            text: "Ready: authored declarations are mounted as registrations and the retained runtime is visible below."
+            foreground: "#79c0ff"
+        };
+
         let documents = elwindui_docking::DockGroup {
             id: documents
             elwindui_docking::DockItem {
@@ -71,8 +85,21 @@ struct DockingDemoSurface {
         let docking = elwindui_docking::DockingControl {
             root
         };
+        let docking_host = Grid {
+            height: 520.0
+            docking
+        };
 
-        docking
+        margin: 16.0
+        spacing: 8.0
+        background: "#20252b"
+        VerticalLayout {
+            spacing: 6.0
+            title
+            instructions
+            status
+            docking_host
+        }
     },
 }
 
@@ -94,10 +121,6 @@ impl DockingDemoWindow {}
 
 #[elwindui::main]
 fn main() {
-    let model = elwindui_docking::DockLayoutModel::empty();
-    let json = serde_json::to_string(&model.snapshot()).expect("snapshot serialization");
-    let _: elwindui_docking::DockLayoutSnapshot =
-        serde_json::from_str(&json).expect("snapshot parse");
     let window = DockingDemoWindow::new();
     window.show();
 }

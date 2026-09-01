@@ -21,7 +21,16 @@ pub struct DockItem {
     can_float: bool,
     #[prop(default = true)]
     can_dock: bool,
-    template: template_view!(|_this: Self| { ContentPresenter {} }),
+    #[state(default = None)]
+    registration_callback: Option<Rc<dyn Fn()>>,
+    // DockItem is an authored registration object. Its page is presented only by the stable
+    // runtime CustomTabViewItem; keeping an empty template here prevents a second page owner.
+    template: template_view!(|this: Self| {
+        on_update(id, title, icon, can_close, can_pin, can_float, can_dock) {
+            this.notify_registration_changed();
+        }
+        Grid {}
+    }),
 }
 
 #[elwindui::component]
@@ -83,5 +92,15 @@ impl DockItem {
 
     pub(crate) fn as_content(&self) -> Option<Rc<dyn UIElementExt>> {
         self.__content_opt()
+    }
+
+    pub(crate) fn bind_registration_callback(&self, callback: Option<Rc<dyn Fn()>>) {
+        self.set_registration_callback(callback);
+    }
+
+    fn notify_registration_changed(&self) {
+        if let Some(callback) = self.registration_callback() {
+            callback();
+        }
     }
 }

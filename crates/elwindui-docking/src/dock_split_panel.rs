@@ -12,7 +12,14 @@ pub struct DockSplitPanel {
     weight: f32,
     #[prop(default = Vec::new())]
     children: Vec<Rc<dyn UIElementExt>>,
-    template: template_view!(|_this: Self| { Grid {} }),
+    #[state(default = None)]
+    registration_callback: Option<Rc<dyn Fn()>>,
+    template: template_view!(|this: Self| {
+        on_update(children, orientation, weight) {
+            this.notify_registration_changed();
+        }
+        Grid {}
+    }),
 }
 
 #[elwindui::component]
@@ -42,6 +49,16 @@ impl DockSplitPanel {
         #[cfg(rust_analyzer)]
         {
             self.children()
+        }
+    }
+
+    pub(crate) fn bind_registration_callback(&self, callback: Option<Rc<dyn Fn()>>) {
+        self.set_registration_callback(callback);
+    }
+
+    fn notify_registration_changed(&self) {
+        if let Some(callback) = self.registration_callback() {
+            callback();
         }
     }
 }

@@ -1,18 +1,22 @@
 //! Transactional tab drag and drop state.
 
-use crate::{
-    DockGroupId, DockItemId, DockLayoutError, DockLayoutModel, DockPlacement, DockSide, DockTarget,
-};
+use crate::model::InternalDockPlacement;
+use crate::snapshot::SnapshotGroupKey;
+use crate::{DockItemId, DockLayoutError, DockLayoutModel, DockSide, DockTarget};
 
 /// A drag keeps the last committed model separate from its preview model.
 pub(crate) struct DragSession {
     item: DockItemId,
     original: DockLayoutModel,
-    preview: DockLayoutModel,
+    candidate: Option<InternalDockPlacement>,
     captured: bool,
 }
 
 impl DragSession {
+    pub(crate) fn item(&self) -> &DockItemId {
+        &self.item
+    }
+
     pub(crate) fn begin(
         model: &DockLayoutModel,
         item: DockItemId,
@@ -23,21 +27,24 @@ impl DragSession {
         Ok(Self {
             item,
             original: model.clone(),
-            preview: model.clone(),
+            candidate: None,
             captured: true,
         })
     }
 
-    /// Calculates a preview only; the original model remains untouched until `commit`.
+    /// Calculates a candidate placement only; no runtime owner or model is mutated.
     pub(crate) fn preview(
         &mut self,
         target: DockTarget,
-        group: Option<DockGroupId>,
+        group: Option<SnapshotGroupKey>,
         weight: f32,
-    ) -> Result<&DockLayoutModel, DockLayoutError> {
+    ) -> Result<DockLayoutModel, DockLayoutError> {
         let placement = placement_for_target(target, group, weight)?;
-        self.preview = self.original.with_item_moved(&self.item, placement)?;
-        Ok(&self.preview)
+        let preview = self
+            .original
+            .with_item_moved_internal(&self.item, placement.clone())?;
+        self.candidate = Some(placement);
+        Ok(preview)
     }
 
     pub(crate) fn cancel(&mut self) -> DockLayoutModel {
@@ -55,15 +62,22 @@ impl DragSession {
             return None;
         }
         self.captured = false;
-        Some(self.preview.clone())
+        self.candidate
+            .take()
+            .and_then(|placement| {
+                self.original
+                    .with_item_moved_internal(&self.item, placement)
+                    .ok()
+            })
+            .or_else(|| Some(self.original.clone()))
     }
 }
 
 fn placement_for_target(
     target: DockTarget,
-    group: Option<DockGroupId>,
+    group: Option<SnapshotGroupKey>,
     weight: f32,
-) -> Result<DockPlacement, DockLayoutError> {
+) -> Result<InternalDockPlacement, DockLayoutError> {
     let side = match target {
         DockTarget::SplitLeft | DockTarget::DockLeft => DockSide::Left,
         DockTarget::SplitTop | DockTarget::DockTop => DockSide::Top,
@@ -71,7 +85,10 @@ fn placement_for_target(
         DockTarget::SplitBottom | DockTarget::DockBottom => DockSide::Bottom,
         DockTarget::Center => {
             return group
-                .map(|group| DockPlacement::Group { group, index: None })
+                .map(|group| InternalDockPlacement::Group {
+                    group: group.into(),
+                    index: None,
+                })
                 .ok_or_else(|| DockLayoutError::InvalidSnapshot {
                     reason: "center drop requires a target group".to_owned(),
                 });
@@ -82,8 +99,8 @@ fn placement_for_target(
         | DockTarget::SplitTop
         | DockTarget::SplitRight
         | DockTarget::SplitBottom => group
-            .map(|group| DockPlacement::SplitGroup {
-                group,
+            .map(|group| InternalDockPlacement::SplitGroup {
+                group: group.into(),
                 side,
                 weight,
             })
@@ -93,7 +110,7 @@ fn placement_for_target(
         DockTarget::DockLeft
         | DockTarget::DockTop
         | DockTarget::DockRight
-        | DockTarget::DockBottom => Ok(DockPlacement::RootEdge { side, weight }),
+        | DockTarget::DockBottom => Ok(InternalDockPlacement::RootEdge { side, weight }),
         DockTarget::Center => unreachable!(),
     }
 }

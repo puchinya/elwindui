@@ -17,6 +17,8 @@ pub mod core {
 // The component macro resolves builtin inheritance and generated extension traits through this
 // private facade. It is intentionally not a public re-export from `elwindui`.
 pub mod ui {
+    #[doc(hidden)]
+    pub use crate::{DockRuntimeHost, DockRuntimeHostExt};
     pub use elwindui_core::ui::*;
 }
 
@@ -33,7 +35,7 @@ mod snapshot;
 pub use dock_group::{DockGroup, DockGroupExt};
 pub use dock_item::{DockItem, DockItemExt};
 pub use dock_split_panel::{DockSplitPanel, DockSplitPanelExt};
-pub use docking_control::{DockingControl, DockingControlExt};
+pub use docking_control::{DockRuntimeHost, DockRuntimeHostExt, DockingControl, DockingControlExt};
 pub use id::{DockGroupId, DockItemId};
 pub use model::DockLayoutModel;
 

@@ -8,7 +8,9 @@ mod group_view;
 mod overlay;
 mod reconcile;
 mod split_view;
+mod support;
 mod surface_registry;
+mod surface_view;
 
 #[cfg(test)]
 pub(crate) use auto_hide::AutoHideOverlay;
@@ -19,3 +21,5 @@ pub(crate) use overlay::DropPreview;
 #[cfg(test)]
 pub(crate) use reconcile::LatestOnlyQueue;
 pub(crate) use reconcile::RuntimeRealization;
+pub(crate) use support::weak_self_from_visual_owner;
+pub(crate) use surface_view::DockSurfaceView;

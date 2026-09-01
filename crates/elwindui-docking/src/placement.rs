@@ -90,6 +90,8 @@ pub enum DockLayoutError {
     UnknownSnapshotVersion { version: u32 },
     /// The snapshot or authored runtime state violates a structural invariant.
     InvalidSnapshot { reason: String },
+    /// A platform floating host could not be created or hosted.
+    FloatingHostUnavailable { reason: String },
 }
 
 impl fmt::Display for DockLayoutError {
@@ -106,6 +108,9 @@ impl fmt::Display for DockLayoutError {
                 write!(f, "unknown dock snapshot version {version}")
             }
             Self::InvalidSnapshot { reason } => write!(f, "invalid dock snapshot: {reason}"),
+            Self::FloatingHostUnavailable { reason } => {
+                write!(f, "floating dock host unavailable: {reason}")
+            }
         }
     }
 }

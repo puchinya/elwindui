@@ -301,6 +301,8 @@ dependencies = [
 name = "elwindui-docking"
 version = "0.1.0"
 dependencies = [
+ "elwindui-backend-appkit",
+ "elwindui-backend-winui3",
  "elwindui-core",
  "elwindui-custom-controls",
  "elwindui-macros",

@@ -88,8 +88,7 @@ impl RadioButton {
             .owner_rc()
             .expect("RadioButton::on_constructed: object must already be Rc-constructed");
         self.inner.set_on_click(Box::new(move || {
-            let this = node
-                .as_any()
+            let this = elwindui_core::base::AsAny::as_any(node.as_ref())
                 .downcast_ref::<RadioButton>()
                 .expect("owner_rc of a RadioButton must downcast to RadioButton");
             this.inner.set_checked(true);
@@ -115,7 +114,9 @@ impl RadioButton {
                 let Some(member) = member.upgrade() else {
                     continue;
                 };
-                let Some(member) = member.as_any().downcast_ref::<RadioButton>() else {
+                let Some(member) = elwindui_core::base::AsAny::as_any(member.as_ref())
+                    .downcast_ref::<RadioButton>()
+                else {
                     continue;
                 };
                 if std::ptr::eq(member, self) {

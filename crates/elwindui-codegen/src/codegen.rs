@@ -3635,6 +3635,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
 
     let mut struct_fields = TokenStream::new();
     let mut ctor_fields = TokenStream::new();
+    let mut ctor_bindings = TokenStream::new();
     let mut accessors = TokenStream::new();
     let mut recompute_calls_after_new = TokenStream::new();
     // Unlike `recompute_calls_after_new` (run synchronously inside `Rc::new_cyclic`, before
@@ -3654,7 +3655,13 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 struct_fields.extend(quote! {
                     #field_ident: std::cell::RefCell<Vec<std::rc::Rc<#item_ty>>>,
                 });
-                ctor_fields.extend(quote! { #field_ident: std::cell::RefCell::new(Vec::new()), });
+                let field_ty = quote! {
+                    std::cell::RefCell<Vec<std::rc::Rc<#item_ty>>>
+                };
+                ctor_bindings.extend(quote! {
+                    let #field_ident: #field_ty = std::cell::RefCell::new(Vec::new());
+                });
+                ctor_fields.extend(quote! { #field_ident: #field_ident, });
 
                 let getter = format_ident!("{}", f.name);
                 let pusher = format_ident!("{}_push", f.name);
@@ -3718,7 +3725,10 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 } else {
                     quote! { std::cell::RefCell::new(#init_expr) }
                 };
-                ctor_fields.extend(quote! { #field_ident: #cell_ctor, });
+                ctor_bindings.extend(quote! {
+                    let #field_ident: #cell_ty = #cell_ctor;
+                });
+                ctor_fields.extend(quote! { #field_ident: #field_ident, });
 
                 let getter = format_ident!("{}", f.name);
                 let setter = format_ident!("set_{}", f.name);
@@ -3772,7 +3782,10 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 };
 
                 struct_fields.extend(quote! { #cache_ident: #cell_ty, });
-                ctor_fields.extend(quote! { #cache_ident: #default_ctor, });
+                ctor_bindings.extend(quote! {
+                    let #cache_ident: #cell_ty = #default_ctor;
+                });
+                ctor_fields.extend(quote! { #cache_ident: #cache_ident, });
 
                 let recompute = format_ident!("recompute_{}", f.name);
                 accessors.extend(quote! {
@@ -3812,9 +3825,18 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     #cache_ident: std::cell::RefCell<elwindui::core::reactive::AsyncComputed<#ty>>,
                     #generation_ident: std::cell::Cell<u64>,
                 });
+                let cache_ty = quote! {
+                    std::cell::RefCell<elwindui::core::reactive::AsyncComputed<#ty>>
+                };
+                ctor_bindings.extend(quote! {
+                    let #cache_ident: #cache_ty = std::cell::RefCell::new(
+                        elwindui::core::reactive::AsyncComputed::Loading,
+                    );
+                    let #generation_ident: std::cell::Cell<u64> = std::cell::Cell::new(0);
+                });
                 ctor_fields.extend(quote! {
-                    #cache_ident: std::cell::RefCell::new(elwindui::core::reactive::AsyncComputed::Loading),
-                    #generation_ident: std::cell::Cell::new(0),
+                    #cache_ident: #cache_ident,
+                    #generation_ident: #generation_ident,
                 });
 
                 let spawn_recompute = format_ident!("__spawn_recompute_{}", f.name);
@@ -3943,7 +3965,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 // rust-analyzer versions can leave the `Rc`/`Weak` and `retain` closure element
                 // types unknown when this code arrives through an attribute macro expansion.
                 let instance: std::rc::Rc<Self> =
-                    std::rc::Rc::new_cyclic(|__self_weak: &std::rc::Weak<Self>| {
+                    std::rc::Rc::<Self>::new_cyclic(|__self_weak: &std::rc::Weak<Self>| {
                     let __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(
                         std::rc::Rc<std::cell::Cell<bool>>,
                         std::rc::Rc<dyn Fn(#property_enum)>,
@@ -3953,6 +3975,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                             std::rc::Rc<dyn Fn(#property_enum)>,
                         )>::new(),
                     ));
+                    #ctor_bindings
                     let instance = Self {
                         #ctor_fields
                         __property_changed_handlers,
@@ -3987,7 +4010,10 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     if let Some(handlers) = handlers.upgrade() {
                         handlers
                             .borrow_mut()
-                            .retain(|(registered, _)| !std::rc::Rc::ptr_eq(registered, &active));
+                            .retain(|entry: &(
+                                std::rc::Rc<std::cell::Cell<bool>>,
+                                std::rc::Rc<dyn Fn(#property_enum)>,
+                            )| !std::rc::Rc::ptr_eq(&entry.0, &active));
                     }
                 })
             }
@@ -4024,7 +4050,10 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 &self,
                 f: impl Fn(&'static str) + 'static,
             ) -> elwindui::core::reactive::Subscription {
-                self.subscribe_property_changed(move |property| f(property.name()))
+                #struct_name::subscribe_property_changed(
+                    self,
+                    move |property: #property_enum| f(property.name()),
+                )
             }
         }
     }
@@ -4893,9 +4922,13 @@ fn generate_component(
         impl #struct_name {
             pub fn new(#ctor_params) -> Self {
                 #default_let_stmts
+                let __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(
+                    std::rc::Rc<std::cell::Cell<bool>>,
+                    std::rc::Rc<dyn Fn(#component_property_enum)>,
+                )>>> = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
                 Self {
                     #ctor_field_inits
-                    __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                    __property_changed_handlers,
                 }
             }
 
@@ -4903,18 +4936,25 @@ fn generate_component(
                 &self,
                 f: impl Fn(#component_property_enum) + 'static,
             ) -> elwindui::core::reactive::Subscription {
-                let active = std::rc::Rc::new(std::cell::Cell::new(true));
+                let active: std::rc::Rc<std::cell::Cell<bool>> =
+                    std::rc::Rc::new(std::cell::Cell::new(true));
                 let handler: std::rc::Rc<dyn Fn(#component_property_enum)> = std::rc::Rc::new(f);
                 self.__property_changed_handlers
                     .borrow_mut()
                     .push((active.clone(), handler));
-                let handlers = std::rc::Rc::downgrade(&self.__property_changed_handlers);
+                let handlers: std::rc::Weak<std::cell::RefCell<Vec<(
+                    std::rc::Rc<std::cell::Cell<bool>>,
+                    std::rc::Rc<dyn Fn(#component_property_enum)>,
+                )>>> = std::rc::Rc::downgrade(&self.__property_changed_handlers);
                 elwindui::core::reactive::Subscription::new(move || {
                     active.set(false);
                     if let Some(handlers) = handlers.upgrade() {
                         handlers
                             .borrow_mut()
-                            .retain(|(registered, _)| !std::rc::Rc::ptr_eq(registered, &active));
+                            .retain(|entry: &(
+                                std::rc::Rc<std::cell::Cell<bool>>,
+                                std::rc::Rc<dyn Fn(#component_property_enum)>,
+                            )| !std::rc::Rc::ptr_eq(&entry.0, &active));
                     }
                 })
             }
@@ -6336,18 +6376,25 @@ fn generate_view(
             &self,
             f: impl Fn(#component_property_enum) + 'static,
         ) -> elwindui::core::reactive::Subscription {
-            let active = std::rc::Rc::new(std::cell::Cell::new(true));
+            let active: std::rc::Rc<std::cell::Cell<bool>> =
+                std::rc::Rc::new(std::cell::Cell::new(true));
             let handler: std::rc::Rc<dyn Fn(#component_property_enum)> = std::rc::Rc::new(f);
             self.__property_changed_handlers
                 .borrow_mut()
                 .push((active.clone(), handler));
-            let handlers = std::rc::Rc::downgrade(&self.__property_changed_handlers);
+            let handlers: std::rc::Weak<std::cell::RefCell<Vec<(
+                std::rc::Rc<std::cell::Cell<bool>>,
+                std::rc::Rc<dyn Fn(#component_property_enum)>,
+            )>>> = std::rc::Rc::downgrade(&self.__property_changed_handlers);
             elwindui::core::reactive::Subscription::new(move || {
                 active.set(false);
                 if let Some(handlers) = handlers.upgrade() {
                     handlers
                         .borrow_mut()
-                        .retain(|(registered, _)| !std::rc::Rc::ptr_eq(registered, &active));
+                        .retain(|entry: &(
+                            std::rc::Rc<std::cell::Cell<bool>>,
+                            std::rc::Rc<dyn Fn(#component_property_enum)>,
+                        )| !std::rc::Rc::ptr_eq(&entry.0, &active));
                 }
             })
         }
@@ -8471,7 +8518,11 @@ fn generate_view(
                 fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
                     let __self_weak_erased: std::rc::Weak<dyn std::any::Any> = __self_weak.clone();
                     #construct_stmts
-                    Self { #(#plain_required_names,)* #cell_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created), __closed: std::cell::Cell::new(false) }
+                    let __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(
+                        std::rc::Rc<std::cell::Cell<bool>>,
+                        std::rc::Rc<dyn Fn(#component_property_enum)>,
+                    )>>> = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                    Self { #(#plain_required_names,)* #cell_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers, __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created), __closed: std::cell::Cell::new(false) }
                 }
 
                 // Runs automatically, exactly once, right after `#[class]`'s auto-generated `new()`

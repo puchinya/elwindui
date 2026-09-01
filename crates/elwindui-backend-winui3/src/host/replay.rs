@@ -221,7 +221,7 @@ pub(crate) fn reconcile_native_children(
                                 if let Some(target) = target {
                                     elwindui_core::focus::native_focus_gained(
                                         &target,
-                                        &keyboard.focus,
+                                        &keyboard.as_ref().focus,
                                         FocusState::Pointer,
                                     );
                                 }
@@ -236,7 +236,10 @@ pub(crate) fn reconcile_native_children(
                         let keyboard_for_lost = Rc::downgrade(keyboard);
                         let lost_focus_id = callback_owner.register_event(Rc::new(move || {
                             if let Some(keyboard) = keyboard_for_lost.upgrade() {
-                                elwindui_core::focus::native_focus_lost(&keyboard.focus, owner_id);
+                                elwindui_core::focus::native_focus_lost(
+                                    &keyboard.as_ref().focus,
+                                    owner_id,
+                                );
                             }
                         }));
                         let lost_focus_token = element

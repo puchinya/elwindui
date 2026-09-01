@@ -200,7 +200,10 @@ pub(crate) struct WinUI3FocusHost {
 impl FocusHost for WinUI3FocusHost {
     fn request_focus(&self, target: &Rc<dyn elwindui_core::ui::UIElementExt>) -> bool {
         match self.keyboard.upgrade() {
-            Some(keyboard) => keyboard.focus.set_focus(target, FocusState::Programmatic),
+            Some(keyboard) => keyboard
+                .as_ref()
+                .focus
+                .set_focus(target, FocusState::Programmatic),
             None => false,
         }
     }
@@ -277,7 +280,7 @@ impl TreeHostPanel {
                 let kb_ref = keyboard_for_key.upgrade();
                 let active_ref = active_for_key.upgrade();
                 if let (Some(tree), Some(kb), Some(active)) = (tree_ref, kb_ref, active_ref) {
-                    let screen_anchor = if let Some(focused) = kb.focus.focused() {
+                    let screen_anchor = if let Some(focused) = kb.as_ref().focus.focused() {
                         let offset = focused
                             .arranged_offset()
                             .unwrap_or(Point { x: 0.0, y: 0.0 });
@@ -697,7 +700,7 @@ impl TreeHostPanel {
                         )
                     } else {
                         let screen_anchor = if let Some(keyboard) = keyboard_for_ctx.upgrade() {
-                            if let Some(focused) = keyboard.focus.focused() {
+                            if let Some(focused) = keyboard.as_ref().focus.focused() {
                                 let offset = focused
                                     .arranged_offset()
                                     .unwrap_or(Point { x: 0.0, y: 0.0 });
@@ -826,7 +829,7 @@ impl TreeHostPanel {
         };
         pointer.handle(
             &tree,
-            &keyboard.focus,
+            &keyboard.as_ref().focus,
             RawPointerEvent {
                 kind,
                 position: local,
@@ -915,7 +918,7 @@ impl TreeHostPanel {
         if self.pointer.cancel() {
             let _ = self.canvas.ReleasePointerCaptures();
         }
-        self.keyboard.focus.clear_focus();
+        self.keyboard.as_ref().focus.clear_focus();
         let _ = self
             .composition
             .borrow_mut()
@@ -977,7 +980,7 @@ impl TreeHostPanel {
             .set_focus_host(Some(Rc::new(WinUI3FocusHost {
                 keyboard: Rc::downgrade(&self.keyboard),
             })));
-        self.keyboard.focus.clear_focus();
+        self.keyboard.as_ref().focus.clear_focus();
         self.keyboard.shortcuts().clear();
         self.keyboard.shortcuts().collect_from_tree(&tree);
         *self.tree.borrow_mut() = Some(tree);
@@ -991,7 +994,7 @@ impl TreeHostPanel {
         if let Some(old) = self.active_popup.borrow_mut().take() {
             old.close();
         }
-        self.keyboard.focus.clear_focus();
+        self.keyboard.as_ref().focus.clear_focus();
         self.keyboard.shortcuts().clear();
         let _ = self
             .composition

@@ -3,10 +3,11 @@
 #[cfg(test)]
 use crate::DockTarget;
 use crate::core::base::{Rect, Size};
-use crate::core::graphics::Brush;
 use crate::core::layout::Visibility;
+use crate::core::theme::BrushStyle;
 use crate::core::ui::{ControlExt, Rectangle, ShapeExt, UIElementExt};
 use crate::runtime::drag::ResolvedDockTarget;
+use crate::runtime::themed_brush;
 use std::rc::Rc;
 
 /// A retained, non-participating layout layer whose child is arranged in the surface's local
@@ -80,7 +81,7 @@ impl DropPreview {
             root.as_any()
                 .downcast_ref::<Rectangle>()
                 .expect("drop preview template root is a Rectangle")
-                .set_fill(Some(Brush::from("#3388ff")));
+                .set_fill(themed_brush(BrushStyle::Selection));
         }
         Self {
             target: None,

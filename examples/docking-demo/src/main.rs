@@ -2,102 +2,169 @@
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
+use elwindui::core::environment::application_environment;
+use elwindui::core::graphics::{Brush, Color};
+use elwindui::core::theme::{BrushStyle, Theme};
 use elwindui::core::ui::WindowExt;
+
+#[elwindui::theme]
+struct VisualStudioTheme {
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(0, 120, 215))))]
+    primary: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(243, 243, 243))))]
+    secondary: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(250, 250, 250))))]
+    tertiary: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(31, 31, 31))))]
+    foreground: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::WHITE)))]
+    background: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(247, 247, 247))))]
+    window_background: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(0, 120, 215))))]
+    tint: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgba(0, 120, 215, 54))))]
+    selection: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(214, 214, 214))))]
+    separator: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(107, 107, 107))))]
+    placeholder: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(0, 120, 215))))]
+    link: BrushStyle,
+}
 #[elwindui::component(inherits VerticalLayout)]
 struct DockingDemoSurface {
     #[computed(expr = elwindui_docking::DockItemId::from("document-a"))]
     document_a: elwindui_docking::DockItemId,
     #[computed(expr = elwindui_docking::DockItemId::from("document-b"))]
     document_b: elwindui_docking::DockItemId,
-    #[computed(expr = elwindui_docking::DockItemId::from("outline"))]
-    outline: elwindui_docking::DockItemId,
+    #[computed(expr = elwindui_docking::DockItemId::from("solution-explorer"))]
+    solution_explorer: elwindui_docking::DockItemId,
+    #[computed(expr = elwindui_docking::DockItemId::from("git-changes"))]
+    git_changes: elwindui_docking::DockItemId,
+    #[computed(expr = elwindui_docking::DockItemId::from("error-list"))]
+    error_list: elwindui_docking::DockItemId,
+    #[computed(expr = elwindui_docking::DockItemId::from("output"))]
+    output: elwindui_docking::DockItemId,
     #[computed(expr = elwindui_docking::DockItemId::from("terminal"))]
     terminal: elwindui_docking::DockItemId,
     #[computed(expr = elwindui_docking::DockGroupId::from("documents"))]
     documents: elwindui_docking::DockGroupId,
-    #[computed(expr = elwindui_docking::DockGroupId::from("outline-tools"))]
-    outline_tools: elwindui_docking::DockGroupId,
-    #[computed(expr = elwindui_docking::DockGroupId::from("terminal-tools"))]
-    terminal_tools: elwindui_docking::DockGroupId,
+    #[computed(expr = elwindui_docking::DockGroupId::from("solution-tools"))]
+    solution_tools: elwindui_docking::DockGroupId,
+    #[computed(expr = elwindui_docking::DockGroupId::from("error-tools"))]
+    error_tools: elwindui_docking::DockGroupId,
+    #[computed(expr = elwindui_docking::DockGroupId::from("output-tools"))]
+    output_tools: elwindui_docking::DockGroupId,
     #[computed(expr = elwindui::core::layout::Orientation::Horizontal)]
     horizontal: elwindui::core::layout::Orientation,
     #[computed(expr = elwindui::core::layout::Orientation::Vertical)]
     vertical: elwindui::core::layout::Orientation,
     body: view! {
-        let title = TextBlock {
-            text: "ElwindUI Docking runtime"
-            font_size: 24.0
-            foreground: "#eef2f7"
-        };
-        let instructions = TextBlock {
-            text: "Drag tabs to group/surface edges, move one outside for a floating window, then re-dock; resize, close, and pin pages."
-            foreground: "#abb7c4"
-        };
-        let status = TextBlock {
-            text: "Ready: the collapsed authored tree feeds a retained runtime surface with live tab, splitter, auto-hide, and floating interactions."
-            foreground: "#79c0ff"
-        };
-
         let documents = elwindui_docking::DockGroup {
             id: documents
+            weight: 2.1
             elwindui_docking::DockItem {
                 id: document_a
                 title: "Document A"
-                TextBlock { text: "Document A" }
+                can_pin: false
+                TextBlock { text: "Document A editor" foreground: BrushStyle::Foreground }
             }
             elwindui_docking::DockItem {
                 id: document_b
                 title: "Document B"
-                TextBlock { text: "Document B" }
+                can_pin: false
+                TextBlock { text: "Document B editor" foreground: BrushStyle::Foreground }
             }
         };
 
-        let outline = elwindui_docking::DockGroup {
-            id: outline_tools
+        let solution = elwindui_docking::DockGroup {
+            id: solution_tools
+            tab_strip_position: elwindui_docking::TabStripPosition::Bottom
+            weight: 1.0
             elwindui_docking::DockItem {
-                id: outline
-                title: "Outline"
-                TextBlock { text: "Outline tool window" }
+                id: solution_explorer
+                title: "Solution Explorer"
+                TextBlock { text: "Solution Explorer" foreground: BrushStyle::Foreground }
+            }
+            elwindui_docking::DockItem {
+                id: git_changes
+                title: "Git Changes"
+                TextBlock { text: "Git Changes" foreground: BrushStyle::Foreground }
             }
         };
 
-        let terminal = elwindui_docking::DockGroup {
-            id: terminal_tools
+        let error = elwindui_docking::DockGroup {
+            id: error_tools
+            tab_strip_position: elwindui_docking::TabStripPosition::Bottom
+            weight: 1.0
+            elwindui_docking::DockItem {
+                id: error_list
+                title: "Error List"
+                TextBlock { text: "No errors" foreground: BrushStyle::Placeholder }
+            }
+        };
+
+        let output = elwindui_docking::DockGroup {
+            id: output_tools
+            tab_strip_position: elwindui_docking::TabStripPosition::Bottom
+            weight: 1.0
+            elwindui_docking::DockItem {
+                id: output
+                title: "Output"
+                TextBlock { text: "Build output" foreground: BrushStyle::Foreground }
+            }
             elwindui_docking::DockItem {
                 id: terminal
                 title: "Terminal"
-                TextBlock { text: "Terminal tool window" }
+                TextBlock { text: "Terminal" foreground: BrushStyle::Foreground }
             }
         };
 
-        let tools = elwindui_docking::DockSplitPanel {
-            orientation: vertical
-            outline
-            terminal
+        let top = elwindui_docking::DockSplitPanel {
+            orientation: horizontal
+            weight: 2.1
+            documents
+            solution
+        };
+
+        let bottom = elwindui_docking::DockSplitPanel {
+            orientation: horizontal
+            weight: 1.0
+            error
+            output
         };
 
         let root = elwindui_docking::DockSplitPanel {
-            orientation: horizontal
-            documents
-            tools
+            orientation: vertical
+            top
+            bottom
         };
 
         let docking = elwindui_docking::DockingControl {
             root
         };
+        let menu = HorizontalLayout {
+            height: 32.0
+            spacing: 18.0
+            background: BrushStyle::Secondary
+            TextBlock { text: "File" foreground: BrushStyle::Foreground }
+            TextBlock { text: "Edit" foreground: BrushStyle::Foreground }
+            TextBlock { text: "View" foreground: BrushStyle::Foreground }
+            TextBlock { text: "Help" foreground: BrushStyle::Foreground }
+        };
         let docking_host = Grid {
-            height: 520.0
+            height: 574.0
+            rows: [elwindui::core::layout::GridLength::Star(1.0)]
+            columns: [elwindui::core::layout::GridLength::Star(1.0)]
             docking
         };
 
-        margin: 16.0
-        spacing: 8.0
-        background: "#20252b"
+        spacing: 0.0
+        background: BrushStyle::WindowBackground
         VerticalLayout {
-            spacing: 6.0
-            title
-            instructions
-            status
+            spacing: 0.0
+            menu
             docking_host
         }
     },
@@ -121,6 +188,7 @@ impl DockingDemoWindow {}
 
 #[elwindui::main]
 fn main() {
+    VisualStudioTheme.apply(&application_environment());
     let window = DockingDemoWindow::new();
     window.show();
 }

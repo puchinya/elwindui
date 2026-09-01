@@ -1,3 +1,6 @@
+use crate::core::environment::application_environment;
+use crate::core::graphics::Brush;
+use crate::core::theme::{BrushStyle, ResolvedValue};
 use crate::core::ui::UIElementExt;
 use std::rc::{Rc, Weak};
 
@@ -16,4 +19,14 @@ pub(crate) fn weak_self_from_visual_owner<T: UIElementExt + 'static>(value: &T) 
     let weak = Rc::downgrade(&owner);
     drop(owner);
     weak
+}
+
+/// Resolves a runtime-owned brush through the application's current Theme. Runtime chrome is
+/// created programmatically, so it uses the same semantic roles as declarative surfaces instead
+/// of embedding a second palette in the docking crate.
+pub(crate) fn themed_brush(style: BrushStyle) -> Option<Brush> {
+    match style.resolve(&application_environment()) {
+        ResolvedValue::Value(brush) => Some(brush),
+        ResolvedValue::PlatformDefault => None,
+    }
 }

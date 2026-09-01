@@ -4,10 +4,12 @@ use crate::DockItemId;
 use crate::DockingControl;
 use crate::core::graphics::IconSource;
 use crate::core::layout::GridLength;
+use crate::core::theme::BrushStyle;
 use crate::core::ui::{ContentControlExt, Grid, GridExt, LayoutExt, UIElementExt};
 use crate::model::RootKind;
 use crate::runtime::auto_hide::AutoHideOverlay;
 use crate::runtime::overlay::DropPreview;
+use crate::runtime::themed_brush;
 use std::rc::Rc;
 
 /// One retained surface root. Floating windows own another instance of this type; authored
@@ -28,6 +30,7 @@ impl DockSurfaceView {
         let root = surface.content_root();
         root.set_rows(vec![GridLength::Star(1.0)]);
         root.set_columns(vec![GridLength::Star(1.0)]);
+        root.set_background(themed_brush(BrushStyle::Background));
         surface.set_content(root);
         surface
     }

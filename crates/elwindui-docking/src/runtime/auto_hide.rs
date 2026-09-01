@@ -5,11 +5,13 @@ use crate::DockingControl;
 use crate::core::graphics::IconSource;
 use crate::core::input::PointerEventArgs;
 use crate::core::layout::{GridLength, Visibility};
+use crate::core::theme::BrushStyle;
 use crate::core::ui::{
-    Grid, GridExt, IconSourceElement, IconSourceElementExt, LayoutExt, Rectangle, ShapeExt,
-    TextBlock, TextBlockExt, UIElementExt,
+    Grid, GridExt, IconSourceElement, IconSourceElementExt, LayoutExt, Rectangle, RectangleExt,
+    ShapeExt, TextBlock, TextBlockExt, UIElementExt,
 };
 use crate::model::RootKind;
+use crate::runtime::themed_brush;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -68,9 +70,12 @@ impl AutoHideOverlay {
         pane.set_attached("Grid", "column", 1i32);
         visual.children().add(pane.clone());
         let pin_button = Rectangle::new();
-        pin_button.set_fill(Some(crate::core::graphics::Brush::from("#606060")));
+        pin_button.set_fill(themed_brush(BrushStyle::Secondary));
+        pin_button.set_stroke(themed_brush(BrushStyle::Separator));
         pin_button.set_width(18.0);
         pin_button.set_height(18.0);
+        pin_button.set_corner_radius(4.0);
+        pin_button.set_visibility(Visibility::Collapsed);
         pin_button.set_attached("Grid", "row", 1i32);
         pin_button.set_attached("Grid", "column", 1i32);
         visual.children().add(pin_button.clone());
@@ -94,6 +99,7 @@ impl AutoHideOverlay {
     pub(crate) fn close(&mut self) -> Option<DockItemId> {
         let previous = self.open.take();
         self.pane.set_visibility(Visibility::Collapsed);
+        self.pin_button.set_visibility(Visibility::Collapsed);
         self.pane.children().clear();
         previous
     }
@@ -151,6 +157,7 @@ impl AutoHideOverlay {
 
     pub(crate) fn show_pane(&self) {
         self.pane.set_visibility(Visibility::Visible);
+        self.pin_button.set_visibility(Visibility::Visible);
     }
 
     pub(crate) fn present_open_item(

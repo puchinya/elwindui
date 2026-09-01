@@ -96,6 +96,7 @@ pub struct CustomTabViewItem {
                 }
                 TextBlock {
                     text: header
+                    foreground: elwindui::core::theme::BrushStyle::Foreground
                     text_alignment: elwindui::core::ui::TextAlignment::Center
                 }
                 close_button
@@ -103,7 +104,7 @@ pub struct CustomTabViewItem {
             Rectangle {
                 Grid::row: indicator_row
                 Grid::column: 1
-                fill: "#0078d4"
+                fill: elwindui::core::theme::BrushStyle::Primary
                 visibility: indicator_visibility
             }
         }

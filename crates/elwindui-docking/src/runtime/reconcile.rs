@@ -2,8 +2,11 @@
 
 use crate::core::base::{Point, Rect};
 use crate::core::input::PointerEventArgs;
-use crate::core::layout::GridLength;
-use crate::core::ui::{Grid, GridExt, LayoutExt, Rectangle, ShapeExt, UIElementExt};
+use crate::core::layout::{GridLength, Visibility};
+use crate::core::theme::BrushStyle;
+use crate::core::ui::{
+    Grid, GridExt, LayoutExt, TextBlock, TextBlockExt, TextStyleOwner, UIElementExt,
+};
 use crate::model::{RootKind, SplitAddress};
 use crate::snapshot::{SnapshotAutoHideEntry, SnapshotGroupKey, SnapshotNode};
 use crate::{
@@ -27,6 +30,7 @@ use super::group_view::replace_group_items;
 use super::split_view::SplitterSession;
 use super::surface_registry::SurfaceRegistry;
 use super::surface_view::{DockSurfaceView, SurfaceRuntime};
+use super::themed_brush;
 
 /// Stable registration-to-presentation map for one authored docking surface.
 ///
@@ -178,7 +182,10 @@ impl RuntimeNode {
 
 struct GroupRuntimeHost {
     container: Rc<Grid>,
-    pin_button: Rc<Rectangle>,
+    title_bar: Rc<Grid>,
+    title: Rc<TextBlock>,
+    pin_button: Rc<Grid>,
+    close_button: Rc<Grid>,
 }
 
 pub struct RuntimeRealization {
@@ -869,6 +876,14 @@ impl RuntimeRealization {
         self.group_selected.get(group).and_then(Clone::clone)
     }
 
+    pub(crate) fn selected_group_index(&self, group: &SnapshotGroupKey) -> Option<usize> {
+        let selected = self.selected_group_item(group)?;
+        self.group_items
+            .get(group)?
+            .iter()
+            .position(|item| item == &selected)
+    }
+
     pub(crate) fn open_auto_hide_item_on(&self, root: &RootKind) -> Option<DockItemId> {
         self.surface_runtime(root)
             .and_then(|surface| surface.auto_hide.current().cloned())
@@ -958,16 +973,43 @@ impl RuntimeRealization {
                         view.select_index(index);
                     }
                 }
+                let tab_position = match &group {
+                    SnapshotGroupKey::Authored(id) => self.registry.group_position(id),
+                    SnapshotGroupKey::Generated(_) => TabStripPosition::Top,
+                };
                 let host = self.group_hosts.entry(group.clone()).or_insert_with(|| {
                     let container = Grid::new();
-                    container.set_rows(vec![GridLength::Star(1.0)]);
+                    container.set_rows(vec![GridLength::Auto, GridLength::Star(1.0)]);
                     container.set_columns(vec![GridLength::Star(1.0)]);
-                    let pin_button = Rectangle::new();
-                    pin_button.set_fill(Some(crate::core::graphics::Brush::from("#606060")));
-                    pin_button.set_width(18.0);
-                    pin_button.set_height(18.0);
+
+                    let title_bar = Grid::new();
+                    title_bar.set_rows(vec![GridLength::Star(1.0)]);
+                    title_bar.set_columns(vec![
+                        GridLength::Star(1.0),
+                        GridLength::Fixed(28.0),
+                        GridLength::Fixed(28.0),
+                    ]);
+                    title_bar.set_height(30.0);
+                    title_bar.set_background(themed_brush(BrushStyle::Secondary));
+
+                    let title = TextBlock::new();
+                    title.set_foreground(themed_brush(BrushStyle::Foreground));
+                    title.set_margin(8.0);
+                    title.set_attached("Grid", "row", 0i32);
+                    title.set_attached("Grid", "column", 0i32);
+                    title_bar.children().add(title.clone());
+
+                    let pin_button = Grid::new();
+                    pin_button.set_background(themed_brush(BrushStyle::Tertiary));
+                    pin_button.set_width(22.0);
+                    pin_button.set_height(22.0);
                     pin_button.set_attached("Grid", "row", 0i32);
-                    pin_button.set_attached("Grid", "column", 0i32);
+                    pin_button.set_attached("Grid", "column", 1i32);
+                    let pin_glyph = TextBlock::new();
+                    pin_glyph.set_text("⌖");
+                    pin_glyph.set_foreground(themed_brush(BrushStyle::Foreground));
+                    pin_glyph.set_text_alignment(crate::core::ui::TextAlignment::Center);
+                    pin_button.children().add(pin_glyph);
                     let weak_owner = self.owner.clone();
                     let pin_group = group.clone();
                     pin_button.register_routed_handler::<PointerEventArgs>(
@@ -978,14 +1020,75 @@ impl RuntimeRealization {
                             }
                         }),
                     );
+                    title_bar.children().add(pin_button.clone());
+
+                    let close_button = Grid::new();
+                    close_button.set_background(themed_brush(BrushStyle::Tertiary));
+                    close_button.set_width(22.0);
+                    close_button.set_height(22.0);
+                    close_button.set_attached("Grid", "row", 0i32);
+                    close_button.set_attached("Grid", "column", 2i32);
+                    let close_glyph = TextBlock::new();
+                    close_glyph.set_text("×");
+                    close_glyph.set_foreground(themed_brush(BrushStyle::Foreground));
+                    close_glyph.set_text_alignment(crate::core::ui::TextAlignment::Center);
+                    close_button.children().add(close_glyph);
+                    let weak_owner = self.owner.clone();
+                    let close_group = group.clone();
+                    close_button.register_routed_handler::<PointerEventArgs>(
+                        "on_pointer_released",
+                        Box::new(move |_, _| {
+                            if let Some(owner) = weak_owner.upgrade() {
+                                owner.handle_group_title_close(close_group.clone());
+                            }
+                        }),
+                    );
+                    title_bar.children().add(close_button.clone());
+                    title_bar.set_visibility(Visibility::Collapsed);
+                    title_bar.set_attached("Grid", "row", 0i32);
+                    title_bar.set_attached("Grid", "column", 0i32);
+                    container.children().add(title_bar.clone());
+
                     GroupRuntimeHost {
                         container,
+                        title_bar,
+                        title,
                         pin_button,
+                        close_button,
                     }
                 });
                 host.container.children().clear();
+                host.container.children().add(host.title_bar.clone());
+                let selected_item = selected
+                    .as_ref()
+                    .and_then(|selected| self.registry.items.get(selected));
+                host.title.set_text(
+                    &selected_item
+                        .map(|item| item.title_value())
+                        .unwrap_or_default(),
+                );
+                let has_pin = selected_item.is_some_and(|item| item.can_pin_value());
+                let show_title_bar = tab_position == TabStripPosition::Bottom || has_pin;
+                host.title_bar.set_visibility(if show_title_bar {
+                    Visibility::Visible
+                } else {
+                    Visibility::Collapsed
+                });
+                host.pin_button.set_visibility(if has_pin {
+                    Visibility::Visible
+                } else {
+                    Visibility::Collapsed
+                });
+                host.close_button.set_visibility(
+                    if selected_item.is_some_and(|item| item.can_close_value()) {
+                        Visibility::Visible
+                    } else {
+                        Visibility::Collapsed
+                    },
+                );
+                view.set_attached("Grid", "row", 1i32);
+                view.set_attached("Grid", "column", 0i32);
                 host.container.children().add(view.clone());
-                host.container.children().add(host.pin_button.clone());
                 Ok(RuntimeNode::Group {
                     host: host.container.clone(),
                 })

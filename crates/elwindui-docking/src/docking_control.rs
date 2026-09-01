@@ -59,6 +59,8 @@ pub struct DockingControl {
             this.handle_layout_update(layout);
         }
         Grid {
+            rows: [crate::core::layout::GridLength::Star(1.0)]
+            columns: [crate::core::layout::GridLength::Star(1.0)]
             ContentPresenter {
                 visibility: crate::core::layout::Visibility::Collapsed
             }
@@ -336,6 +338,16 @@ impl DockingControl {
         {
             let _ = self.commit_user_model(next);
         }
+    }
+
+    pub(crate) fn handle_group_title_close(&self, group: SnapshotGroupKey) {
+        let Some(index) = self
+            .runtime_realization()
+            .and_then(|realization| realization.borrow().selected_group_index(&group))
+        else {
+            return;
+        };
+        self.handle_group_close(group, index);
     }
 
     pub(crate) fn handle_auto_hide_open(&self, root: RootKind, item: DockItemId) {

@@ -306,6 +306,11 @@ impl RuntimeRealization {
         let snapshot = model.snapshot();
         self.detach_existing_tree();
         self.auto_hide.close();
+        let previous_floating_surfaces = self
+            .floating
+            .iter()
+            .map(|(_, _, surface)| surface.clone())
+            .collect::<Vec<_>>();
         let desired_owners = desired_owners(&snapshot);
         self.detach_before_attach(&desired_owners);
         self.owners = desired_owners;
@@ -348,7 +353,10 @@ impl RuntimeRealization {
                 RootKind::Floating(floating_index),
                 &[],
             )?;
-            let floating_surface = DockSurfaceView::empty_surface();
+            let floating_surface = previous_floating_surfaces
+                .get(floating_index)
+                .cloned()
+                .unwrap_or_else(DockSurfaceView::empty_surface);
             let floating_surface_root = floating_surface.content_root();
             floating_surface_root.children().add(node.element());
             let floating_auto_hide = AutoHideOverlay::new();
@@ -361,7 +369,9 @@ impl RuntimeRealization {
                 .children()
                 .add(floating_preview.visual());
             let floating_surface_node: Rc<dyn UIElementExt> = floating_surface.clone();
-            self.surfaces.register(&floating_surface_node);
+            if previous_floating_surfaces.get(floating_index).is_none() {
+                self.surfaces.register(&floating_surface_node);
+            }
             floating_roots.push((bounds, node, floating_surface));
         }
         groups.retain(|key, _| used_groups.contains_key(key));

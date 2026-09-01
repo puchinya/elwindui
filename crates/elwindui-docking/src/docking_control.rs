@@ -127,7 +127,14 @@ impl DockingControl {
 
     fn apply_model(&self, model: DockLayoutModel) -> Result<(), DockLayoutError> {
         if let Some(realization) = self.runtime_realization() {
-            realization.borrow_mut().reconcile(&model)?;
+            let previous = self.last_applied_model();
+            if let Err(error) = realization.borrow_mut().reconcile(&model) {
+                // Native floating-host creation happens at the end of reconciliation. If it
+                // fails, restore the committed projection before returning the typed error so
+                // the source model and its retained ownership remain unchanged.
+                let _ = realization.borrow_mut().reconcile(&previous);
+                return Err(error);
+            }
         }
         self.set_last_applied_model(model.clone());
         self.set_layout(model);

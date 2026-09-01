@@ -507,7 +507,7 @@ impl DockLayoutModel {
         cumulative_delta: f32,
         arranged_extent: f32,
     ) -> Option<Self> {
-        if !arranged_extent.is_finite() || arranged_extent <= 0.0 {
+        if !arranged_extent.is_finite() || arranged_extent <= 0.0 || !cumulative_delta.is_finite() {
             return None;
         }
         let mut next = self.clone();

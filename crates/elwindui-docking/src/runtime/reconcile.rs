@@ -8,7 +8,7 @@ use crate::core::ui::{
     Grid, GridExt, LayoutExt, TextBlock, TextBlockExt, TextStyleOwner, UIElementExt,
 };
 use crate::model::{RootKind, SplitAddress};
-use crate::snapshot::{SnapshotAutoHideEntry, SnapshotGroupKey, SnapshotNode};
+use crate::snapshot::{SnapshotAutoHideEntry, SnapshotGroupKey, SnapshotNode, SnapshotOrientation};
 use crate::{
     DockGroup, DockGroupId, DockItem, DockItemId, DockLayoutError, DockLayoutModel, DockSplitPanel,
 };
@@ -25,7 +25,7 @@ use std::rc::Weak;
 use super::drag::{DragSession, DragSourceGeometry, ResolvedDockTarget};
 #[cfg(test)]
 use super::floating_window::FloatingHostFactory;
-use super::floating_window::{FloatingHostId, FloatingHostRegistry};
+use super::floating_window::{FloatingHostId, FloatingHostRegistry, PreparedFloatingHostSync};
 use super::group_view::replace_group_items;
 use super::split_view::SplitterSession;
 use super::surface_registry::SurfaceRegistry;
@@ -165,7 +165,6 @@ pub(crate) enum RuntimePresentationOwner {
 }
 
 struct FloatingRuntime {
-    bounds: crate::Rect,
     node: RuntimeNode,
     identity: Vec<SnapshotGroupKey>,
     surface: SurfaceRuntime,
@@ -180,12 +179,59 @@ impl RuntimeNode {
     }
 }
 
+#[derive(Clone)]
 struct GroupRuntimeHost {
     container: Rc<Grid>,
     title_bar: Rc<Grid>,
     title: Rc<TextBlock>,
     pin_button: Rc<Grid>,
     close_button: Rc<Grid>,
+}
+
+struct PlannedGroup {
+    view: Rc<CustomTabView>,
+    host: GroupRuntimeHost,
+    tabs: Vec<Rc<CustomTabViewItem>>,
+    items: Vec<DockItemId>,
+    selected: Option<DockItemId>,
+    tab_position: TabStripPosition,
+    title: String,
+    title_visibility: Visibility,
+    pin_visibility: Visibility,
+    close_visibility: Visibility,
+}
+
+struct PlannedSplit {
+    grid: Rc<Grid>,
+    splitters: Vec<Rc<CustomSplitter>>,
+    orientation: SnapshotOrientation,
+    weights: Vec<f32>,
+}
+
+struct PlannedFloatingRuntime {
+    bounds: crate::Rect,
+    node: RuntimeNode,
+    identity: Vec<SnapshotGroupKey>,
+    surface: Rc<DockSurfaceView>,
+}
+
+/// A complete candidate realization. Planning only derives facts and constructs unattached
+/// candidate controls; `commit_reconcile` is the sole place that changes visual ownership.
+struct ReconcilePlan {
+    snapshot: crate::snapshot::DockLayoutSnapshot,
+    desired_owners: BTreeMap<DockItemId, RuntimePresentationOwner>,
+    planned_groups: BTreeMap<SnapshotGroupKey, PlannedGroup>,
+    planned_splits: BTreeMap<SplitAddress, PlannedSplit>,
+    group_items: BTreeMap<SnapshotGroupKey, Vec<DockItemId>>,
+    group_roots: BTreeMap<SnapshotGroupKey, RootKind>,
+    group_selected: BTreeMap<SnapshotGroupKey, Option<DockItemId>>,
+    auto_hide_roots: BTreeMap<DockItemId, RootKind>,
+    root: Option<RuntimeNode>,
+    floating: Vec<PlannedFloatingRuntime>,
+    surfaces: SurfaceRegistry,
+    main_surface_child: Option<Rc<dyn UIElementExt>>,
+    open_auto_hide: Vec<(RootKind, DockItemId)>,
+    host_sync: PreparedFloatingHostSync,
 }
 
 pub struct RuntimeRealization {
@@ -210,7 +256,9 @@ pub struct RuntimeRealization {
     owner: Weak<crate::DockingControl>,
     reconciling: Rc<Cell<bool>>,
     #[cfg(test)]
-    fail_next_reconcile: bool,
+    fail_after_reconcile_plan: bool,
+    #[cfg(test)]
+    full_reconcile_count: usize,
 }
 
 /// Source updates use a latest-only queue while a realization is being applied.
@@ -289,7 +337,9 @@ impl RuntimeRealization {
             owner,
             reconciling: Rc::new(Cell::new(false)),
             #[cfg(test)]
-            fail_next_reconcile: false,
+            fail_after_reconcile_plan: false,
+            #[cfg(test)]
+            full_reconcile_count: 0,
         })
     }
 
@@ -297,13 +347,14 @@ impl RuntimeRealization {
         &mut self,
         root: &dyn UIElementExt,
     ) -> Result<(), DockLayoutError> {
-        self.detach_existing_tree();
         self.registry.refresh_authored(root)?;
         // An authored registration change can invalidate the item or splitter captured by a
         // native gesture. Cancel both transient sessions before the next model reconciliation;
         // this is safer than allowing a stale wrapper to commit into the new registry.
         self.drag = None;
-        self.splitter = None;
+        if let Some(mut splitter) = self.splitter.take() {
+            splitter.cancel();
+        }
         self.clear_previews();
         Ok(())
     }
@@ -316,70 +367,62 @@ impl RuntimeRealization {
         self.clear_previews();
     }
 
-    /// Applies a model transaction to the realization. All tab list changes happen after the
-    /// complete model has been accepted, so a failed snapshot cannot partially mutate the UI.
+    /// Applies a model through the private prepare/commit boundary. Preparation owns every
+    /// fallible operation; commit only performs the already-validated ownership transition.
     pub(crate) fn reconcile(&mut self, model: &DockLayoutModel) -> Result<(), DockLayoutError> {
-        self.reconcile_internal(model, None)
+        let host_sync = self.apply_staged(model)?;
+        self.floating_hosts.commit_sync(host_sync);
+        Ok(())
     }
 
-    /// Applies a candidate that already has a prepared native host. The prepared surface is used
-    /// for the newly appended floating root, while the host registry remains untouched until the
-    /// caller commits the transaction.
-    pub(crate) fn reconcile_with_prepared(
+    pub(crate) fn apply_staged(
         &mut self,
         model: &DockLayoutModel,
-        prepared_surface: Rc<DockSurfaceView>,
-    ) -> Result<(), DockLayoutError> {
-        self.reconcile_internal(model, Some(prepared_surface))
+    ) -> Result<PreparedFloatingHostSync, DockLayoutError> {
+        let plan = self.prepare_reconcile(model)?;
+        Ok(self.commit_reconcile(plan))
     }
 
-    fn reconcile_internal(
+    pub(crate) fn commit_floating_host_sync(&mut self, host_sync: PreparedFloatingHostSync) {
+        self.floating_hosts.commit_sync(host_sync);
+    }
+
+    fn prepare_reconcile(
         &mut self,
         model: &DockLayoutModel,
-        prepared_surface: Option<Rc<DockSurfaceView>>,
-    ) -> Result<(), DockLayoutError> {
-        #[cfg(test)]
-        if self.fail_next_reconcile {
-            self.fail_next_reconcile = false;
-            return Err(DockLayoutError::InvalidSnapshot {
-                reason: "injected reconciliation failure".to_owned(),
-            });
-        }
+    ) -> Result<ReconcilePlan, DockLayoutError> {
         let snapshot = model.snapshot();
-        self.detach_existing_tree();
-        let mut previous_floating = std::mem::take(&mut self.floating);
-        self.surfaces = SurfaceRegistry::default();
+        crate::snapshot::validate_snapshot(&snapshot)?;
         let desired_owners = desired_owners(&snapshot);
-        self.detach_before_attach(&desired_owners);
-        self.owners = desired_owners;
-        self.reconciling.set(true);
-        let _reconciling_guard = ReconcilingGuard(self.reconciling.clone());
-        self.group_items.clear();
-        self.group_roots.clear();
-        self.group_selected.clear();
-        self.auto_hide_roots.clear();
         let floating_count = snapshot.floating_roots.len();
+        let mut auto_hide_roots = BTreeMap::new();
         for entry in snapshot.auto_hide.iter().flatten() {
-            self.auto_hide_roots
-                .insert(entry.item.clone(), auto_hide_root(entry, floating_count));
+            auto_hide_roots.insert(entry.item.clone(), auto_hide_root(entry, floating_count));
         }
-        let mut used_groups = BTreeMap::new();
-        let mut used_splits = BTreeMap::new();
+
         let mut groups = self.groups.clone();
-        let open_auto_hide = snapshot
-            .auto_hide
-            .iter()
-            .flatten()
-            .filter(|entry| entry.open)
-            .map(|entry| entry.item.clone())
-            .collect::<Vec<_>>();
+        let mut group_hosts = self.group_hosts.clone();
+        let mut planned_groups = BTreeMap::new();
+        let mut planned_splits = BTreeMap::new();
+        let mut group_items = BTreeMap::new();
+        let mut group_roots = BTreeMap::new();
+        let mut group_selected = BTreeMap::new();
+        let mut used_groups = BTreeSet::new();
+        let mut used_splits = BTreeSet::new();
+
         let root = snapshot
             .main_root
             .as_ref()
             .map(|node| {
-                self.build_node(
+                self.plan_node(
                     node,
                     &mut groups,
+                    &mut group_hosts,
+                    &mut planned_groups,
+                    &mut planned_splits,
+                    &mut group_items,
+                    &mut group_roots,
+                    &mut group_selected,
                     &mut used_groups,
                     &mut used_splits,
                     RootKind::Main,
@@ -387,87 +430,158 @@ impl RuntimeRealization {
                 )
             })
             .transpose()?;
-        let mut floating_roots = Vec::new();
-        for (floating_index, floating) in snapshot.floating_roots.iter().enumerate() {
-            let bounds = floating.bounds.into();
-            let node = self.build_node(
-                &floating.root,
+
+        let mut floating = Vec::with_capacity(snapshot.floating_roots.len());
+        for (floating_index, floating_root) in snapshot.floating_roots.iter().enumerate() {
+            let root_kind = RootKind::Floating(floating_index);
+            let node = self.plan_node(
+                &floating_root.root,
                 &mut groups,
+                &mut group_hosts,
+                &mut planned_groups,
+                &mut planned_splits,
+                &mut group_items,
+                &mut group_roots,
+                &mut group_selected,
                 &mut used_groups,
                 &mut used_splits,
-                RootKind::Floating(floating_index),
+                root_kind.clone(),
                 &[],
             )?;
-            let identity = group_identity(&floating.root);
-            let mut surface_runtime = if floating_index + 1 == snapshot.floating_roots.len() {
-                prepared_surface
-                    .as_ref()
-                    .map(|surface| {
-                        SurfaceRuntime::new(
-                            RootKind::Floating(floating_index),
-                            surface.clone(),
-                            &self.owner,
-                        )
-                    })
-                    .or_else(|| {
-                        previous_floating
-                            .iter()
-                            .position(|runtime| runtime.identity == identity)
-                            .map(|index| previous_floating.swap_remove(index).surface)
-                    })
-            } else {
-                previous_floating
-                    .iter()
-                    .position(|runtime| runtime.identity == identity)
-                    .map(|index| previous_floating.swap_remove(index).surface)
-            }
-            .unwrap_or_else(|| {
-                SurfaceRuntime::new(
-                    RootKind::Floating(floating_index),
-                    DockSurfaceView::empty_surface(),
-                    &self.owner,
-                )
-            });
-            surface_runtime.set_root(RootKind::Floating(floating_index));
-            surface_runtime.auto_hide.close();
-            surface_runtime.preview.clear();
-            surface_runtime.reset_visual_children();
-            surface_runtime.add_main_child(node.element());
-            floating_roots.push(FloatingRuntime {
-                bounds,
+            let identity = group_identity(&floating_root.root);
+            let surface = self
+                .floating
+                .iter()
+                .find(|runtime| runtime.identity == identity)
+                .map(|runtime| runtime.surface.surface.clone())
+                .unwrap_or_else(DockSurfaceView::empty_surface);
+            floating.push(PlannedFloatingRuntime {
+                bounds: floating_root.bounds.into(),
                 node,
                 identity,
-                surface: surface_runtime,
+                surface,
             });
         }
-        groups.retain(|key, _| used_groups.contains_key(key));
-        self.group_items
-            .retain(|key, _| used_groups.contains_key(key));
-        self.group_roots
-            .retain(|key, _| used_groups.contains_key(key));
-        self.split_views
-            .retain(|key, _| used_splits.contains_key(key));
+
+        groups.retain(|key, _| used_groups.contains(key));
+        group_hosts.retain(|key, _| used_groups.contains(key));
+        planned_groups.retain(|key, _| used_groups.contains(key));
+        planned_splits.retain(|key, _| used_splits.contains(key));
+
+        let mut surfaces = SurfaceRegistry::default();
+        for (index, runtime) in floating.iter().enumerate() {
+            let surface_node: Rc<dyn UIElementExt> = runtime.surface.clone();
+            surfaces.register(RootKind::Floating(index), &surface_node);
+        }
+        let main_surface_node: Rc<dyn UIElementExt> = self.main_surface.surface.clone();
+        surfaces.register(RootKind::Main, &main_surface_node);
+
+        let open_auto_hide = snapshot
+            .auto_hide
+            .iter()
+            .flatten()
+            .filter(|entry| entry.open)
+            .map(|entry| (auto_hide_root(entry, floating_count), entry.item.clone()))
+            .collect::<Vec<_>>();
+        let floating_specs = floating
+            .iter()
+            .map(|runtime| (runtime.bounds, runtime.surface.clone()))
+            .collect::<Vec<_>>();
+        let host_sync = self
+            .floating_hosts
+            .prepare_sync(&floating_specs, &self.owner)?;
+
+        #[cfg(test)]
+        if self.fail_after_reconcile_plan {
+            self.fail_after_reconcile_plan = false;
+            host_sync.abort();
+            return Err(DockLayoutError::InvalidSnapshot {
+                reason: "injected late planning failure".to_owned(),
+            });
+        }
+
+        Ok(ReconcilePlan {
+            snapshot,
+            desired_owners,
+            planned_groups,
+            planned_splits,
+            group_items,
+            group_roots,
+            group_selected,
+            auto_hide_roots,
+            main_surface_child: root.as_ref().map(RuntimeNode::element),
+            root,
+            floating,
+            surfaces,
+            open_auto_hide,
+            host_sync,
+        })
+    }
+
+    fn commit_reconcile(&mut self, plan: ReconcilePlan) -> PreparedFloatingHostSync {
+        let ReconcilePlan {
+            snapshot,
+            desired_owners,
+            planned_groups,
+            planned_splits,
+            group_items,
+            group_roots,
+            group_selected,
+            auto_hide_roots,
+            root,
+            floating: planned_floating,
+            surfaces,
+            main_surface_child,
+            open_auto_hide,
+            host_sync,
+        } = plan;
+
+        self.reconciling.set(true);
+        let _reconciling_guard = ReconcilingGuard(self.reconciling.clone());
+        self.detach_existing_tree();
+        self.detach_before_attach(&desired_owners);
+        let mut previous_floating = std::mem::take(&mut self.floating);
+
+        for planned in planned_groups.values() {
+            self.apply_planned_group(planned);
+        }
+
+        if let Some(root_node) = root.as_ref() {
+            let _ = self.apply_planned_node(root_node, RootKind::Main, &[], &planned_splits);
+        }
         self.main_surface.auto_hide.close();
         self.main_surface.preview.clear();
         self.main_surface.reset_visual_children();
-        if let Some(root) = root.as_ref() {
-            let element = root.element();
-            self.main_surface.add_main_child(element.clone());
-            self.main_surface_child = Some(element);
+        if let Some(element) = main_surface_child.clone() {
+            self.main_surface.add_main_child(element);
         }
-        self.groups = groups;
-        self.group_hosts
-            .retain(|key, _| used_groups.contains_key(key));
-        self.root = root;
-        self.floating = floating_roots;
-        for (index, runtime) in self.floating.iter().enumerate() {
-            let surface_node: Rc<dyn UIElementExt> = runtime.surface.surface.clone();
-            self.surfaces
-                .register(RootKind::Floating(index), &surface_node);
+
+        let mut floating = Vec::with_capacity(planned_floating.len());
+        for (index, planned) in planned_floating.into_iter().enumerate() {
+            let root = RootKind::Floating(index);
+            let mut surface = previous_floating
+                .iter()
+                .position(|runtime| runtime.identity == planned.identity)
+                .map(|position| previous_floating.swap_remove(position).surface)
+                .unwrap_or_else(|| {
+                    SurfaceRuntime::new(root.clone(), planned.surface.clone(), &self.owner)
+                });
+            surface.set_root(root.clone());
+            surface.auto_hide.close();
+            surface.preview.clear();
+            surface.reset_visual_children();
+            let element =
+                self.apply_planned_node(&planned.node, root.clone(), &[], &planned_splits);
+            surface.add_main_child(element);
+            floating.push(FloatingRuntime {
+                node: planned.node,
+                identity: planned.identity,
+                surface,
+            });
         }
-        let main_surface_node: Rc<dyn UIElementExt> = self.main_surface.surface.clone();
-        self.surfaces.register(RootKind::Main, &main_surface_node);
+
         let registry = &self.registry;
+        let floating_count = snapshot.floating_roots.len();
         let strip_titles = |root: &RootKind| {
             snapshot
                 .auto_hide
@@ -491,36 +605,52 @@ impl RuntimeRealization {
         };
         self.main_surface
             .render_strips(strip_titles(&RootKind::Main).into_iter(), &self.owner);
-        for (index, runtime) in self.floating.iter().enumerate() {
-            let root = RootKind::Floating(index);
-            runtime
-                .surface
-                .render_strips(strip_titles(&root).into_iter(), &self.owner);
+        for (index, runtime) in floating.iter().enumerate() {
+            runtime.surface.render_strips(
+                strip_titles(&RootKind::Floating(index)).into_iter(),
+                &self.owner,
+            );
         }
-        for item in open_auto_hide {
-            let root = snapshot
-                .auto_hide
-                .iter()
-                .flatten()
-                .find(|entry| entry.item == item)
-                .map(|entry| auto_hide_root(entry, floating_count))
-                .unwrap_or(RootKind::Main);
-            let wrapper = self.registry.wrapper(&item);
-            let surface = self.surface_runtime_mut(&root);
-            if let Some(surface) = surface {
+        for (root, item) in open_auto_hide {
+            if let Some(surface) = match &root {
+                RootKind::Main => Some(&mut self.main_surface),
+                RootKind::Floating(index) => {
+                    floating.get_mut(*index).map(|runtime| &mut runtime.surface)
+                }
+            } {
                 surface.auto_hide.open(item.clone());
-                surface.auto_hide.present_open_item(wrapper);
+                surface
+                    .auto_hide
+                    .present_open_item(self.registry.wrapper(&item));
             }
         }
-        let floating_specs = self
-            .floating
+
+        self.groups = planned_groups
             .iter()
-            .map(|runtime| (runtime.bounds, runtime.surface.surface.clone()))
-            .collect::<Vec<_>>();
-        if prepared_surface.is_none() {
-            self.floating_hosts.sync(&floating_specs, &self.owner)?;
+            .map(|(key, planned)| (key.clone(), planned.view.clone()))
+            .collect();
+        self.group_hosts = planned_groups
+            .into_iter()
+            .map(|(key, planned)| (key, planned.host))
+            .collect();
+        self.group_items = group_items;
+        self.group_roots = group_roots;
+        self.group_selected = group_selected;
+        self.auto_hide_roots = auto_hide_roots;
+        self.owners = desired_owners;
+        self.root = root;
+        self.floating = floating;
+        self.main_surface_child = main_surface_child;
+        self.surfaces = surfaces;
+        self.split_views = planned_splits
+            .into_iter()
+            .map(|(address, planned)| (address, (planned.grid, planned.splitters)))
+            .collect();
+        #[cfg(test)]
+        {
+            self.full_reconcile_count = self.full_reconcile_count.saturating_add(1);
         }
-        Ok(())
+        host_sync
     }
 
     pub(crate) fn begin_drag(
@@ -671,24 +801,13 @@ impl RuntimeRealization {
         drag.set_floating_candidate(bounds)
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_floating_host(
         &mut self,
         bounds: crate::Rect,
     ) -> Result<super::floating_window::PreparedFloatingHost, DockLayoutError> {
         self.floating_hosts
             .prepare_new(DockSurfaceView::empty_surface(), bounds, &self.owner)
-    }
-
-    pub(crate) fn commit_prepared_host(
-        &mut self,
-        prepared: super::floating_window::PreparedFloatingHost,
-        root_index: usize,
-    ) -> super::floating_window::FloatingHostId {
-        self.floating_hosts.commit_prepared(prepared, root_index)
-    }
-
-    pub(crate) fn show_floating_host(&self, id: super::floating_window::FloatingHostId) {
-        self.floating_hosts.show(id);
     }
 
     pub(crate) fn floating_root_index(&self, id: FloatingHostId) -> Option<usize> {
@@ -701,8 +820,13 @@ impl RuntimeRealization {
     }
 
     #[cfg(test)]
-    pub(crate) fn fail_next_reconcile_for_test(&mut self) {
-        self.fail_next_reconcile = true;
+    pub(crate) fn fail_after_reconcile_plan_for_test(&mut self) {
+        self.fail_after_reconcile_plan = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn full_reconcile_count_for_test(&self) -> usize {
+        self.full_reconcile_count
     }
 
     #[cfg(test)]
@@ -719,6 +843,21 @@ impl RuntimeRealization {
     pub(crate) fn surface_for_test(&self, root: &RootKind) -> Option<Rc<DockSurfaceView>> {
         self.surface_runtime(root)
             .map(|runtime| runtime.surface.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn group_for_test(&self, group: &SnapshotGroupKey) -> Option<Rc<CustomTabView>> {
+        self.groups.get(group).cloned()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn main_runtime_root_for_test(&self) -> Option<Rc<dyn UIElementExt>> {
+        self.root.as_ref().map(RuntimeNode::element)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owner_for_test(&self, item: &DockItemId) -> Option<RuntimePresentationOwner> {
+        self.owners.get(item).cloned()
     }
 
     #[cfg(test)]
@@ -764,7 +903,7 @@ impl RuntimeRealization {
             self.surfaces
                 .entries()
                 .into_iter()
-                .filter_map(|(root, surface)| {
+                .find_map(|(root, surface)| {
                     let host_root_point = surface.screen_to_root(screen)?;
                     let surface_local_point =
                         SurfaceRegistry::host_root_to_surface_local(&surface, host_root_point)?;
@@ -774,8 +913,7 @@ impl RuntimeRealization {
                         surface,
                         surface_local_point,
                     ))
-                })
-                .next()?
+                })?
         } else {
             let surface = self.surfaces.surface_for_root(&source_root)?;
             let surface_local_point =
@@ -834,7 +972,8 @@ impl RuntimeRealization {
     pub(crate) fn finish_splitter(&mut self, canceled: bool) -> Option<DockLayoutModel> {
         self.splitter.take().and_then(|mut splitter| {
             if canceled {
-                Some(splitter.cancel())
+                splitter.cancel();
+                None
             } else {
                 splitter.commit()
             }
@@ -884,6 +1023,50 @@ impl RuntimeRealization {
             .position(|item| item == &selected)
     }
 
+    /// Applies the non-structural part of a live tab selection. The caller has already changed
+    /// the retained `CustomTabView` selected index, so this method only accepts a selection when
+    /// the model transformation preserves every item/group/root relationship.
+    pub(crate) fn apply_selection_fast_path(
+        &mut self,
+        model: &DockLayoutModel,
+        next: &DockLayoutModel,
+        group: &SnapshotGroupKey,
+        index: usize,
+        item: &DockItemId,
+    ) -> bool {
+        if self.group_item(group, index).as_ref() != Some(item)
+            || !self
+                .groups
+                .get(group)
+                .is_some_and(|view| view.selected_index() == index)
+            || model.is_item_closed(item)
+            || model.is_item_auto_hidden(item)
+            || !same_selection_structure(&model.snapshot(), &next.snapshot())
+        {
+            return false;
+        }
+        let owner_matches = match self.owners.get(item) {
+            Some(RuntimePresentationOwner::Group(current)) => current == group,
+            Some(RuntimePresentationOwner::FloatingGroup { group: current, .. }) => {
+                current == group
+            }
+            _ => false,
+        };
+        if !owner_matches {
+            return false;
+        }
+
+        self.group_selected
+            .insert(group.clone(), Some(item.clone()));
+        for owner in self.owners.values_mut() {
+            if matches!(owner, RuntimePresentationOwner::AutoHide { .. }) {
+                *owner = RuntimePresentationOwner::None;
+            }
+        }
+        self.clear_auto_hide_presentations();
+        true
+    }
+
     pub(crate) fn open_auto_hide_item_on(&self, root: &RootKind) -> Option<DockItemId> {
         self.surface_runtime(root)
             .and_then(|surface| surface.auto_hide.current().cloned())
@@ -929,12 +1112,18 @@ impl RuntimeRealization {
         self.drag.as_ref().map(|drag| drag.item().clone())
     }
 
-    fn build_node(
-        &mut self,
+    fn plan_node(
+        &self,
         node: &SnapshotNode,
         groups: &mut BTreeMap<SnapshotGroupKey, Rc<CustomTabView>>,
-        used_groups: &mut BTreeMap<SnapshotGroupKey, ()>,
-        used_splits: &mut BTreeMap<SplitAddress, ()>,
+        group_hosts: &mut BTreeMap<SnapshotGroupKey, GroupRuntimeHost>,
+        planned_groups: &mut BTreeMap<SnapshotGroupKey, PlannedGroup>,
+        planned_splits: &mut BTreeMap<SplitAddress, PlannedSplit>,
+        group_items: &mut BTreeMap<SnapshotGroupKey, Vec<DockItemId>>,
+        group_roots: &mut BTreeMap<SnapshotGroupKey, RootKind>,
+        group_selected: &mut BTreeMap<SnapshotGroupKey, Option<DockItemId>>,
+        used_groups: &mut BTreeSet<SnapshotGroupKey>,
+        used_splits: &mut BTreeSet<SplitAddress>,
         root_kind: RootKind,
         path: &[usize],
     ) -> Result<RuntimeNode, DockLayoutError> {
@@ -944,8 +1133,8 @@ impl RuntimeRealization {
                 items,
                 selected,
             } => {
-                used_groups.insert(group.clone(), ());
-                self.group_roots.insert(group.clone(), root_kind.clone());
+                used_groups.insert(group.clone());
+                group_roots.insert(group.clone(), root_kind.clone());
                 let view = if let Some(view) = groups.get(group) {
                     view.clone()
                 } else {
@@ -954,8 +1143,8 @@ impl RuntimeRealization {
                     groups.insert(group.clone(), view.clone());
                     view
                 };
-                self.group_items.insert(group.clone(), items.clone());
-                self.group_selected.insert(group.clone(), selected.clone());
+                group_items.insert(group.clone(), items.clone());
+                group_selected.insert(group.clone(), selected.clone());
                 let tabs = items
                     .iter()
                     .map(|id| {
@@ -964,131 +1153,51 @@ impl RuntimeRealization {
                             .ok_or_else(|| DockLayoutError::UnknownItem(id.clone()))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                replace_group_items(&view, tabs);
-                if let SnapshotGroupKey::Authored(id) = group {
-                    view.set_tab_strip_position(self.registry.group_position(id));
-                }
-                if let Some(selected) = selected {
-                    if let Some(index) = items.iter().position(|id| id == selected) {
-                        view.select_index(index);
-                    }
-                }
                 let tab_position = match &group {
                     SnapshotGroupKey::Authored(id) => self.registry.group_position(id),
                     SnapshotGroupKey::Generated(_) => TabStripPosition::Top,
                 };
-                let host = self.group_hosts.entry(group.clone()).or_insert_with(|| {
-                    let container = Grid::new();
-                    container.set_rows(vec![GridLength::Auto, GridLength::Star(1.0)]);
-                    container.set_columns(vec![GridLength::Star(1.0)]);
-
-                    let title_bar = Grid::new();
-                    title_bar.set_rows(vec![GridLength::Star(1.0)]);
-                    title_bar.set_columns(vec![
-                        GridLength::Star(1.0),
-                        GridLength::Fixed(28.0),
-                        GridLength::Fixed(28.0),
-                    ]);
-                    title_bar.set_height(30.0);
-                    title_bar.set_background(themed_brush(BrushStyle::Secondary));
-
-                    let title = TextBlock::new();
-                    title.set_foreground(themed_brush(BrushStyle::Foreground));
-                    title.set_margin(8.0);
-                    title.set_attached("Grid", "row", 0i32);
-                    title.set_attached("Grid", "column", 0i32);
-                    title_bar.children().add(title.clone());
-
-                    let pin_button = Grid::new();
-                    pin_button.set_background(themed_brush(BrushStyle::Tertiary));
-                    pin_button.set_width(22.0);
-                    pin_button.set_height(22.0);
-                    pin_button.set_attached("Grid", "row", 0i32);
-                    pin_button.set_attached("Grid", "column", 1i32);
-                    let pin_glyph = TextBlock::new();
-                    pin_glyph.set_text("⌖");
-                    pin_glyph.set_foreground(themed_brush(BrushStyle::Foreground));
-                    pin_glyph.set_text_alignment(crate::core::ui::TextAlignment::Center);
-                    pin_button.children().add(pin_glyph);
-                    let weak_owner = self.owner.clone();
-                    let pin_group = group.clone();
-                    pin_button.register_routed_handler::<PointerEventArgs>(
-                        "on_pointer_released",
-                        Box::new(move |_, _| {
-                            if let Some(owner) = weak_owner.upgrade() {
-                                owner.handle_group_pin(pin_group.clone());
-                            }
-                        }),
-                    );
-                    title_bar.children().add(pin_button.clone());
-
-                    let close_button = Grid::new();
-                    close_button.set_background(themed_brush(BrushStyle::Tertiary));
-                    close_button.set_width(22.0);
-                    close_button.set_height(22.0);
-                    close_button.set_attached("Grid", "row", 0i32);
-                    close_button.set_attached("Grid", "column", 2i32);
-                    let close_glyph = TextBlock::new();
-                    close_glyph.set_text("×");
-                    close_glyph.set_foreground(themed_brush(BrushStyle::Foreground));
-                    close_glyph.set_text_alignment(crate::core::ui::TextAlignment::Center);
-                    close_button.children().add(close_glyph);
-                    let weak_owner = self.owner.clone();
-                    let close_group = group.clone();
-                    close_button.register_routed_handler::<PointerEventArgs>(
-                        "on_pointer_released",
-                        Box::new(move |_, _| {
-                            if let Some(owner) = weak_owner.upgrade() {
-                                owner.handle_group_title_close(close_group.clone());
-                            }
-                        }),
-                    );
-                    title_bar.children().add(close_button.clone());
-                    title_bar.set_visibility(Visibility::Collapsed);
-                    title_bar.set_attached("Grid", "row", 0i32);
-                    title_bar.set_attached("Grid", "column", 0i32);
-                    container.children().add(title_bar.clone());
-
-                    GroupRuntimeHost {
-                        container,
-                        title_bar,
-                        title,
-                        pin_button,
-                        close_button,
-                    }
-                });
-                host.container.children().clear();
-                host.container.children().add(host.title_bar.clone());
                 let selected_item = selected
                     .as_ref()
                     .and_then(|selected| self.registry.items.get(selected));
-                host.title.set_text(
-                    &selected_item
-                        .map(|item| item.title_value())
-                        .unwrap_or_default(),
-                );
                 let has_pin = selected_item.is_some_and(|item| item.can_pin_value());
                 let show_title_bar = tab_position == TabStripPosition::Bottom || has_pin;
-                host.title_bar.set_visibility(if show_title_bar {
+                let title_visibility = if show_title_bar {
                     Visibility::Visible
                 } else {
                     Visibility::Collapsed
-                });
-                host.pin_button.set_visibility(if has_pin {
+                };
+                let pin_visibility = if has_pin {
                     Visibility::Visible
                 } else {
                     Visibility::Collapsed
-                });
-                host.close_button.set_visibility(
-                    if selected_item.is_some_and(|item| item.can_close_value()) {
-                        Visibility::Visible
-                    } else {
-                        Visibility::Collapsed
+                };
+                let close_visibility = if selected_item.is_some_and(|item| item.can_close_value()) {
+                    Visibility::Visible
+                } else {
+                    Visibility::Collapsed
+                };
+                let host = group_hosts
+                    .entry(group.clone())
+                    .or_insert_with(|| self.new_group_host(group))
+                    .clone();
+                planned_groups.insert(
+                    group.clone(),
+                    PlannedGroup {
+                        view,
+                        host: host.clone(),
+                        tabs,
+                        items: items.clone(),
+                        selected: selected.clone(),
+                        tab_position,
+                        title: selected_item
+                            .map(|item| item.title_value())
+                            .unwrap_or_default(),
+                        title_visibility,
+                        pin_visibility,
+                        close_visibility,
                     },
                 );
-                view.set_attached("Grid", "row", 1i32);
-                view.set_attached("Grid", "column", 0i32);
-                host.container.children().add(view.clone());
                 Ok(RuntimeNode::Group {
                     host: host.container.clone(),
                 })
@@ -1101,7 +1210,7 @@ impl RuntimeRealization {
                     root: root_kind.clone(),
                     path: path.to_vec(),
                 };
-                used_splits.insert(split_address.clone(), ());
+                used_splits.insert(split_address.clone());
                 let weights = snapshot_children
                     .iter()
                     .map(|child| child.weight)
@@ -1112,9 +1221,15 @@ impl RuntimeRealization {
                     .map(|(index, child)| {
                         let mut child_path = path.to_vec();
                         child_path.push(index);
-                        self.build_node(
+                        self.plan_node(
                             &child.node,
                             groups,
+                            group_hosts,
+                            planned_groups,
+                            planned_splits,
+                            group_items,
+                            group_roots,
+                            group_selected,
                             used_groups,
                             used_splits,
                             root_kind.clone(),
@@ -1124,16 +1239,183 @@ impl RuntimeRealization {
                     .collect::<Result<Vec<_>, _>>()?;
                 let (grid, mut splitters) = self
                     .split_views
-                    .remove(&split_address)
+                    .get(&split_address)
+                    .cloned()
                     .unwrap_or_else(|| (Grid::new(), Vec::new()));
+                while splitters.len() < children.len().saturating_sub(1) {
+                    let index = splitters.len();
+                    let splitter = CustomSplitter::new_splitter();
+                    self.wire_splitter(
+                        &splitter,
+                        grid.clone(),
+                        split_address.clone(),
+                        index,
+                        (*orientation).into(),
+                    );
+                    splitters.push(splitter);
+                }
+                splitters.truncate(children.len().saturating_sub(1));
+                planned_splits.insert(
+                    split_address,
+                    PlannedSplit {
+                        grid: grid.clone(),
+                        splitters,
+                        orientation: *orientation,
+                        weights,
+                    },
+                );
+                Ok(RuntimeNode::Split { children, grid })
+            }
+        }
+    }
+
+    fn new_group_host(&self, group: &SnapshotGroupKey) -> GroupRuntimeHost {
+        let container = Grid::new();
+        container.set_rows(vec![GridLength::Auto, GridLength::Star(1.0)]);
+        container.set_columns(vec![GridLength::Star(1.0)]);
+
+        let title_bar = Grid::new();
+        title_bar.set_rows(vec![GridLength::Star(1.0)]);
+        title_bar.set_columns(vec![
+            GridLength::Star(1.0),
+            GridLength::Fixed(28.0),
+            GridLength::Fixed(28.0),
+        ]);
+        title_bar.set_height(30.0);
+        title_bar.set_background(themed_brush(BrushStyle::Secondary));
+
+        let title = TextBlock::new();
+        title.set_foreground(themed_brush(BrushStyle::Foreground));
+        title.set_margin(8.0);
+        title.set_attached("Grid", "row", 0i32);
+        title.set_attached("Grid", "column", 0i32);
+        title_bar.children().add(title.clone());
+
+        let pin_button = Grid::new();
+        pin_button.set_background(themed_brush(BrushStyle::Tertiary));
+        pin_button.set_width(22.0);
+        pin_button.set_height(22.0);
+        pin_button.set_attached("Grid", "row", 0i32);
+        pin_button.set_attached("Grid", "column", 1i32);
+        let pin_glyph = TextBlock::new();
+        pin_glyph.set_text("⌖");
+        pin_glyph.set_foreground(themed_brush(BrushStyle::Foreground));
+        pin_glyph.set_text_alignment(crate::core::ui::TextAlignment::Center);
+        pin_button.children().add(pin_glyph);
+        let weak_owner = self.owner.clone();
+        let pin_group = group.clone();
+        pin_button.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_released",
+            Box::new(move |_, _| {
+                if let Some(owner) = weak_owner.upgrade() {
+                    owner.handle_group_pin(pin_group.clone());
+                }
+            }),
+        );
+        title_bar.children().add(pin_button.clone());
+
+        let close_button = Grid::new();
+        close_button.set_background(themed_brush(BrushStyle::Tertiary));
+        close_button.set_width(22.0);
+        close_button.set_height(22.0);
+        close_button.set_attached("Grid", "row", 0i32);
+        close_button.set_attached("Grid", "column", 2i32);
+        let close_glyph = TextBlock::new();
+        close_glyph.set_text("×");
+        close_glyph.set_foreground(themed_brush(BrushStyle::Foreground));
+        close_glyph.set_text_alignment(crate::core::ui::TextAlignment::Center);
+        close_button.children().add(close_glyph);
+        let weak_owner = self.owner.clone();
+        let close_group = group.clone();
+        close_button.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_released",
+            Box::new(move |_, _| {
+                if let Some(owner) = weak_owner.upgrade() {
+                    owner.handle_group_title_close(close_group.clone());
+                }
+            }),
+        );
+        title_bar.children().add(close_button.clone());
+        title_bar.set_visibility(Visibility::Collapsed);
+        title_bar.set_attached("Grid", "row", 0i32);
+        title_bar.set_attached("Grid", "column", 0i32);
+        container.children().add(title_bar.clone());
+
+        GroupRuntimeHost {
+            container,
+            title_bar,
+            title,
+            pin_button,
+            close_button,
+        }
+    }
+
+    fn apply_planned_group(&self, planned: &PlannedGroup) {
+        replace_group_items(&planned.view, planned.tabs.clone());
+        planned.view.set_tab_strip_position(planned.tab_position);
+        if let Some(selected) = planned.selected.as_ref() {
+            if let Some(index) = planned.items.iter().position(|item| item == selected) {
+                planned.view.select_index(index);
+            }
+        }
+        planned.host.container.children().clear();
+        planned
+            .host
+            .container
+            .children()
+            .add(planned.host.title_bar.clone());
+        planned.host.title.set_text(&planned.title);
+        planned
+            .host
+            .title_bar
+            .set_visibility(planned.title_visibility);
+        planned
+            .host
+            .pin_button
+            .set_visibility(planned.pin_visibility);
+        planned
+            .host
+            .close_button
+            .set_visibility(planned.close_visibility);
+        planned.view.set_attached("Grid", "row", 1i32);
+        planned.view.set_attached("Grid", "column", 0i32);
+        planned.host.container.children().add(planned.view.clone());
+    }
+
+    fn apply_planned_node(
+        &self,
+        node: &RuntimeNode,
+        root_kind: RootKind,
+        path: &[usize],
+        splits: &BTreeMap<SplitAddress, PlannedSplit>,
+    ) -> Rc<dyn UIElementExt> {
+        match node {
+            RuntimeNode::Group { host } => host.clone(),
+            RuntimeNode::Split { children, grid } => {
+                let address = SplitAddress {
+                    root: root_kind.clone(),
+                    path: path.to_vec(),
+                };
+                let planned = splits
+                    .get(&address)
+                    .expect("planned split must exist during commit");
                 grid.children().clear();
-                match orientation {
-                    crate::snapshot::SnapshotOrientation::Horizontal => {
+                match planned.orientation {
+                    SnapshotOrientation::Horizontal => {
                         grid.set_rows(vec![GridLength::Star(1.0)]);
                         let mut columns = Vec::new();
                         for (index, child) in children.iter().enumerate() {
-                            columns.push(GridLength::Star(snapshot_split_weight(weights[index])));
-                            let element = child.element();
+                            columns.push(GridLength::Star(snapshot_split_weight(
+                                planned.weights[index],
+                            )));
+                            let mut child_path = path.to_vec();
+                            child_path.push(index);
+                            let element = self.apply_planned_node(
+                                child,
+                                root_kind.clone(),
+                                &child_path,
+                                splits,
+                            );
                             element.as_ui_element().set_attached(
                                 "Grid",
                                 "column",
@@ -1142,71 +1424,59 @@ impl RuntimeRealization {
                             grid.children().add(element);
                             if index + 1 < children.len() {
                                 columns.push(GridLength::Fixed(6.0));
-                                let splitter = splitters
-                                    .get(index)
-                                    .cloned()
-                                    .unwrap_or_else(CustomSplitter::new_splitter);
-                                splitter.set_orientation((*orientation).into());
+                                let splitter = planned.splitters[index].clone();
+                                splitter.set_orientation(crate::Orientation::Horizontal);
                                 splitter.set_attached("Grid", "column", (index * 2 + 1) as i32);
                                 self.wire_splitter(
                                     &splitter,
                                     grid.clone(),
-                                    SplitAddress {
-                                        root: root_kind.clone(),
-                                        path: path.to_vec(),
-                                    },
+                                    address.clone(),
                                     index,
-                                    (*orientation).into(),
+                                    crate::Orientation::Horizontal,
                                 );
-                                grid.children().add(splitter.clone());
-                                if index >= splitters.len() {
-                                    splitters.push(splitter);
-                                }
+                                grid.children().add(splitter);
                             }
                         }
                         grid.set_columns(columns);
                     }
-                    crate::snapshot::SnapshotOrientation::Vertical => {
+                    SnapshotOrientation::Vertical => {
                         grid.set_columns(vec![GridLength::Star(1.0)]);
                         let mut rows = Vec::new();
                         for (index, child) in children.iter().enumerate() {
-                            rows.push(GridLength::Star(snapshot_split_weight(weights[index])));
-                            let element = child.element();
+                            rows.push(GridLength::Star(snapshot_split_weight(
+                                planned.weights[index],
+                            )));
+                            let mut child_path = path.to_vec();
+                            child_path.push(index);
+                            let element = self.apply_planned_node(
+                                child,
+                                root_kind.clone(),
+                                &child_path,
+                                splits,
+                            );
                             element
                                 .as_ui_element()
                                 .set_attached("Grid", "row", (index * 2) as i32);
                             grid.children().add(element);
                             if index + 1 < children.len() {
                                 rows.push(GridLength::Fixed(6.0));
-                                let splitter = splitters
-                                    .get(index)
-                                    .cloned()
-                                    .unwrap_or_else(CustomSplitter::new_splitter);
-                                splitter.set_orientation((*orientation).into());
+                                let splitter = planned.splitters[index].clone();
+                                splitter.set_orientation(crate::Orientation::Vertical);
                                 splitter.set_attached("Grid", "row", (index * 2 + 1) as i32);
                                 self.wire_splitter(
                                     &splitter,
                                     grid.clone(),
-                                    SplitAddress {
-                                        root: root_kind.clone(),
-                                        path: path.to_vec(),
-                                    },
+                                    address.clone(),
                                     index,
-                                    (*orientation).into(),
+                                    crate::Orientation::Vertical,
                                 );
-                                grid.children().add(splitter.clone());
-                                if index >= splitters.len() {
-                                    splitters.push(splitter);
-                                }
+                                grid.children().add(splitter);
                             }
                         }
                         grid.set_rows(rows);
                     }
                 }
-                splitters.truncate(children.len().saturating_sub(1));
-                self.split_views
-                    .insert(split_address, (grid.clone(), splitters.clone()));
-                Ok(RuntimeNode::Split { children, grid })
+                grid.clone()
             }
         }
     }
@@ -1455,11 +1725,16 @@ impl RuntimeRealization {
 }
 
 fn detach_runtime_node(node: &RuntimeNode) {
-    if let RuntimeNode::Split { children, grid, .. } = node {
-        for child in children {
-            detach_runtime_node(child);
+    match node {
+        RuntimeNode::Group { host } => {
+            host.children().clear();
         }
-        grid.children().clear();
+        RuntimeNode::Split { children, grid, .. } => {
+            for child in children {
+                detach_runtime_node(child);
+            }
+            grid.children().clear();
+        }
     }
 }
 
@@ -1725,6 +2000,71 @@ fn desired_owners(
         owners.insert(entry.item.clone(), RuntimePresentationOwner::None);
     }
     owners
+}
+
+fn same_selection_structure(
+    left: &crate::snapshot::DockLayoutSnapshot,
+    right: &crate::snapshot::DockLayoutSnapshot,
+) -> bool {
+    fn same_node(left: &SnapshotNode, right: &SnapshotNode) -> bool {
+        match (left, right) {
+            (
+                SnapshotNode::Split {
+                    orientation: left_orientation,
+                    children: left_children,
+                },
+                SnapshotNode::Split {
+                    orientation: right_orientation,
+                    children: right_children,
+                },
+            ) => {
+                left_orientation == right_orientation
+                    && left_children.len() == right_children.len()
+                    && left_children
+                        .iter()
+                        .zip(right_children)
+                        .all(|(left, right)| {
+                            left.weight == right.weight && same_node(&left.node, &right.node)
+                        })
+            }
+            (
+                SnapshotNode::Group {
+                    group: left_group,
+                    items: left_items,
+                    ..
+                },
+                SnapshotNode::Group {
+                    group: right_group,
+                    items: right_items,
+                    ..
+                },
+            ) => left_group == right_group && left_items == right_items,
+            _ => false,
+        }
+    }
+
+    let roots_match = match (&left.main_root, &right.main_root) {
+        (Some(left), Some(right)) => same_node(left, right),
+        (None, None) => true,
+        _ => false,
+    } && left.floating_roots.len() == right.floating_roots.len()
+        && left
+            .floating_roots
+            .iter()
+            .zip(&right.floating_roots)
+            .all(|(left, right)| left.bounds == right.bounds && same_node(&left.root, &right.root));
+    if !roots_match || left.closed != right.closed {
+        return false;
+    }
+    left.auto_hide
+        .iter()
+        .zip(&right.auto_hide)
+        .all(|(left, right)| {
+            left.len() == right.len()
+                && left.iter().zip(right).all(|(left, right)| {
+                    left.item == right.item && left.return_state == right.return_state
+                })
+        })
 }
 
 struct ReconcilingGuard(Rc<Cell<bool>>);

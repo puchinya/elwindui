@@ -26,13 +26,16 @@ pub(crate) struct CustomTabContentPresenter {
     bound_items: Vec<std::rc::Weak<CustomTabViewItem>>,
     #[state(default = None)]
     presentation_state: Option<Rc<std::cell::RefCell<Vec<ContentEntry>>>>,
+    #[state(default = None)]
+    last_arranged_selected_index: Option<usize>,
+    #[state(default = true)]
+    structure_dirty: bool,
     template: template_view!(|this: Self| {
         on_mount {
             this.reconcile_contents();
         }
         on_update(items, selected_index) {
-            this.reconcile_contents();
-            this.invalidate_measure();
+            this.sync_property_update();
         }
         Grid {}
     }),
@@ -103,6 +106,27 @@ impl CustomTabContentPresenter {
         }
         *state.borrow_mut() = entries;
         self.set_bound_items(items.iter().map(Rc::downgrade).collect());
+        self.set_structure_dirty(true);
+        self.set_last_arranged_selected_index(None);
+    }
+
+    fn items_match_bound(&self) -> bool {
+        let items = self.items();
+        self.bound_items().len() == items.len()
+            && self
+                .bound_items()
+                .iter()
+                .zip(items.iter())
+                .all(|(old, new)| old.upgrade().is_some_and(|old| Rc::ptr_eq(&old, new)))
+    }
+
+    fn sync_property_update(&self) {
+        if !self.items_match_bound() {
+            self.reconcile_contents();
+        }
+        // A selected page may have a different desired size, but selecting it never changes the
+        // retained content list or its subscriptions. The next measure touches only that page.
+        self.invalidate_measure();
     }
 
     fn replace_item_content(
@@ -163,10 +187,11 @@ impl CustomTabContentPresenter {
             root.measure(available);
         }
         let entries = self.entries();
-        for (_, content) in &entries {
-            if let Some(content) = content {
-                content.measure(available);
-            }
+        if let Some((_, Some(content))) = entries
+            .iter()
+            .find(|(index, _)| *index == self.selected_index())
+        {
+            content.measure(available);
         }
         entries
             .iter()
@@ -186,28 +211,48 @@ impl CustomTabContentPresenter {
                 height: final_size.height.max(0.0),
             });
         }
-        for (index, content) in self.entries() {
-            let Some(content) = content else {
-                continue;
-            };
-            let rect = if index == self.selected_index() {
-                Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: final_size.width.max(0.0),
-                    height: final_size.height.max(0.0),
+        let full_rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: final_size.width.max(0.0),
+            height: final_size.height.max(0.0),
+        };
+        let empty_rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        };
+        let entries = self.entries();
+        let selected = self.selected_index();
+        let previous = self.last_arranged_selected_index();
+        if self.structure_dirty() || previous.is_none() {
+            for (index, content) in entries {
+                if let Some(content) = content {
+                    content.set_clip_to_bounds(Some(true));
+                    content.arrange(if index == selected {
+                        full_rect
+                    } else {
+                        empty_rect
+                    });
                 }
-            } else {
-                Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 0.0,
-                    height: 0.0,
+            }
+        } else if previous != Some(selected) {
+            for index in [previous, Some(selected)].into_iter().flatten() {
+                if let Some((_, Some(content))) =
+                    entries.iter().find(|(candidate, _)| *candidate == index)
+                {
+                    content.set_clip_to_bounds(Some(true));
+                    content.arrange(if index == selected {
+                        full_rect
+                    } else {
+                        empty_rect
+                    });
                 }
-            };
-            content.set_clip_to_bounds(Some(true));
-            content.arrange(rect);
+            }
         }
+        self.set_last_arranged_selected_index(Some(selected));
+        self.set_structure_dirty(false);
         final_size
     }
 }

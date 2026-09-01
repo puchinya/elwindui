@@ -91,6 +91,7 @@ fn close_handler(
 
 pub(crate) struct PreparedFloatingHost {
     pub(crate) id: FloatingHostId,
+    pub(crate) root_index: usize,
     pub(crate) bounds: Rect,
     pub(crate) surface: Rc<DockSurfaceView>,
     pub(crate) host: Rc<dyn FloatingWindowHost>,
@@ -109,6 +110,39 @@ pub(crate) struct FloatingHostState {
     pub(crate) bounds: Rect,
     pub(crate) surface: Rc<DockSurfaceView>,
     pub(crate) host: Rc<dyn FloatingWindowHost>,
+}
+
+struct PreparedExistingHostUpdate {
+    id: FloatingHostId,
+    root_index: usize,
+    bounds: Rect,
+    surface: Rc<DockSurfaceView>,
+    close_handler: Rc<dyn Fn() -> bool>,
+}
+
+/// Native floating-host changes prepared without touching the committed registry.
+pub(crate) struct PreparedFloatingHostSync {
+    next_id: u64,
+    updates: Vec<PreparedExistingHostUpdate>,
+    new_hosts: Vec<PreparedFloatingHost>,
+    stale_ids: Vec<FloatingHostId>,
+}
+
+impl PreparedFloatingHostSync {
+    pub(crate) fn empty(next_id: u64) -> Self {
+        Self {
+            next_id,
+            updates: Vec::new(),
+            new_hosts: Vec::new(),
+            stale_ids: Vec::new(),
+        }
+    }
+
+    pub(crate) fn abort(self) {
+        for host in self.new_hosts {
+            host.abort();
+        }
+    }
 }
 
 pub(crate) struct FloatingHostRegistry {
@@ -144,9 +178,9 @@ impl FloatingHostRegistry {
         }
     }
 
-    fn allocate_id(&mut self) -> FloatingHostId {
-        let id = FloatingHostId(self.next_id.max(1));
-        self.next_id = self.next_id.saturating_add(1).max(1);
+    fn allocate_id(next_id: &mut u64) -> FloatingHostId {
+        let id = FloatingHostId((*next_id).max(1));
+        *next_id = (*next_id).saturating_add(1).max(1);
         id
     }
 
@@ -163,29 +197,34 @@ impl FloatingHostRegistry {
     }
 
     /// Creates and fully configures a host without inserting it into the committed registry.
+    #[cfg(test)]
     pub(crate) fn prepare_new(
-        &mut self,
+        &self,
         surface: Rc<DockSurfaceView>,
         bounds: Rect,
         owner: &std::rc::Weak<crate::DockingControl>,
     ) -> Result<PreparedFloatingHost, DockLayoutError> {
-        let id = self.allocate_id();
+        let mut next_id = self.next_id;
+        let id = Self::allocate_id(&mut next_id);
         let host = (self.factory)()?;
         Self::configure_host(&host, &surface, bounds, close_handler(owner, id));
         Ok(PreparedFloatingHost {
             id,
+            root_index: 0,
             bounds,
             surface,
             host,
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn commit_prepared(
         &mut self,
         prepared: PreparedFloatingHost,
         root_index: usize,
     ) -> FloatingHostId {
         let id = prepared.id;
+        self.next_id = self.next_id.max(id.0.saturating_add(1).max(1));
         self.hosts.push(FloatingHostState {
             id,
             root_index,
@@ -202,36 +241,58 @@ impl FloatingHostRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn sync(
         &mut self,
         specs: &[(Rect, Rc<DockSurfaceView>)],
         owner: &std::rc::Weak<crate::DockingControl>,
     ) -> Result<(), DockLayoutError> {
+        let prepared = self.prepare_sync(specs, owner)?;
+        self.commit_sync(prepared);
+        Ok(())
+    }
+
+    /// Plans synchronization against candidate floating surfaces without changing committed
+    /// native hosts or the registry. New hosts are configured but remain hidden and unregistered.
+    pub(crate) fn prepare_sync(
+        &self,
+        specs: &[(Rect, Rc<DockSurfaceView>)],
+        owner: &std::rc::Weak<crate::DockingControl>,
+    ) -> Result<PreparedFloatingHostSync, DockLayoutError> {
         if !self.hosting_enabled {
-            return Ok(());
+            return Ok(PreparedFloatingHostSync::empty(self.next_id));
         }
+        let mut next_id = self.next_id;
         let mut used = Vec::with_capacity(specs.len());
+        let mut updates = Vec::with_capacity(specs.len());
+        let mut new_hosts: Vec<PreparedFloatingHost> = Vec::new();
         for (index, (bounds, surface)) in specs.iter().enumerate() {
-            if let Some(host_index) = self
+            if let Some(host) = self
                 .hosts
                 .iter()
-                .position(|host| Rc::ptr_eq(&host.surface, surface))
+                .find(|host| Rc::ptr_eq(&host.surface, surface))
             {
-                let host = &mut self.hosts[host_index];
-                host.root_index = index;
-                host.bounds = *bounds;
-                host.surface = surface.clone();
-                host.host.set_bounds(*bounds);
-                let content: Rc<dyn UIElementExt> = surface.clone();
-                host.host.set_content(content);
-                host.host
-                    .set_close_request_handler(Some(close_handler(owner, host.id)));
+                updates.push(PreparedExistingHostUpdate {
+                    id: host.id,
+                    root_index: index,
+                    bounds: *bounds,
+                    surface: surface.clone(),
+                    close_handler: close_handler(owner, host.id),
+                });
                 used.push(host.id);
             } else {
-                let host_id = self.allocate_id();
-                let host = (self.factory)()?;
+                let host_id = Self::allocate_id(&mut next_id);
+                let host = match (self.factory)() {
+                    Ok(host) => host,
+                    Err(error) => {
+                        for prepared in new_hosts {
+                            prepared.abort();
+                        }
+                        return Err(error);
+                    }
+                };
                 Self::configure_host(&host, surface, *bounds, close_handler(owner, host_id));
-                self.hosts.push(FloatingHostState {
+                new_hosts.push(PreparedFloatingHost {
                     id: host_id,
                     root_index: index,
                     bounds: *bounds,
@@ -241,24 +302,68 @@ impl FloatingHostRegistry {
                 used.push(host_id);
             }
         }
+        let stale_ids = self
+            .hosts
+            .iter()
+            .filter(|host| !used.contains(&host.id))
+            .map(|host| host.id)
+            .collect();
+        Ok(PreparedFloatingHostSync {
+            next_id,
+            updates,
+            new_hosts,
+            stale_ids,
+        })
+    }
+
+    /// Commits a prepared host synchronization after the retained runtime/model commit has
+    /// succeeded. There are no recoverable Docking errors in this phase.
+    pub(crate) fn commit_sync(&mut self, prepared: PreparedFloatingHostSync) {
+        if !self.hosting_enabled {
+            return;
+        }
+        self.next_id = self.next_id.max(prepared.next_id);
+
+        for update in prepared.updates {
+            if let Some(host) = self.hosts.iter_mut().find(|host| host.id == update.id) {
+                host.root_index = update.root_index;
+                host.bounds = update.bounds;
+                host.surface = update.surface.clone();
+                host.host.set_bounds(update.bounds);
+                let content: Rc<dyn UIElementExt> = update.surface.clone();
+                host.host.set_content(content);
+                host.host
+                    .set_close_request_handler(Some(update.close_handler));
+            }
+        }
+
+        let mut new_ids = Vec::new();
+        for host in prepared.new_hosts {
+            new_ids.push(host.id);
+            self.hosts.push(FloatingHostState {
+                id: host.id,
+                root_index: host.root_index,
+                bounds: host.bounds,
+                surface: host.surface,
+                host: host.host,
+            });
+        }
+
+        let stale_ids = prepared.stale_ids;
         let mut retained = Vec::with_capacity(self.hosts.len());
-        let mut stale = Vec::new();
         for host in self.hosts.drain(..) {
-            if used.contains(&host.id) {
-                retained.push(host);
+            if stale_ids.contains(&host.id) {
+                host.host.set_close_request_handler(None);
+                host.host.close();
             } else {
-                stale.push(host);
+                retained.push(host);
             }
         }
         self.hosts = retained;
-        for host in stale {
-            host.host.set_close_request_handler(None);
-            host.host.close();
-        }
-        for id in used {
+
+        for id in new_ids {
             self.show(id);
         }
-        Ok(())
     }
 
     pub(crate) fn root_index_for_host(&self, id: FloatingHostId) -> Option<usize> {

@@ -1276,6 +1276,73 @@ fn selected_content_is_arranged_below_top_strip_and_unselected_is_zero_clipped()
 }
 
 #[test]
+fn repeated_selection_retains_page_owners_and_only_switches_active_rectangles() {
+    let first = CustomTabViewItem::new_item();
+    let second = CustomTabViewItem::new_item();
+    let third = CustomTabViewItem::new_item();
+    let first_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    let second_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    let third_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    first.set_content(first_content.clone());
+    second.set_content(second_content.clone());
+    third.set_content(third_content.clone());
+    let view = CustomTabView::new_view();
+    view.set_children(vec![first, second, third]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    let size = Size {
+        width: 320.0,
+        height: 160.0,
+    };
+    layout_root(&root, size);
+    let first_parent = first_content.visual_parent().expect("first content parent");
+    let second_parent = second_content
+        .visual_parent()
+        .expect("second content parent");
+    let third_parent = third_content.visual_parent().expect("third content parent");
+
+    assert!(view.select_index(1));
+    layout_root(&root, size);
+    assert_eq!(first_content.arranged_width(), Some(0.0));
+    assert_eq!(second_content.arranged_width(), Some(320.0));
+    assert_eq!(third_content.arranged_width(), Some(0.0));
+    assert!(
+        first_content
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &first_parent))
+    );
+    assert!(
+        second_content
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &second_parent))
+    );
+    assert!(
+        third_content
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &third_parent))
+    );
+
+    assert!(view.select_index(2));
+    layout_root(&root, size);
+    assert_eq!(second_content.arranged_width(), Some(0.0));
+    assert_eq!(third_content.arranged_width(), Some(320.0));
+    assert!(
+        first_content
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &first_parent))
+    );
+    assert!(
+        second_content
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &second_parent))
+    );
+    assert!(
+        third_content
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &third_parent))
+    );
+}
+
+#[test]
 fn close_affordance_is_composed_and_respects_presentation() {
     let item = CustomTabViewItem::new_item();
     item.set_header("document".to_string());

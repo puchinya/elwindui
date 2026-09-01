@@ -11,8 +11,15 @@
   once, and suppresses source echoes/latest-only reentrant updates.
 - The runtime retains item wrappers, group views, split Grids, and splitter instances. It realizes
   N-pane splits with N-1 `CustomSplitter`s and uses explicit detach-before-attach ownership.
+- Structural model application is staged through a private `ReconcilePlan`; native floating hosts
+  are prepared outside the committed registry and are inserted/shown only after the runtime/model
+  commit. Failed preparation leaves committed wrapper parents, runtime maps, and existing hosts
+  unchanged; no old-model rollback is used.
 - CustomTabView selection/close/tab-drag callbacks and CustomSplitter callbacks are wired through
   weak Docking owners. Drag preview is a real visual adornment and does not reparent page content.
+- Normal tab selection uses a retained value-only path, and live splitter movement updates retained
+  Grid tracks with arrange invalidation. CustomTabView caches private presenter references and the
+  content presenter measures only the selected page while retaining hidden page ownership.
 - Four custom auto-hide strips, icon/title entries, a single wrapper-hosting overlay pane, and pin
   affordances are present per Dock surface.
 - Drop discovery carries the selected `RootKind`, target group, and exact surface-local preview
@@ -30,7 +37,7 @@
 
 ## Tests and verification state
 
-The focused `elwindui-docking` suite currently has 55 passing tests covering default
+The focused `elwindui-docking` suite currently has 58 passing tests covering default
 initialization/reset, activation, close/reopen, all four split/edge sides, snapshot round-trip,
 auto-hide state, typed invalid values, latest-only source logic, removed-authored-group repair,
 adjacent split-weight transformation, generated-group drag targets, retained runtime presentation,

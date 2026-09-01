@@ -149,26 +149,59 @@ impl DockingControl {
         self.__content_opt()
     }
 
-    fn apply_model(&self, model: DockLayoutModel) -> Result<(), DockLayoutError> {
-        if let Some(realization) = self.runtime_realization() {
-            let previous = self.last_applied_model();
-            if let Err(error) = realization.borrow_mut().reconcile(&model) {
-                // Native floating-host creation happens at the end of reconciliation. If it
-                // fails, restore the committed projection before returning the typed error so
-                // the source model and its retained ownership remain unchanged.
-                let _ = realization.borrow_mut().reconcile(&previous);
-                return Err(error);
-            }
-        }
+    fn apply_model(
+        &self,
+        model: DockLayoutModel,
+    ) -> Result<Option<crate::runtime::PreparedFloatingHostSync>, DockLayoutError> {
+        let host_sync = if let Some(realization) = self.runtime_realization() {
+            Some(realization.borrow_mut().apply_staged(&model)?)
+        } else {
+            None
+        };
         self.set_last_applied_model(model.clone());
         self.set_layout(model);
-        Ok(())
+        Ok(host_sync)
     }
 
     fn commit_user_model(&self, model: DockLayoutModel) -> Result<(), DockLayoutError> {
-        self.apply_model(model.clone())?;
+        let runtime_before = self.runtime_realization();
+        let host_sync = self.apply_model(model.clone())?;
+        if let Some(callback) = self.layout_change_callback() {
+            callback(model.clone());
+        }
+        if let Some(host_sync) = host_sync {
+            let runtime_is_current = runtime_before.as_ref().is_some_and(|runtime| {
+                self.runtime_realization()
+                    .is_some_and(|current| Rc::ptr_eq(runtime, &current))
+            });
+            if runtime_is_current && self.last_applied_model() == model {
+                runtime_before
+                    .expect("runtime was present when the staged model was prepared")
+                    .borrow_mut()
+                    .commit_floating_host_sync(host_sync);
+            } else {
+                // A user callback may unmount the owner or assign a newer source value. The
+                // prepared native resources belong to the abandoned transaction in that case.
+                host_sync.abort();
+            }
+        }
+        Ok(())
+    }
+
+    fn commit_user_value_only(&self, model: DockLayoutModel) {
+        self.set_last_applied_model(model.clone());
+        self.set_layout(model.clone());
         if let Some(callback) = self.layout_change_callback() {
             callback(model);
+        }
+    }
+
+    fn commit_source_model(&self, model: DockLayoutModel) -> Result<(), DockLayoutError> {
+        let host_sync = self.apply_model(model)?;
+        if let (Some(realization), Some(host_sync)) = (self.runtime_realization(), host_sync) {
+            realization
+                .borrow_mut()
+                .commit_floating_host_sync(host_sync);
         }
         Ok(())
     }
@@ -229,16 +262,9 @@ impl DockingControl {
                 realization.borrow_mut().cancel_transient();
             }
             let normalized = self.attach_current_default(candidate);
-            let result = self
-                .runtime_realization()
-                .map(|realization| realization.borrow_mut().reconcile(&normalized));
-            if let Some(Err(error)) = result {
+            if let Err(error) = self.commit_source_model(normalized.clone()) {
                 self.set_applying_source(false);
                 panic!("failed to apply source DockLayoutModel: {error}");
-            }
-            self.set_last_applied_model(normalized.clone());
-            if normalized != self.layout() {
-                self.set_layout(normalized);
             }
             let pending = self.pending_source();
             self.set_pending_source(None);
@@ -310,11 +336,21 @@ impl DockingControl {
         else {
             return;
         };
-        let Ok(next) = self.layout().with_item_activated(&item) else {
+        let current = self.layout();
+        let Ok(next) = current.with_item_activated(&item) else {
             return;
         };
-        if next != self.layout() {
-            let _ = self.commit_user_model(next);
+        if next != current {
+            let fast_path = self.runtime_realization().is_some_and(|realization| {
+                realization
+                    .borrow_mut()
+                    .apply_selection_fast_path(&current, &next, &group, index, &item)
+            });
+            if fast_path {
+                self.commit_user_value_only(next);
+            } else {
+                let _ = self.commit_user_model(next);
+            }
         }
     }
 
@@ -464,47 +500,16 @@ impl DockingControl {
             return;
         }
 
-        let (next, prepared) = {
+        let next = {
             let mut current = realization.borrow_mut();
             let Ok(next) = current.floating_candidate(bounds) else {
                 current.finish_drag(false);
                 return;
             };
-            let prepared = match current.prepare_floating_host(bounds) {
-                Ok(prepared) => prepared,
-                Err(_) => {
-                    current.finish_drag(false);
-                    return;
-                }
-            };
-            (next, prepared)
+            next
         };
-        let prepared_surface = prepared.surface.clone();
-        let previous = self.last_applied_model();
-        if realization
-            .borrow_mut()
-            .reconcile_with_prepared(&next, prepared_surface)
-            .is_err()
-        {
-            prepared.abort();
-            let mut current = realization.borrow_mut();
-            current.cancel_transient();
-            let _ = current.reconcile(&previous);
-            return;
-        }
-        let root_index = next.snapshot().floating_roots.len().saturating_sub(1);
-        let mut current = realization.borrow_mut();
-        current.finish_drag(true);
-        drop(current);
-        self.set_last_applied_model(next.clone());
-        self.set_layout(next.clone());
-        if let Some(callback) = self.layout_change_callback() {
-            callback(next);
-        }
-        let id = realization
-            .borrow_mut()
-            .commit_prepared_host(prepared, root_index);
-        realization.borrow().show_floating_host(id);
+        let result = self.commit_user_model(next);
+        realization.borrow_mut().finish_drag(result.is_ok());
     }
 
     pub(crate) fn handle_splitter_started(
@@ -545,7 +550,7 @@ impl DockingControl {
         if let Some(next) = next
             && next != self.layout()
         {
-            let _ = self.commit_user_model(next);
+            self.commit_user_value_only(next);
         }
     }
 

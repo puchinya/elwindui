@@ -18,6 +18,7 @@ pub(crate) use drag::DragSourceGeometry;
 #[cfg(test)]
 pub(crate) use drag::{DragSession, ResolvedDockTarget};
 pub(crate) use floating_window::FloatingHostId;
+pub(crate) use floating_window::PreparedFloatingHostSync;
 #[cfg(test)]
 pub(crate) use floating_window::{FloatingHostFactory, FloatingHostRegistry, FloatingWindowHost};
 #[cfg(test)]

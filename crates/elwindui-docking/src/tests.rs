@@ -1169,7 +1169,7 @@ fn floating_host_prepare_failure_keeps_the_committed_registry_empty() {
             reason: "test factory failure".to_owned(),
         })
     });
-    let mut registry = FloatingHostRegistry::with_factory(factory);
+    let registry = FloatingHostRegistry::with_factory(factory);
     let surface = DockSurfaceView::empty_surface();
     let owner = std::rc::Weak::<DockingControl>::new();
     let error = match registry.prepare_new(
@@ -1250,6 +1250,197 @@ fn floating_prepare_failure_keeps_docking_model_and_wrapper_parent_unchanged() {
 }
 
 #[test]
+fn late_reconcile_plan_failure_preserves_the_committed_runtime_projection() {
+    let docking = mounted_default_docking();
+    let tab = find_all::<CustomTabView>(docking.as_ref())
+        .into_iter()
+        .next()
+        .expect("runtime group should be visible");
+    assert!(tab.apply_template());
+    let wrapper = find_all::<CustomTabViewItem>(docking.as_ref())
+        .into_iter()
+        .next()
+        .expect("runtime group should contain a stable wrapper");
+    let wrapper_node: Rc<dyn UIElementExt> = wrapper.clone();
+    let original_parent = wrapper_node
+        .visual_parent()
+        .expect("wrapper should have an owner before planning");
+    let original_model = docking.layout();
+    let candidate = original_model
+        .with_item_closed(&item("first"))
+        .expect("candidate should be valid");
+    let realization = docking.realization_for_test().unwrap();
+    let original_surface = realization
+        .borrow()
+        .surface_for_test(&RootKind::Main)
+        .expect("main surface should be retained");
+    let original_group = realization
+        .borrow()
+        .group_for_test(&SnapshotGroupKey::Authored(group("documents")))
+        .expect("authored group should be retained");
+    let original_root = realization
+        .borrow()
+        .main_runtime_root_for_test()
+        .expect("main runtime root should be retained");
+    let original_owner = realization
+        .borrow()
+        .owner_for_test(&item("first"))
+        .expect("wrapper should have a committed owner");
+    let original_reconciles = realization.borrow().full_reconcile_count_for_test();
+    let original_surface_count = realization.borrow().surface_registry_count_for_test();
+
+    let result = {
+        let mut realization = realization.borrow_mut();
+        realization.fail_after_reconcile_plan_for_test();
+        realization.apply_staged(&candidate)
+    };
+
+    assert!(matches!(
+        result,
+        Err(DockLayoutError::InvalidSnapshot { .. })
+    ));
+    assert_eq!(docking.layout(), original_model);
+    assert!(
+        wrapper_node
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &original_parent))
+    );
+    let realization = docking.realization_for_test().unwrap();
+    assert!(Rc::ptr_eq(
+        &realization
+            .borrow()
+            .surface_for_test(&RootKind::Main)
+            .unwrap(),
+        &original_surface
+    ));
+    assert!(Rc::ptr_eq(
+        &realization
+            .borrow()
+            .group_for_test(&SnapshotGroupKey::Authored(group("documents")))
+            .unwrap(),
+        &original_group
+    ));
+    assert!(Rc::ptr_eq(
+        &realization.borrow().main_runtime_root_for_test().unwrap(),
+        &original_root
+    ));
+    assert_eq!(
+        realization.borrow().owner_for_test(&item("first")),
+        Some(original_owner)
+    );
+    assert_eq!(
+        realization.borrow().full_reconcile_count_for_test(),
+        original_reconciles
+    );
+    assert_eq!(
+        realization.borrow().surface_registry_count_for_test(),
+        original_surface_count
+    );
+}
+
+#[test]
+fn late_plan_failure_does_not_touch_an_existing_floating_host() {
+    let docking = mounted_default_docking();
+    let hosts = Rc::new(RefCell::new(Vec::new()));
+    docking.install_floating_host_factory_for_test(individual_fake_factory(hosts.clone()));
+    let first_floating = docking
+        .layout()
+        .with_item_moved(
+            &item("first"),
+            DockPlacement::Floating {
+                bounds: Rect {
+                    x: 900.0,
+                    y: 100.0,
+                    width: 420.0,
+                    height: 260.0,
+                },
+            },
+        )
+        .expect("first floating root should be valid");
+    docking.set_layout(first_floating);
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
+    let host_a = hosts.borrow()[0].clone();
+    let original_bounds = host_a.log.bounds.get();
+    let original_content = host_a.log.content.borrow().clone();
+    let original_handler = host_a.log.close_handler.borrow().clone();
+    host_a.log.events.borrow_mut().clear();
+    let wrapper = find_all::<CustomTabViewItem>(docking.as_ref())
+        .into_iter()
+        .next()
+        .expect("runtime should contain a stable wrapper");
+    let wrapper_node: Rc<dyn UIElementExt> = wrapper;
+    let original_parent = wrapper_node
+        .visual_parent()
+        .expect("wrapper should be hosted");
+    let original_model = docking.layout();
+    let candidate = original_model
+        .with_item_moved(
+            &item("second"),
+            DockPlacement::Floating {
+                bounds: Rect {
+                    x: 1400.0,
+                    y: 100.0,
+                    width: 360.0,
+                    height: 220.0,
+                },
+            },
+        )
+        .expect("second floating root should be valid");
+    let realization = docking.realization_for_test().unwrap();
+    let result = {
+        let mut realization = realization.borrow_mut();
+        realization.fail_after_reconcile_plan_for_test();
+        realization.apply_staged(&candidate)
+    };
+
+    assert!(result.is_err());
+    assert_eq!(docking.layout(), original_model);
+    assert!(
+        wrapper_node
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &original_parent))
+    );
+    assert!(host_a.log.events.borrow().is_empty());
+    assert_eq!(host_a.log.bounds.get(), original_bounds);
+    assert!(
+        host_a
+            .log
+            .content
+            .borrow()
+            .as_ref()
+            .zip(original_content.as_ref())
+            .is_some_and(|(current, original)| Rc::ptr_eq(current, original))
+    );
+    assert!(
+        host_a
+            .log
+            .close_handler
+            .borrow()
+            .as_ref()
+            .zip(original_handler.as_ref())
+            .is_some_and(|(current, original)| Rc::ptr_eq(current, original))
+    );
+    assert_eq!(realization.borrow().floating_host_count_for_test(), 1);
+    assert_eq!(hosts.borrow().len(), 2);
+    assert_eq!(hosts.borrow()[1].log.close_count.get(), 1);
+    assert!(
+        !hosts.borrow()[1]
+            .log
+            .events
+            .borrow()
+            .iter()
+            .any(|event| *event == "show")
+    );
+}
+
+#[test]
 fn floating_host_prepare_commit_show_is_staged_and_ordered() {
     let hosts = Rc::new(RefCell::new(Vec::new()));
     let log = FakeHostLog::new();
@@ -1285,7 +1476,7 @@ fn aborting_a_prepared_floating_host_clears_handler_and_closes_it() {
     let hosts = Rc::new(RefCell::new(Vec::new()));
     let log = FakeHostLog::new();
     let factory = fake_factory(hosts.clone(), log.clone());
-    let mut registry = FloatingHostRegistry::with_factory(factory);
+    let registry = FloatingHostRegistry::with_factory(factory);
     let owner = std::rc::Weak::<DockingControl>::new();
     let prepared = registry
         .prepare_new(
@@ -1499,6 +1690,102 @@ fn floating_host_ids_follow_their_surfaces_when_an_earlier_root_is_removed() {
     assert_eq!(registry.root_index_for_host(ids[1]), Some(0));
     assert_eq!(hosts.borrow()[0].log.close_count.get(), 1);
     assert_eq!(hosts.borrow()[1].log.close_count.get(), 0);
+}
+
+#[test]
+fn floating_host_sync_preparation_leaves_existing_hosts_untouched() {
+    let hosts = Rc::new(RefCell::new(Vec::new()));
+    let mut registry = FloatingHostRegistry::with_factory(individual_fake_factory(hosts.clone()));
+    let owner = std::rc::Weak::<DockingControl>::new();
+    let surface_a = DockSurfaceView::empty_surface();
+    let surface_b = DockSurfaceView::empty_surface();
+    registry
+        .sync(
+            &[(
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 320.0,
+                    height: 220.0,
+                },
+                surface_a.clone(),
+            )],
+            &owner,
+        )
+        .expect("initial host should synchronize");
+    let host_a = hosts.borrow()[0].clone();
+    let host_a_id = registry.host_ids()[0];
+    let original_bounds = host_a.log.bounds.get();
+    let original_content = host_a.log.content.borrow().clone();
+    let original_handler = host_a.log.close_handler.borrow().clone();
+    host_a.log.events.borrow_mut().clear();
+
+    let prepared = registry
+        .prepare_sync(
+            &[
+                (
+                    Rect {
+                        x: 40.0,
+                        y: 50.0,
+                        width: 420.0,
+                        height: 260.0,
+                    },
+                    surface_a,
+                ),
+                (
+                    Rect {
+                        x: 600.0,
+                        y: 80.0,
+                        width: 300.0,
+                        height: 200.0,
+                    },
+                    surface_b,
+                ),
+            ],
+            &owner,
+        )
+        .expect("host sync should prepare");
+
+    assert!(host_a.log.events.borrow().is_empty());
+    assert_eq!(host_a.log.bounds.get(), original_bounds);
+    assert!(
+        host_a
+            .log
+            .content
+            .borrow()
+            .as_ref()
+            .zip(original_content.as_ref())
+            .is_some_and(|(current, original)| Rc::ptr_eq(current, original))
+    );
+    assert!(
+        host_a
+            .log
+            .close_handler
+            .borrow()
+            .as_ref()
+            .zip(original_handler.as_ref())
+            .is_some_and(|(current, original)| Rc::ptr_eq(current, original))
+    );
+    assert_eq!(registry.root_index_for_host(host_a_id), Some(0));
+    assert_eq!(registry.host_count(), 1);
+
+    let staged = hosts.borrow()[1].clone();
+    assert_eq!(
+        *staged.log.events.borrow(),
+        vec!["set_bounds", "set_content", "set_close_handler"]
+    );
+    prepared.abort();
+    assert_eq!(staged.log.close_count.get(), 1);
+    assert!(
+        !staged
+            .log
+            .events
+            .borrow()
+            .iter()
+            .any(|event| *event == "show")
+    );
+    assert_eq!(registry.host_count(), 1);
+    assert_eq!(registry.root_index_for_host(host_a_id), Some(0));
 }
 
 #[test]
@@ -2043,15 +2330,79 @@ fn retained_group_callbacks_commit_selection_and_close_once() {
         .downcast_ref::<CustomTabView>()
         .expect("runtime group is a CustomTabView");
     assert!(tab.apply_template());
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
+    let wrappers = find_all::<CustomTabViewItem>(docking.as_ref());
+    assert_eq!(wrappers.len(), 2);
+    let first_wrapper_parent = (wrappers[0].clone() as Rc<dyn UIElementExt>)
+        .visual_parent()
+        .expect("first wrapper should be hosted");
+    let second_wrapper_parent = (wrappers[1].clone() as Rc<dyn UIElementExt>)
+        .visual_parent()
+        .expect("second wrapper should be hosted");
     let changes = std::rc::Rc::new(Cell::new(0));
     let changes_for_callback = changes.clone();
     docking.set_on_layout_change(Box::new(move |_| {
         changes_for_callback.set(changes_for_callback.get() + 1);
     }));
 
-    assert!(tab.select_index(1));
+    let full_reconciles_before_selection = docking
+        .realization_for_test()
+        .expect("mounted docking has a realization")
+        .borrow()
+        .full_reconcile_count_for_test();
+    let second_bounds =
+        SurfaceRegistry::bounds_in_host_root(&(wrappers[1].clone() as Rc<dyn UIElementExt>))
+            .expect("second tab should be arranged");
+    let second_center = Point {
+        x: second_bounds.x + second_bounds.width * 0.5,
+        y: second_bounds.y + second_bounds.height * 0.5,
+    };
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(
+            RawPointerEventKind::Pressed(MouseButton::Left),
+            second_center,
+        ),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(
+            RawPointerEventKind::Released(MouseButton::Left),
+            second_center,
+        ),
+    );
     assert!(docking.layout().is_item_active(&item("second")));
     assert_eq!(changes.get(), 1);
+    assert_eq!(
+        docking
+            .realization_for_test()
+            .unwrap()
+            .borrow()
+            .full_reconcile_count_for_test(),
+        full_reconciles_before_selection,
+        "selection-only changes must not reconcile the retained Dock runtime"
+    );
+    assert!(
+        wrappers[0]
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &first_wrapper_parent))
+    );
+    assert!(
+        wrappers[1]
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &second_wrapper_parent))
+    );
 
     assert!(tab.request_close(1));
     assert!(docking.layout().is_item_closed(&item("second")));
@@ -2298,7 +2649,7 @@ fn actual_tab_float_prepare_failure_leaves_model_and_wrapper_parent_unchanged() 
 }
 
 #[test]
-fn actual_tab_float_reconcile_failure_aborts_prepared_host_without_commit() {
+fn actual_tab_float_late_plan_failure_aborts_prepared_host_without_commit() {
     let docking = mounted_default_docking();
     let hosts = Rc::new(RefCell::new(Vec::new()));
     let log = FakeHostLog::new();
@@ -2337,7 +2688,9 @@ fn actual_tab_float_reconcile_failure_aborts_prepared_host_without_commit() {
         .borrow_mut()
         .begin_drag(&original, item("first"), start)
         .expect("source geometry should be available");
-    realization.borrow_mut().fail_next_reconcile_for_test();
+    realization
+        .borrow_mut()
+        .fail_after_reconcile_plan_for_test();
     docking.handle_tab_drag_completed(
         SnapshotGroupKey::Authored(group("documents")),
         TabDragCompletedEventArgs {
@@ -2381,7 +2734,7 @@ fn actual_tab_float_uses_source_geometry_and_shows_after_commit() {
     let docking = mounted_default_docking();
     let hosts = Rc::new(RefCell::new(Vec::new()));
     let log = FakeHostLog::new();
-    docking.install_floating_host_factory_for_test(fake_factory(hosts.clone(), log));
+    docking.install_floating_host_factory_for_test(fake_factory(hosts.clone(), log.clone()));
     let root: Rc<dyn UIElementExt> = docking.clone();
     root.set_coordinate_host(Some(Rc::new(OffsetCoordinateHost {
         screen_origin: Point { x: 0.0, y: 0.0 },
@@ -2424,8 +2777,10 @@ fn actual_tab_float_uses_source_geometry_and_shows_after_commit() {
     };
     let changes = Rc::new(Cell::new(0));
     let changes_for_callback = changes.clone();
+    let log_for_callback = log.clone();
     docking.set_on_layout_change(Box::new(move |_| {
         changes_for_callback.set(changes_for_callback.get() + 1);
+        log_for_callback.events.borrow_mut().push("layout_callback");
     }));
     let dispatcher = PointerDispatcher::new();
     let focus = FocusTracker::new();
@@ -2480,6 +2835,7 @@ fn actual_tab_float_uses_source_geometry_and_shows_after_commit() {
             "set_bounds",
             "set_content",
             "set_close_handler",
+            "layout_callback",
             "show"
         ]
     );
@@ -2656,6 +3012,10 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
     docking.set_on_layout_change(Box::new(move |_| {
         changes_for_callback.set(changes_for_callback.get() + 1);
     }));
+    let realization = docking
+        .realization_for_test()
+        .expect("mounted docking has a realization");
+    let full_reconciles_before_drag = realization.borrow().full_reconcile_count_for_test();
     let dispatcher = PointerDispatcher::new();
     let focus = FocusTracker::new();
     dispatcher.handle(
@@ -2663,23 +3023,27 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
         &focus,
         pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
     );
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(
-            RawPointerEventKind::Moved,
-            Point {
-                x: start.x + 36.0,
-                y: start.y,
-            },
-        ),
-    );
-    let realization = docking
-        .realization_for_test()
-        .expect("mounted docking has a realization");
+    for step in 1..=20 {
+        dispatcher.handle(
+            &root,
+            &focus,
+            pointer_event(
+                RawPointerEventKind::Moved,
+                Point {
+                    x: start.x + 36.0 * step as f32 / 20.0,
+                    y: start.y,
+                },
+            ),
+        );
+    }
     assert!(realization.borrow().active_splitter_for_test());
     assert_eq!(docking.layout(), original);
     assert_ne!(*grid.columns.borrow(), original_tracks);
+    assert_eq!(
+        realization.borrow().full_reconcile_count_for_test(),
+        full_reconciles_before_drag,
+        "splitter preview must not reconcile the Dock runtime"
+    );
     dispatcher.handle(
         &root,
         &focus,
@@ -2694,6 +3058,11 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
     assert!(!realization.borrow().active_splitter_for_test());
     assert_ne!(docking.layout(), original);
     assert_eq!(changes.get(), 1);
+    assert_eq!(
+        realization.borrow().full_reconcile_count_for_test(),
+        full_reconciles_before_drag,
+        "splitter completion must use the value-only path"
+    );
 
     let canceled = mounted_three_pane_docking();
     let canceled_original = canceled.layout();
@@ -2720,6 +3089,10 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
         .expect("canceled splitter should have a parent");
     let canceled_grid = canceled_grid_node.as_any().downcast_ref::<Grid>().unwrap();
     let canceled_tracks = canceled_grid.columns.borrow().clone();
+    let canceled_realization = canceled.realization_for_test().unwrap();
+    let canceled_full_reconciles = canceled_realization
+        .borrow()
+        .full_reconcile_count_for_test();
     let canceled_changes = Rc::new(Cell::new(0));
     let canceled_changes_for_callback = canceled_changes.clone();
     canceled.set_on_layout_change(Box::new(move |_| {
@@ -2751,6 +3124,12 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
     assert_eq!(canceled.layout(), canceled_original);
     assert_eq!(*canceled_grid.columns.borrow(), canceled_tracks);
     assert_eq!(canceled_changes.get(), 0);
+    assert_eq!(
+        canceled_realization
+            .borrow()
+            .full_reconcile_count_for_test(),
+        canceled_full_reconciles
+    );
 }
 
 #[test]

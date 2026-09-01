@@ -66,6 +66,10 @@ pub struct CustomTabView {
     #[state(default = Vec::new())]
     bound_items: Vec<std::rc::Weak<CustomTabViewItem>>,
     #[state(default = None)]
+    strip_presenter: Option<std::rc::Weak<CustomTabStripPresenter>>,
+    #[state(default = None)]
+    content_presenter: Option<std::rc::Weak<CustomTabContentPresenter>>,
+    #[state(default = None)]
     tab_gesture: Option<TabGesture>,
     #[computed(expr = if tab_strip_position == TabStripPosition::Top { 0 } else { 1 })]
     tab_strip_row: i32,
@@ -119,6 +123,7 @@ impl CustomTabView {
     #[overrides]
     fn on_apply_template(&self) {
         self.set_clip_to_bounds(Some(true));
+        self.cache_presenters();
         self.reconcile_children();
     }
 }
@@ -276,7 +281,7 @@ impl CustomTabView {
                 .zip(children.iter())
                 .all(|(old, new)| old.upgrade().is_some_and(|old| Rc::ptr_eq(&old, new)));
         if unchanged {
-            self.sync_presenters(&children);
+            self.sync_presentation(&children);
             return;
         }
 
@@ -327,21 +332,62 @@ impl CustomTabView {
                 .all(|(old, new)| Rc::ptr_eq(old, new));
         if !template_matches {
             self.set_template_items(children.clone());
-            self.sync_presenters(&children);
+            self.sync_presenters_structural(&children);
             return;
         }
-        self.sync_presenters(&children);
+        self.sync_presenters_structural(&children);
     }
 
-    fn sync_presenters(&self, children: &[Rc<CustomTabViewItem>]) {
+    fn cache_presenters(&self) {
+        let strip = super::core::visual_tree::find_all::<CustomTabStripPresenter>(self)
+            .into_iter()
+            .find_map(|node| {
+                node.as_any()
+                    .is::<CustomTabStripPresenter>()
+                    .then(|| Rc::downgrade(&concrete_element::<CustomTabStripPresenter>(node)))
+            });
+        let content = super::core::visual_tree::find_all::<CustomTabContentPresenter>(self)
+            .into_iter()
+            .find_map(|node| {
+                node.as_any()
+                    .is::<CustomTabContentPresenter>()
+                    .then(|| Rc::downgrade(&concrete_element::<CustomTabContentPresenter>(node)))
+            });
+        self.set_strip_presenter(strip);
+        self.set_content_presenter(content);
+    }
+
+    fn presenters(
+        &self,
+    ) -> (
+        Option<Rc<CustomTabStripPresenter>>,
+        Option<Rc<CustomTabContentPresenter>>,
+    ) {
+        let strip = self
+            .strip_presenter()
+            .and_then(|presenter| presenter.upgrade());
+        let content = self
+            .content_presenter()
+            .and_then(|presenter| presenter.upgrade());
+        if strip.is_none() || content.is_none() {
+            self.cache_presenters();
+            return (
+                self.strip_presenter()
+                    .and_then(|presenter| presenter.upgrade()),
+                self.content_presenter()
+                    .and_then(|presenter| presenter.upgrade()),
+            );
+        }
+        (strip, content)
+    }
+
+    fn sync_presenters_structural(&self, children: &[Rc<CustomTabViewItem>]) {
         let selected = self.selected_index();
         let position = self.tab_strip_position();
         let close = self.close_button_presentation();
 
-        for node in super::core::visual_tree::find_all::<CustomTabStripPresenter>(self) {
-            let Some(presenter) = node.as_any().downcast_ref::<CustomTabStripPresenter>() else {
-                continue;
-            };
+        let (strip_presenter, content_presenter) = self.presenters();
+        if let Some(presenter) = strip_presenter {
             presenter.set_items(children.to_vec());
             presenter.set_selected_index(selected);
             presenter.set_tab_strip_position(position);
@@ -350,19 +396,38 @@ impl CustomTabView {
                 .as_ui_element()
                 .set_attached::<i32>("Grid", "row", self.tab_strip_row());
             presenter.reconcile_items();
-            break;
         }
-        for node in super::core::visual_tree::find_all::<CustomTabContentPresenter>(self) {
-            let Some(presenter) = node.as_any().downcast_ref::<CustomTabContentPresenter>() else {
-                continue;
-            };
+        if let Some(presenter) = content_presenter {
             presenter.set_items(children.to_vec());
             presenter.set_selected_index(selected);
             presenter
                 .as_ui_element()
                 .set_attached::<i32>("Grid", "row", self.content_row());
             presenter.reconcile_contents();
-            break;
+        }
+        for (index, item) in children.iter().enumerate() {
+            item.set_presentation(index == selected, item.pointer_over(), position, close);
+        }
+    }
+
+    fn sync_presentation(&self, children: &[Rc<CustomTabViewItem>]) {
+        let selected = self.selected_index();
+        let position = self.tab_strip_position();
+        let close = self.close_button_presentation();
+        let (strip_presenter, content_presenter) = self.presenters();
+        if let Some(presenter) = strip_presenter {
+            presenter.set_selected_index(selected);
+            presenter.set_tab_strip_position(position);
+            presenter.set_close_button_presentation(close);
+            presenter
+                .as_ui_element()
+                .set_attached::<i32>("Grid", "row", self.tab_strip_row());
+        }
+        if let Some(presenter) = content_presenter {
+            presenter.set_selected_index(selected);
+            presenter
+                .as_ui_element()
+                .set_attached::<i32>("Grid", "row", self.content_row());
         }
         for (index, item) in children.iter().enumerate() {
             item.set_presentation(index == selected, item.pointer_over(), position, close);
@@ -370,9 +435,14 @@ impl CustomTabView {
     }
 
     fn validate_children(&self, children: &[Rc<CustomTabViewItem>]) {
-        let owner = super::core::visual_tree::find_all::<CustomTabStripPresenter>(self)
-            .into_iter()
-            .next();
+        let owner = self
+            .strip_presenter()
+            .and_then(|presenter| presenter.upgrade())
+            .or_else(|| {
+                self.cache_presenters();
+                self.strip_presenter()
+                    .and_then(|presenter| presenter.upgrade())
+            });
         for (index, child) in children.iter().enumerate() {
             assert!(
                 !children[..index]
@@ -382,9 +452,12 @@ impl CustomTabView {
             );
             if let Some(parent) = child.visual_parent() {
                 assert!(
-                    owner
-                        .as_ref()
-                        .is_some_and(|owner| Rc::ptr_eq(&parent, owner)),
+                    owner.as_ref().is_some_and(|owner| {
+                        parent
+                            .as_any()
+                            .downcast_ref::<CustomTabStripPresenter>()
+                            .is_some_and(|parent| std::ptr::eq(parent, owner.as_ref()))
+                    }),
                     "CustomTabViewItem is already owned by another Visual parent; detach it before attaching"
                 );
             }
@@ -594,6 +667,13 @@ fn concrete_tab_item(item: Rc<dyn CustomTabViewItemExt>) -> Rc<CustomTabViewItem
     // SAFETY: the checked Any type is exactly CustomTabViewItem, and the Rc strong count is
     // transferred from the erased pointer without changing ownership.
     unsafe { Rc::from_raw(raw as *const CustomTabViewItem) }
+}
+
+fn concrete_element<T: 'static>(element: Rc<dyn UIElementExt>) -> Rc<T> {
+    assert!(element.as_any().is::<T>());
+    let raw = Rc::into_raw(element) as *const ();
+    // SAFETY: the checked Any type is exactly T, and the erased Rc strong count is transferred.
+    unsafe { Rc::from_raw(raw as *const T) }
 }
 
 impl ListExt<dyn CustomTabViewItemExt> for CustomTabView {

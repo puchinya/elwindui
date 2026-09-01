@@ -40,6 +40,9 @@ capture, cancellation, root-relative position, and optional logical screen posit
 supplies splitter gestures. Split nodes with N children realize as one retained Grid with N panes and
 N-1 six-pixel `CustomSplitter`s. Splitter movement changes only transient Grid tracks; a successful
 completion writes adjacent normalized weights once, while cancellation restores the original tracks.
+Selection-only changes and completed adjacent split-weight changes update the retained runtime and
+bound value without rebuilding unchanged structural Dock content; live splitter movement only
+updates retained tracks and arrange state.
 
 Drag movement changes only a custom drop-preview rectangle and candidate target. It never reparents
 page content or reconciles a preview model. Completion commits one normalized model, or cancels when

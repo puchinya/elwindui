@@ -23,7 +23,9 @@ complete desired ownership map, detaches wrappers from old group/overlay parents
 structural children, then attaches the same wrappers to their desired parents. Group views,
 splitter collections, and split Grids are retained by authored/generated group identity and
 `SplitAddress`. Metadata refresh updates header/icon/capability chrome without replacing page
-content; dynamic page replacement is outside V1.
+content; dynamic page replacement is outside V1. A normal tab selection updates only the existing
+group's selected bookkeeping and the bound value when its fast-path preconditions hold. It does
+not rebuild groups, splitters, surfaces, wrappers, or native hosts.
 
 The runtime owns presentation only. It does not serialize wrappers, visual parents, native Window
 handles, callbacks, or surface registrations in `DockLayoutSnapshot`.
@@ -37,8 +39,10 @@ Star column. Every splitter records a private `SplitAddress` (main/floating root
 and adjacent boundary index.
 
 On splitter start, the retained Grid extent and committed model are captured. Delta updates derive
-a transient model from the original and update only the adjacent Grid tracks. Completion either
-restores the captured tracks or performs one model commit and one notification.
+a transient track vector directly from the captured adjacent weights and update only the retained
+Grid's rows or columns with arrange invalidation. Completion either restores the captured tracks
+or performs one adjacent-weight model transformation, one model commit, and one notification;
+the completed split-weight value update does not structurally reconcile the Dock runtime.
 
 ## Callback and source flow
 
@@ -48,10 +52,14 @@ The custom controls remain the owners of pointer threshold and capture state.
 
 The generated `layout` update callback routes to one internal source-application method. It compares
 against `last_applied_model`, cancels transient state, attaches authored metadata, normalizes, and
-applies only the latest reentrant pending value. User callbacks instead calculate a complete
-normalized model, reconcile the retained projection, update the bound property, and notify exactly
-once. The subsequent generated property update is suppressed by equality with
-`last_applied_model`.
+applies only the latest reentrant pending value. Structural user changes use a `ReconcilePlan`:
+preparation derives all candidate runtime/native work without touching committed ownership, and an
+infallible commit performs the single ownership transition. The bound property is updated after
+runtime commit, then the user callback is notified exactly once; staged floating-host
+synchronization is inserted/shown only after that commit. There is no reconcile-the-old-model
+rollback path. Selection-only changes and completed adjacent split-weight changes use retained
+value/layout fast paths because neither changes ownership or topology. The subsequent generated
+property update is suppressed by equality with `last_applied_model`.
 
 Authored registration callbacks are bound on every current declaration node after each traversal.
 They guard reentrancy, cancel stale gestures, refresh item/group metadata, repair removed authored

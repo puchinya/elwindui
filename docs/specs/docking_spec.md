@@ -43,9 +43,17 @@ completion writes adjacent normalized weights once, while cancellation restores 
 
 Drag movement changes only a custom drop-preview rectangle and candidate target. It never reparents
 page content or reconciles a preview model. Completion commits one normalized model, or cancels when
-there is no valid target. Outer surface bands provide four Dock targets; the deepest containing
-runtime group provides Center or four Split targets. Cross-window discovery uses only Core
-`screen_to_root`/`root_to_screen` conversions and arranged visual bounds.
+there is no valid target. The private resolved target retains the destination root, target group,
+and surface-local preview rectangle as one value, so preview, hit testing, and commit cannot diverge.
+Outer surface bands provide four Dock targets; the deepest containing runtime group provides Center
+or four Split targets. Cross-window discovery uses only Core `screen_to_root`/`root_to_screen`
+conversions and arranged visual bounds, converting screen coordinates to host-root and then
+surface-local coordinates by subtracting the surface origin. Without a screen position, only the
+source surface is eligible.
+
+Preview geometry is the complete target group for Center, the corresponding half for Split, and the
+corresponding quarter of the surface for an outer Dock target. The rectangle is arranged by a
+retained surface-local overlay layer.
 
 ## Auto-hide and floating
 
@@ -56,10 +64,17 @@ the deterministic order Left, Top, Right, Bottom. Unpinning restores the remembe
 then the current authored default, then the root fallback.
 
 On macOS and Windows, a floating model root is hosted by a real backend `Window` containing its
-retained `DockSurfaceView`. Bounds are the model's normalized logical desktop `Rect`. Native close
-requests are intercepted: any non-closeable contained item vetoes the close; otherwise all contained
-items are closed in one model transaction and the host is removed. A floating-host failure returns
-`DockLayoutError::FloatingHostUnavailable` and leaves the source ownership/model unchanged.
+retained `DockSurfaceView`. Bounds are the model's normalized logical desktop `Rect`. A new host is
+prepared with bounds, content, and a weak close handler before the candidate ownership/model is
+committed; it is shown only after that commit. Interactive floating bounds derive from the dragged
+group's arranged size and pointer offset, with a minimum size of 160 by 120. A floating-host
+failure returns `DockLayoutError::FloatingHostUnavailable` and leaves the source ownership/model
+unchanged.
+
+Native close requests are intercepted: any non-closeable contained item vetoes the close; otherwise
+all contained items are closed in one model transaction and the host is removed. Host callbacks use
+a private stable host identity, so removing an earlier floating root cannot redirect a later Window's
+close request.
 
 The current GTK4 baseline has no equivalent usable `Window` surface. Pure model floating snapshots
 remain valid there, while an interactive request to create a floating native host reports

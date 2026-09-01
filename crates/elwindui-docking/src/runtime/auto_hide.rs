@@ -9,6 +9,8 @@ use crate::core::ui::{
     Grid, GridExt, IconSourceElement, IconSourceElementExt, LayoutExt, Rectangle, ShapeExt,
     TextBlock, TextBlockExt, UIElementExt,
 };
+use crate::model::RootKind;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Only one auto-hide item owns the open overlay at a time.
@@ -18,6 +20,7 @@ pub(crate) struct AutoHideOverlay {
     strips: [Rc<Grid>; 4],
     pane: Rc<Grid>,
     pin_button: Rc<Rectangle>,
+    root_context: Rc<RefCell<RootKind>>,
 }
 
 impl AutoHideOverlay {
@@ -71,12 +74,14 @@ impl AutoHideOverlay {
         pin_button.set_attached("Grid", "row", 1i32);
         pin_button.set_attached("Grid", "column", 1i32);
         visual.children().add(pin_button.clone());
+        let root_context = Rc::new(RefCell::new(RootKind::Main));
         Self {
             open: None,
             visual,
             strips,
             pane,
             pin_button,
+            root_context,
         }
     }
 
@@ -105,6 +110,7 @@ impl AutoHideOverlay {
         &self,
         titles: impl Iterator<Item = (usize, DockItemId, String, Option<IconSource>)>,
         owner: &std::rc::Weak<DockingControl>,
+        root: RootKind,
     ) {
         for strip in &self.strips {
             strip.children().clear();
@@ -130,11 +136,12 @@ impl AutoHideOverlay {
             text.set_attached("Grid", "column", 1i32);
             entry.children().add(text);
             let weak_owner = owner.clone();
+            let entry_root = root.clone();
             entry.register_routed_handler::<PointerEventArgs>(
                 "on_pointer_released",
                 Box::new(move |_, _| {
                     if let Some(owner) = weak_owner.upgrade() {
-                        owner.handle_auto_hide_open(item.clone());
+                        owner.handle_auto_hide_open(entry_root.clone(), item.clone());
                     }
                 }),
             );
@@ -157,16 +164,23 @@ impl AutoHideOverlay {
         self.show_pane();
     }
 
-    pub(crate) fn bind_pin_handler(&self, owner: &std::rc::Weak<DockingControl>) {
+    pub(crate) fn bind_pin_handler(&self, owner: &std::rc::Weak<DockingControl>, root: RootKind) {
+        *self.root_context.borrow_mut() = root;
+        let root_context = self.root_context.clone();
         let weak_owner = owner.clone();
         self.pin_button.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
             Box::new(move |_, _| {
                 if let Some(owner) = weak_owner.upgrade() {
-                    owner.handle_pin_gesture();
+                    let root = root_context.borrow().clone();
+                    owner.handle_pin_gesture(root);
                 }
             }),
         );
+    }
+
+    pub(crate) fn set_root(&self, root: RootKind) {
+        *self.root_context.borrow_mut() = root;
     }
 }
 

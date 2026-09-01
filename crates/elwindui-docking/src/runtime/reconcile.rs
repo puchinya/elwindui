@@ -5,7 +5,7 @@ use crate::core::input::PointerEventArgs;
 use crate::core::layout::GridLength;
 use crate::core::ui::{Grid, GridExt, LayoutExt, Rectangle, ShapeExt, UIElementExt};
 use crate::model::{RootKind, SplitAddress};
-use crate::snapshot::{SnapshotGroupKey, SnapshotNode};
+use crate::snapshot::{SnapshotAutoHideEntry, SnapshotGroupKey, SnapshotNode};
 use crate::{
     DockGroup, DockGroupId, DockItem, DockItemId, DockLayoutError, DockLayoutModel, DockSplitPanel,
 };
@@ -15,18 +15,18 @@ use elwindui_custom_controls::{
     SplitterDragStartedEventArgs, TabStripPosition,
 };
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::rc::Weak;
 
-use super::auto_hide::AutoHideOverlay;
-use super::drag::DragSession;
-use super::floating_window::{FloatingHostRegistry, floating_host_available};
+use super::drag::{DragSession, DragSourceGeometry, ResolvedDockTarget};
+#[cfg(test)]
+use super::floating_window::FloatingHostFactory;
+use super::floating_window::{FloatingHostId, FloatingHostRegistry};
 use super::group_view::replace_group_items;
-use super::overlay::DropPreview;
 use super::split_view::SplitterSession;
 use super::surface_registry::SurfaceRegistry;
-use super::surface_view::DockSurfaceView;
+use super::surface_view::{DockSurfaceView, SurfaceRuntime};
 
 /// Stable registration-to-presentation map for one authored docking surface.
 ///
@@ -150,12 +150,21 @@ pub(crate) enum RuntimeNode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RuntimePresentationOwner {
     Group(SnapshotGroupKey),
-    AutoHide,
+    AutoHide {
+        root: RootKind,
+    },
     FloatingGroup {
         root: usize,
         group: SnapshotGroupKey,
     },
     None,
+}
+
+struct FloatingRuntime {
+    bounds: crate::Rect,
+    node: RuntimeNode,
+    identity: Vec<SnapshotGroupKey>,
+    surface: SurfaceRuntime,
 }
 
 impl RuntimeNode {
@@ -177,22 +186,24 @@ pub struct RuntimeRealization {
     groups: BTreeMap<SnapshotGroupKey, Rc<CustomTabView>>,
     group_hosts: BTreeMap<SnapshotGroupKey, GroupRuntimeHost>,
     group_items: BTreeMap<SnapshotGroupKey, Vec<DockItemId>>,
+    group_roots: BTreeMap<SnapshotGroupKey, RootKind>,
     group_selected: BTreeMap<SnapshotGroupKey, Option<DockItemId>>,
+    auto_hide_roots: BTreeMap<DockItemId, RootKind>,
     owners: BTreeMap<DockItemId, RuntimePresentationOwner>,
     root: Option<RuntimeNode>,
-    floating: Vec<(crate::Rect, RuntimeNode, Rc<DockSurfaceView>)>,
+    floating: Vec<FloatingRuntime>,
     split_views: BTreeMap<SplitAddress, (Rc<Grid>, Vec<Rc<CustomSplitter>>)>,
     drag: Option<DragSession>,
     splitter: Option<SplitterSession>,
-    auto_hide: AutoHideOverlay,
-    preview: DropPreview,
     floating_hosts: FloatingHostRegistry,
     surfaces: SurfaceRegistry,
-    surface: Rc<DockSurfaceView>,
+    main_surface: SurfaceRuntime,
     surface_root: Rc<Grid>,
     main_surface_child: Option<Rc<dyn UIElementExt>>,
     owner: Weak<crate::DockingControl>,
     reconciling: Rc<Cell<bool>>,
+    #[cfg(test)]
+    fail_next_reconcile: bool,
 }
 
 /// Source updates use a latest-only queue while a realization is being applied.
@@ -244,36 +255,34 @@ impl RuntimeRealization {
         surface: Rc<DockSurfaceView>,
         owner: Weak<crate::DockingControl>,
     ) -> Result<Self, DockLayoutError> {
-        let auto_hide = AutoHideOverlay::new();
-        let preview = DropPreview::new();
-        auto_hide.bind_pin_handler(&owner);
+        let main_surface = SurfaceRuntime::new(RootKind::Main, surface.clone(), &owner);
         let surface_root = surface.content_root();
-        surface_root.children().add(auto_hide.visual());
-        surface_root.children().add(preview.visual());
         let mut surfaces = SurfaceRegistry::default();
         let surface_node: Rc<dyn UIElementExt> = surface.clone();
-        surfaces.register(&surface_node);
+        surfaces.register(RootKind::Main, &surface_node);
         Ok(Self {
             registry: StableItemRegistry::from_authored(root)?,
             groups: BTreeMap::new(),
             group_hosts: BTreeMap::new(),
             group_items: BTreeMap::new(),
+            group_roots: BTreeMap::new(),
             group_selected: BTreeMap::new(),
+            auto_hide_roots: BTreeMap::new(),
             owners: BTreeMap::new(),
             root: None,
             floating: Vec::new(),
             split_views: BTreeMap::new(),
             drag: None,
             splitter: None,
-            auto_hide,
-            preview,
             floating_hosts: FloatingHostRegistry::default(),
             surfaces,
-            surface,
+            main_surface,
             surface_root,
             main_surface_child: None,
             owner,
             reconciling: Rc::new(Cell::new(false)),
+            #[cfg(test)]
+            fail_next_reconcile: false,
         })
     }
 
@@ -288,7 +297,7 @@ impl RuntimeRealization {
         // this is safer than allowing a stale wrapper to commit into the new registry.
         self.drag = None;
         self.splitter = None;
-        self.preview.clear();
+        self.clear_previews();
         Ok(())
     }
 
@@ -297,27 +306,56 @@ impl RuntimeRealization {
         if let Some(mut splitter) = self.splitter.take() {
             splitter.cancel();
         }
-        self.preview.clear();
+        self.clear_previews();
     }
 
     /// Applies a model transaction to the realization. All tab list changes happen after the
     /// complete model has been accepted, so a failed snapshot cannot partially mutate the UI.
     pub(crate) fn reconcile(&mut self, model: &DockLayoutModel) -> Result<(), DockLayoutError> {
+        self.reconcile_internal(model, None)
+    }
+
+    /// Applies a candidate that already has a prepared native host. The prepared surface is used
+    /// for the newly appended floating root, while the host registry remains untouched until the
+    /// caller commits the transaction.
+    pub(crate) fn reconcile_with_prepared(
+        &mut self,
+        model: &DockLayoutModel,
+        prepared_surface: Rc<DockSurfaceView>,
+    ) -> Result<(), DockLayoutError> {
+        self.reconcile_internal(model, Some(prepared_surface))
+    }
+
+    fn reconcile_internal(
+        &mut self,
+        model: &DockLayoutModel,
+        prepared_surface: Option<Rc<DockSurfaceView>>,
+    ) -> Result<(), DockLayoutError> {
+        #[cfg(test)]
+        if self.fail_next_reconcile {
+            self.fail_next_reconcile = false;
+            return Err(DockLayoutError::InvalidSnapshot {
+                reason: "injected reconciliation failure".to_owned(),
+            });
+        }
         let snapshot = model.snapshot();
         self.detach_existing_tree();
-        self.auto_hide.close();
-        let previous_floating_surfaces = self
-            .floating
-            .iter()
-            .map(|(_, _, surface)| surface.clone())
-            .collect::<Vec<_>>();
+        let mut previous_floating = std::mem::take(&mut self.floating);
+        self.surfaces = SurfaceRegistry::default();
         let desired_owners = desired_owners(&snapshot);
         self.detach_before_attach(&desired_owners);
         self.owners = desired_owners;
         self.reconciling.set(true);
         let _reconciling_guard = ReconcilingGuard(self.reconciling.clone());
         self.group_items.clear();
+        self.group_roots.clear();
         self.group_selected.clear();
+        self.auto_hide_roots.clear();
+        let floating_count = snapshot.floating_roots.len();
+        for entry in snapshot.auto_hide.iter().flatten() {
+            self.auto_hide_roots
+                .insert(entry.item.clone(), auto_hide_root(entry, floating_count));
+        }
         let mut used_groups = BTreeMap::new();
         let mut used_splits = BTreeMap::new();
         let mut groups = self.groups.clone();
@@ -343,7 +381,7 @@ impl RuntimeRealization {
             })
             .transpose()?;
         let mut floating_roots = Vec::new();
-        for (floating_index, floating) in snapshot.floating_roots.into_iter().enumerate() {
+        for (floating_index, floating) in snapshot.floating_roots.iter().enumerate() {
             let bounds = floating.bounds.into();
             let node = self.build_node(
                 &floating.root,
@@ -353,35 +391,61 @@ impl RuntimeRealization {
                 RootKind::Floating(floating_index),
                 &[],
             )?;
-            let floating_surface = previous_floating_surfaces
-                .get(floating_index)
-                .cloned()
-                .unwrap_or_else(DockSurfaceView::empty_surface);
-            let floating_surface_root = floating_surface.content_root();
-            floating_surface_root.children().add(node.element());
-            let floating_auto_hide = AutoHideOverlay::new();
-            floating_auto_hide.bind_pin_handler(&self.owner);
-            floating_surface_root
-                .children()
-                .add(floating_auto_hide.visual());
-            let floating_preview = DropPreview::new();
-            floating_surface_root
-                .children()
-                .add(floating_preview.visual());
-            let floating_surface_node: Rc<dyn UIElementExt> = floating_surface.clone();
-            if previous_floating_surfaces.get(floating_index).is_none() {
-                self.surfaces.register(&floating_surface_node);
+            let identity = group_identity(&floating.root);
+            let mut surface_runtime = if floating_index + 1 == snapshot.floating_roots.len() {
+                prepared_surface
+                    .as_ref()
+                    .map(|surface| {
+                        SurfaceRuntime::new(
+                            RootKind::Floating(floating_index),
+                            surface.clone(),
+                            &self.owner,
+                        )
+                    })
+                    .or_else(|| {
+                        previous_floating
+                            .iter()
+                            .position(|runtime| runtime.identity == identity)
+                            .map(|index| previous_floating.swap_remove(index).surface)
+                    })
+            } else {
+                previous_floating
+                    .iter()
+                    .position(|runtime| runtime.identity == identity)
+                    .map(|index| previous_floating.swap_remove(index).surface)
             }
-            floating_roots.push((bounds, node, floating_surface));
+            .unwrap_or_else(|| {
+                SurfaceRuntime::new(
+                    RootKind::Floating(floating_index),
+                    DockSurfaceView::empty_surface(),
+                    &self.owner,
+                )
+            });
+            surface_runtime.set_root(RootKind::Floating(floating_index));
+            surface_runtime.auto_hide.close();
+            surface_runtime.preview.clear();
+            surface_runtime.reset_visual_children();
+            surface_runtime.add_main_child(node.element());
+            floating_roots.push(FloatingRuntime {
+                bounds,
+                node,
+                identity,
+                surface: surface_runtime,
+            });
         }
         groups.retain(|key, _| used_groups.contains_key(key));
         self.group_items
             .retain(|key, _| used_groups.contains_key(key));
+        self.group_roots
+            .retain(|key, _| used_groups.contains_key(key));
         self.split_views
             .retain(|key, _| used_splits.contains_key(key));
+        self.main_surface.auto_hide.close();
+        self.main_surface.preview.clear();
+        self.main_surface.reset_visual_children();
         if let Some(root) = root.as_ref() {
             let element = root.element();
-            self.surface_root.children().insert(0, element.clone());
+            self.main_surface.add_main_child(element.clone());
             self.main_surface_child = Some(element);
         }
         self.groups = groups;
@@ -389,39 +453,66 @@ impl RuntimeRealization {
             .retain(|key, _| used_groups.contains_key(key));
         self.root = root;
         self.floating = floating_roots;
-        self.preview.clear();
-        self.auto_hide.close();
+        for (index, runtime) in self.floating.iter().enumerate() {
+            let surface_node: Rc<dyn UIElementExt> = runtime.surface.surface.clone();
+            self.surfaces
+                .register(RootKind::Floating(index), &surface_node);
+        }
+        let main_surface_node: Rc<dyn UIElementExt> = self.main_surface.surface.clone();
+        self.surfaces.register(RootKind::Main, &main_surface_node);
         let registry = &self.registry;
-        let strip_titles = snapshot
-            .auto_hide
-            .iter()
-            .enumerate()
-            .flat_map(move |(side, entries)| {
-                entries.iter().filter_map(move |entry| {
-                    registry.items.get(&entry.item).map(|item| {
-                        (
-                            side,
-                            entry.item.clone(),
-                            item.title_value(),
-                            item.icon_value(),
-                        )
+        let strip_titles = |root: &RootKind| {
+            snapshot
+                .auto_hide
+                .iter()
+                .enumerate()
+                .flat_map(|(side, entries)| {
+                    entries.iter().filter_map(move |entry| {
+                        (auto_hide_root(entry, floating_count) == *root).then(|| {
+                            registry.items.get(&entry.item).map(|item| {
+                                (
+                                    side,
+                                    entry.item.clone(),
+                                    item.title_value(),
+                                    item.icon_value(),
+                                )
+                            })
+                        })?
                     })
                 })
-            })
-            .collect::<Vec<_>>();
-        self.auto_hide
-            .render_strips(strip_titles.into_iter(), &self.owner);
+                .collect::<Vec<_>>()
+        };
+        self.main_surface
+            .render_strips(strip_titles(&RootKind::Main).into_iter(), &self.owner);
+        for (index, runtime) in self.floating.iter().enumerate() {
+            let root = RootKind::Floating(index);
+            runtime
+                .surface
+                .render_strips(strip_titles(&root).into_iter(), &self.owner);
+        }
         for item in open_auto_hide {
-            self.auto_hide.open(item.clone());
-            self.auto_hide
-                .present_open_item(self.registry.wrapper(&item));
+            let root = snapshot
+                .auto_hide
+                .iter()
+                .flatten()
+                .find(|entry| entry.item == item)
+                .map(|entry| auto_hide_root(entry, floating_count))
+                .unwrap_or(RootKind::Main);
+            let wrapper = self.registry.wrapper(&item);
+            let surface = self.surface_runtime_mut(&root);
+            if let Some(surface) = surface {
+                surface.auto_hide.open(item.clone());
+                surface.auto_hide.present_open_item(wrapper);
+            }
         }
         let floating_specs = self
             .floating
             .iter()
-            .map(|(bounds, _, surface)| (*bounds, surface.clone()))
+            .map(|runtime| (runtime.bounds, runtime.surface.surface.clone()))
             .collect::<Vec<_>>();
-        self.floating_hosts.sync(&floating_specs, &self.owner)?;
+        if prepared_surface.is_none() {
+            self.floating_hosts.sync(&floating_specs, &self.owner)?;
+        }
         Ok(())
     }
 
@@ -429,6 +520,7 @@ impl RuntimeRealization {
         &mut self,
         model: &DockLayoutModel,
         item: DockItemId,
+        host_root_position: Point,
     ) -> Result<(), DockLayoutError> {
         let Some(authored) = self.registry.items.get(&item) else {
             return Err(DockLayoutError::UnknownItem(item));
@@ -438,8 +530,54 @@ impl RuntimeRealization {
                 reason: "dock item does not permit docking".to_owned(),
             });
         }
-        self.drag = Some(DragSession::begin(model, item)?);
-        self.preview.clear();
+        let source_root =
+            self.item_root(&item)
+                .ok_or_else(|| DockLayoutError::InvalidSnapshot {
+                    reason: "dock item has no current runtime surface".to_owned(),
+                })?;
+        let group = self
+            .group_items
+            .iter()
+            .find(|(_, items)| items.iter().any(|candidate| candidate == &item))
+            .map(|(group, _)| group)
+            .ok_or_else(|| DockLayoutError::InvalidSnapshot {
+                reason: "dock item has no current runtime group geometry".to_owned(),
+            })?;
+        let group_view =
+            self.groups
+                .get(group)
+                .cloned()
+                .ok_or_else(|| DockLayoutError::InvalidSnapshot {
+                    reason: "dock item runtime group is unavailable".to_owned(),
+                })?;
+        let group_node: Rc<dyn UIElementExt> = group_view;
+        let source_bounds_host =
+            SurfaceRegistry::bounds_in_host_root(&group_node).ok_or_else(|| {
+                DockLayoutError::InvalidSnapshot {
+                    reason: "dock item runtime group has no arranged geometry".to_owned(),
+                }
+            })?;
+        let pointer_offset = Point {
+            x: host_root_position.x - source_bounds_host.x,
+            y: host_root_position.y - source_bounds_host.y,
+        };
+        if !pointer_offset.x.is_finite() || !pointer_offset.y.is_finite() {
+            return Err(DockLayoutError::InvalidSnapshot {
+                reason: "dock drag pointer offset is not finite".to_owned(),
+            });
+        }
+        let source_geometry = DragSourceGeometry {
+            source_root: source_root.clone(),
+            source_bounds_host,
+            pointer_offset,
+        };
+        self.drag = Some(DragSession::begin(
+            model,
+            item,
+            source_root,
+            source_geometry,
+        )?);
+        self.clear_previews();
         Ok(())
     }
 
@@ -480,129 +618,180 @@ impl RuntimeRealization {
         model.with_item_moved(item, crate::DockPlacement::AutoHide { side })
     }
 
-    pub(crate) fn request_float(
-        &mut self,
-        model: &DockLayoutModel,
-        item: &DockItemId,
-        bounds: crate::Rect,
-    ) -> Result<DockLayoutModel, DockLayoutError> {
-        let authored = self
-            .registry
-            .items
-            .get(item)
-            .ok_or_else(|| DockLayoutError::UnknownItem(item.clone()))?;
-        if !authored.can_float_value() {
-            return Err(DockLayoutError::InvalidSnapshot {
-                reason: "dock item does not permit floating".to_owned(),
-            });
-        }
-        if !floating_host_available() {
-            return Err(DockLayoutError::FloatingHostUnavailable {
-                reason: "the current platform has no Docking Window implementation".to_owned(),
-            });
-        }
-        model.with_item_moved(item, crate::DockPlacement::Floating { bounds })
-    }
-
     pub(crate) fn preview_drag(
         &mut self,
-        target: crate::DockTarget,
-        group: Option<SnapshotGroupKey>,
+        target: &ResolvedDockTarget,
         weight: f32,
-    ) -> Result<DockLayoutModel, DockLayoutError> {
+    ) -> Result<(), DockLayoutError> {
         let Some(drag) = self.drag.as_mut() else {
             return Err(DockLayoutError::InvalidSnapshot {
                 reason: "dock preview requested without an active drag".to_owned(),
             });
         };
-        let model = drag.preview(target, group, weight)?;
-        self.preview.set_target(target);
-        Ok(model)
+        drag.preview(target, weight)?;
+        self.clear_previews();
+        let Some(surface) = self.surface_runtime_mut(&target.root) else {
+            return Err(DockLayoutError::InvalidFloatingRoot {
+                index: match target.root {
+                    RootKind::Floating(index) => index,
+                    RootKind::Main => 0,
+                },
+            });
+        };
+        surface.preview.show(target);
+        Ok(())
     }
 
     pub(crate) fn clear_drag_target(&mut self) {
-        self.preview.clear();
+        self.clear_previews();
+    }
+
+    pub(crate) fn drag_source_geometry(&self) -> Option<DragSourceGeometry> {
+        self.drag
+            .as_ref()
+            .map(|drag| drag.source_geometry().clone())
+    }
+
+    pub(crate) fn floating_candidate(
+        &mut self,
+        bounds: crate::Rect,
+    ) -> Result<DockLayoutModel, DockLayoutError> {
+        let Some(drag) = self.drag.as_mut() else {
+            return Err(DockLayoutError::InvalidSnapshot {
+                reason: "floating candidate requested without an active drag".to_owned(),
+            });
+        };
+        drag.set_floating_candidate(bounds)
+    }
+
+    pub(crate) fn prepare_floating_host(
+        &mut self,
+        bounds: crate::Rect,
+    ) -> Result<super::floating_window::PreparedFloatingHost, DockLayoutError> {
+        self.floating_hosts
+            .prepare_new(DockSurfaceView::empty_surface(), bounds, &self.owner)
+    }
+
+    pub(crate) fn commit_prepared_host(
+        &mut self,
+        prepared: super::floating_window::PreparedFloatingHost,
+        root_index: usize,
+    ) -> super::floating_window::FloatingHostId {
+        self.floating_hosts.commit_prepared(prepared, root_index)
+    }
+
+    pub(crate) fn show_floating_host(&self, id: super::floating_window::FloatingHostId) {
+        self.floating_hosts.show(id);
+    }
+
+    pub(crate) fn floating_root_index(&self, id: FloatingHostId) -> Option<usize> {
+        self.floating_hosts.root_index_for_host(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_floating_host_factory_for_test(&mut self, factory: FloatingHostFactory) {
+        self.floating_hosts = FloatingHostRegistry::with_factory(factory);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_reconcile_for_test(&mut self) {
+        self.fail_next_reconcile = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_drag_for_test(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_splitter_for_test(&self) -> bool {
+        self.splitter.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn surface_for_test(&self, root: &RootKind) -> Option<Rc<DockSurfaceView>> {
+        self.surface_runtime(root)
+            .map(|runtime| runtime.surface.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn surface_chrome_for_test(
+        &self,
+        root: &RootKind,
+    ) -> Option<(Rc<dyn UIElementExt>, Rc<dyn UIElementExt>)> {
+        self.surface_runtime(root)
+            .map(|runtime| (runtime.auto_hide.visual(), runtime.preview.visual()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn preview_for_test(&self, root: &RootKind) -> Option<(crate::DockTarget, Rect)> {
+        self.surface_runtime(root)
+            .and_then(|runtime| runtime.preview.target().zip(runtime.preview.preview_rect()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn show_preview_for_test(&mut self, target: ResolvedDockTarget) {
+        self.clear_previews();
+        if let Some(surface) = self.surface_runtime_mut(&target.root) {
+            surface.preview.show(&target);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn floating_host_count_for_test(&self) -> usize {
+        self.floating_hosts.host_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn surface_registry_count_for_test(&self) -> usize {
+        self.surfaces.entries().len()
     }
 
     pub(crate) fn target_for_drop(
         &self,
         screen_position: Option<Point>,
-        source_position: Point,
-    ) -> Option<(crate::DockTarget, Option<SnapshotGroupKey>)> {
-        let (surface, point) = if let Some(screen) = screen_position {
+        host_root_position: Point,
+    ) -> Option<ResolvedDockTarget> {
+        let source_root = self.drag.as_ref()?.source_root();
+        let (root, surface, surface_local_point) = if let Some(screen) = screen_position {
             self.surfaces
-                .roots_for_screen_point(screen)
+                .entries()
                 .into_iter()
-                .filter_map(|surface| surface.screen_to_root(screen).map(|point| (surface, point)))
-                .find_map(|(surface, point)| {
+                .filter_map(|(root, surface)| {
+                    let host_root_point = surface.screen_to_root(screen)?;
+                    let surface_local_point =
+                        SurfaceRegistry::host_root_to_surface_local(&surface, host_root_point)?;
                     let bounds = SurfaceRegistry::surface_bounds(&surface)?;
-                    contains(bounds, point).then_some((surface, point))
-                })?
+                    contains(bounds, surface_local_point).then_some((
+                        root,
+                        surface,
+                        surface_local_point,
+                    ))
+                })
+                .next()?
         } else {
-            let surface: Rc<dyn UIElementExt> = self.surface_root.clone();
-            (surface, source_position)
+            let surface = self.surfaces.surface_for_root(&source_root)?;
+            let surface_local_point =
+                SurfaceRegistry::host_root_to_surface_local(&surface, host_root_position)?;
+            let bounds = SurfaceRegistry::surface_bounds(&surface)?;
+            contains(bounds, surface_local_point).then_some((
+                source_root,
+                surface,
+                surface_local_point,
+            ))?
         };
         let surface_bounds = SurfaceRegistry::surface_bounds(&surface)?;
-        if !contains(surface_bounds, point) {
-            return None;
-        }
-        let band = (surface_bounds.width.min(surface_bounds.height) * 0.10).clamp(24.0, 64.0);
-        let outer = [
-            (point.x <= band, crate::DockTarget::DockLeft),
-            (point.y <= band, crate::DockTarget::DockTop),
-            (
-                point.x >= surface_bounds.width - band,
-                crate::DockTarget::DockRight,
-            ),
-            (
-                point.y >= surface_bounds.height - band,
-                crate::DockTarget::DockBottom,
-            ),
-        ];
-        if let Some((_, target)) = outer.into_iter().find(|(inside, _)| *inside) {
-            return Some((target, None));
-        }
 
-        let mut deepest = None;
-        let mut smallest_area = f32::INFINITY;
-        for (key, group) in &self.groups {
+        let selected_root = root.clone();
+        let groups = self.groups.iter().filter_map(|(key, group)| {
+            if self.group_roots.get(key) != Some(&selected_root) {
+                return None;
+            }
             let group_node: Rc<dyn UIElementExt> = group.clone();
-            let Some(bounds) = SurfaceRegistry::bounds_in_surface_root(&group_node, &surface)
-            else {
-                continue;
-            };
-            if !contains(bounds, point) {
-                continue;
-            }
-            let area = bounds.width * bounds.height;
-            if area < smallest_area {
-                smallest_area = area;
-                deepest = Some((key, bounds));
-            }
-        }
-        let (key, bounds) = deepest?;
-        let band = (bounds.width.min(bounds.height) * 0.25).clamp(24.0, 64.0);
-        let local = Point {
-            x: point.x - bounds.x,
-            y: point.y - bounds.y,
-        };
-        let target = [
-            (local.x <= band, crate::DockTarget::SplitLeft),
-            (local.y <= band, crate::DockTarget::SplitTop),
-            (
-                local.x >= bounds.width - band,
-                crate::DockTarget::SplitRight,
-            ),
-            (
-                local.y >= bounds.height - band,
-                crate::DockTarget::SplitBottom,
-            ),
-        ]
-        .into_iter()
-        .find(|(inside, _)| *inside)
-        .map(|(_, target)| target)
-        .unwrap_or(crate::DockTarget::Center);
-        Some((target, Some(key.clone())))
+            SurfaceRegistry::bounds_in_surface_local(&group_node, &surface)
+                .map(|bounds| (key.clone(), bounds))
+        });
+        resolve_local_target(root, surface_bounds, surface_local_point, groups)
     }
 
     pub(crate) fn finish_drag(&mut self, commit: bool) -> Option<DockLayoutModel> {
@@ -613,7 +802,7 @@ impl RuntimeRealization {
                 Some(drag.cancel())
             }
         });
-        self.preview.clear();
+        self.clear_previews();
         result
     }
 
@@ -647,20 +836,42 @@ impl RuntimeRealization {
 
     #[allow(dead_code)]
     pub(crate) fn open_auto_hide(&mut self, item: DockItemId) -> Option<DockItemId> {
-        self.auto_hide.open(item)
+        let root = self.auto_hide_roots.get(&item)?.clone();
+        self.open_auto_hide_on(root, item)
     }
 
     pub(crate) fn present_auto_hide(&self, item: &DockItemId) {
-        self.auto_hide
-            .present_open_item(self.registry.wrapper(item));
+        let Some(root) = self.auto_hide_roots.get(item) else {
+            return;
+        };
+        if let Some(surface) = self.surface_runtime(root) {
+            surface
+                .auto_hide
+                .present_open_item(self.registry.wrapper(item));
+        }
+    }
+
+    pub(crate) fn open_auto_hide_on(
+        &mut self,
+        root: RootKind,
+        item: DockItemId,
+    ) -> Option<DockItemId> {
+        self.clear_auto_hide_presentations();
+        let wrapper = self.registry.wrapper(&item);
+        self.surface_runtime_mut(&root).map(|surface| {
+            let previous = surface.auto_hide.open(item.clone());
+            surface.auto_hide.present_open_item(wrapper);
+            previous
+        })?
     }
 
     pub(crate) fn selected_group_item(&self, group: &SnapshotGroupKey) -> Option<DockItemId> {
         self.group_selected.get(group).and_then(Clone::clone)
     }
 
-    pub(crate) fn open_auto_hide_item(&self) -> Option<DockItemId> {
-        self.auto_hide.current().cloned()
+    pub(crate) fn open_auto_hide_item_on(&self, root: &RootKind) -> Option<DockItemId> {
+        self.surface_runtime(root)
+            .and_then(|surface| surface.auto_hide.current().cloned())
     }
 
     pub(crate) fn can_pin(&self, item: &DockItemId) -> bool {
@@ -670,16 +881,22 @@ impl RuntimeRealization {
             .is_some_and(|item| item.can_pin_value())
     }
 
+    pub(crate) fn can_float(&self, item: &DockItemId) -> bool {
+        self.registry
+            .items
+            .get(item)
+            .is_some_and(|item| item.can_float_value())
+    }
+
     pub(crate) fn dispose(&mut self) {
         self.detach_existing_tree();
         self.surface_root.children().clear();
         self.drag = None;
         self.splitter = None;
-        self.preview.clear();
-        self.auto_hide.close();
+        self.clear_previews();
+        self.main_surface.auto_hide.close();
         self.floating_hosts.close_empty();
-        let surface_node: Rc<dyn UIElementExt> = self.surface.clone();
-        self.surfaces.unregister(&surface_node);
+        self.surfaces.unregister(RootKind::Main);
         self.surfaces = SurfaceRegistry::default();
         self.groups.clear();
         self.group_hosts.clear();
@@ -688,7 +905,9 @@ impl RuntimeRealization {
         self.floating.clear();
         self.split_views.clear();
         self.group_items.clear();
+        self.group_roots.clear();
         self.group_selected.clear();
+        self.auto_hide_roots.clear();
     }
 
     pub(crate) fn drag_item(&self) -> Option<DockItemId> {
@@ -711,6 +930,7 @@ impl RuntimeRealization {
                 selected,
             } => {
                 used_groups.insert(group.clone(), ());
+                self.group_roots.insert(group.clone(), root_kind.clone());
                 let view = if let Some(view) = groups.get(group) {
                     view.clone()
                 } else {
@@ -741,6 +961,7 @@ impl RuntimeRealization {
                 let host = self.group_hosts.entry(group.clone()).or_insert_with(|| {
                     let container = Grid::new();
                     container.set_rows(vec![GridLength::Star(1.0)]);
+                    container.set_columns(vec![GridLength::Star(1.0)]);
                     let pin_button = Rectangle::new();
                     pin_button.set_fill(Some(crate::core::graphics::Brush::from("#606060")));
                     pin_button.set_width(18.0);
@@ -1022,29 +1243,72 @@ impl RuntimeRealization {
             .map(|(key, _)| key)?;
         let group_view = self.groups.get(key)?;
         let group_node: Rc<dyn UIElementExt> = group_view.clone();
-        self.surfaces
-            .all_surfaces()
-            .into_iter()
-            .find_map(|surface| {
-                let bounds = SurfaceRegistry::surface_bounds(&surface)?;
-                let group_bounds = SurfaceRegistry::bounds_in_surface_root(&group_node, &surface)?;
-                let distances = [
-                    (group_bounds.x, crate::DockSide::Left),
-                    (group_bounds.y, crate::DockSide::Top),
-                    (
-                        bounds.width - group_bounds.x - group_bounds.width,
-                        crate::DockSide::Right,
-                    ),
-                    (
-                        bounds.height - group_bounds.y - group_bounds.height,
-                        crate::DockSide::Bottom,
-                    ),
-                ];
-                distances
-                    .into_iter()
-                    .min_by(|(left, _), (right, _)| left.total_cmp(right))
-                    .map(|(_, side)| side)
-            })
+        let root = self.group_roots.get(key)?;
+        let surface = self.surfaces.surface_for_root(root)?;
+        let bounds = SurfaceRegistry::surface_bounds(&surface)?;
+        let group_bounds = SurfaceRegistry::bounds_in_surface_local(&group_node, &surface)?;
+        let distances = [
+            (group_bounds.x, crate::DockSide::Left),
+            (group_bounds.y, crate::DockSide::Top),
+            (
+                bounds.width - group_bounds.x - group_bounds.width,
+                crate::DockSide::Right,
+            ),
+            (
+                bounds.height - group_bounds.y - group_bounds.height,
+                crate::DockSide::Bottom,
+            ),
+        ];
+        let mut nearest = None;
+        for (distance, side) in distances {
+            if !distance.is_finite() {
+                continue;
+            }
+            if nearest.is_none_or(|(best, _): (f32, crate::DockSide)| distance < best) {
+                nearest = Some((distance, side));
+            }
+        }
+        nearest.map(|(_, side)| side)
+    }
+
+    fn item_root(&self, item: &DockItemId) -> Option<RootKind> {
+        match self.owners.get(item)? {
+            RuntimePresentationOwner::Group(group) => self.group_roots.get(group).cloned(),
+            RuntimePresentationOwner::FloatingGroup { root, .. } => Some(RootKind::Floating(*root)),
+            RuntimePresentationOwner::AutoHide { root } => Some(root.clone()),
+            RuntimePresentationOwner::None => None,
+        }
+    }
+
+    fn surface_runtime(&self, root: &RootKind) -> Option<&SurfaceRuntime> {
+        match root {
+            RootKind::Main => Some(&self.main_surface),
+            RootKind::Floating(index) => self.floating.get(*index).map(|runtime| &runtime.surface),
+        }
+    }
+
+    fn surface_runtime_mut(&mut self, root: &RootKind) -> Option<&mut SurfaceRuntime> {
+        match root {
+            RootKind::Main => Some(&mut self.main_surface),
+            RootKind::Floating(index) => self
+                .floating
+                .get_mut(*index)
+                .map(|runtime| &mut runtime.surface),
+        }
+    }
+
+    fn clear_previews(&mut self) {
+        self.main_surface.preview.clear();
+        for runtime in &mut self.floating {
+            runtime.surface.preview.clear();
+        }
+    }
+
+    fn clear_auto_hide_presentations(&mut self) {
+        self.main_surface.auto_hide.close();
+        for runtime in &mut self.floating {
+            runtime.surface.auto_hide.close();
+        }
     }
 }
 
@@ -1056,9 +1320,13 @@ impl RuntimeRealization {
         if let Some(root) = self.root.as_ref() {
             detach_runtime_node(root);
         }
-        for (_, root, surface) in &self.floating {
-            surface.content_root().children().clear();
-            detach_runtime_node(root);
+        self.main_surface.auto_hide.close();
+        self.main_surface.preview.clear();
+        for runtime in &mut self.floating {
+            runtime.surface.auto_hide.close();
+            runtime.surface.preview.clear();
+            runtime.surface.surface.content_root().children().clear();
+            detach_runtime_node(&runtime.node);
         }
     }
 
@@ -1077,7 +1345,7 @@ impl RuntimeRealization {
                         view.replace_children(Vec::new());
                     }
                 }
-                RuntimePresentationOwner::AutoHide | RuntimePresentationOwner::None => {}
+                RuntimePresentationOwner::AutoHide { .. } | RuntimePresentationOwner::None => {}
             }
         }
     }
@@ -1105,6 +1373,201 @@ fn contains(bounds: Rect, point: Point) -> bool {
         && point.y >= bounds.y
         && point.x <= bounds.x + bounds.width
         && point.y <= bounds.y + bounds.height
+}
+
+/// Resolves a pointer already expressed in one surface's local coordinate space. Keeping this
+/// separate from the screen/root conversion makes the target facts and preview geometry one
+/// operation: the exact object returned here is also the object used by the drag commit path.
+fn resolve_local_target(
+    root: RootKind,
+    surface_bounds: Rect,
+    surface_local_point: Point,
+    groups: impl IntoIterator<Item = (SnapshotGroupKey, Rect)>,
+) -> Option<ResolvedDockTarget> {
+    if !valid_preview_rect(surface_bounds)
+        || !surface_local_point.x.is_finite()
+        || !surface_local_point.y.is_finite()
+        || !contains(surface_bounds, surface_local_point)
+    {
+        return None;
+    }
+    let outer_band = (surface_bounds.width.min(surface_bounds.height) * 0.10).clamp(24.0, 64.0);
+    let outer = [
+        (
+            surface_local_point.x <= outer_band,
+            crate::DockTarget::DockLeft,
+        ),
+        (
+            surface_local_point.y <= outer_band,
+            crate::DockTarget::DockTop,
+        ),
+        (
+            surface_local_point.x >= surface_bounds.width - outer_band,
+            crate::DockTarget::DockRight,
+        ),
+        (
+            surface_local_point.y >= surface_bounds.height - outer_band,
+            crate::DockTarget::DockBottom,
+        ),
+    ];
+    if let Some((_, target)) = outer.into_iter().find(|(inside, _)| *inside) {
+        return Some(ResolvedDockTarget {
+            root,
+            target,
+            group: None,
+            preview_rect: outer_preview(surface_bounds, target)?,
+        });
+    }
+
+    let mut deepest = None;
+    let mut smallest_area = f32::INFINITY;
+    for (key, bounds) in groups {
+        if !valid_preview_rect(bounds) || !contains(bounds, surface_local_point) {
+            continue;
+        }
+        let area = bounds.width * bounds.height;
+        if area < smallest_area {
+            smallest_area = area;
+            deepest = Some((key, bounds));
+        }
+    }
+    let (group, bounds) = deepest?;
+    let group_band = (bounds.width.min(bounds.height) * 0.25).clamp(24.0, 64.0);
+    let local = Point {
+        x: surface_local_point.x - bounds.x,
+        y: surface_local_point.y - bounds.y,
+    };
+    let target = [
+        (local.x <= group_band, crate::DockTarget::SplitLeft),
+        (local.y <= group_band, crate::DockTarget::SplitTop),
+        (
+            local.x >= bounds.width - group_band,
+            crate::DockTarget::SplitRight,
+        ),
+        (
+            local.y >= bounds.height - group_band,
+            crate::DockTarget::SplitBottom,
+        ),
+    ]
+    .into_iter()
+    .find(|(inside, _)| *inside)
+    .map(|(_, target)| target)
+    .unwrap_or(crate::DockTarget::Center);
+    Some(ResolvedDockTarget {
+        root,
+        target,
+        group: Some(group),
+        preview_rect: group_preview(bounds, target)?,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn resolve_local_target_for_test(
+    root: RootKind,
+    surface_bounds: Rect,
+    surface_local_point: Point,
+    groups: Vec<(SnapshotGroupKey, Rect)>,
+) -> Option<ResolvedDockTarget> {
+    resolve_local_target(root, surface_bounds, surface_local_point, groups)
+}
+
+fn auto_hide_root(entry: &SnapshotAutoHideEntry, floating_count: usize) -> RootKind {
+    entry
+        .return_state
+        .floating_root
+        .filter(|index| *index < floating_count)
+        .map(RootKind::Floating)
+        .unwrap_or(RootKind::Main)
+}
+
+fn group_identity(node: &SnapshotNode) -> Vec<SnapshotGroupKey> {
+    fn visit(node: &SnapshotNode, groups: &mut BTreeSet<SnapshotGroupKey>) {
+        match node {
+            SnapshotNode::Group { group, .. } => {
+                groups.insert(group.clone());
+            }
+            SnapshotNode::Split { children, .. } => {
+                for child in children {
+                    visit(&child.node, groups);
+                }
+            }
+        }
+    }
+    let mut groups = BTreeSet::new();
+    visit(node, &mut groups);
+    groups.into_iter().collect()
+}
+
+fn outer_preview(surface: Rect, target: crate::DockTarget) -> Option<Rect> {
+    let preview = match target {
+        crate::DockTarget::DockLeft => Rect {
+            x: surface.x,
+            y: surface.y,
+            width: surface.width * 0.25,
+            height: surface.height,
+        },
+        crate::DockTarget::DockRight => Rect {
+            x: surface.x + surface.width * 0.75,
+            y: surface.y,
+            width: surface.width * 0.25,
+            height: surface.height,
+        },
+        crate::DockTarget::DockTop => Rect {
+            x: surface.x,
+            y: surface.y,
+            width: surface.width,
+            height: surface.height * 0.25,
+        },
+        crate::DockTarget::DockBottom => Rect {
+            x: surface.x,
+            y: surface.y + surface.height * 0.75,
+            width: surface.width,
+            height: surface.height * 0.25,
+        },
+        _ => return None,
+    };
+    valid_preview_rect(preview).then_some(preview)
+}
+
+fn group_preview(group: Rect, target: crate::DockTarget) -> Option<Rect> {
+    let preview = match target {
+        crate::DockTarget::Center => group,
+        crate::DockTarget::SplitLeft => Rect {
+            x: group.x,
+            y: group.y,
+            width: group.width * 0.5,
+            height: group.height,
+        },
+        crate::DockTarget::SplitRight => Rect {
+            x: group.x + group.width * 0.5,
+            y: group.y,
+            width: group.width * 0.5,
+            height: group.height,
+        },
+        crate::DockTarget::SplitTop => Rect {
+            x: group.x,
+            y: group.y,
+            width: group.width,
+            height: group.height * 0.5,
+        },
+        crate::DockTarget::SplitBottom => Rect {
+            x: group.x,
+            y: group.y + group.height * 0.5,
+            width: group.width,
+            height: group.height * 0.5,
+        },
+        _ => return None,
+    };
+    valid_preview_rect(preview).then_some(preview)
+}
+
+fn valid_preview_rect(rect: Rect) -> bool {
+    rect.x.is_finite()
+        && rect.y.is_finite()
+        && rect.width.is_finite()
+        && rect.height.is_finite()
+        && rect.width >= 0.0
+        && rect.height >= 0.0
 }
 
 fn desired_owners(
@@ -1146,7 +1609,9 @@ fn desired_owners(
             owners.insert(
                 entry.item.clone(),
                 if entry.open {
-                    RuntimePresentationOwner::AutoHide
+                    RuntimePresentationOwner::AutoHide {
+                        root: auto_hide_root(entry, snapshot.floating_roots.len()),
+                    }
                 } else {
                     RuntimePresentationOwner::None
                 },

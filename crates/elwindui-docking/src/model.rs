@@ -165,6 +165,7 @@ pub(crate) enum InternalDockPlacement {
         weight: f32,
     },
     RootEdge {
+        root: RootKind,
         side: DockSide,
         weight: f32,
     },
@@ -351,9 +352,11 @@ impl DockLayoutModel {
                 side,
                 weight,
             },
-            DockPlacement::RootEdge { side, weight } => {
-                InternalDockPlacement::RootEdge { side, weight }
-            }
+            DockPlacement::RootEdge { side, weight } => InternalDockPlacement::RootEdge {
+                root: RootKind::Main,
+                side,
+                weight,
+            },
             DockPlacement::Floating { bounds } => InternalDockPlacement::Floating { bounds },
             DockPlacement::AutoHide { side } => InternalDockPlacement::AutoHide { side },
         };
@@ -375,6 +378,14 @@ impl DockLayoutModel {
             && !valid_bounds(bounds)
         {
             return Err(DockLayoutError::InvalidBounds);
+        }
+        if let InternalDockPlacement::RootEdge {
+            root: RootKind::Floating(index),
+            ..
+        } = &placement
+            && self.workspace.floating_roots.get(*index).is_none()
+        {
+            return Err(DockLayoutError::InvalidFloatingRoot { index: *index });
         }
         let mut next = self.clone();
         if !next.contains_item(item) {
@@ -806,15 +817,14 @@ impl DockLayoutModel {
                     });
                 }
             }
-            InternalDockPlacement::RootEdge { side, weight } => {
+            InternalDockPlacement::RootEdge { root, side, weight } => {
                 let key = self.next_generated_key();
                 let new_group = Node::Group {
                     group: key,
                     items: vec![item.clone()],
                     selected: Some(item),
                 };
-                let old_root = self.workspace.main_root.take();
-                self.workspace.main_root = Some(match old_root {
+                let wrap_root = |old_root: Option<Node>, new_group: Node| match old_root {
                     None => new_group,
                     Some(root) => {
                         let orientation = side.orientation();
@@ -835,7 +845,21 @@ impl DockLayoutModel {
                             },
                         }
                     }
-                });
+                };
+                match root {
+                    RootKind::Main => {
+                        self.workspace.main_root =
+                            Some(wrap_root(self.workspace.main_root.take(), new_group));
+                    }
+                    RootKind::Floating(index) => {
+                        let old_root = std::mem::replace(
+                            &mut self.workspace.floating_roots[index].root,
+                            new_group.clone(),
+                        );
+                        self.workspace.floating_roots[index].root =
+                            wrap_root(Some(old_root), new_group);
+                    }
+                }
             }
             InternalDockPlacement::Floating { bounds } => {
                 let key = self.next_generated_key();

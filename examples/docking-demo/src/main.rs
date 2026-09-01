@@ -30,11 +30,11 @@ struct DockingDemoSurface {
             foreground: "#eef2f7"
         };
         let instructions = TextBlock {
-            text: "Drag a tab to a group edge or the surface edge; resize dividers; close, pin, and float pages."
+            text: "Drag tabs to group/surface edges, move one outside for a floating window, then re-dock; resize, close, and pin pages."
             foreground: "#abb7c4"
         };
         let status = TextBlock {
-            text: "Ready: authored declarations are mounted as registrations and the retained runtime is visible below."
+            text: "Ready: the collapsed authored tree feeds a retained runtime surface with live tab, splitter, auto-hide, and floating interactions."
             foreground: "#79c0ff"
         };
 

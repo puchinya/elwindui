@@ -14,12 +14,18 @@ mod surface_view;
 
 #[cfg(test)]
 pub(crate) use auto_hide::AutoHideOverlay;
+pub(crate) use drag::DragSourceGeometry;
 #[cfg(test)]
-pub(crate) use drag::DragSession;
+pub(crate) use drag::{DragSession, ResolvedDockTarget};
+pub(crate) use floating_window::FloatingHostId;
+#[cfg(test)]
+pub(crate) use floating_window::{FloatingHostFactory, FloatingHostRegistry, FloatingWindowHost};
 #[cfg(test)]
 pub(crate) use overlay::DropPreview;
-#[cfg(test)]
-pub(crate) use reconcile::LatestOnlyQueue;
 pub(crate) use reconcile::RuntimeRealization;
+#[cfg(test)]
+pub(crate) use reconcile::{LatestOnlyQueue, resolve_local_target_for_test};
 pub(crate) use support::weak_self_from_visual_owner;
+#[cfg(test)]
+pub(crate) use surface_registry::SurfaceRegistry;
 pub(crate) use surface_view::DockSurfaceView;

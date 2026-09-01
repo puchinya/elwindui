@@ -92,6 +92,8 @@ pub enum DockLayoutError {
     InvalidSnapshot { reason: String },
     /// A platform floating host could not be created or hosted.
     FloatingHostUnavailable { reason: String },
+    /// An internal interactive placement addressed a floating root that no longer exists.
+    InvalidFloatingRoot { index: usize },
 }
 
 impl fmt::Display for DockLayoutError {
@@ -110,6 +112,9 @@ impl fmt::Display for DockLayoutError {
             Self::InvalidSnapshot { reason } => write!(f, "invalid dock snapshot: {reason}"),
             Self::FloatingHostUnavailable { reason } => {
                 write!(f, "floating dock host unavailable: {reason}")
+            }
+            Self::InvalidFloatingRoot { index } => {
+                write!(f, "invalid floating dock root index {index}")
             }
         }
     }

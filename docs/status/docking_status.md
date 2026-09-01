@@ -15,21 +15,30 @@
   weak Docking owners. Drag preview is a real visual adornment and does not reparent page content.
 - Four custom auto-hide strips, icon/title entries, a single wrapper-hosting overlay pane, and pin
   affordances are present per Dock surface.
+- Drop discovery carries the selected `RootKind`, target group, and exact surface-local preview
+  rectangle together. Surface registration stores floating-root identity, corrects non-zero
+  DockSurfaceView offsets, filters group hit testing by root, and keeps only the target surface's
+  positioned preview visible.
 - AppKit and WinUI3 have private native floating Window adapters with logical bounds, retained
-  surface content, close interception, and empty-host cleanup. GTK model floating remains valid but
-  interactive native floating reports `FloatingHostUnavailable` because the baseline has no usable
-  Window implementation.
+  surface content, stable host IDs, staged prepare/commit creation, close interception, and
+  empty-host cleanup. Interactive bounds preserve the source group's arranged size and pointer
+  offset, subject to a 160x120 minimum. GTK model floating remains valid but interactive native
+  floating reports `FloatingHostUnavailable` because the baseline has no usable Window
+  implementation.
 - `examples/docking-demo` visibly composes documents, nested tools, and the retained DockingControl
   runtime; it no longer only serializes an empty model.
 
 ## Tests and verification state
 
-Focused model/runtime tests cover default initialization/reset, activation, close/reopen, all four
-split/edge sides, snapshot round-trip, auto-hide state, typed invalid values, latest-only source
-logic, removed-authored-group repair, adjacent split-weight transformation, generated-group drag
-targets, retained runtime presentation, callback-driven selection/close, initial publication, and
-dynamic registration. Native GUI behavior still requires platform-host verification where noted
-below.
+The focused `elwindui-docking` suite currently has 55 passing tests covering default
+initialization/reset, activation, close/reopen, all four split/edge sides, snapshot round-trip,
+auto-hide state, typed invalid values, latest-only source logic, removed-authored-group repair,
+adjacent split-weight transformation, generated-group drag targets, retained runtime presentation,
+callback-driven selection/close, initial publication, dynamic registration, cross-window target
+root/geometry and offset conversion, positioned previews, floating source geometry, staged host
+failure/success, stable host identity, native close veto/accept, final-root cleanup, actual tab and
+splitter pointer paths, and unmount/weak-lifetime cleanup. Native GUI behavior still requires
+platform-host verification where noted below.
 
 The canonical command results are recorded in the PR #218 remediation report. Workspace failures
 are kept separate from Docking-specific results; in particular, the existing AppKit

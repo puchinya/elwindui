@@ -59,15 +59,25 @@ group references, and publish only when the layout value actually changes.
 
 ## Drag target and preview
 
-`SurfaceRegistry` stores weak surface references. Bounds are computed from arranged dimensions and
-the visual-parent chain up to that registered surface. Screen-position target discovery first
-converts through each registered surface; without a screen position only the source surface's
-root-relative point is eligible. Surface edge bands are 10% of the smaller extent clamped to 24..64
-pixels. Group split bands are 25% with the same clamp. Edge ties use Left, Top, Right, Bottom.
+`SurfaceRegistry` stores a weak surface reference together with its private `RootKind` (floating
+indices follow the committed model vector; the main surface is registered last for deterministic
+discovery). Bounds are computed from arranged dimensions and the visual-parent chain to the hosted
+visual root. Screen-position target discovery converts screen -> host-root with
+`screen_to_root`, then host-root -> surface-local by subtracting the registered surface origin;
+without a screen position only the source surface's root-relative point is eligible. Surface edge
+bands are 10% of the smaller extent clamped to 24..64 pixels. Group split bands are 25% with the
+same clamp. Edge ties use Left, Top, Right, Bottom.
 
-`DragSession` retains the committed model and a runtime-only candidate placement. Moving a tab updates only
-`DropPreview`, a real custom rectangle. It never applies candidate ownership. Cancel, capture loss,
-source removal, source application, and unmount clear the preview/session.
+Target discovery returns one private `ResolvedDockTarget` containing the destination `RootKind`,
+`DockTarget`, optional group key, and computed surface-local preview rectangle. Outer Dock targets
+use the selected surface's root; group targets are filtered to groups belonging to that root. The
+preview is the group bounds, a half-group split, or a quarter-surface outer band as appropriate.
+
+`DragSession` retains the committed model, source `RootKind`, source group bounds in host-root
+coordinates, pointer offset, and a runtime-only candidate placement. Moving a tab updates only
+`DropPreview`, whose retained layer arranges a rectangle in surface-local coordinates. It never
+applies candidate ownership. Cancel, capture loss, source removal, source application, and unmount
+clear every surface preview/session.
 
 ## Auto-hide and native floating hosts
 
@@ -75,7 +85,11 @@ source removal, source application, and unmount clear the preview/session.
 pin affordance. It attaches the stable wrapper to the pane, so auto-hide never creates a second page.
 The bound model controls which entry is open and which remembered return state is used.
 
-`FloatingHostRegistry` maps model floating-root positions to native windows on AppKit and WinUI3.
-The adapter implements a private `FloatingWindowHost` contract for content, logical bounds, show,
-close, and native close interception. GTK deliberately has no adapter in this change. Native close
-handlers capture only weak Docking state; owner disposal clears handlers before closing every host.
+`SurfaceRuntime` retains one surface, auto-hide controller, and preview controller for the main root
+and for every floating root. `FloatingHostRegistry` maps model floating-root positions to native
+windows on AppKit and WinUI3. The adapter implements a private `FloatingWindowHost` contract for
+content, logical bounds, show, close, and native close interception. A new host follows
+prepare -> reconcile -> model commit -> registry insertion -> show; preparation failure therefore
+does not require changing committed wrapper ownership. GTK deliberately has no adapter in this
+change. Native close handlers capture only weak Docking state and a stable private
+`FloatingHostId`; owner disposal clears handlers before closing every host.

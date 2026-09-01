@@ -1,7 +1,10 @@
+use crate::core::base::Point;
 use crate::core::ui::Grid;
 use crate::core::ui::{ContentControlExt, UIElementExt};
-use crate::model::SplitAddress;
 use crate::model::{DefaultDockDefinition, DockLayoutModel, Node};
+use crate::model::{RootKind, SplitAddress};
+use crate::runtime::DragSourceGeometry;
+use crate::runtime::FloatingHostId;
 use crate::snapshot::SnapshotGroupKey;
 use crate::{DockItemId, DockLayoutError};
 use elwindui_custom_controls::{
@@ -83,6 +86,25 @@ impl DockingControl {
     /// Removes the user layout-change callback.
     pub fn clear_on_layout_change(&self) {
         self.set_layout_change_callback(None);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn realization_for_test(
+        &self,
+    ) -> Option<Rc<RefCell<crate::runtime::RuntimeRealization>>> {
+        self.runtime_realization()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_floating_host_factory_for_test(
+        &self,
+        factory: crate::runtime::FloatingHostFactory,
+    ) {
+        if let Some(realization) = self.runtime_realization() {
+            realization
+                .borrow_mut()
+                .set_floating_host_factory_for_test(factory);
+        }
     }
 
     fn capture_authored_default(&self) {
@@ -316,7 +338,7 @@ impl DockingControl {
         }
     }
 
-    pub(crate) fn handle_auto_hide_open(&self, item: DockItemId) {
+    pub(crate) fn handle_auto_hide_open(&self, root: RootKind, item: DockItemId) {
         let current = self.layout();
         let Ok(next) = current.with_item_activated(&item) else {
             return;
@@ -324,7 +346,7 @@ impl DockingControl {
         if next == current {
             if let Some(realization) = self.runtime_realization() {
                 let mut realization = realization.borrow_mut();
-                realization.open_auto_hide(item.clone());
+                realization.open_auto_hide_on(root, item.clone());
                 realization.present_auto_hide(&item);
             }
             return;
@@ -354,7 +376,9 @@ impl DockingControl {
             return;
         };
         if let Some(realization) = self.runtime_realization() {
-            let _ = realization.borrow_mut().begin_drag(&self.layout(), item);
+            let _ = realization
+                .borrow_mut()
+                .begin_drag(&self.layout(), item, args.position);
         }
     }
 
@@ -365,15 +389,14 @@ impl DockingControl {
     ) {
         if let Some(realization) = self.runtime_realization() {
             let mut realization = realization.borrow_mut();
-            let Some((target, target_group)) =
-                realization.target_for_drop(args.screen_position, args.position)
+            let Some(target) = realization.target_for_drop(args.screen_position, args.position)
             else {
                 realization.clear_drag_target();
                 return;
             };
             // The realization owns the target/adornment state. No model reconciliation occurs in
             // this path; CustomTabView remains the sole threshold/capture state machine.
-            let _ = realization.preview_drag(target, target_group, 1.0);
+            let _ = realization.preview_drag(&target, 1.0);
         }
         let _ = group;
     }
@@ -386,43 +409,90 @@ impl DockingControl {
         let Some(realization) = self.runtime_realization() else {
             return;
         };
-        let mut floating_fallback = None;
-        if !args.canceled {
-            let mut current = realization.borrow_mut();
-            let Some((target, target_group)) =
-                current.target_for_drop(args.screen_position, args.position)
-            else {
-                if let (Some(screen), Some(item)) = (args.screen_position, current.drag_item()) {
-                    let bounds = crate::Rect {
-                        x: screen.x,
-                        y: screen.y,
-                        width: 480.0,
-                        height: 320.0,
-                    };
-                    floating_fallback = current.request_float(&self.layout(), &item, bounds).ok();
-                }
-                current.clear_drag_target();
-                current.finish_drag(false);
-                if floating_fallback.is_none() {
-                    return;
-                }
-                drop(current);
-                if let Some(next) = floating_fallback {
-                    let _ = self.commit_user_model(next);
-                }
-                return;
-            };
-            let _ = current.preview_drag(target, target_group, 1.0);
-        }
-        let next = realization.borrow_mut().finish_drag(!args.canceled);
         if args.canceled {
+            realization.borrow_mut().finish_drag(false);
             return;
         }
-        if let Some(next) = next
-            && next != self.layout()
-        {
-            let _ = self.commit_user_model(next);
+
+        let target = {
+            realization
+                .borrow()
+                .target_for_drop(args.screen_position, args.position)
+        };
+        if let Some(target) = target {
+            let next = {
+                let mut current = realization.borrow_mut();
+                let _ = current.preview_drag(&target, 1.0);
+                current.finish_drag(true)
+            };
+            if let Some(next) = next
+                && next != self.layout()
+            {
+                let _ = self.commit_user_model(next);
+            }
+            return;
         }
+
+        let Some(screen) = args.screen_position else {
+            realization.borrow_mut().finish_drag(false);
+            return;
+        };
+        let item = realization.borrow().drag_item();
+        let geometry = realization.borrow().drag_source_geometry();
+        let (Some(item), Some(geometry)) = (item, geometry) else {
+            realization.borrow_mut().finish_drag(false);
+            return;
+        };
+        let Some(bounds) = floating_bounds(&geometry, screen) else {
+            realization.borrow_mut().finish_drag(false);
+            return;
+        };
+        if !realization.borrow().can_float(&item) {
+            realization.borrow_mut().finish_drag(false);
+            return;
+        }
+
+        let (next, prepared) = {
+            let mut current = realization.borrow_mut();
+            let Ok(next) = current.floating_candidate(bounds) else {
+                current.finish_drag(false);
+                return;
+            };
+            let prepared = match current.prepare_floating_host(bounds) {
+                Ok(prepared) => prepared,
+                Err(_) => {
+                    current.finish_drag(false);
+                    return;
+                }
+            };
+            (next, prepared)
+        };
+        let prepared_surface = prepared.surface.clone();
+        let previous = self.last_applied_model();
+        if realization
+            .borrow_mut()
+            .reconcile_with_prepared(&next, prepared_surface)
+            .is_err()
+        {
+            prepared.abort();
+            let mut current = realization.borrow_mut();
+            current.cancel_transient();
+            let _ = current.reconcile(&previous);
+            return;
+        }
+        let root_index = next.snapshot().floating_roots.len().saturating_sub(1);
+        let mut current = realization.borrow_mut();
+        current.finish_drag(true);
+        drop(current);
+        self.set_last_applied_model(next.clone());
+        self.set_layout(next.clone());
+        if let Some(callback) = self.layout_change_callback() {
+            callback(next);
+        }
+        let id = realization
+            .borrow_mut()
+            .commit_prepared_host(prepared, root_index);
+        realization.borrow().show_floating_host(id);
     }
 
     pub(crate) fn handle_splitter_started(
@@ -488,11 +558,21 @@ impl DockingControl {
         true
     }
 
-    pub(crate) fn handle_pin_gesture(&self) {
+    pub(crate) fn handle_floating_close_host(&self, host_id: FloatingHostId) -> bool {
+        let Some(index) = self
+            .runtime_realization()
+            .and_then(|realization| realization.borrow().floating_root_index(host_id))
+        else {
+            return false;
+        };
+        self.handle_floating_close(index)
+    }
+
+    pub(crate) fn handle_pin_gesture(&self, root: RootKind) {
         let model = self.layout();
         let item = self
             .runtime_realization()
-            .and_then(|realization| realization.borrow().open_auto_hide_item())
+            .and_then(|realization| realization.borrow().open_auto_hide_item_on(&root))
             .or_else(|| model.selected_item_id());
         let Some(item) = item else {
             return;
@@ -522,6 +602,45 @@ impl DockingControl {
             let _ = self.commit_user_model(next);
         }
     }
+}
+
+fn floating_bounds(source: &DragSourceGeometry, screen_position: Point) -> Option<crate::Rect> {
+    if !source.source_bounds_host.x.is_finite()
+        || !source.source_bounds_host.y.is_finite()
+        || !source.source_bounds_host.width.is_finite()
+        || !source.source_bounds_host.height.is_finite()
+        || source.source_bounds_host.width < 0.0
+        || source.source_bounds_host.height < 0.0
+        || !source.pointer_offset.x.is_finite()
+        || !source.pointer_offset.y.is_finite()
+        || !screen_position.x.is_finite()
+        || !screen_position.y.is_finite()
+    {
+        return None;
+    }
+    let width = source.source_bounds_host.width.max(160.0);
+    let height = source.source_bounds_host.height.max(120.0);
+    let bounds = crate::Rect {
+        x: screen_position.x - source.pointer_offset.x,
+        y: screen_position.y - source.pointer_offset.y,
+        width,
+        height,
+    };
+    (bounds.x.is_finite()
+        && bounds.y.is_finite()
+        && bounds.width.is_finite()
+        && bounds.height.is_finite()
+        && bounds.width >= 160.0
+        && bounds.height >= 120.0)
+        .then_some(bounds)
+}
+
+#[cfg(test)]
+pub(crate) fn floating_bounds_for_test(
+    source: &DragSourceGeometry,
+    screen_position: Point,
+) -> Option<crate::Rect> {
+    floating_bounds(source, screen_position)
 }
 
 fn authored_node(

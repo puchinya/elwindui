@@ -86,12 +86,12 @@ impl CustomTabContentPresenter {
                 }
                 self.as_ui_element().visual_collection.add(content.clone());
             }
-            let weak_presenter = self.weak_self();
-            let weak_item = Rc::downgrade(item);
+            let weak_presenter: std::rc::Weak<CustomTabContentPresenter> = self.weak_self();
+            let weak_item: std::rc::Weak<CustomTabViewItem> = Rc::downgrade(item);
             let subscription = item.__subscribe_content_changed(Rc::new(move |replacement| {
-                if let (Some(presenter), Some(item)) =
-                    (weak_presenter.upgrade(), weak_item.upgrade())
-                {
+                let presenter: Option<Rc<CustomTabContentPresenter>> = weak_presenter.upgrade();
+                let item: Option<Rc<CustomTabViewItem>> = weak_item.upgrade();
+                if let (Some(presenter), Some(item)) = (presenter, item) {
                     presenter.replace_item_content(&item, replacement);
                 }
             }));
@@ -116,7 +116,9 @@ impl CustomTabContentPresenter {
             entry
                 .item
                 .upgrade()
-                .is_some_and(|candidate| std::ptr::eq(candidate.as_ref(), item))
+                .is_some_and(|candidate: Rc<CustomTabViewItem>| {
+                    std::ptr::eq(candidate.as_ref(), item)
+                })
         }) else {
             return;
         };

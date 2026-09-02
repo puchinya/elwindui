@@ -15,7 +15,7 @@ use crate::reactive::Subscription;
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 /// Identifies one Environment value slot. Implemented by types generated from
 /// `#[elwindui::environment_key]` (`docs/specs/theme_environment_spec.md` §2).
@@ -189,9 +189,10 @@ impl EnvironmentContext {
         let cell = self.state.resolve_cell::<K>();
         let listener: Rc<dyn Fn()> = Rc::new(listener);
         cell.listeners.borrow_mut().push(listener.clone());
-        let weak_cell = Rc::downgrade(&cell);
+        let weak_cell: Weak<EnvironmentCell<K::Value>> = Rc::downgrade(&cell);
         Subscription::new(move || {
-            if let Some(cell) = weak_cell.upgrade() {
+            let cell: Option<Rc<EnvironmentCell<K::Value>>> = weak_cell.upgrade();
+            if let Some(cell) = cell {
                 cell.listeners
                     .borrow_mut()
                     .retain(|registered| !Rc::ptr_eq(registered, &listener));

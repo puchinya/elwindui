@@ -85,7 +85,8 @@ impl InnerPopupSurface {
         // again — see `on_native_closed`'s own doc comment.
         let weak_surface = Rc::downgrade(&surface);
         let callback_id = surface.callback_owner.register_event(Rc::new(move || {
-            if let Some(s) = weak_surface.upgrade() {
+            let surface: Option<Rc<Self>> = weak_surface.upgrade();
+            if let Some(s) = surface {
                 s.on_native_closed();
             }
         }));

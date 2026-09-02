@@ -1215,6 +1215,9 @@ fn emit_template_property_subscriptions(
     target_type: &TokenStream,
     property_bounds: &Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
 ) -> TokenStream {
+    // The target is interpolated into generated tokens. Keep the input explicit for
+    // rust-analyzer, which does not model quote interpolation as a local use.
+    let _target_type_is_empty = target_type.is_empty();
     property_bounds
         .borrow()
         .keys()
@@ -1224,13 +1227,16 @@ fn emit_template_property_subscriptions(
             let refresh_cell = format_ident!("__elwindui_template_property_refresh_cell_{key}");
             quote! {
                 {
-                    let #weak_parent = std::rc::Rc::downgrade(&__elwindui_template_parent);
+                    let #weak_parent: std::rc::Weak<#target_type> =
+                        std::rc::Rc::downgrade(&__elwindui_template_parent);
                     let #refresh_cell = std::rc::Rc::clone(&__elwindui_template_refresh_cell);
                     __subscriptions.borrow_mut().push(
                         <#target_type as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
                             &*__elwindui_template_parent,
                             move || {
-                                if #weak_parent.upgrade().is_some() {
+                                let parent: Option<std::rc::Rc<#target_type>> =
+                                    #weak_parent.upgrade();
+                                if parent.is_some() {
                                     if let Some(__elwindui_template_refresh_callback) =
                                         #refresh_cell.borrow().as_ref().cloned()
                                     {
@@ -1308,12 +1314,14 @@ pub(crate) fn emit_compiled_template_factory(
             elwindui::core::ui::ControlTemplate::<#target_type>::from_environment(move |__environment| {
                 use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
                 use elwindui::ui::*;
-                let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
+                let __subscriptions: std::rc::Rc<std::cell::RefCell<Vec<
+                    elwindui::core::reactive::Subscription,
+                >>> = std::rc::Rc::new(std::cell::RefCell::new(
                     Vec::<elwindui::core::reactive::Subscription>::new(),
                 ));
                 #capture_clones
                 #let_statements
-                let __root = #root;
+                let __root: std::rc::Rc<dyn elwindui::core::ui::UIElementExt> = #root;
                 #on_mount_hook
                 #on_unmount_hook
                 __root
@@ -1328,24 +1336,29 @@ pub(crate) fn emit_compiled_template_factory(
     let property_subscriptions =
         emit_template_property_subscriptions(&target_type, &body.property_bounds);
     let on_unmount = body.on_unmount.clone();
-    let on_mount_hook = body
+    let _on_mount_hook = body
         .on_mount
         .clone()
         .map(|body| {
+            let _ = &body;
             let weak_parent = format_ident!("__elwindui_template_mount_weak");
             let parent = format_ident!("__elwindui_template_parent");
             quote! {
                 {
-                    let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                    let #weak_parent: std::rc::Weak<#target_type> =
+                        std::rc::Rc::downgrade(&#parent);
                     let __template_mount_environment = __environment.clone();
                     let __template_mount_subscriptions = __subscriptions.clone();
                     elwindui::core::ui::UIElementExt::add_mount_hook(
                         &*__root,
                         Box::new(move || {
-                            if let Some(#parent) = #weak_parent.upgrade() {
-                                let this = #parent.clone();
+                            let mount_parent: Option<std::rc::Rc<#target_type>> =
+                                #weak_parent.upgrade();
+                            if let Some(#parent) = mount_parent {
+                                let this: std::rc::Rc<#target_type> = #parent.clone();
                                 let __environment = __template_mount_environment.clone();
                                 let __subscriptions = __template_mount_subscriptions.clone();
+                                let _ = (&this, &__environment, &__subscriptions);
                                 #body
                             }
                         }),
@@ -1362,13 +1375,17 @@ pub(crate) fn emit_compiled_template_factory(
                 let parent = format_ident!("__elwindui_template_parent");
                 quote! {
                     {
-                        let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                        let #weak_parent: std::rc::Weak<#target_type> =
+                            std::rc::Rc::downgrade(&#parent);
                         __subscriptions.borrow_mut().push(
                             <#target_type as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
                                 &*#parent,
                                 move || {
-                                    if let Some(#parent) = #weak_parent.upgrade() {
-                                        let this = #parent.clone();
+                                    let update_parent: Option<std::rc::Rc<#target_type>> =
+                                        #weak_parent.upgrade();
+                                    if let Some(#parent) = update_parent {
+                                        let this: std::rc::Rc<#target_type> = #parent.clone();
+                                        let _ = &this;
                                         #update_body
                                     }
                                 },
@@ -1386,12 +1403,15 @@ pub(crate) fn emit_compiled_template_factory(
         let parent = format_ident!("__elwindui_template_parent");
         quote! {
             {
-                let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                let #weak_parent: std::rc::Weak<#target_type> =
+                    std::rc::Rc::downgrade(&#parent);
                 elwindui::core::ui::UIElementExt::add_unmount_hook(
                     &*__root,
                     Box::new(move || {
-                        if let Some(#parent) = #weak_parent.upgrade() {
-                            let this = #parent.clone();
+                        let unmount_parent: Option<std::rc::Rc<#target_type>> =
+                            #weak_parent.upgrade();
+                        if let Some(#parent) = unmount_parent {
+                            let this: std::rc::Rc<#target_type> = #parent.clone();
                             #body
                         }
                     }),
@@ -1404,38 +1424,49 @@ pub(crate) fn emit_compiled_template_factory(
         elwindui::core::ui::ControlTemplate::<#target_type>::new(move |context| {
             use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
             use elwindui::ui::*;
-            let __elwindui_template_parent = context.control.clone();
+            let __elwindui_template_parent: std::rc::Rc<#target_type> = context.control.clone();
             let __environment = context.environment.clone();
-            let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
+            let __subscriptions: std::rc::Rc<std::cell::RefCell<Vec<
+                elwindui::core::reactive::Subscription,
+            >>> = std::rc::Rc::new(std::cell::RefCell::new(
                 Vec::<elwindui::core::reactive::Subscription>::new(),
             ));
-            let __elwindui_template_refresh_cell = std::rc::Rc::new(
+            let __elwindui_template_refresh_cell: std::rc::Rc<std::cell::RefCell<
+                Option<std::rc::Rc<dyn Fn()>>,
+            >> = std::rc::Rc::new(
                 std::cell::RefCell::new(None::<std::rc::Rc<dyn Fn()>>),
             );
-            let __elwindui_template_refresh_parent = __elwindui_template_parent.clone();
+            let __elwindui_template_refresh_parent: std::rc::Rc<#target_type> =
+                __elwindui_template_parent.clone();
             let __elwindui_template_refresh_environment = __environment.clone();
-            let __elwindui_template_refresh_cell_for_callback =
-                std::rc::Rc::clone(&__elwindui_template_refresh_cell);
-            let this = __elwindui_template_parent.clone();
+            let __elwindui_template_refresh_cell_for_callback: std::rc::Rc<std::cell::RefCell<
+                Option<std::rc::Rc<dyn Fn()>>,
+            >> = std::rc::Rc::clone(&__elwindui_template_refresh_cell);
+            let this: std::rc::Rc<#target_type> = __elwindui_template_parent.clone();
+            let _ = &this;
             #capture_clones
             #let_statements
-            let __root = #root;
+            let __root: std::rc::Rc<dyn elwindui::core::ui::UIElementExt> = #root;
             let __elwindui_template_refresh_callback: std::rc::Rc<dyn Fn()> =
                 std::rc::Rc::new(move || {
-                    let __elwindui_template_parent =
-                        __elwindui_template_refresh_parent.clone();
-                    let this = __elwindui_template_parent.clone();
+                        let __elwindui_template_parent: std::rc::Rc<#target_type> =
+                            __elwindui_template_refresh_parent.clone();
+                        let this: std::rc::Rc<#target_type> = __elwindui_template_parent.clone();
+                        let _ = &this;
                     let __environment = __elwindui_template_refresh_environment.clone();
                     #refresh
                 });
             *__elwindui_template_refresh_cell_for_callback.borrow_mut() =
                 Some(__elwindui_template_refresh_callback);
             #property_subscriptions
-            #on_mount_hook
+            #_on_mount_hook
             #update_subscriptions
             #on_unmount_hook
-            let __template_subscriptions_for_cleanup = __subscriptions.clone();
-            let __template_target_for_cleanup = __elwindui_template_parent.clone();
+            let __template_subscriptions_for_cleanup: std::rc::Rc<std::cell::RefCell<Vec<
+                elwindui::core::reactive::Subscription,
+            >>> = __subscriptions.clone();
+            let __template_target_for_cleanup: std::rc::Rc<#target_type> =
+                __elwindui_template_parent.clone();
             __template_target_for_cleanup.add_unmount_hook(Box::new(move || {
                 __template_subscriptions_for_cleanup.borrow_mut().clear();
             }));
@@ -1460,24 +1491,29 @@ fn emit_view_factory(
     let refresh = &body.refresh;
     let property_subscriptions =
         emit_template_property_subscriptions(&target_type, &body.property_bounds);
-    let on_mount_hook = body
+    let _on_mount_hook = body
         .on_mount
         .clone()
         .map(|body| {
+            let _ = &body;
             let weak_parent = format_ident!("__elwindui_deferred_mount_weak");
             let parent = format_ident!("__elwindui_template_parent");
             quote! {
                 {
-                    let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                    let #weak_parent: std::rc::Weak<#target_type> =
+                        std::rc::Rc::downgrade(&#parent);
                     let __deferred_mount_environment = __environment.clone();
                     let __deferred_mount_subscriptions = __subscriptions.clone();
                     elwindui::core::ui::UIElementExt::add_mount_hook(
                         &*__root,
                         Box::new(move || {
-                            if let Some(#parent) = #weak_parent.upgrade() {
-                                let this = #parent.clone();
+                            let mount_parent: Option<std::rc::Rc<#target_type>> =
+                                #weak_parent.upgrade();
+                            if let Some(#parent) = mount_parent {
+                                let this: std::rc::Rc<#target_type> = #parent.clone();
                                 let __environment = __deferred_mount_environment.clone();
                                 let __subscriptions = __deferred_mount_subscriptions.clone();
+                                let _ = (&this, &__environment, &__subscriptions);
                                 #body
                             }
                         }),
@@ -1494,13 +1530,17 @@ fn emit_view_factory(
                 let parent = format_ident!("__elwindui_template_parent");
                 quote! {
                     {
-                        let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                        let #weak_parent: std::rc::Weak<#target_type> =
+                            std::rc::Rc::downgrade(&#parent);
                         __subscriptions.borrow_mut().push(
                             <#target_type as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
                                 &*#parent,
                                 move || {
-                                    if let Some(#parent) = #weak_parent.upgrade() {
-                                        let this = #parent.clone();
+                                    let update_parent: Option<std::rc::Rc<#target_type>> =
+                                        #weak_parent.upgrade();
+                                    if let Some(#parent) = update_parent {
+                                        let this: std::rc::Rc<#target_type> = #parent.clone();
+                                        let _ = &this;
                                         #update_body
                                     }
                                 },
@@ -1521,12 +1561,15 @@ fn emit_view_factory(
             let parent = format_ident!("__elwindui_template_parent");
             quote! {
                 {
-                    let #weak_parent = std::rc::Rc::downgrade(&#parent);
+                let #weak_parent: std::rc::Weak<#target_type> =
+                    std::rc::Rc::downgrade(&#parent);
                     elwindui::core::ui::UIElementExt::add_unmount_hook(
                         &*__root,
                         Box::new(move || {
-                            if let Some(#parent) = #weak_parent.upgrade() {
-                                let this = #parent.clone();
+                            let unmount_parent: Option<std::rc::Rc<#target_type>> =
+                                #weak_parent.upgrade();
+                            if let Some(#parent) = unmount_parent {
+                                let this: std::rc::Rc<#target_type> = #parent.clone();
                                 #body
                             }
                         }),
@@ -1537,37 +1580,50 @@ fn emit_view_factory(
         .unwrap_or_default();
     quote! {
         {
-            let __deferred_parent_weak = std::rc::Rc::downgrade(&#parent);
+            let __deferred_parent_weak: std::rc::Weak<#target_type> =
+                std::rc::Rc::downgrade(&#parent);
             elwindui::core::ui::ViewFactory::new(move |context| {
-                context.owner.upgrade()?;
-                let __elwindui_template_parent = __deferred_parent_weak.upgrade()?;
+                let __owner: Option<std::rc::Rc<dyn elwindui::core::ui::UIElementExt>> =
+                    context.owner.upgrade();
+                __owner?;
+                let __deferred_parent: Option<std::rc::Rc<#target_type>> =
+                    __deferred_parent_weak.upgrade();
+                let __elwindui_template_parent: std::rc::Rc<#target_type> = __deferred_parent?;
                 let __environment = context.environment.clone();
-                let __subscriptions = std::rc::Rc::new(std::cell::RefCell::new(
+                let __subscriptions: std::rc::Rc<std::cell::RefCell<Vec<
+                    elwindui::core::reactive::Subscription,
+                >>> = std::rc::Rc::new(std::cell::RefCell::new(
                     Vec::<elwindui::core::reactive::Subscription>::new(),
                 ));
-                let __elwindui_template_refresh_cell = std::rc::Rc::new(
+                let __elwindui_template_refresh_cell: std::rc::Rc<std::cell::RefCell<
+                    Option<std::rc::Rc<dyn Fn()>>,
+                >> = std::rc::Rc::new(
                     std::cell::RefCell::new(None::<std::rc::Rc<dyn Fn()>>),
                 );
-                let __elwindui_template_refresh_parent = __elwindui_template_parent.clone();
+                let __elwindui_template_refresh_parent: std::rc::Rc<#target_type> =
+                    __elwindui_template_parent.clone();
                 let __elwindui_template_refresh_environment = __environment.clone();
-                let __elwindui_template_refresh_cell_for_callback =
-                    std::rc::Rc::clone(&__elwindui_template_refresh_cell);
-                let this = __elwindui_template_parent.clone();
+                let __elwindui_template_refresh_cell_for_callback: std::rc::Rc<
+                    std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>>,
+                > = std::rc::Rc::clone(&__elwindui_template_refresh_cell);
+                let this: std::rc::Rc<#target_type> = __elwindui_template_parent.clone();
+                let _ = &this;
                 #capture_clones
                 #let_statements
-                let __root = #root;
+                let __root: std::rc::Rc<dyn elwindui::core::ui::UIElementExt> = #root;
                 let __elwindui_template_refresh_callback: std::rc::Rc<dyn Fn()> =
                     std::rc::Rc::new(move || {
-                        let __elwindui_template_parent =
+                        let __elwindui_template_parent: std::rc::Rc<#target_type> =
                             __elwindui_template_refresh_parent.clone();
-                        let this = __elwindui_template_parent.clone();
+                        let this: std::rc::Rc<#target_type> = __elwindui_template_parent.clone();
+                        let _ = &this;
                         let __environment = __elwindui_template_refresh_environment.clone();
                         #refresh
                     });
                 *__elwindui_template_refresh_cell_for_callback.borrow_mut() =
                     Some(__elwindui_template_refresh_callback);
                 #property_subscriptions
-                #on_mount_hook
+            #_on_mount_hook
                 #update_subscriptions
                 #on_unmount_hook
                 let __deferred_subscriptions = __subscriptions.clone();

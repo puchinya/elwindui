@@ -138,33 +138,38 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
     // so this mechanical signature update is deliberately kept behavior-identical rather than
     // guessed at.
     fn request_relayout(&self, dirty_group_id: u64, _kind: elwindui_core::ui::InvalidationKind) {
-        let Some(active) = self.active.upgrade() else {
+        let active: Option<Rc<Cell<bool>>> = self.active.upgrade();
+        let Some(active) = active else {
             return;
         };
         if !active.get() {
             return;
         }
-        if let Some(render_tree) = self.render_tree.upgrade() {
-            if let Some(render_tree) = render_tree.borrow_mut().as_mut() {
+        let render_tree: Option<Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>> =
+            self.render_tree.upgrade();
+        if let Some(render_tree) = render_tree {
+            let mut render_tree = render_tree.borrow_mut();
+            if let Some(render_tree) = render_tree.as_mut() {
                 render_tree.mark_dirty(dirty_group_id);
             }
         }
         if self.pending.replace(true) {
             return; // already scheduled — the pending pass will pick up this call's changes too
         }
-        let Some(this) = self.weak_self.borrow().upgrade() else {
+        let this: Option<Rc<WinUI3RelayoutHost>> = self.weak_self.borrow().upgrade();
+        let Some(this) = this else {
             self.pending.set(false);
             return;
         };
         this.pending.set(false);
-        if let (
-            Some(tree),
-            Some(render_tree),
-            Some(native_children),
-            Some(composition),
-            Some(keyboard),
-            Some(unconstrained_axes),
-            Some(active),
+        let upgraded: (
+            Option<Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>>,
+            Option<Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>>,
+            Option<Rc<RefCell<NativeChildMap>>>,
+            Option<Rc<RefCell<CompositionRenderer>>>,
+            Option<Rc<KeyboardDispatcher>>,
+            Option<Rc<Cell<(bool, bool)>>>,
+            Option<Rc<Cell<bool>>>,
         ) = (
             this.tree.upgrade(),
             this.render_tree.upgrade(),
@@ -173,7 +178,17 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
             this.keyboard.upgrade(),
             this.unconstrained_axes.upgrade(),
             this.active.upgrade(),
-        ) {
+        );
+        if let (
+            Some(tree),
+            Some(render_tree),
+            Some(native_children),
+            Some(composition),
+            Some(keyboard),
+            Some(unconstrained_axes),
+            Some(active),
+        ) = upgraded
+        {
             TreeHostPanel::relayout_static(
                 &this.canvas,
                 &composition,
@@ -199,7 +214,8 @@ pub(crate) struct WinUI3FocusHost {
 
 impl FocusHost for WinUI3FocusHost {
     fn request_focus(&self, target: &Rc<dyn elwindui_core::ui::UIElementExt>) -> bool {
-        match self.keyboard.upgrade() {
+        let keyboard: Option<Rc<KeyboardDispatcher>> = self.keyboard.upgrade();
+        match keyboard {
             Some(keyboard) => keyboard
                 .as_ref()
                 .focus
@@ -237,10 +253,8 @@ impl PointerGestureHost for WinUI3PointerGestureHost {
         &self,
         subtree: &Rc<dyn elwindui_core::ui::UIElementExt>,
     ) -> bool {
-        let canceled = self
-            .pointer
-            .upgrade()
-            .is_some_and(|pointer| pointer.cancel_for_subtree(subtree));
+        let pointer: Option<Rc<PointerDispatcher>> = self.pointer.upgrade();
+        let canceled = pointer.is_some_and(|pointer| pointer.cancel_for_subtree(subtree));
         if canceled {
             if let Some(canvas) = self.canvas.upgrade() {
                 let _ = canvas.ReleasePointerCaptures();
@@ -276,9 +290,15 @@ impl TreeHostPanel {
             let active_for_key = Rc::downgrade(&this.active_popup);
             let canvas_for_context_key = this.canvas.clone();
             let context_callback_id = this.callback_owner.register_bool_event(Rc::new(move || {
-                let tree_ref = tree_for_key.upgrade().and_then(|t| t.borrow().clone());
-                let kb_ref = keyboard_for_key.upgrade();
-                let active_ref = active_for_key.upgrade();
+                let tree_storage: Option<
+                    Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
+                > = tree_for_key.upgrade();
+                let tree_ref: Option<Rc<dyn elwindui_core::ui::UIElementExt>> =
+                    tree_storage.and_then(|t| t.borrow().clone());
+                let kb_ref: Option<Rc<KeyboardDispatcher>> = keyboard_for_key.upgrade();
+                let active_ref: Option<
+                    Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
+                > = active_for_key.upgrade();
                 if let (Some(tree), Some(kb), Some(active)) = (tree_ref, kb_ref, active_ref) {
                     let screen_anchor = if let Some(focused) = kb.as_ref().focus.focused() {
                         let offset = focused
@@ -318,10 +338,14 @@ impl TreeHostPanel {
             let tree_for_key = Rc::downgrade(&this.tree);
             let keyboard_for_key = Rc::downgrade(&this.keyboard);
             let callback_id = this.callback_owner.register_key(Rc::new(move |event| {
-                if let (Some(tree), Some(keyboard)) =
-                    (tree_for_key.upgrade(), keyboard_for_key.upgrade())
-                {
-                    if let Some(tree) = tree.borrow().clone() {
+                let tree_storage: Option<
+                    Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
+                > = tree_for_key.upgrade();
+                let keyboard: Option<Rc<KeyboardDispatcher>> = keyboard_for_key.upgrade();
+                if let (Some(tree), Some(keyboard)) = (tree_storage, keyboard) {
+                    let tree: Option<Rc<dyn elwindui_core::ui::UIElementExt>> =
+                        tree.borrow().clone();
+                    if let Some(tree) = tree {
                         keyboard.handle_key(&tree, event);
                     }
                 }
@@ -364,10 +388,14 @@ impl TreeHostPanel {
             let tree_for_key = Rc::downgrade(&this.tree);
             let keyboard_for_key = Rc::downgrade(&this.keyboard);
             let callback_id = this.callback_owner.register_key(Rc::new(move |event| {
-                if let (Some(tree), Some(keyboard)) =
-                    (tree_for_key.upgrade(), keyboard_for_key.upgrade())
-                {
-                    if let Some(tree) = tree.borrow().clone() {
+                let tree_storage: Option<
+                    Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
+                > = tree_for_key.upgrade();
+                let keyboard: Option<Rc<KeyboardDispatcher>> = keyboard_for_key.upgrade();
+                if let (Some(tree), Some(keyboard)) = (tree_storage, keyboard) {
+                    let tree: Option<Rc<dyn elwindui_core::ui::UIElementExt>> =
+                        tree.borrow().clone();
+                    if let Some(tree) = tree {
                         keyboard.handle_key(&tree, event);
                     }
                 }
@@ -400,9 +428,11 @@ impl TreeHostPanel {
             let tree_for_text = Rc::downgrade(&this.tree);
             let keyboard_for_text = Rc::downgrade(&this.keyboard);
             let callback_id = this.callback_owner.register_text(Rc::new(move |text| {
-                if let (Some(tree), Some(keyboard)) =
-                    (tree_for_text.upgrade(), keyboard_for_text.upgrade())
-                {
+                let tree_storage: Option<
+                    Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
+                > = tree_for_text.upgrade();
+                let keyboard: Option<Rc<KeyboardDispatcher>> = keyboard_for_text.upgrade();
+                if let (Some(tree), Some(keyboard)) = (tree_storage, keyboard) {
                     if let Some(tree) = tree.borrow().clone() {
                         keyboard.handle_text_input(&tree, RawTextInputEvent { text });
                     }
@@ -587,6 +617,23 @@ impl TreeHostPanel {
             let weak_active = Rc::downgrade(&this.active);
             let canvas_for_handler = this.canvas.clone();
             let callback_id = this.callback_owner.register_event(Rc::new(move || {
+                let state: (
+                    Option<Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>>,
+                    Option<Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>>,
+                    Option<Rc<RefCell<NativeChildMap>>>,
+                    Option<Rc<RefCell<CompositionRenderer>>>,
+                    Option<Rc<KeyboardDispatcher>>,
+                    Option<Rc<Cell<(bool, bool)>>>,
+                    Option<Rc<Cell<bool>>>,
+                ) = (
+                    weak.upgrade(),
+                    weak_render_tree.upgrade(),
+                    weak_native_children.upgrade(),
+                    weak_composition.upgrade(),
+                    weak_keyboard.upgrade(),
+                    weak_unconstrained_axes.upgrade(),
+                    weak_active.upgrade(),
+                );
                 if let (
                     Some(tree),
                     Some(render_tree),
@@ -596,13 +643,7 @@ impl TreeHostPanel {
                     Some(unconstrained_axes),
                     Some(active),
                 ) = (
-                    weak.upgrade(),
-                    weak_render_tree.upgrade(),
-                    weak_native_children.upgrade(),
-                    weak_composition.upgrade(),
-                    weak_keyboard.upgrade(),
-                    weak_unconstrained_axes.upgrade(),
-                    weak_active.upgrade(),
+                    state.0, state.1, state.2, state.3, state.4, state.5, state.6,
                 ) {
                     Self::relayout_static(
                         &canvas_for_handler,
@@ -637,11 +678,16 @@ impl TreeHostPanel {
                     if args.Handled().unwrap_or(false) {
                         return;
                     }
-                    if let (Some(tree), Some(keyboard), Some(active)) = (
-                        tree_for_context.upgrade(),
-                        keyboard_for_context.upgrade(),
-                        active_for_context.upgrade(),
-                    ) {
+                    let tree_storage: Option<
+                        Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
+                    > = tree_for_context.upgrade();
+                    let keyboard: Option<Rc<KeyboardDispatcher>> = keyboard_for_context.upgrade();
+                    let active: Option<
+                        Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
+                    > = active_for_context.upgrade();
+                    if let (Some(tree), Some(keyboard), Some(active)) =
+                        (tree_storage, keyboard, active)
+                    {
                         if let Some(tree) = tree.borrow().clone() {
                             let Ok(point) = args.GetPosition(&canvas_for_context) else {
                                 return;
@@ -699,7 +745,8 @@ impl TreeHostPanel {
                             },
                         )
                     } else {
-                        let screen_anchor = if let Some(keyboard) = keyboard_for_ctx.upgrade() {
+                        let keyboard: Option<Rc<KeyboardDispatcher>> = keyboard_for_ctx.upgrade();
+                        let screen_anchor = if let Some(keyboard) = keyboard {
                             if let Some(focused) = keyboard.as_ref().focus.focused() {
                                 let offset = focused
                                     .arranged_offset()
@@ -728,11 +775,20 @@ impl TreeHostPanel {
                             .map(|anchor| elwindui_core::ui::ContextRequest::keyboard(Some(anchor)))
                     };
                     if let Some(request) = request {
-                        if let (Some(tree), Some(keyboard), Some(active)) = (
-                            tree_for_ctx.upgrade(),
-                            keyboard_for_ctx.upgrade(),
-                            active_for_ctx.upgrade(),
-                        ) {
+                        let tree_storage: Option<
+                            Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
+                        > = tree_for_ctx.upgrade();
+                        let keyboard: Option<Rc<KeyboardDispatcher>> = keyboard_for_ctx.upgrade();
+                        let active: Option<
+                            Rc<
+                                RefCell<
+                                    Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>,
+                                >,
+                            >,
+                        > = active_for_ctx.upgrade();
+                        if let (Some(tree), Some(keyboard), Some(active)) =
+                            (tree_storage, keyboard, active)
+                        {
                             if let Some(tree) = tree.borrow().clone() {
                                 if Self::dispatch_context_request(
                                     &Some(tree),
@@ -811,10 +867,14 @@ impl TreeHostPanel {
         if !Self::pointer_originates_from_canvas(canvas, args) {
             return false;
         }
-        let Some(tree) = tree.upgrade().and_then(|tree| tree.borrow().clone()) else {
+        let tree_storage: Option<Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>> =
+            tree.upgrade();
+        let Some(tree) = tree_storage.and_then(|tree| tree.borrow().clone()) else {
             return false;
         };
-        let (Some(pointer), Some(keyboard)) = (pointer.upgrade(), keyboard.upgrade()) else {
+        let pointer: Option<Rc<PointerDispatcher>> = pointer.upgrade();
+        let keyboard: Option<Rc<KeyboardDispatcher>> = keyboard.upgrade();
+        let (Some(pointer), Some(keyboard)) = (pointer, keyboard) else {
             return false;
         };
         let Ok(point) = args.GetCurrentPoint(canvas) else {
@@ -827,9 +887,10 @@ impl TreeHostPanel {
             x: position.X,
             y: position.Y,
         };
+        let focus = &keyboard.as_ref().focus;
         pointer.handle(
             &tree,
-            &keyboard.as_ref().focus,
+            focus,
             RawPointerEvent {
                 kind,
                 position: local,
@@ -957,7 +1018,7 @@ impl TreeHostPanel {
             unconstrained_axes: Rc::downgrade(&self.unconstrained_axes),
             active: Rc::downgrade(&self.active),
             pending: Cell::new(false),
-            weak_self: RefCell::new(Weak::new()),
+            weak_self: RefCell::new(Weak::<WinUI3RelayoutHost>::new()),
         });
         *host.weak_self.borrow_mut() = Rc::downgrade(&host);
         tree.as_ui_element().set_invalidate_host(Some(host));

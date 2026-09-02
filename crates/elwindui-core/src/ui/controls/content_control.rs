@@ -84,9 +84,11 @@ impl ContentControl {
         self.content_changed_handlers
             .borrow_mut()
             .push(handler.clone());
-        let weak_handlers = Rc::downgrade(&self.content_changed_handlers);
+        let weak_handlers: std::rc::Weak<RefCell<Vec<ContentChangedHandler>>> =
+            Rc::downgrade(&self.content_changed_handlers);
         Subscription::new(move || {
-            let Some(handlers) = weak_handlers.upgrade() else {
+            let handlers: Option<Rc<RefCell<Vec<ContentChangedHandler>>>> = weak_handlers.upgrade();
+            let Some(handlers) = handlers else {
                 return;
             };
             handlers

@@ -274,7 +274,10 @@ impl CustomTabView {
                 .bound_items()
                 .iter()
                 .zip(children.iter())
-                .all(|(old, new)| old.upgrade().is_some_and(|old| Rc::ptr_eq(&old, new)));
+                .all(|(old, new)| {
+                    let old: Option<Rc<CustomTabViewItem>> = old.upgrade();
+                    old.is_some_and(|old| Rc::ptr_eq(&old, new))
+                });
         if unchanged {
             self.sync_presenters(&children);
             return;
@@ -285,32 +288,33 @@ impl CustomTabView {
             return;
         }
 
-        for old in self
+        let old_items: Vec<Rc<CustomTabViewItem>> = self
             .bound_items()
             .into_iter()
-            .filter_map(|item| item.upgrade())
-        {
+            .filter_map(|item: std::rc::Weak<CustomTabViewItem>| item.upgrade())
+            .collect();
+        for old in old_items {
             old.set_owner_pointer_handler(None);
             old.set_owner_close_handler(None);
         }
 
-        let weak_view = self.weak_self();
+        let weak_view: std::rc::Weak<CustomTabView> = self.weak_self();
         for item in &children {
-            let weak_item = Rc::downgrade(item);
+            let weak_item: std::rc::Weak<CustomTabViewItem> = Rc::downgrade(item);
             let weak_view_for_pointer = weak_view.clone();
             item.set_owner_pointer_handler(Some(Box::new(move |event| {
-                if let (Some(view), Some(item)) =
-                    (weak_view_for_pointer.upgrade(), weak_item.upgrade())
-                {
+                let view: Option<Rc<CustomTabView>> = weak_view_for_pointer.upgrade();
+                let item: Option<Rc<CustomTabViewItem>> = weak_item.upgrade();
+                if let (Some(view), Some(item)) = (view, item) {
                     view.handle_item_pointer(&item, event);
                 }
             })));
-            let weak_item = Rc::downgrade(item);
+            let weak_item: std::rc::Weak<CustomTabViewItem> = Rc::downgrade(item);
             let weak_view_for_close = weak_view.clone();
             item.set_owner_close_handler(Some(Box::new(move || {
-                if let (Some(view), Some(item)) =
-                    (weak_view_for_close.upgrade(), weak_item.upgrade())
-                {
+                let view: Option<Rc<CustomTabView>> = weak_view_for_close.upgrade();
+                let item: Option<Rc<CustomTabViewItem>> = weak_item.upgrade();
+                if let (Some(view), Some(item)) = (view, item) {
                     if let Some(index) = view.index_of(&item) {
                         view.request_close(index);
                     }
@@ -318,7 +322,12 @@ impl CustomTabView {
             })));
         }
 
-        self.set_bound_items(children.iter().map(Rc::downgrade).collect());
+        self.set_bound_items(
+            children
+                .iter()
+                .map(|item: &Rc<CustomTabViewItem>| Rc::downgrade(item))
+                .collect(),
+        );
         let template_matches = self.template_items().len() == children.len()
             && self
                 .template_items()
@@ -395,7 +404,8 @@ impl CustomTabView {
         let Some(gesture) = self.tab_gesture() else {
             return false;
         };
-        let still_present = gesture.item.upgrade().is_some_and(|item| {
+        let gesture_item: Option<Rc<CustomTabViewItem>> = gesture.item.upgrade();
+        let still_present = gesture_item.is_some_and(|item| {
             children
                 .iter()
                 .any(|candidate| Rc::ptr_eq(candidate, &item))
@@ -484,10 +494,10 @@ impl CustomTabView {
                 let Some(current) = self.tab_gesture() else {
                     return;
                 };
-                let same_item = current
-                    .item
-                    .upgrade()
-                    .zip(gesture_item.upgrade())
+                let current_item: Option<Rc<CustomTabViewItem>> = current.item.upgrade();
+                let original_item: Option<Rc<CustomTabViewItem>> = gesture_item.upgrade();
+                let same_item = current_item
+                    .zip(original_item)
                     .is_some_and(|(current, original)| Rc::ptr_eq(&current, &original));
                 if !same_item || !matches!(current.kind, TabGestureKind::Dragging) {
                     return;
@@ -655,12 +665,11 @@ fn gesture_index(gesture: &TabGesture, view: &CustomTabView) -> usize {
         view.bound_items()
             .iter()
             .position(|item| {
-                item.upgrade().is_some_and(|current| {
-                    gesture
-                        .item
-                        .upgrade()
-                        .is_some_and(|target| Rc::ptr_eq(&current, &target))
-                })
+                item.upgrade()
+                    .is_some_and(|current: Rc<CustomTabViewItem>| {
+                        let target: Option<Rc<CustomTabViewItem>> = gesture.item.upgrade();
+                        target.is_some_and(|target| Rc::ptr_eq(&current, &target))
+                    })
             })
             .unwrap_or(0)
     })

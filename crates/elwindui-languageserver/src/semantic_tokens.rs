@@ -107,6 +107,7 @@ fn view_body_ranges(src: &str, file: &syn::File) -> Vec<Range<usize>> {
 /// end. `None` for an empty `view! {}` (nothing to highlight). `proc_macro2::Span` exposes the
 /// starting line/column on rust-analyzer's analysis model even when its range methods are
 /// unavailable, so derive the final token's byte end from its source position and token text.
+#[cfg(not(rust_analyzer))]
 fn token_stream_byte_range(src: &str, tokens: &proc_macro2::TokenStream) -> Option<Range<usize>> {
     let mut iter = tokens.clone().into_iter();
     let first = iter.next()?;
@@ -119,6 +120,15 @@ fn token_stream_byte_range(src: &str, tokens: &proc_macro2::TokenStream) -> Opti
     Some(start..end)
 }
 
+// rust-analyzer's proc-macro shadow for proc_macro2::Span does not expose source locations.  The
+// language server's own analysis-only build does not need to produce semantic-token positions;
+// its normal rustc build keeps the real span-based implementation above.
+#[cfg(rust_analyzer)]
+fn token_stream_byte_range(_src: &str, _tokens: &proc_macro2::TokenStream) -> Option<Range<usize>> {
+    None
+}
+
+#[cfg(not(rust_analyzer))]
 fn token_start_byte_offset(src: &str, token: &proc_macro2::TokenTree) -> usize {
     let location = match token {
         proc_macro2::TokenTree::Group(group) => group.span().start(),
@@ -129,6 +139,7 @@ fn token_start_byte_offset(src: &str, token: &proc_macro2::TokenTree) -> usize {
     line_column_byte_offset(src, location)
 }
 
+#[cfg(not(rust_analyzer))]
 fn line_column_byte_offset(src: &str, location: proc_macro2::LineColumn) -> usize {
     let line_index = location.line.saturating_sub(1) as usize;
     let line_start = src

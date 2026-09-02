@@ -1724,11 +1724,12 @@ fn turbofish_ext_path(ext_ident: &TokenStream2, ty_generics: &TokenStream2) -> T
 /// the default body must name which trait's method it means.
 fn build_dyn_default_methods(
     dyn_ident: &Ident,
-    ext_ty: &TokenStream2,
+    _ext_ty: &TokenStream2,
     ext_ty_call: &TokenStream2,
     sigs: &[syn::Signature],
     overridable_names: &[Ident],
 ) -> Vec<TokenStream2> {
+    let _ext_ty_as_text = _ext_ty.to_string();
     let mut out: Vec<TokenStream2> = sigs
         .iter()
         .map(|sig| {
@@ -1772,10 +1773,10 @@ fn build_dyn_default_methods(
             }
         })
         .collect();
-    out.push(quote! { fn #dyn_ident(&self) -> &dyn #ext_ty; });
+    out.push(quote! { fn #dyn_ident(&self) -> &dyn #_ext_ty; });
     for name in overridable_names {
         let per_method = per_method_accessor_ident(name);
-        out.push(quote! { fn #per_method(&self) -> &dyn #ext_ty; });
+        out.push(quote! { fn #per_method(&self) -> &dyn #_ext_ty; });
     }
     out
 }
@@ -3395,7 +3396,7 @@ fn build_ancestor_route(parent_bare: &str, inh: &Type) -> AncestorRoute {
 }
 
 fn build_inherit_macros(
-    bare_name: &str,
+    _bare_name: &str,
     dyn_ident: &Ident,
     has_concrete_type: bool,
     skip_own_impl: bool,
@@ -3438,6 +3439,8 @@ fn build_inherit_macros(
     // this function's original, unconditional behavior exactly.
     entry_override: Option<TokenStream2>,
 ) -> TokenStream2 {
+    let _bare_name_as_text = _bare_name.to_owned();
+    let bare_name = _bare_name;
     let entry_ident = inherit_macro_ident(bare_name);
     let skip_ident = inherit_macro_skip_ident(bare_name);
     let classify_ident = inherit_macro_classify_ident(bare_name);
@@ -3481,11 +3484,10 @@ fn build_inherit_macros(
         }
     });
 
-    let extra_forwards: Vec<TokenStream2> = extra_required_names
+    let _extra_forwards: Vec<TokenStream2> = extra_required_names
         .iter()
         .map(|name| quote! { fn #name(&self) -> &$RootConcrete { self.base.#name() } })
         .collect();
-    let extra_forwards = &extra_forwards;
 
     // PR #164 final remediation round (finding A6): recursing to the next layer no longer bakes a
     // pre-resolved ancestor trait as a literal token here (`next_trait`, formerly computed by the
@@ -3596,7 +3598,7 @@ fn build_inherit_macros(
     // The entry macro's own initial call: one literal empty `[]` per slot (no `$`/metavariable
     // involved here — this is the concrete starting value classify's own patterns above then match
     // against).
-    let empty_slots: Vec<TokenStream2> = slot_idents.iter().map(|_| quote! { [] }).collect();
+    let _empty_slots: Vec<TokenStream2> = slot_idents.iter().map(|_| quote! { [] }).collect();
 
     // `$crate::#classify_ident!` (not a bare `#classify_ident!`) in every self-reference below --
     // required whenever the entry/classify macros defined *here* are invoked from a *different*
@@ -3628,13 +3630,14 @@ fn build_inherit_macros(
     // method *not* declared `#[overridable]` has only ever had one real implementor (the declaring
     // class), so `#dyn_ident`'s original "reflexive there, forward everywhere else" shape remains
     // correct and unchanged for it.
-    let resolve_ident = format_ident!("__elwindui_inherit_{bare_name}_resolve");
+    let _resolve_ident = format_ident!("__elwindui_inherit_{bare_name}_resolve");
+    let _resolve_ident_as_text = _resolve_ident.to_string();
     let resolve_calls: Vec<TokenStream2> = slot_idents
         .iter()
         .zip(overridable_names.iter())
         .map(|(slot, name)| {
             let accessor = per_method_accessor_ident(name);
-            quote! { $crate::#resolve_ident!($OwnTrait, #accessor; $( $#slot )?); }
+            quote! { $crate::#_resolve_ident!($OwnTrait, #accessor; $( $#slot )?); }
         })
         .collect();
     let resolve_macro = (!overridable_names.is_empty()).then(|| {
@@ -3642,7 +3645,7 @@ fn build_inherit_macros(
             #[doc(hidden)]
             #[macro_export]
             #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
-            macro_rules! #resolve_ident {
+            macro_rules! #_resolve_ident {
                 // No override at this hop for this one method -- forward to whatever `self.base`
                 // itself resolves to (another override further up, or the original declaring
                 // class's own reflexive one).
@@ -3662,7 +3665,7 @@ fn build_inherit_macros(
         quote! {
             impl $OwnTrait for $SubType {
                 fn #dyn_ident(&self) -> &dyn $OwnTrait { self.base.#dyn_ident() }
-                #(#extra_forwards)*
+                #(#_extra_forwards)*
                 #(#resolve_calls)*
             }
         }
@@ -3677,7 +3680,7 @@ fn build_inherit_macros(
     // every macro-to-macro self-reference in this function needs a different mechanism.
     // Same-module `pub use` self-re-exports for these three macros (plus the sealed-check macro)
     // are built separately, by the caller, into one shared wrapper module — see
-    // `macro_reexport_mod_ident`'s own doc comment for why. `#resolve_ident` doesn't need this
+    // `macro_reexport_mod_ident`'s own doc comment for why. `#_resolve_ident` doesn't need this
     // treatment: it's only ever `$crate::`-self-referenced from *this* class's own classify macro,
     // never named directly by another class's own generated code the way `entry`/`skip` are.
     // `$BridgePath` is accepted by every entry macro unconditionally (whether or not `entry_override`
@@ -3687,7 +3690,7 @@ fn build_inherit_macros(
     // (classify invocation) simply never references it.
     let entry_body = entry_override.unwrap_or_else(|| {
         quote! {
-            $crate::#classify_ident!($SubType, $OwnTrait, $OwnConcrete, $RootConcrete; #(#empty_slots)*; []; $($overrides)*);
+            $crate::#classify_ident!($SubType, $OwnTrait, $OwnConcrete, $RootConcrete; #(#_empty_slots)*; []; $($overrides)*);
         }
     });
 
@@ -3866,6 +3869,12 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     let attrs = &attrs;
     let generics = &item.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    // These values are interpolated into generated items; keep the source-side references
+    // explicit for rust-analyzer, which does not model quote interpolation as a local use.
+    let _generic_parameter_list_is_empty = generics.params.is_empty();
+    let _impl_generics_tokens = quote::ToTokens::to_token_stream(&impl_generics);
+    let _type_generics_tokens = quote::ToTokens::to_token_stream(&ty_generics);
+    let _has_where_clause = where_clause.is_some();
 
     let existing_fields: Vec<Field> = match &item.fields {
         Fields::Named(named) => named.named.iter().cloned().collect(),
@@ -4198,7 +4207,8 @@ fn build_rust_analyzer_shadow(
             .collect();
         quote! {
             pub fn new(#params) -> std::rc::Rc<Self> {
-                std::rc::Rc::new(Self::construct(#(#arg_names),*))
+                let instance: std::rc::Rc<Self> = std::rc::Rc::new(Self::construct(#(#arg_names),*));
+                instance
             }
         }
     });
@@ -4979,9 +4989,10 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             .collect();
         quote! {
             pub fn new(#(#public_params),*) -> std::rc::Rc<Self> {
-                let __obj = std::rc::Rc::new_cyclic(|__weak_self: &std::rc::Weak<Self>| {
-                    Self::__class_construct(__weak_self.clone(), #(#arg_names),*)
-                });
+                let __obj: std::rc::Rc<Self> =
+                    std::rc::Rc::<Self>::new_cyclic(|__weak_self: &std::rc::Weak<Self>| {
+                        Self::__class_construct(__weak_self.clone(), #(#arg_names),*)
+                    });
                 __obj.__elwindui_run_on_constructed();
                 __obj
             }
@@ -4996,7 +5007,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             // constructed ordinarily in one place and inside an `EnvironmentScope` in another.
             #[doc(hidden)]
             pub fn __new_unmounted(#(#public_params),*) -> std::rc::Rc<Self> {
-                std::rc::Rc::new_cyclic(|__weak_self: &std::rc::Weak<Self>| {
+                std::rc::Rc::<Self>::new_cyclic(|__weak_self: &std::rc::Weak<Self>| {
                     Self::__class_construct(__weak_self.clone(), #(#arg_names),*)
                 })
             }
@@ -5322,7 +5333,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                     Some(own_ext_policy_macro),
                 )
             }
-            Some(existing) if args.no_ancestor_forward => {
+            Some(_existing) if args.no_ancestor_forward => {
                 (None, None, None, None, None, None, None, None)
             }
             Some(existing) => {

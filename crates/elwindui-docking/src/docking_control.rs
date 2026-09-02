@@ -124,25 +124,39 @@ impl DockingControl {
         let model = self
             .layout()
             .attach_default(DefaultDockDefinition::new(Some(root)));
-        let mut realization = crate::runtime::RuntimeRealization::from_authored(
-            content.as_ref(),
-            self.runtime_surface(),
-            crate::runtime::weak_self_from_visual_owner(self),
-        )
-        .unwrap_or_else(|error| panic!("invalid authored docking declaration: {error}"));
-        realization.reconcile(&model).unwrap_or_else(|error| {
-            panic!("failed to realize authored docking declaration: {error}")
-        });
-        self.set_runtime_realization(Some(Rc::new(RefCell::new(realization))));
+        let realization = Rc::new(RefCell::new(
+            crate::runtime::RuntimeRealization::from_authored(
+                content.as_ref(),
+                self.runtime_surface(),
+                crate::runtime::weak_self_from_visual_owner(self),
+            )
+            .unwrap_or_else(|error| panic!("invalid authored docking declaration: {error}")),
+        ));
+        self.set_runtime_realization(Some(realization.clone()));
+        let staged = realization.borrow_mut().apply_staged(&model);
+        let host_sync = match staged {
+            Ok(host_sync) => host_sync,
+            Err(error) => {
+                realization.borrow_mut().dispose();
+                if self
+                    .runtime_realization()
+                    .is_some_and(|current| Rc::ptr_eq(&current, &realization))
+                {
+                    self.set_runtime_realization(None);
+                }
+                panic!("failed to realize authored docking declaration: {error}");
+            }
+        };
         self.bind_registration_callbacks(content.as_ref());
         self.set_last_applied_model(model.clone());
         self.set_layout(model.clone());
         if was_empty && !self.initial_publication_done() {
             self.set_initial_publication_done(true);
             if let Some(callback) = self.layout_change_callback() {
-                callback(model);
+                callback(model.clone());
             }
         }
+        self.finalize_staged_host_sync(Some(realization), &model, Some(host_sync));
     }
 
     pub(crate) fn authored_content(&self) -> Option<Rc<dyn UIElementExt>> {
@@ -152,39 +166,54 @@ impl DockingControl {
     fn apply_model(
         &self,
         model: DockLayoutModel,
-    ) -> Result<Option<crate::runtime::PreparedFloatingHostSync>, DockLayoutError> {
-        let host_sync = if let Some(realization) = self.runtime_realization() {
-            Some(realization.borrow_mut().apply_staged(&model)?)
-        } else {
-            None
-        };
+    ) -> Result<
+        (
+            Option<Rc<RefCell<crate::runtime::RuntimeRealization>>>,
+            Option<crate::runtime::PreparedFloatingHostSync>,
+        ),
+        DockLayoutError,
+    > {
+        let runtime_before = self.runtime_realization();
+        let host_sync = runtime_before
+            .as_ref()
+            .map(|realization| realization.borrow_mut().apply_staged(&model))
+            .transpose()?;
         self.set_last_applied_model(model.clone());
-        self.set_layout(model);
-        Ok(host_sync)
+        self.set_layout(model.clone());
+        Ok((runtime_before, host_sync))
+    }
+
+    fn finalize_staged_host_sync(
+        &self,
+        runtime_before: Option<Rc<RefCell<crate::runtime::RuntimeRealization>>>,
+        expected_model: &DockLayoutModel,
+        host_sync: Option<crate::runtime::PreparedFloatingHostSync>,
+    ) {
+        let Some(host_sync) = host_sync else {
+            return;
+        };
+        let runtime_is_current = runtime_before.as_ref().is_some_and(|runtime| {
+            self.runtime_realization()
+                .is_some_and(|current| Rc::ptr_eq(runtime, &current))
+        });
+        if runtime_is_current && self.last_applied_model() == *expected_model {
+            runtime_before
+                .expect("runtime was present when the staged model was prepared")
+                .borrow_mut()
+                .commit_floating_host_sync(host_sync);
+        } else {
+            // A callback or generated source update may have replaced the owner/runtime before
+            // the native resources were committed. They belong to the abandoned transaction.
+            host_sync.abort();
+        }
     }
 
     fn commit_user_model(&self, model: DockLayoutModel) -> Result<(), DockLayoutError> {
-        let runtime_before = self.runtime_realization();
-        let host_sync = self.apply_model(model.clone())?;
+        let (runtime_before, host_sync) = self.apply_model(model.clone())?;
         if let Some(callback) = self.layout_change_callback() {
             callback(model.clone());
         }
-        if let Some(host_sync) = host_sync {
-            let runtime_is_current = runtime_before.as_ref().is_some_and(|runtime| {
-                self.runtime_realization()
-                    .is_some_and(|current| Rc::ptr_eq(runtime, &current))
-            });
-            if runtime_is_current && self.last_applied_model() == model {
-                runtime_before
-                    .expect("runtime was present when the staged model was prepared")
-                    .borrow_mut()
-                    .commit_floating_host_sync(host_sync);
-            } else {
-                // A user callback may unmount the owner or assign a newer source value. The
-                // prepared native resources belong to the abandoned transaction in that case.
-                host_sync.abort();
-            }
-        }
+        self.finalize_staged_host_sync(runtime_before, &model, host_sync);
         Ok(())
     }
 
@@ -197,12 +226,8 @@ impl DockingControl {
     }
 
     fn commit_source_model(&self, model: DockLayoutModel) -> Result<(), DockLayoutError> {
-        let host_sync = self.apply_model(model)?;
-        if let (Some(realization), Some(host_sync)) = (self.runtime_realization(), host_sync) {
-            realization
-                .borrow_mut()
-                .commit_floating_host_sync(host_sync);
-        }
+        let (runtime_before, host_sync) = self.apply_model(model.clone())?;
+        self.finalize_staged_host_sync(runtime_before, &model, host_sync);
         Ok(())
     }
 
@@ -229,22 +254,25 @@ impl DockingControl {
             });
         let current = self.layout();
         let model = current.attach_default(DefaultDockDefinition::new(Some(root)));
-        let mut realization = realization.borrow_mut();
-        realization
-            .refresh_authored(content.as_ref())
-            .unwrap_or_else(|error| panic!("invalid authored docking registration: {error}"));
-        realization.reconcile(&model).unwrap_or_else(|error| {
-            panic!("failed to reconcile authored docking registration: {error}")
-        });
+        let runtime_before = realization.clone();
+        let host_sync = {
+            let mut realization = runtime_before.borrow_mut();
+            realization
+                .refresh_authored(content.as_ref())
+                .unwrap_or_else(|error| panic!("invalid authored docking registration: {error}"));
+            realization.apply_staged(&model).unwrap_or_else(|error| {
+                panic!("failed to reconcile authored docking registration: {error}")
+            })
+        };
         self.bind_registration_callbacks(content.as_ref());
-        drop(realization);
         if model != current {
             self.set_last_applied_model(model.clone());
             self.set_layout(model.clone());
             if let Some(callback) = self.layout_change_callback() {
-                callback(model);
+                callback(model.clone());
             }
         }
+        self.finalize_staged_host_sync(Some(runtime_before), &model, Some(host_sync));
     }
 
     fn handle_layout_update(&self, incoming: DockLayoutModel) {

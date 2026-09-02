@@ -37,15 +37,17 @@
 
 ## Tests and verification state
 
-The focused `elwindui-docking` suite currently has 58 passing tests covering default
+The focused `elwindui-docking` suite currently has 61 passing tests covering default
 initialization/reset, activation, close/reopen, all four split/edge sides, snapshot round-trip,
 auto-hide state, typed invalid values, latest-only source logic, removed-authored-group repair,
 adjacent split-weight transformation, generated-group drag targets, retained runtime presentation,
 callback-driven selection/close, initial publication, dynamic registration, cross-window target
 root/geometry and offset conversion, positioned previews, floating source geometry, staged host
 failure/success, stable host identity, native close veto/accept, final-root cleanup, actual tab and
-splitter pointer paths, and unmount/weak-lifetime cleanup. Native GUI behavior still requires
-platform-host verification where noted below.
+splitter pointer paths, prepare/commit ordering, and unmount/weak-lifetime cleanup. The focused
+`elwindui-custom-controls` suite has 43 passing tests, including structural-selection counters,
+selected-only measurement/arrangement probes, and content-replacement geometry. Native GUI behavior
+still requires platform-host verification where noted below.
 
 The canonical command results are recorded in the PR #218 remediation report. Workspace failures
 are kept separate from Docking-specific results; in particular, the existing AppKit

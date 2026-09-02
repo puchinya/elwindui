@@ -55,11 +55,14 @@ against `last_applied_model`, cancels transient state, attaches authored metadat
 applies only the latest reentrant pending value. Structural user changes use a `ReconcilePlan`:
 preparation derives all candidate runtime/native work without touching committed ownership, and an
 infallible commit performs the single ownership transition. The bound property is updated after
-runtime commit, then the user callback is notified exactly once; staged floating-host
-synchronization is inserted/shown only after that commit. There is no reconcile-the-old-model
-rollback path. Selection-only changes and completed adjacent split-weight changes use retained
-value/layout fast paths because neither changes ownership or topology. The subsequent generated
-property update is suppressed by equality with `last_applied_model`.
+runtime commit, then the user callback is notified exactly once; a shared owner-level finalizer
+commits staged floating-host synchronization only after the owner/runtime and published model are
+still the same transaction, otherwise it aborts the staged resources. This ordering is used for
+source application, initial/default capture, registration refresh, and user structural commits.
+There is no reconcile-the-old-model rollback path and no production runtime reconcile shortcut.
+Selection-only changes and completed adjacent split-weight changes use retained value/layout fast
+paths because neither changes ownership or topology. The subsequent generated property update is
+suppressed by equality with `last_applied_model`.
 
 Authored registration callbacks are bound on every current declaration node after each traversal.
 They guard reentrancy, cancel stale gestures, refresh item/group metadata, repair removed authored
@@ -97,7 +100,7 @@ The bound model controls which entry is open and which remembered return state i
 and for every floating root. `FloatingHostRegistry` maps model floating-root positions to native
 windows on AppKit and WinUI3. The adapter implements a private `FloatingWindowHost` contract for
 content, logical bounds, show, close, and native close interception. A new host follows
-prepare -> reconcile -> model commit -> registry insertion -> show; preparation failure therefore
-does not require changing committed wrapper ownership. GTK deliberately has no adapter in this
-change. Native close handlers capture only weak Docking state and a stable private
+prepare -> runtime commit -> owner model/property commit -> callback -> registry synchronization
+-> show; preparation failure therefore does not require changing committed wrapper ownership.
+GTK deliberately has no adapter in this change. Native close handlers capture only weak Docking state and a stable private
 `FloatingHostId`; owner disposal clears handlers before closing every host.

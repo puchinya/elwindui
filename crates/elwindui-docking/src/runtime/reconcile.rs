@@ -367,9 +367,13 @@ impl RuntimeRealization {
         self.clear_previews();
     }
 
-    /// Applies a model through the private prepare/commit boundary. Preparation owns every
-    /// fallible operation; commit only performs the already-validated ownership transition.
-    pub(crate) fn reconcile(&mut self, model: &DockLayoutModel) -> Result<(), DockLayoutError> {
+    /// Test-only convenience that exercises the complete staged protocol. Production callers
+    /// must let `DockingControl` finalize the prepared native-host sync after owner publication.
+    #[cfg(test)]
+    pub(crate) fn reconcile_for_test(
+        &mut self,
+        model: &DockLayoutModel,
+    ) -> Result<(), DockLayoutError> {
         let host_sync = self.apply_staged(model)?;
         self.floating_hosts.commit_sync(host_sync);
         Ok(())

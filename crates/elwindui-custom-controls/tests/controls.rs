@@ -1090,6 +1090,101 @@ fn content_replacement_detaches_old_visual_before_attaching_new_visual() {
 }
 
 #[test]
+fn hidden_content_replacement_resets_only_the_replaced_page_geometry() {
+    let first = CustomTabViewItem::new_item();
+    let second = CustomTabViewItem::new_item();
+    let third = CustomTabViewItem::new_item();
+    let first_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    let old_hidden_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    let third_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    first.set_content(first_content.clone());
+    second.set_content(old_hidden_content.clone());
+    third.set_content(third_content.clone());
+
+    let view = CustomTabView::new_view();
+    view.set_children(vec![first.clone(), second.clone(), third.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    let size = Size {
+        width: 240.0,
+        height: 120.0,
+    };
+    layout_root(&root, size);
+    let presenter = old_hidden_content
+        .visual_parent()
+        .expect("hidden content presenter");
+    let first_parent = first_content.visual_parent().expect("first content parent");
+    let third_parent = third_content.visual_parent().expect("third content parent");
+    assert_eq!(old_hidden_content.arranged_width(), Some(0.0));
+
+    let replacement = elwindui_custom_controls::core::ui::TextBlock::new();
+    second.set_content(replacement.clone());
+    layout_root(&root, size);
+
+    assert!(old_hidden_content.visual_parent().is_none());
+    assert!(
+        replacement
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &presenter))
+    );
+    assert_eq!(replacement.arranged_width(), Some(0.0));
+    assert_eq!(replacement.arranged_height(), Some(0.0));
+    assert!(
+        first_content
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &first_parent))
+    );
+    assert!(
+        third_content
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &third_parent))
+    );
+}
+
+#[test]
+fn selected_content_replacement_is_arranged_full_without_rebuilding_other_pages() {
+    let first = CustomTabViewItem::new_item();
+    let second = CustomTabViewItem::new_item();
+    let first_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    let old_selected_content = elwindui_custom_controls::core::ui::TextBlock::new();
+    first.set_content(first_content.clone());
+    second.set_content(old_selected_content.clone());
+
+    let view = CustomTabView::new_view();
+    view.set_children(vec![first.clone(), second.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    let size = Size {
+        width: 240.0,
+        height: 120.0,
+    };
+    layout_root(&root, size);
+    let presenter = old_selected_content
+        .visual_parent()
+        .expect("selected content presenter");
+    let first_parent = first_content.visual_parent().expect("first content parent");
+
+    assert!(view.select_index(1));
+    layout_root(&root, size);
+    let replacement = elwindui_custom_controls::core::ui::TextBlock::new();
+    second.set_content(replacement.clone());
+    layout_root(&root, size);
+
+    assert_eq!(view.selected_index(), 1);
+    assert!(old_selected_content.visual_parent().is_none());
+    assert!(
+        replacement
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &presenter))
+    );
+    assert_eq!(replacement.arranged_width(), Some(240.0));
+    assert_eq!(replacement.arranged_height(), Some(88.0));
+    assert!(
+        first_content
+            .visual_parent()
+            .is_some_and(|parent| Rc::ptr_eq(&parent, &first_parent))
+    );
+}
+
+#[test]
 fn content_presenter_preserves_item_indices_when_a_tab_has_no_content() {
     let first = CustomTabViewItem::new_item();
     let second = CustomTabViewItem::new_item();

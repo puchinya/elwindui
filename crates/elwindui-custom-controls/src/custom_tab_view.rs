@@ -7,10 +7,20 @@ use super::{
     TabCloseRequested, TabDragCompletedEventArgs, TabDragMovedEventArgs, TabDragStartedEventArgs,
     TabStripPosition, weak_self_from_visual_owner,
 };
+#[cfg(test)]
+use std::cell::RefCell;
+#[cfg(test)]
+use std::collections::HashMap;
 use std::rc::Rc;
 
 const TAB_STRIP_HEIGHT: f32 = 32.0;
 const TAB_DRAG_THRESHOLD: f32 = 4.0;
+
+#[cfg(test)]
+thread_local! {
+    static STRUCTURAL_RECONCILIATION_COUNTS: RefCell<HashMap<usize, usize>> =
+        RefCell::new(HashMap::new());
+}
 
 #[derive(Clone, Debug)]
 // This module is private; `pub` is required only so the component macro can
@@ -273,7 +283,6 @@ impl CustomTabView {
 
     fn reconcile_children(&self) {
         let children = self.children_values();
-        self.validate_children(&children);
         let unchanged = self.bound_items().len() == children.len()
             && self
                 .bound_items()
@@ -285,10 +294,13 @@ impl CustomTabView {
             return;
         }
 
+        self.validate_children(&children);
         if self.cancel_removed_gesture(&children) {
             self.reconcile_children();
             return;
         }
+        #[cfg(test)]
+        self.note_structural_reconciliation();
 
         for old in self
             .bound_items()
@@ -654,6 +666,22 @@ impl CustomTabView {
     fn weak_self(&self) -> std::rc::Weak<Self> {
         weak_self_from_visual_owner(self)
     }
+
+    #[cfg(test)]
+    fn note_structural_reconciliation(&self) {
+        let key = self as *const Self as usize;
+        STRUCTURAL_RECONCILIATION_COUNTS.with(|counts| {
+            let mut counts = counts.borrow_mut();
+            *counts.entry(key).or_default() += 1;
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn structural_reconciliation_count_for_test(&self) -> usize {
+        let key = self as *const Self as usize;
+        STRUCTURAL_RECONCILIATION_COUNTS
+            .with(|counts| counts.borrow().get(&key).copied().unwrap_or(0))
+    }
 }
 
 fn concrete_tab_item(item: Rc<dyn CustomTabViewItemExt>) -> Rc<CustomTabViewItem> {
@@ -674,6 +702,53 @@ fn concrete_element<T: 'static>(element: Rc<dyn UIElementExt>) -> Rc<T> {
     let raw = Rc::into_raw(element) as *const ();
     // SAFETY: the checked Any type is exactly T, and the erased Rc strong count is transferred.
     unsafe { Rc::from_raw(raw as *const T) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::base::Size;
+    use crate::core::ui::layout_root;
+
+    #[test]
+    fn selection_only_updates_do_not_enter_structural_reconciliation() {
+        let view = CustomTabView::new_view();
+        let items = (0..5)
+            .map(|index| {
+                let item = CustomTabViewItem::new_item();
+                item.set_header(format!("item-{index}"));
+                item
+            })
+            .collect();
+        view.replace_children(items);
+        let structural_count = view.structural_reconciliation_count_for_test();
+
+        for index in [1, 2, 3, 4, 1] {
+            assert!(view.select_index(index));
+        }
+
+        assert_eq!(
+            view.structural_reconciliation_count_for_test(),
+            structural_count
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "same CustomTabViewItem twice")]
+    fn structural_updates_still_validate_duplicate_items() {
+        let view = CustomTabView::new_view();
+        let item = CustomTabViewItem::new_item();
+        view.replace_children(vec![item.clone()]);
+        let root: Rc<dyn UIElementExt> = view.clone();
+        layout_root(
+            &root,
+            Size {
+                width: 240.0,
+                height: 120.0,
+            },
+        );
+        view.replace_children(vec![item.clone(), item]);
+    }
 }
 
 impl ListExt<dyn CustomTabViewItemExt> for CustomTabView {

@@ -161,6 +161,10 @@ use syn::{
     punctuated::Punctuated,
 };
 
+fn append_tokens<T: quote::ToTokens>(out: &mut TokenStream2, value: &T) {
+    quote::ToTokens::to_tokens(value, out);
+}
+
 /// Parsed `#[class(inherits = .., struct_only = .., abstract_class, sealed, no_ancestor_forward)]`
 /// arguments — every key is optional and any subset/order is accepted.
 #[derive(Default)]
@@ -1476,6 +1480,10 @@ fn inherit_macro_classify_ident(bare_name: &str) -> Ident {
     format_ident!("__elwindui_inherit_{}_classify", bare_name)
 }
 
+fn inherit_resolve_ident(bare_name: &str) -> Ident {
+    format_ident!("__elwindui_inherit_{bare_name}_resolve")
+}
+
 /// `ContentControl` -> `__elwindui_check_not_sealed_ContentControl`: see `#[sealed]`'s own handling
 /// in `build_sealed_check_macro`/`expand_impl`.
 fn sealed_check_ident(bare_name: &str) -> Ident {
@@ -1724,12 +1732,10 @@ fn turbofish_ext_path(ext_ident: &TokenStream2, ty_generics: &TokenStream2) -> T
 /// the default body must name which trait's method it means.
 fn build_dyn_default_methods(
     dyn_ident: &Ident,
-    _ext_ty: &TokenStream2,
     ext_ty_call: &TokenStream2,
     sigs: &[syn::Signature],
     overridable_names: &[Ident],
 ) -> Vec<TokenStream2> {
-    let _ext_ty_as_text = _ext_ty.to_string();
     let mut out: Vec<TokenStream2> = sigs
         .iter()
         .map(|sig| {
@@ -1773,10 +1779,10 @@ fn build_dyn_default_methods(
             }
         })
         .collect();
-    out.push(quote! { fn #dyn_ident(&self) -> &dyn #_ext_ty; });
+    out.push(quote! { fn #dyn_ident(&self) -> &dyn #ext_ty_call; });
     for name in overridable_names {
         let per_method = per_method_accessor_ident(name);
-        out.push(quote! { fn #per_method(&self) -> &dyn #_ext_ty; });
+        out.push(quote! { fn #per_method(&self) -> &dyn #ext_ty_call; });
     }
     out
 }
@@ -3396,7 +3402,7 @@ fn build_ancestor_route(parent_bare: &str, inh: &Type) -> AncestorRoute {
 }
 
 fn build_inherit_macros(
-    _bare_name: &str,
+    bare_name: &str,
     dyn_ident: &Ident,
     has_concrete_type: bool,
     skip_own_impl: bool,
@@ -3439,8 +3445,6 @@ fn build_inherit_macros(
     // this function's original, unconditional behavior exactly.
     entry_override: Option<TokenStream2>,
 ) -> TokenStream2 {
-    let _bare_name_as_text = _bare_name.to_owned();
-    let bare_name = _bare_name;
     let entry_ident = inherit_macro_ident(bare_name);
     let skip_ident = inherit_macro_skip_ident(bare_name);
     let classify_ident = inherit_macro_classify_ident(bare_name);
@@ -3630,22 +3634,27 @@ fn build_inherit_macros(
     // method *not* declared `#[overridable]` has only ever had one real implementor (the declaring
     // class), so `#dyn_ident`'s original "reflexive there, forward everywhere else" shape remains
     // correct and unchanged for it.
-    let _resolve_ident = format_ident!("__elwindui_inherit_{bare_name}_resolve");
-    let _resolve_ident_as_text = _resolve_ident.to_string();
-    let resolve_calls: Vec<TokenStream2> = slot_idents
-        .iter()
-        .zip(overridable_names.iter())
-        .map(|(slot, name)| {
+    let (resolve_calls, resolve_macro) = if overridable_names.is_empty() {
+        (TokenStream2::new(), None)
+    } else {
+        let resolve_ident = inherit_resolve_ident(bare_name);
+        let mut resolve_calls = TokenStream2::new();
+        for (slot, name) in slot_idents.iter().zip(overridable_names.iter()) {
             let accessor = per_method_accessor_ident(name);
-            quote! { $crate::#_resolve_ident!($OwnTrait, #accessor; $( $#slot )?); }
-        })
-        .collect();
-    let resolve_macro = (!overridable_names.is_empty()).then(|| {
-        quote! {
+            let mut tokens = quote! { $crate:: };
+            append_tokens(&mut tokens, &resolve_ident);
+            tokens.extend(quote! { !($OwnTrait, #accessor; $( $#slot )?); });
+            resolve_calls.extend(tokens);
+        }
+        let mut resolve_macro = quote! {
             #[doc(hidden)]
             #[macro_export]
             #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
-            macro_rules! #_resolve_ident {
+            macro_rules!
+        };
+        append_tokens(&mut resolve_macro, &resolve_ident);
+        resolve_macro.extend(quote! {
+            {
                 // No override at this hop for this one method -- forward to whatever `self.base`
                 // itself resolves to (another override further up, or the original declaring
                 // class's own reflexive one).
@@ -3659,14 +3668,15 @@ fn build_inherit_macros(
                     $item
                 };
             }
-        }
-    });
+        });
+        (resolve_calls, Some(resolve_macro))
+    };
     let own_impl = (!skip_own_impl).then(|| {
         quote! {
             impl $OwnTrait for $SubType {
                 fn #dyn_ident(&self) -> &dyn $OwnTrait { self.base.#dyn_ident() }
                 #(#_extra_forwards)*
-                #(#resolve_calls)*
+                #resolve_calls
             }
         }
     });
@@ -3680,7 +3690,7 @@ fn build_inherit_macros(
     // every macro-to-macro self-reference in this function needs a different mechanism.
     // Same-module `pub use` self-re-exports for these three macros (plus the sealed-check macro)
     // are built separately, by the caller, into one shared wrapper module — see
-    // `macro_reexport_mod_ident`'s own doc comment for why. `#_resolve_ident` doesn't need this
+    // `macro_reexport_mod_ident`'s own doc comment for why. `#resolve_ident` doesn't need this
     // treatment: it's only ever `$crate::`-self-referenced from *this* class's own classify macro,
     // never named directly by another class's own generated code the way `entry`/`skip` are.
     // `$BridgePath` is accepted by every entry macro unconditionally (whether or not `entry_override`
@@ -4025,8 +4035,7 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
     // `ext_ty` never carries generics here (no `#generics`/`ty_generics` splice above, even when
     // the `trait_only` trait itself declares its own) — call-position and type-position are
     // already identical, so no separate turbofish form is needed.
-    let dyn_methods =
-        build_dyn_default_methods(&dyn_ident, &ext_ty, &ext_ty, &sigs, &overridable_names);
+    let dyn_methods = build_dyn_default_methods(&dyn_ident, &ext_ty, &sigs, &overridable_names);
     let into_node_ident = into_node_ident(&bare_name);
     let into_node_default = build_into_node_default(&into_node_ident, &ext_ty);
 
@@ -4846,7 +4855,6 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             overridable_methods.iter().map(|f| f.sig.clone()).collect();
         let overridable_defaults = build_dyn_default_methods(
             &dyn_ident,
-            &ext_ty,
             &ext_ty_call,
             &overridable_sigs,
             &overridable_names,
@@ -4927,13 +4935,8 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         let own_sigs: Vec<syn::Signature> = own_methods.iter().map(|f| f.sig.clone()).collect();
         let ext_ty = quote! { #ext_ident #ty_generics };
         let ext_ty_call = turbofish_ext_path(&quote! { #ext_ident }, &quote! { #ty_generics });
-        let dyn_methods = build_dyn_default_methods(
-            &dyn_ident,
-            &ext_ty,
-            &ext_ty_call,
-            &own_sigs,
-            &overridable_names,
-        );
+        let dyn_methods =
+            build_dyn_default_methods(&dyn_ident, &ext_ty_call, &own_sigs, &overridable_names);
         let bodies = own_methods.iter().map(|f| quote! { #f });
         // See root mode's own identical treatment (above) for why each of *this* class's own
         // `#[overridable]` methods (if it declares any of its own, beyond just re-overriding an

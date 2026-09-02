@@ -1,7 +1,9 @@
 use super::core;
 use super::core::base::Point;
+use super::core::environment::application_environment;
 use super::core::input::{MouseButton, PointerEventArgs};
 use super::core::layout::Visibility;
+use super::core::theme::{BrushStyle, ResolvedValue};
 use super::core::ui::{ControlExt, TextStyleOwner, UIElementExt};
 use super::weak_self_from_visual_owner;
 use std::rc::Rc;
@@ -34,6 +36,7 @@ pub(crate) struct CustomTabCloseButton {
             visibility: slot_visibility
             TextBlock {
                 text: "×"
+                foreground: elwindui::core::theme::BrushStyle::Foreground
                 text_alignment: elwindui::core::ui::TextAlignment::Center
             }
         }
@@ -65,7 +68,11 @@ impl CustomTabCloseButton {
             return;
         };
         if self.glyph_visible() {
-            glyph.clear_foreground();
+            let foreground = match BrushStyle::Foreground.resolve(&application_environment()) {
+                ResolvedValue::Value(brush) => Some(brush),
+                ResolvedValue::PlatformDefault => None,
+            };
+            glyph.set_foreground(foreground);
         } else {
             glyph.set_foreground(Some(core::graphics::Brush::Solid(
                 core::graphics::Color::TRANSPARENT,

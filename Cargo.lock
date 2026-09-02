@@ -178,6 +178,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "docking-demo"
+version = "0.1.0"
+dependencies = [
+ "elwindui",
+ "elwindui-custom-controls",
+ "elwindui-docking",
+ "serde_json",
+]
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -285,6 +295,19 @@ dependencies = [
  "elwindui",
  "elwindui-core",
  "elwindui-macros",
+]
+
+[[package]]
+name = "elwindui-docking"
+version = "0.1.0"
+dependencies = [
+ "elwindui-backend-appkit",
+ "elwindui-backend-winui3",
+ "elwindui-core",
+ "elwindui-custom-controls",
+ "elwindui-macros",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

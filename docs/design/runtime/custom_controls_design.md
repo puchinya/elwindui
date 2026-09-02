@@ -57,11 +57,21 @@ updated together.
 strip presenter attaches the item controls without recreating them. The item
 content remains logically owned by `CustomTabViewItem`; the content presenter
 attaches each current content visual exactly once and keeps it attached while
-selection changes. The selected content is arranged to the full presenter
-rect; unselected content is arranged to `0 x 0` and clipped. Replacing content
-detaches the old visual before attaching the new one. Removing an item drops
+selection changes. `CustomTabView` caches weak references to its private strip and content
+presenters after template application. When item identity/order is unchanged, selection and
+presentation updates use those references without rewriting presenter item lists, repeating
+visual-tree discovery, or entering structural validation/reconciliation. Structural changes still
+validate duplicate identity and visual-parent ownership before rebinding. The selected content is
+arranged to the full presenter rect; unselected content is arranged to `0 x 0` and clipped.
+Replacing content detaches the old visual before attaching the new one, marks one structural
+geometry pass, and preserves the presenter and unrelated page entries. Removing an item drops
 its weak subscription and detaches its content without destroying external
 `Rc` ownership.
+
+The content presenter measures only the selected page. A structural item/content change marks a
+full hidden-page zero-arrange pass for the next arrange; a later selection-only arrange updates
+only the previous and current selected pages. Hidden pages remain attached and subscribed, but
+retention does not cause them to be measured on the selection hot path.
 
 All reconciliation validates one visual owner and duplicate item identity.
 Callbacks and content subscriptions capture weak owners. If cancellation or a

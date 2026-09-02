@@ -21,12 +21,27 @@ pub(crate) struct CustomTabStripPresenter {
             this.reconcile_items();
         }
         on_update(items, selected_index, tab_strip_position, close_button_presentation) {
-            this.reconcile_items();
+            this.sync_property_update();
         }
     },
 }
 
 impl CustomTabStripPresenter {
+    fn sync_property_update(&self) {
+        let items = self.items();
+        let unchanged = self.bound_items().len() == items.len()
+            && self
+                .bound_items()
+                .iter()
+                .zip(items.iter())
+                .all(|(old, new)| old.upgrade().is_some_and(|old| Rc::ptr_eq(&old, new)));
+        if unchanged {
+            self.sync_items(&items);
+        } else {
+            self.reconcile_items();
+        }
+    }
+
     pub(crate) fn reconcile_items(&self) {
         let items = self.items();
         let unchanged = self.bound_items().len() == items.len()

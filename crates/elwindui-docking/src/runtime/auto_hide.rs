@@ -1,0 +1,198 @@
+//! Auto-hide strip and single-open overlay state.
+
+use crate::DockItemId;
+use crate::DockingControl;
+use crate::core::graphics::IconSource;
+use crate::core::input::PointerEventArgs;
+use crate::core::layout::{GridLength, Visibility};
+use crate::core::theme::BrushStyle;
+use crate::core::ui::{
+    Grid, GridExt, IconSourceElement, IconSourceElementExt, LayoutExt, Rectangle, RectangleExt,
+    ShapeExt, TextBlock, TextBlockExt, UIElementExt,
+};
+use crate::model::RootKind;
+use crate::runtime::themed_brush;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// Only one auto-hide item owns the open overlay at a time.
+pub(crate) struct AutoHideOverlay {
+    open: Option<DockItemId>,
+    visual: Rc<Grid>,
+    strips: [Rc<Grid>; 4],
+    pane: Rc<Grid>,
+    pin_button: Rc<Rectangle>,
+    root_context: Rc<RefCell<RootKind>>,
+}
+
+impl AutoHideOverlay {
+    pub(crate) fn new() -> Self {
+        let visual = Grid::new();
+        visual.set_rows(vec![
+            GridLength::Auto,
+            GridLength::Star(1.0),
+            GridLength::Auto,
+        ]);
+        visual.set_columns(vec![
+            GridLength::Auto,
+            GridLength::Star(1.0),
+            GridLength::Auto,
+        ]);
+        let strips = std::array::from_fn(|index| {
+            let strip = Grid::new();
+            strip.set_width(28.0);
+            strip.set_height(28.0);
+            strip.set_attached("DockSurface", "side", index as i32);
+            match index {
+                0 => {
+                    strip.set_attached("Grid", "row", 1i32);
+                    strip.set_attached("Grid", "column", 0i32);
+                }
+                1 => {
+                    strip.set_attached("Grid", "row", 0i32);
+                    strip.set_attached("Grid", "column", 1i32);
+                }
+                2 => {
+                    strip.set_attached("Grid", "row", 1i32);
+                    strip.set_attached("Grid", "column", 2i32);
+                }
+                _ => {
+                    strip.set_attached("Grid", "row", 2i32);
+                    strip.set_attached("Grid", "column", 1i32);
+                }
+            }
+            visual.children().add(strip.clone());
+            strip
+        });
+        let pane = Grid::new();
+        pane.set_visibility(Visibility::Collapsed);
+        pane.set_attached("Grid", "row", 1i32);
+        pane.set_attached("Grid", "column", 1i32);
+        visual.children().add(pane.clone());
+        let pin_button = Rectangle::new();
+        pin_button.set_fill(themed_brush(BrushStyle::Secondary));
+        pin_button.set_stroke(themed_brush(BrushStyle::Separator));
+        pin_button.set_width(18.0);
+        pin_button.set_height(18.0);
+        pin_button.set_corner_radius(4.0);
+        pin_button.set_visibility(Visibility::Collapsed);
+        pin_button.set_attached("Grid", "row", 1i32);
+        pin_button.set_attached("Grid", "column", 1i32);
+        visual.children().add(pin_button.clone());
+        let root_context = Rc::new(RefCell::new(RootKind::Main));
+        Self {
+            open: None,
+            visual,
+            strips,
+            pane,
+            pin_button,
+            root_context,
+        }
+    }
+
+    pub(crate) fn open(&mut self, item: DockItemId) -> Option<DockItemId> {
+        let previous = self.open.replace(item);
+        self.show_pane();
+        previous
+    }
+
+    pub(crate) fn close(&mut self) -> Option<DockItemId> {
+        let previous = self.open.take();
+        self.pane.set_visibility(Visibility::Collapsed);
+        self.pin_button.set_visibility(Visibility::Collapsed);
+        self.pane.children().clear();
+        previous
+    }
+
+    pub(crate) fn current(&self) -> Option<&DockItemId> {
+        self.open.as_ref()
+    }
+
+    pub(crate) fn visual(&self) -> Rc<dyn UIElementExt> {
+        self.visual.clone()
+    }
+
+    pub(crate) fn render_strips(
+        &self,
+        titles: impl Iterator<Item = (usize, DockItemId, String, Option<IconSource>)>,
+        owner: &std::rc::Weak<DockingControl>,
+        root: RootKind,
+    ) {
+        for strip in &self.strips {
+            strip.children().clear();
+        }
+        for (side, item, title, icon_source) in titles {
+            let Some(strip) = self.strips.get(side) else {
+                continue;
+            };
+            let entry = Grid::new();
+            entry.set_width(120.0);
+            entry.set_height(24.0);
+            entry.set_columns(vec![GridLength::Auto, GridLength::Star(1.0)]);
+            if let Some(icon_source) = icon_source {
+                let icon = IconSourceElement::new();
+                icon.set_icon_source(Some(icon_source));
+                icon.set_width(16.0);
+                icon.set_height(16.0);
+                icon.set_attached("Grid", "column", 0i32);
+                entry.children().add(icon);
+            }
+            let text = TextBlock::new();
+            text.set_text(&title);
+            text.set_attached("Grid", "column", 1i32);
+            entry.children().add(text);
+            let weak_owner = owner.clone();
+            let entry_root = root.clone();
+            entry.register_routed_handler::<PointerEventArgs>(
+                "on_pointer_released",
+                Box::new(move |_, _| {
+                    if let Some(owner) = weak_owner.upgrade() {
+                        owner.handle_auto_hide_open(entry_root.clone(), item.clone());
+                    }
+                }),
+            );
+            strip.children().add(entry);
+        }
+    }
+
+    pub(crate) fn show_pane(&self) {
+        self.pane.set_visibility(Visibility::Visible);
+        self.pin_button.set_visibility(Visibility::Visible);
+    }
+
+    pub(crate) fn present_open_item(
+        &self,
+        wrapper: Option<Rc<elwindui_custom_controls::CustomTabViewItem>>,
+    ) {
+        self.pane.children().clear();
+        if let Some(wrapper) = wrapper {
+            self.pane.children().add(wrapper);
+        }
+        self.show_pane();
+    }
+
+    pub(crate) fn bind_pin_handler(&self, owner: &std::rc::Weak<DockingControl>, root: RootKind) {
+        *self.root_context.borrow_mut() = root;
+        let root_context = self.root_context.clone();
+        let weak_owner = owner.clone();
+        self.pin_button.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_released",
+            Box::new(move |_, _| {
+                if let Some(owner) = weak_owner.upgrade() {
+                    let root = root_context.borrow().clone();
+                    owner.handle_pin_gesture(root);
+                }
+            }),
+        );
+    }
+
+    pub(crate) fn set_root(&self, root: RootKind) {
+        *self.root_context.borrow_mut() = root;
+    }
+}
+
+impl Default for AutoHideOverlay {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -2099,10 +2099,10 @@ fn floating_native_close_uses_stable_host_identity_after_root_reindex() {
     docking.set_layout(remaining_after_first_close);
     assert_eq!(hosts.borrow()[0].log.close_count.get(), 1);
 
-    assert!(hosts.borrow()[1].log.invoke_close());
+    assert!(!hosts.borrow()[1].log.invoke_close());
     assert!(docking.layout().is_item_closed(&item("second")));
     assert_eq!(changes.get(), 1);
-    assert_eq!(hosts.borrow()[1].log.close_count.get(), 1);
+    assert_eq!(hosts.borrow()[1].log.close_count.get(), 0);
 }
 
 #[test]
@@ -2169,11 +2169,11 @@ fn floating_native_close_commits_all_items_once_and_closes_one_host() {
     }));
     let host = hosts.borrow()[0].clone();
 
-    assert!(host.log.invoke_close());
+    assert!(!host.log.invoke_close());
     assert!(docking.layout().is_item_closed(&item("first")));
     assert!(docking.layout().is_item_closed(&item("second")));
     assert_eq!(changes.get(), 1);
-    assert_eq!(host.log.close_count.get(), 1);
+    assert_eq!(host.log.close_count.get(), 0);
     assert!(host.log.close_handler.borrow().is_none());
     assert_eq!(
         docking

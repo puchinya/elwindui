@@ -5,8 +5,7 @@ use crate::core::input::PointerEventArgs;
 use crate::core::layout::{GridLength, HorizontalAlignment, VerticalAlignment, Visibility};
 use crate::core::theme::BrushStyle;
 use crate::core::ui::{
-    Grid, GridExt, LayoutExt, Rectangle, ShapeExt, TextBlock, TextBlockExt, TextStyleOwner,
-    UIElementExt,
+    Grid, GridExt, LayoutExt, TextBlock, TextBlockExt, TextStyleOwner, UIElementExt,
 };
 #[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
 use crate::core::ui::{MenuExt, MenuItemExt};
@@ -31,14 +30,15 @@ use super::floating_window::FloatingHostFactory;
 use super::floating_window::{FloatingHostId, FloatingHostRegistry, PreparedFloatingHostSync};
 use super::group_view::replace_group_items;
 use super::metrics::{
-    GROUP_DOCK_BAND_FRACTION, GROUP_DOCK_BAND_MAX, GROUP_DOCK_BAND_MIN, ICON_GRID_SIZE,
-    ICON_PIXEL_SIZE, ROOT_DOCK_BAND, SPLITTER_HIT_SIZE, TITLE_BAR_HEIGHT,
-    TITLE_BUTTON_COLUMN_WIDTH, TITLE_BUTTON_SIZE, TITLE_TEXT_MARGIN,
+    GROUP_DOCK_BAND_FRACTION, GROUP_DOCK_BAND_MAX, GROUP_DOCK_BAND_MIN, ROOT_DOCK_BAND,
+    SPLITTER_HIT_SIZE, TITLE_BAR_HEIGHT, TITLE_BUTTON_COLUMN_WIDTH, TITLE_BUTTON_SIZE,
+    TITLE_TEXT_MARGIN,
 };
 use super::split_view::SplitterSession;
 use super::surface_registry::SurfaceRegistry;
 use super::surface_view::{DockSurfaceView, SurfaceRuntime};
 use super::themed_brush;
+use elwindui_custom_controls::{ChromeIcon, chrome_icon};
 
 /// Stable registration-to-presentation map for one authored docking surface.
 ///
@@ -953,6 +953,14 @@ impl RuntimeRealization {
         self.floating_hosts.root_index_for_host(id)
     }
 
+    pub(crate) fn begin_native_floating_close(&mut self, id: FloatingHostId) -> bool {
+        self.floating_hosts.begin_native_close(id)
+    }
+
+    pub(crate) fn cancel_native_floating_close(&mut self, id: FloatingHostId) {
+        self.floating_hosts.cancel_native_close(id);
+    }
+
     #[cfg(test)]
     pub(crate) fn set_floating_host_factory_for_test(&mut self, factory: FloatingHostFactory) {
         self.floating_hosts = FloatingHostRegistry::with_factory(factory);
@@ -1684,50 +1692,19 @@ impl RuntimeRealization {
         }
     }
 
-    fn private_icon(pin: bool) -> Rc<Grid> {
-        let icon = Grid::new();
-        icon.set_width(ICON_GRID_SIZE);
-        icon.set_height(ICON_GRID_SIZE);
-        icon.set_rows(vec![GridLength::Fixed(ICON_PIXEL_SIZE); 3]);
-        icon.set_columns(vec![GridLength::Fixed(ICON_PIXEL_SIZE); 3]);
-        let cells = if pin {
-            vec![(0, 0), (0, 1), (0, 2), (1, 1), (2, 1)]
-        } else {
-            vec![(0, 0), (0, 2), (1, 1), (2, 0), (2, 2)]
-        };
-        for (row, column) in cells {
-            let mark = Rectangle::new();
-            mark.set_fill(themed_brush(BrushStyle::Foreground));
-            mark.set_attached("Grid", "row", row);
-            mark.set_attached("Grid", "column", column);
-            icon.children().add(mark);
-        }
-        icon
+    fn private_icon(pin: bool) -> Rc<dyn UIElementExt> {
+        chrome_icon(
+            if pin {
+                ChromeIcon::Pin
+            } else {
+                ChromeIcon::Close
+            },
+            themed_brush(BrushStyle::Foreground),
+        )
     }
 
-    fn float_icon() -> Rc<Grid> {
-        let icon = Grid::new();
-        icon.set_width(ICON_GRID_SIZE);
-        icon.set_height(ICON_GRID_SIZE);
-        icon.set_rows(vec![GridLength::Fixed(ICON_PIXEL_SIZE); 3]);
-        icon.set_columns(vec![GridLength::Fixed(ICON_PIXEL_SIZE); 3]);
-        for (row, column) in [
-            (0, 0),
-            (0, 1),
-            (0, 2),
-            (1, 0),
-            (1, 2),
-            (2, 0),
-            (2, 1),
-            (2, 2),
-        ] {
-            let mark = Rectangle::new();
-            mark.set_fill(themed_brush(BrushStyle::Foreground));
-            mark.set_attached("Grid", "row", row);
-            mark.set_attached("Grid", "column", column);
-            icon.children().add(mark);
-        }
-        icon
+    fn float_icon() -> Rc<dyn UIElementExt> {
+        chrome_icon(ChromeIcon::Float, themed_brush(BrushStyle::Foreground))
     }
 
     fn apply_planned_group(&self, planned: &PlannedGroup) {

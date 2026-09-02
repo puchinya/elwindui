@@ -32,10 +32,15 @@
   positioned preview visible.
 - AppKit and WinUI3 have private native floating Window adapters with logical bounds, retained
   surface content, stable host IDs, staged prepare/commit creation, close interception, and
-  empty-host cleanup. Interactive bounds preserve the source group's arranged size and pointer
-  offset, subject to a 160x120 minimum. GTK model floating remains valid but interactive native
-  floating reports `FloatingHostUnavailable` because the baseline has no usable Window
+  empty-host cleanup. A native close callback marks the host as closing, commits the model once, and
+  lets the original OS close continue without reentrant `close()`; rejected closes keep both the
+  model and native host intact. Interactive bounds preserve the source group's arranged size and
+  pointer offset, subject to a 160x120 minimum. GTK model floating remains valid but interactive
+  native floating reports `FloatingHostUnavailable` because the baseline has no usable Window
   implementation.
+- Docking chrome close, pin, and floating affordances use a shared cached 16x16 vector geometry with
+  round caps/joins and centered hit-test-transparent presentation. The former 3x3 rectangle mosaics
+  are no longer used.
 - `examples/docking-demo` visibly composes documents, nested tools, and the retained DockingControl
   runtime; it no longer only serializes an empty model.
 
@@ -50,16 +55,21 @@ root/geometry and offset conversion, positioned previews, floating source geomet
 failure/success, stable host identity, native close veto/accept, final-root cleanup, actual tab and
 splitter pointer paths, prepare/commit ordering, and unmount/weak-lifetime cleanup, including V2
 active-item round-trip, V1 rejection, clear/reset, whole-group movement, empty-group presentation,
-and indexed context-close actions. The focused `elwindui-custom-controls` suite has 7 library tests
+and indexed context-close actions. The focused `elwindui-custom-controls` suite has 8 library tests
 and 36 integration tests, including
 structural-selection counters and compact presentation. Native GUI behavior still requires
 platform-host verification where noted below.
+
+The current workspace verification is `1001 passed, 3 ignored`; `cargo check --workspace`, the
+`rust_analyzer`-cfg check, and the repository rust-analyzer diagnostic gate all pass. The latter
+reports only intentional `inactive-code` WeakWarnings (200 records, zero actionable diagnostics).
 
 ## Platform boundaries
 
 - AppKit runtime interaction: run selection/close, tab drag targets/cancellation, splitter
   completion/cancellation, pin/auto-hide/unpin, floating/re-dock, and native close accept/reject
-  when macOS UI permissions are available.
+  when macOS UI permissions are available. The latest attempt was NOT RUN because the macOS host
+  was locked and automatic unlock was unavailable.
 - WinUI3 runtime interaction: run the equivalent matrix only when the separate Issue #207/#217
   Windows integration state permits it; those fixes are not part of #172/#218.
 - GTK4: compile as required by the workspace. Do not claim native floating runtime support without a

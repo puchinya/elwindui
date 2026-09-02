@@ -1,6 +1,6 @@
 use elwindui_custom_controls::core::base::{Point, Size};
 use elwindui_custom_controls::core::graphics::{
-    Brush, IconSource, RenderCommand, RenderGroup, RenderTree, SystemIcon,
+    IconSource, RenderCommand, RenderGroup, RenderTree, SystemIcon,
 };
 use elwindui_custom_controls::core::input::{
     KeyModifiers, MouseButton, PointerEventArgs, RawPointerEvent, RawPointerEventKind,
@@ -69,20 +69,10 @@ fn find_visual(node: &Rc<dyn UIElementExt>, name: &str) -> Option<Rc<dyn UIEleme
     None
 }
 
-fn close_pixel_count(item: &Rc<CustomTabViewItem>) -> usize {
+fn close_icon_is_vector(item: &Rc<CustomTabViewItem>) -> bool {
     let close = item.close_button();
-    let pixels = elwindui_custom_controls::core::visual_tree::find_all::<Rectangle>(&*close);
-    let hidden = !pixels.is_empty()
-        && pixels.iter().all(|node| {
-            node.as_any()
-                .downcast_ref::<Rectangle>()
-                .is_some_and(|pixel| {
-                    pixel
-                        .fill()
-                        .is_some_and(|brush| matches!(brush, Brush::Solid(color) if color.a == 0))
-                })
-        });
-    if hidden { 0 } else { pixels.len() }
+    let close: Rc<dyn UIElementExt> = close;
+    find_visual(&close, "IconSourceElement").is_some()
 }
 
 fn item_indicator(item: &Rc<CustomTabViewItem>) -> Rc<dyn UIElementExt> {
@@ -595,7 +585,7 @@ fn pointer_over_hover_changes_close_template_without_width_jitter() {
         close.arranged_height(),
         close.arranged_offset(),
     );
-    assert_eq!(close_pixel_count(&item), 0);
+    assert!(!close_icon_is_vector(&item));
 
     let target: Rc<dyn UIElementExt> = item.clone();
     let args = pointer(Point { x: 1.0, y: 1.0 }, None);
@@ -623,7 +613,7 @@ fn pointer_over_hover_changes_close_template_without_width_jitter() {
         ),
         close_arranged_before
     );
-    assert_eq!(close_pixel_count(&item), 5);
+    assert!(close_icon_is_vector(&item));
     dispatch_routed(
         &target,
         "on_pointer_exited",
@@ -648,7 +638,7 @@ fn pointer_over_hover_changes_close_template_without_width_jitter() {
         ),
         close_arranged_before
     );
-    assert_eq!(close_pixel_count(&item), 0);
+    assert!(!close_icon_is_vector(&item));
 }
 
 #[test]
@@ -923,7 +913,7 @@ fn tab_header_render_tree_is_composed_from_standard_visuals() {
     assert!(find_visual(&root, "Rectangle").is_some());
     let texts = rendered_texts(&RenderTree::new::<()>(&root));
     assert!(texts.iter().any(|text| text == "document"));
-    assert_eq!(close_pixel_count(&item), 5);
+    assert!(close_icon_is_vector(&item));
 }
 
 #[test]
@@ -1488,7 +1478,7 @@ fn close_affordance_is_composed_and_respects_presentation() {
     );
 
     let always_width = item.arranged_width().expect("tab width");
-    assert_eq!(close_pixel_count(&item), 5);
+    assert!(close_icon_is_vector(&item));
 
     view.set_close_button_presentation(CloseButtonPresentation::Never);
     layout_root(
@@ -1500,7 +1490,7 @@ fn close_affordance_is_composed_and_respects_presentation() {
     );
     let never_width = item.arranged_width().expect("tab width");
     let _never = RenderTree::new::<()>(&root);
-    assert_eq!(close_pixel_count(&item), 0);
+    assert!(!close_icon_is_vector(&item));
     assert_eq!(always_width, never_width + 20.0);
 
     view.set_close_button_presentation(CloseButtonPresentation::OnPointerOver);

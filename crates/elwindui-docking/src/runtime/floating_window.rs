@@ -138,6 +138,10 @@ pub(crate) struct FloatingHostState {
     pub(crate) bounds: Rect,
     pub(crate) surface: Rc<DockSurfaceView>,
     pub(crate) host: Rc<dyn FloatingWindowHost>,
+    /// Set while this host is being closed by the native window manager. The native callback is
+    /// still on the stack, so the committed model removes the host from our registry and lets the
+    /// original native close continue instead of calling `close()` reentrantly.
+    pub(crate) native_close_in_flight: bool,
 }
 
 struct PreparedExistingHostUpdate {
@@ -261,6 +265,7 @@ impl FloatingHostRegistry {
             bounds: prepared.bounds,
             surface: prepared.surface,
             host: prepared.host,
+            native_close_in_flight: false,
         });
         id
     }
@@ -392,6 +397,7 @@ impl FloatingHostRegistry {
                 bounds: host.bounds,
                 surface: host.surface,
                 host: host.host,
+                native_close_in_flight: false,
             });
         }
 
@@ -399,9 +405,12 @@ impl FloatingHostRegistry {
         let mut retained = Vec::with_capacity(self.hosts.len());
         for host in self.hosts.drain(..) {
             if stale_ids.contains(&host.id) {
+                let native_close_in_flight = host.native_close_in_flight;
                 host.host.set_bounds_changed_handler(None);
                 host.host.set_close_request_handler(None);
-                host.host.close();
+                if !native_close_in_flight {
+                    host.host.close();
+                }
             } else {
                 retained.push(host);
             }
@@ -421,11 +430,31 @@ impl FloatingHostRegistry {
             .map(|host| host.root_index)
     }
 
+    pub(crate) fn begin_native_close(&mut self, id: FloatingHostId) -> bool {
+        let Some(host) = self.hosts.iter_mut().find(|host| host.id == id) else {
+            return false;
+        };
+        if host.native_close_in_flight {
+            return false;
+        }
+        host.native_close_in_flight = true;
+        true
+    }
+
+    pub(crate) fn cancel_native_close(&mut self, id: FloatingHostId) {
+        if let Some(host) = self.hosts.iter_mut().find(|host| host.id == id) {
+            host.native_close_in_flight = false;
+        }
+    }
+
     pub(crate) fn close_empty(&mut self) {
         for host in self.hosts.drain(..) {
+            let native_close_in_flight = host.native_close_in_flight;
             host.host.set_bounds_changed_handler(None);
             host.host.set_close_request_handler(None);
-            host.host.close();
+            if !native_close_in_flight {
+                host.host.close();
+            }
         }
     }
 

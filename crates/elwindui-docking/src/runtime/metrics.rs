@@ -6,9 +6,6 @@ pub(crate) const TITLE_BUTTON_COLUMN_WIDTH: f32 = 28.0;
 pub(crate) const TITLE_BUTTON_SIZE: f32 = 22.0;
 pub(crate) const TITLE_TEXT_MARGIN: f32 = 8.0;
 
-pub(crate) const ICON_GRID_SIZE: f32 = 12.0;
-pub(crate) const ICON_PIXEL_SIZE: f32 = 4.0;
-
 pub(crate) const SPLITTER_HIT_SIZE: f32 = 6.0;
 pub(crate) const ROOT_DOCK_BAND: f32 = 40.0;
 pub(crate) const GROUP_DOCK_BAND_FRACTION: f32 = 0.25;

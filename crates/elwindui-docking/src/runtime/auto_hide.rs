@@ -7,8 +7,8 @@ use crate::core::input::PointerEventArgs;
 use crate::core::layout::{GridLength, Visibility};
 use crate::core::theme::BrushStyle;
 use crate::core::ui::{
-    Grid, GridExt, IconSourceElement, IconSourceElementExt, LayoutExt, Rectangle, ShapeExt,
-    TextBlock, TextBlockExt, UIElementExt,
+    Grid, GridExt, IconSourceElement, IconSourceElementExt, LayoutExt, TextBlock, TextBlockExt,
+    UIElementExt,
 };
 use crate::model::RootKind;
 use crate::runtime::metrics::{
@@ -16,6 +16,7 @@ use crate::runtime::metrics::{
     AUTO_HIDE_STRIP_SIZE,
 };
 use crate::runtime::themed_brush;
+use elwindui_custom_controls::{ChromeIcon, chrome_icon};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -77,7 +78,10 @@ impl AutoHideOverlay {
         pin_button.set_background(themed_brush(BrushStyle::Secondary));
         pin_button.set_width(AUTO_HIDE_PIN_SIZE);
         pin_button.set_height(AUTO_HIDE_PIN_SIZE);
-        pin_button.children().add(private_pin_icon());
+        pin_button.children().add(chrome_icon(
+            ChromeIcon::Pin,
+            themed_brush(BrushStyle::Foreground),
+        ));
         pin_button.set_visibility(Visibility::Collapsed);
         pin_button.set_attached("Grid", "row", 1i32);
         pin_button.set_attached("Grid", "column", 1i32);
@@ -192,22 +196,6 @@ impl AutoHideOverlay {
     pub(crate) fn set_root(&self, root: RootKind) {
         *self.root_context.borrow_mut() = root;
     }
-}
-
-fn private_pin_icon() -> Rc<Grid> {
-    let icon = Grid::new();
-    icon.set_width(12.0);
-    icon.set_height(12.0);
-    icon.set_rows(vec![GridLength::Fixed(4.0); 3]);
-    icon.set_columns(vec![GridLength::Fixed(4.0); 3]);
-    for (row, column) in [(0, 0), (0, 1), (0, 2), (1, 1), (2, 1)] {
-        let mark = Rectangle::new();
-        mark.set_fill(themed_brush(BrushStyle::Foreground));
-        mark.set_attached("Grid", "row", row);
-        mark.set_attached("Grid", "column", column);
-        icon.children().add(mark);
-    }
-    icon
 }
 
 impl Default for AutoHideOverlay {

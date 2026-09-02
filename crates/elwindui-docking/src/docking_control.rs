@@ -789,35 +789,51 @@ impl DockingControl {
         }
     }
 
-    pub(crate) fn handle_floating_close(&self, floating_index: usize) -> bool {
-        let items = self.layout().floating_item_ids(floating_index);
+    pub(crate) fn handle_floating_close_host(&self, host_id: FloatingHostId) -> bool {
         let Some(realization) = self.runtime_realization() else {
             return false;
         };
-        if !realization.borrow().all_closeable(&items) {
+        let Some(index) = realization.borrow().floating_root_index(host_id) else {
+            return false;
+        };
+        let current = self.layout();
+        let items = current.floating_item_ids(index);
+        if items.is_empty() || !realization.borrow().all_closeable(&items) {
             return true;
         }
-        let mut next = self.layout();
+        if !realization
+            .borrow_mut()
+            .begin_native_floating_close(host_id)
+        {
+            return true;
+        }
+
+        let mut next = current.clone();
         for item in &items {
             let Ok(updated) = next.with_item_closed(item) else {
-                return false;
+                realization
+                    .borrow_mut()
+                    .cancel_native_floating_close(host_id);
+                return true;
             };
             next = updated;
         }
-        if next != self.layout() {
-            let _ = self.commit_user_model(next);
-        }
-        true
-    }
-
-    pub(crate) fn handle_floating_close_host(&self, host_id: FloatingHostId) -> bool {
-        let Some(index) = self
-            .runtime_realization()
-            .and_then(|realization| realization.borrow().floating_root_index(host_id))
-        else {
+        if next == current {
+            realization
+                .borrow_mut()
+                .cancel_native_floating_close(host_id);
             return false;
-        };
-        self.handle_floating_close(index)
+        }
+
+        match self.commit_user_model(next) {
+            Ok(()) if realization.borrow().floating_root_index(host_id).is_none() => false,
+            Ok(()) | Err(_) => {
+                realization
+                    .borrow_mut()
+                    .cancel_native_floating_close(host_id);
+                true
+            }
+        }
     }
 
     pub(crate) fn handle_floating_bounds_changed(

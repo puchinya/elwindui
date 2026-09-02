@@ -4,8 +4,9 @@ use super::core::environment::application_environment;
 use super::core::input::{MouseButton, PointerEventArgs};
 use super::core::layout::Visibility;
 use super::core::theme::{BrushStyle, ResolvedValue};
-use super::core::ui::{ControlExt, Rectangle, ShapeExt, UIElementExt};
+use super::core::ui::{ControlExt, Grid, LayoutExt, UIElementExt};
 use super::weak_self_from_visual_owner;
+use super::{ChromeIcon, chrome_icon};
 use std::rc::Rc;
 
 /// Private close-slot control used by [`CustomTabViewItem`]'s authored header template.
@@ -35,41 +36,6 @@ pub(crate) struct CustomTabCloseButton {
             width: 20.0
             height: 32.0
             visibility: slot_visibility
-            rows: [
-                elwindui::core::layout::GridLength::Fixed(4.0),
-                elwindui::core::layout::GridLength::Fixed(4.0),
-                elwindui::core::layout::GridLength::Fixed(4.0),
-            ]
-            columns: [
-                elwindui::core::layout::GridLength::Fixed(4.0),
-                elwindui::core::layout::GridLength::Fixed(4.0),
-                elwindui::core::layout::GridLength::Fixed(4.0),
-            ]
-            Rectangle {
-                Grid::row: 0
-                Grid::column: 0
-                fill: elwindui::core::theme::BrushStyle::Foreground
-            }
-            Rectangle {
-                Grid::row: 0
-                Grid::column: 2
-                fill: elwindui::core::theme::BrushStyle::Foreground
-            }
-            Rectangle {
-                Grid::row: 1
-                Grid::column: 1
-                fill: elwindui::core::theme::BrushStyle::Foreground
-            }
-            Rectangle {
-                Grid::row: 2
-                Grid::column: 0
-                fill: elwindui::core::theme::BrushStyle::Foreground
-            }
-            Rectangle {
-                Grid::row: 2
-                Grid::column: 2
-                fill: elwindui::core::theme::BrushStyle::Foreground
-            }
         }
     }),
 }
@@ -89,20 +55,25 @@ impl CustomTabCloseButton {
 
 impl CustomTabCloseButton {
     pub(crate) fn sync_glyph_paint(&self) {
-        let fill = if self.glyph_visible() {
+        let foreground = if self.glyph_visible() {
             match BrushStyle::Foreground.resolve(&application_environment()) {
                 ResolvedValue::Value(brush) => Some(brush),
                 ResolvedValue::PlatformDefault => None,
             }
         } else {
-            Some(core::graphics::Brush::Solid(
-                core::graphics::Color::TRANSPARENT,
-            ))
+            None
         };
-        for glyph in core::visual_tree::find_all::<Rectangle>(self) {
-            if let Some(glyph) = glyph.as_any().downcast_ref::<Rectangle>() {
-                glyph.set_fill(fill.clone());
-            }
+        let Some(slot_node) = core::visual_tree::find_all::<Grid>(self).into_iter().next() else {
+            return;
+        };
+        let Some(slot) = slot_node.as_any().downcast_ref::<Grid>() else {
+            return;
+        };
+        slot.children().clear();
+        if self.glyph_visible() {
+            let glyph = chrome_icon(ChromeIcon::Close, foreground);
+            glyph.set_hit_test_visible(false);
+            slot.children().add(glyph);
         }
     }
 

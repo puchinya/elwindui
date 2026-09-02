@@ -181,6 +181,47 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
             );
         }
     }
+
+    fn flush_interactive_relayout(&self) {
+        let Some(active) = self.active.upgrade() else {
+            return;
+        };
+        if !active.get() {
+            return;
+        }
+        self.pending.set(false);
+        let Some(this) = self.weak_self.borrow().upgrade() else {
+            return;
+        };
+        if let (
+            Some(tree),
+            Some(render_tree),
+            Some(native_children),
+            Some(composition),
+            Some(keyboard),
+            Some(unconstrained_axes),
+            Some(active),
+        ) = (
+            this.tree.upgrade(),
+            this.render_tree.upgrade(),
+            this.native_children.upgrade(),
+            this.composition.upgrade(),
+            this.keyboard.upgrade(),
+            this.unconstrained_axes.upgrade(),
+            this.active.upgrade(),
+        ) {
+            TreeHostPanel::relayout_static(
+                &this.canvas,
+                &composition,
+                &tree,
+                &render_tree,
+                &native_children,
+                &keyboard,
+                unconstrained_axes.get(),
+                &active,
+            );
+        }
+    }
 }
 
 /// `elwindui_core::ui::FocusHost` for `TreeHostPanel` — the `FocusHost` counterpart to

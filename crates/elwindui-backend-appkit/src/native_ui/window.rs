@@ -115,4 +115,12 @@ impl elwindui_core::ui::WindowLifecycleHost for Window {
     fn set_close_request_handler(&self, handler: Option<Rc<dyn Fn() -> bool>>) {
         self.inner.set_close_request_handler(handler);
     }
+
+    fn set_bounds_changed_handler(&self, handler: Option<Rc<dyn Fn(elwindui_core::base::Rect)>>) {
+        self.inner.set_bounds_changed_handler(handler);
+    }
+
+    fn activate(&self) {
+        self.inner.activate();
+    }
 }

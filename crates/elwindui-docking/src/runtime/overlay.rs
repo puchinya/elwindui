@@ -1,12 +1,14 @@
 //! Dock target overlays and transient previews.
 
-#[cfg(test)]
 use crate::DockTarget;
 use crate::core::base::{Rect, Size};
-use crate::core::layout::Visibility;
+use crate::core::layout::{GridLength, HorizontalAlignment, VerticalAlignment, Visibility};
 use crate::core::theme::BrushStyle;
-use crate::core::ui::{ControlExt, Rectangle, ShapeExt, UIElementExt};
+use crate::core::ui::{
+    ControlExt, Grid, GridExt, LayoutExt, Rectangle, RectangleExt, ShapeExt, UIElementExt,
+};
 use crate::runtime::drag::ResolvedDockTarget;
+use crate::runtime::metrics::{COMPASS_BUTTON_SIZE, COMPASS_GAP, COMPASS_SIZE};
 use crate::runtime::themed_brush;
 use std::rc::Rc;
 
@@ -18,6 +20,91 @@ pub(crate) struct DropPreviewLayer {
     #[state(default = None)]
     preview_rect: Option<Rect>,
     template: template_view!(|_this: Self| { Rectangle {} }),
+}
+
+/// A discoverable compass shown on every surface while a dock drag is over that surface. The
+/// buttons are deliberately non-hit-testable: the coordinator remains the sole authority for
+/// geometry and the compass cannot steal the originating pointer capture.
+pub(crate) struct DockTargetOverlay {
+    visual: Rc<Grid>,
+    buttons: Vec<(DockTarget, Rc<Rectangle>)>,
+}
+
+impl DockTargetOverlay {
+    pub(crate) fn new() -> Self {
+        let visual = Grid::new();
+        visual.set_width(COMPASS_SIZE);
+        visual.set_height(COMPASS_SIZE);
+        visual.set_horizontal_alignment(HorizontalAlignment::Center);
+        visual.set_vertical_alignment(VerticalAlignment::Center);
+        visual.set_hit_test_visible(false);
+        visual.set_rows(vec![
+            GridLength::Fixed(COMPASS_BUTTON_SIZE),
+            GridLength::Fixed(COMPASS_GAP),
+            GridLength::Fixed(COMPASS_BUTTON_SIZE),
+            GridLength::Fixed(COMPASS_GAP),
+            GridLength::Fixed(COMPASS_BUTTON_SIZE),
+        ]);
+        visual.set_columns(vec![
+            GridLength::Fixed(COMPASS_BUTTON_SIZE),
+            GridLength::Fixed(COMPASS_GAP),
+            GridLength::Fixed(COMPASS_BUTTON_SIZE),
+            GridLength::Fixed(COMPASS_GAP),
+            GridLength::Fixed(COMPASS_BUTTON_SIZE),
+        ]);
+        let placements = [
+            (DockTarget::SplitTop, 0, 2),
+            (DockTarget::SplitLeft, 2, 0),
+            (DockTarget::Center, 2, 2),
+            (DockTarget::SplitRight, 2, 4),
+            (DockTarget::SplitBottom, 4, 2),
+        ];
+        let buttons = placements
+            .into_iter()
+            .map(|(target, row, column)| {
+                let button = Rectangle::new();
+                button.set_width(COMPASS_BUTTON_SIZE);
+                button.set_height(COMPASS_BUTTON_SIZE);
+                button.set_corner_radius(4.0);
+                button.set_fill(themed_brush(BrushStyle::Tint));
+                button.set_stroke(themed_brush(BrushStyle::Separator));
+                button.set_stroke_width(1.0);
+                button.set_attached("Grid", "row", row);
+                button.set_attached("Grid", "column", column);
+                visual.children().add(button.clone());
+                (target, button)
+            })
+            .collect();
+        visual.set_visibility(Visibility::Collapsed);
+        Self { visual, buttons }
+    }
+
+    pub(crate) fn show(&self, target: DockTarget) {
+        for (candidate, button) in &self.buttons {
+            let selected = *candidate == target
+                || matches!(
+                    (candidate, target),
+                    (DockTarget::SplitLeft, DockTarget::DockLeft)
+                        | (DockTarget::SplitTop, DockTarget::DockTop)
+                        | (DockTarget::SplitRight, DockTarget::DockRight)
+                        | (DockTarget::SplitBottom, DockTarget::DockBottom)
+                );
+            button.set_fill(themed_brush(if selected {
+                BrushStyle::Selection
+            } else {
+                BrushStyle::Tint
+            }));
+        }
+        self.visual.set_visibility(Visibility::Visible);
+    }
+
+    pub(crate) fn clear(&self) {
+        self.visual.set_visibility(Visibility::Collapsed);
+    }
+
+    pub(crate) fn visual(&self) -> Rc<dyn UIElementExt> {
+        self.visual.clone()
+    }
 }
 
 #[elwindui::component]

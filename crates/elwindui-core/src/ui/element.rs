@@ -40,8 +40,20 @@ pub enum InvalidationKind {
     Measure,
 }
 
+/// Backend capability for scheduling layout and render work from a UI element.
+///
+/// Implementations should retain only a weak route back to their native host because the hosted
+/// tree stores this trait object while the host owns the tree. A host may coalesce requests until
+/// its next event-loop turn; interactive callers can use [`Self::flush_interactive_relayout`] when
+/// they need the pending arrange to be realized before measuring geometry.
 pub trait RelayoutHost {
+    /// Requests a host pass for the dirty render group at the strongest required invalidation
+    /// level.
     fn request_relayout(&self, dirty_group_id: u64, kind: InvalidationKind);
+
+    /// Realizes a pending interactive arrange before returning when the backend can do so safely.
+    /// Hosts that coalesce layout requests may keep the default no-op implementation.
+    fn flush_interactive_relayout(&self) {}
 }
 
 /// Backend-neutral coordinate conversion supplied by the native host that owns a Visual tree.
@@ -791,6 +803,10 @@ impl UIElement {
     fn set_pointer_gesture_host(&self, host: Option<Rc<dyn PointerGestureHost>>) {
         *self.as_ui_element().pointer_gesture_host.borrow_mut() = host;
     }
+    /// Flushes the owning host's pending interactive arrange, if the backend supports it.
+    fn flush_interactive_relayout(&self) {
+        flush_interactive_relayout(self.as_ui_element());
+    }
     /// Converts a point from this element's hosted-tree root coordinate space to normalized
     /// logical desktop coordinates.
     fn root_to_screen(&self, point: Point) -> Option<Point> {
@@ -1060,6 +1076,27 @@ pub(crate) fn request_relayout(base: &UIElement, kind: InvalidationKind) {
     }
     if let Some(host) = host {
         host.request_relayout(base.render_group_id, kind);
+    }
+}
+
+pub(crate) fn flush_interactive_relayout(base: &UIElement) {
+    let mut current = base
+        .visual_parent
+        .borrow()
+        .as_ref()
+        .and_then(|w| w.upgrade());
+    let mut host = base.invalidate_host.borrow().clone();
+    while let Some(element) = current {
+        host = element
+            .as_ui_element()
+            .invalidate_host
+            .borrow()
+            .clone()
+            .or(host);
+        current = element.visual_parent();
+    }
+    if let Some(host) = host {
+        host.flush_interactive_relayout();
     }
 }
 

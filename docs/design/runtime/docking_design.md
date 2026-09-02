@@ -23,12 +23,18 @@ complete desired ownership map, detaches wrappers from old group/overlay parents
 structural children, then attaches the same wrappers to their desired parents. Group views,
 splitter collections, and split Grids are retained by authored/generated group identity and
 `SplitAddress`. Metadata refresh updates header/icon/capability chrome without replacing page
-content; dynamic page replacement is outside V1. A normal tab selection updates only the existing
+content; dynamic page replacement is outside this design scope. A normal tab selection updates only the existing
 group's selected bookkeeping and the bound value when its fast-path preconditions hold. It does
 not rebuild groups, splitters, surfaces, wrappers, or native hosts.
 
 The runtime owns presentation only. It does not serialize wrappers, visual parents, native Window
 handles, callbacks, or surface registrations in `DockLayoutSnapshot`.
+
+Group title bars are retained whole-group drag handles. Tab context menus dispatch capability-
+checked close, indexed-close, float, and pin operations through the same model transaction
+boundary as pointer gestures. Empty authored groups marked `show_when_empty` retain their group
+host and display a non-hit-testable drop hint; other empty groups are normalized away. Per-group
+`compact_tabs` is applied to the retained tab view without replacing wrappers or page content.
 
 ## Main surface and split realization
 
@@ -99,7 +105,9 @@ The bound model controls which entry is open and which remembered return state i
 `SurfaceRuntime` retains one surface, auto-hide controller, and preview controller for the main root
 and for every floating root. `FloatingHostRegistry` maps model floating-root positions to native
 windows on AppKit and WinUI3. The adapter implements a private `FloatingWindowHost` contract for
-content, logical bounds, show, close, and native close interception. A new host follows
+content, logical bounds, show, activation, close, and native close interception. Native move/resize
+notifications update the model's floating bounds through the same source/property transaction
+path. A new host follows
 prepare -> runtime commit -> owner model/property commit -> callback -> registry synchronization
 -> show; preparation failure therefore does not require changing committed wrapper ownership.
 GTK deliberately has no adapter in this change. Native close handlers capture only weak Docking state and a stable private

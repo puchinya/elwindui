@@ -2,13 +2,16 @@ use super::core;
 use super::core::graphics::IconSource;
 use super::core::input::PointerEventArgs;
 use super::core::layout::Visibility;
-use super::core::ui::{ControlExt, IconSourceElementExt, UIElementExt};
+use super::core::ui::{ControlExt, Grid, GridExt, IconSourceElementExt, UIElementExt};
 use super::custom_tab_view::TabItemPointerEvent;
 use super::{
     CloseButtonPresentation, CustomTabCloseButton, CustomTabCloseButtonExt, TabStripPosition,
     weak_self_from_visual_owner,
 };
 use std::rc::Rc;
+
+const TAB_HEADER_HEIGHT: f32 = 30.0;
+const COMPACT_TAB_HEADER_HEIGHT: f32 = 26.0;
 
 /// One item displayed by [`CustomTabView`]. Its visual template is the tab header; its inherited
 /// `ContentControl` content remains the logical page presented by the private content presenter.
@@ -32,6 +35,8 @@ pub struct CustomTabViewItem {
     is_pointer_over: bool,
     #[state(default = TabStripPosition::Top)]
     tab_strip_position: TabStripPosition,
+    #[state(default = false)]
+    compact: bool,
     #[state(default = CloseButtonPresentation::Always)]
     close_button_presentation: CloseButtonPresentation,
     #[computed(expr = if tab_strip_position == TabStripPosition::Top { 0 } else { 1 })]
@@ -40,16 +45,18 @@ pub struct CustomTabViewItem {
     indicator_row: i32,
     #[computed(expr = if tab_strip_position == TabStripPosition::Top {
         vec![
-            elwindui::core::layout::GridLength::Fixed(30.0),
+            elwindui::core::layout::GridLength::Fixed(TAB_HEADER_HEIGHT),
             elwindui::core::layout::GridLength::Fixed(2.0),
         ]
     } else {
         vec![
             elwindui::core::layout::GridLength::Fixed(2.0),
-            elwindui::core::layout::GridLength::Fixed(30.0),
+            elwindui::core::layout::GridLength::Fixed(TAB_HEADER_HEIGHT),
         ]
     })]
     header_grid_rows: Vec<elwindui::core::layout::GridLength>,
+    #[computed(expr = TAB_HEADER_HEIGHT)]
+    header_height: f32,
     #[computed(expr = if icon.is_some() { Visibility::Visible } else { Visibility::Collapsed })]
     icon_visibility: Visibility,
     #[computed(expr = closable && close_button_presentation != CloseButtonPresentation::Never)]
@@ -69,7 +76,7 @@ pub struct CustomTabViewItem {
             this.bind_header_handlers();
             this.sync_close_button();
         }
-        on_update(header, icon, closable, is_selected, tab_strip_position, close_button_presentation) {
+        on_update(header, icon, closable, is_selected, tab_strip_position, compact, close_button_presentation) {
             this.sync_close_button();
         }
         let close_button = CustomTabCloseButton {
@@ -86,7 +93,7 @@ pub struct CustomTabViewItem {
             HorizontalLayout {
                 Grid::row: header_row
                 Grid::column: 1
-                height: 30.0
+                height: header_height
                 spacing: 6.0
                 IconSourceElement {
                     width: 16.0
@@ -174,6 +181,7 @@ impl CustomTabViewItem {
         is_pointer_over: bool,
         tab_strip_position: TabStripPosition,
         close_button_presentation: CloseButtonPresentation,
+        compact_tabs: bool,
     ) {
         if self.is_selected() != is_selected {
             self.set_is_selected(is_selected);
@@ -182,9 +190,11 @@ impl CustomTabViewItem {
             self.set_is_pointer_over(is_pointer_over);
         }
         let position_changed = self.tab_strip_position() != tab_strip_position;
-        if position_changed {
+        let compact_changed = self.compact() != compact_tabs;
+        if position_changed || compact_changed {
             self.set_tab_strip_position(tab_strip_position);
-            self.sync_header_rows();
+            self.set_compact(compact_tabs);
+            self.sync_header_layout();
         }
         if self.close_button_presentation() != close_button_presentation {
             self.set_close_button_presentation(close_button_presentation);
@@ -196,15 +206,35 @@ impl CustomTabViewItem {
         self.is_pointer_over()
     }
 
-    fn sync_header_rows(&self) {
+    fn sync_header_layout(&self) {
         let Some(root) = self.__template_root() else {
             return;
         };
+        let compact_height = if self.compact() {
+            COMPACT_TAB_HEADER_HEIGHT
+        } else {
+            TAB_HEADER_HEIGHT
+        };
+        if let Some(grid) = root.as_any().downcast_ref::<Grid>() {
+            let indicator_height = 2.0;
+            let rows = if self.tab_strip_position() == TabStripPosition::Top {
+                vec![
+                    elwindui::core::layout::GridLength::Fixed(compact_height),
+                    elwindui::core::layout::GridLength::Fixed(indicator_height),
+                ]
+            } else {
+                vec![
+                    elwindui::core::layout::GridLength::Fixed(indicator_height),
+                    elwindui::core::layout::GridLength::Fixed(compact_height),
+                ]
+            };
+            grid.set_rows(rows);
+        }
         let children = root.visual_children();
         if let Some(header) = children.first() {
-            header
-                .as_ui_element()
-                .set_attached::<i32>("Grid", "row", self.header_row());
+            let header = header.as_ui_element();
+            header.set_attached::<i32>("Grid", "row", self.header_row());
+            header.set_height(compact_height);
         }
         if let Some(indicator) = children.get(1) {
             indicator

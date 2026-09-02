@@ -4,6 +4,7 @@
 use super::InnerMenuBar;
 use crate::ffi::mtm;
 use crate::host::TreeHostView;
+use elwindui_core::base::Rect;
 use elwindui_core::input::FocusState;
 use elwindui_core::ui::UIElementExt;
 use objc2::rc::Retained;
@@ -12,9 +13,9 @@ use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor,
     NSFloatingWindowLevel, NSNormalWindowLevel, NSResponder, NSScreen, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSWindowDidMoveNotification, NSWindowDidResizeNotification, NSWindowStyleMask,
 };
-use objc2_foundation::{NSObjectProtocol, NSRect, NSString};
+use objc2_foundation::{NSNotification, NSObjectProtocol, NSRect, NSString};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -56,6 +57,7 @@ fn resolve_focus_owner(
 #[derive(Default)]
 pub(crate) struct ElwinduiWindowIvars {
     close_request_handler: RefCell<Option<Rc<dyn Fn() -> bool>>>,
+    bounds_changed_handler: RefCell<Option<Rc<dyn Fn(Rect)>>>,
 }
 
 define_class!(
@@ -146,6 +148,34 @@ define_class!(
                 }
             }
         }
+
+        #[unsafe(method(elwinduiWindowBoundsChanged:))]
+        fn bounds_changed(&self, _notification: &NSNotification) {
+            let Some(handler) = self.ivars().bounds_changed_handler.borrow().clone() else {
+                return;
+            };
+            let frame = self.frame();
+            let screen_height = self
+                .screen()
+                .or_else(|| NSScreen::mainScreen(mtm()))
+                .map(|screen| screen.frame().size.height)
+                .unwrap_or(0.0);
+            let bounds = Rect {
+                x: frame.origin.x as f32,
+                y: (screen_height - (frame.origin.y + frame.size.height)) as f32,
+                width: frame.size.width as f32,
+                height: frame.size.height as f32,
+            };
+            if bounds.x.is_finite()
+                && bounds.y.is_finite()
+                && bounds.width.is_finite()
+                && bounds.height.is_finite()
+                && bounds.width > 0.0
+                && bounds.height > 0.0
+            {
+                handler(bounds);
+            }
+        }
     }
 );
 
@@ -218,6 +248,21 @@ impl InnerWindow {
             ];
             Retained::into_super(window)
         };
+        let notifications = objc2_foundation::NSNotificationCenter::defaultCenter();
+        unsafe {
+            notifications.addObserver_selector_name_object(
+                &*ns as &objc2::runtime::AnyObject,
+                objc2::sel!(elwinduiWindowBoundsChanged:),
+                Some(NSWindowDidMoveNotification),
+                Some(&*ns as &objc2::runtime::AnyObject),
+            );
+            notifications.addObserver_selector_name_object(
+                &*ns as &objc2::runtime::AnyObject,
+                objc2::sel!(elwinduiWindowBoundsChanged:),
+                Some(NSWindowDidResizeNotification),
+                Some(&*ns as &objc2::runtime::AnyObject),
+            );
+        }
         let content_host = TreeHostView::new();
         // `Window` property setters can resize the NSWindow after this content view has been
         // installed (the notepad starts at 640×480 although InnerWindow's construction rect is
@@ -248,6 +293,14 @@ impl InnerWindow {
             .downcast_ref::<ElwinduiWindow>()
             .expect("InnerWindow::ns is always a real ElwinduiWindow");
         *window.ivars().close_request_handler.borrow_mut() = handler;
+    }
+
+    pub(crate) fn set_bounds_changed_handler(&self, handler: Option<Rc<dyn Fn(Rect)>>) {
+        let window = self
+            .ns
+            .downcast_ref::<ElwinduiWindow>()
+            .expect("InnerWindow::ns is always a real ElwinduiWindow");
+        *window.ivars().bounds_changed_handler.borrow_mut() = handler;
     }
 
     pub(crate) fn set_content(&self, content: Rc<dyn UIElementExt>) {
@@ -296,6 +349,10 @@ impl InnerWindow {
         app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
         self.ns.makeKeyAndOrderFront(None);
         app.activate();
+    }
+
+    pub(crate) fn activate(&self) {
+        self.ns.makeKeyAndOrderFront(None);
     }
 
     /// Visibility only (CI-8 of #80) — `orderOut:` is `makeKeyAndOrderFront:`'s natural AppKit

@@ -156,6 +156,15 @@ impl RelayoutHost for AppKitRelayoutHost {
         }
         view.setNeedsLayout(true);
     }
+
+    fn flush_interactive_relayout(&self) {
+        let Some(view) = self.0.load() else { return };
+        if view.ivars().relaying_out.get() {
+            view.ivars().needs_another_pass.set(true);
+            return;
+        }
+        view.relayout();
+    }
 }
 
 /// `elwindui_core::ui::FocusHost` for `TreeHostView` — the `FocusHost` counterpart to

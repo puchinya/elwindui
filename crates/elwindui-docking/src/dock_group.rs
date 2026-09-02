@@ -12,12 +12,16 @@ pub struct DockGroup {
     weight: f32,
     #[prop(default = TabStripPosition::Top)]
     tab_strip_position: TabStripPosition,
+    #[prop(default = false)]
+    compact_tabs: bool,
+    #[prop(default = false)]
+    show_when_empty: bool,
     #[prop(default = Vec::new())]
     children: Vec<Rc<DockItem>>,
     #[state(default = None)]
     registration_callback: Option<Rc<dyn Fn()>>,
     template: template_view!(|this: Self| {
-        on_update(children, id, weight, tab_strip_position) {
+        on_update(children, id, weight, tab_strip_position, compact_tabs, show_when_empty) {
             this.notify_registration_changed();
         }
         Grid {}
@@ -46,6 +50,16 @@ impl DockGroup {
     /// Returns this group's authored tab-strip position.
     pub fn tab_strip_position_value(&self) -> TabStripPosition {
         self.tab_strip_position()
+    }
+
+    /// Returns whether this group uses compact tab sizing.
+    pub fn compact_tabs_value(&self) -> bool {
+        self.compact_tabs()
+    }
+
+    /// Returns whether this authored group remains visible when empty.
+    pub fn show_when_empty_value(&self) -> bool {
+        self.show_when_empty()
     }
 
     pub(crate) fn authored_children(&self) -> Vec<Rc<DockItem>> {

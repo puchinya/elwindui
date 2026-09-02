@@ -5,6 +5,7 @@ mod auto_hide;
 mod drag;
 mod floating_window;
 mod group_view;
+pub(crate) mod metrics;
 mod overlay;
 mod reconcile;
 mod split_view;

@@ -4,8 +4,9 @@
 
 - `elwindui-docking` is a separate consumer crate with stable `DockItemId` and `DockGroupId`
   registrations, authored-default metadata, and dynamic registration callbacks.
-- `DockLayoutModel` is an opaque immutable value for main/floating roots, selection, closed return
-  state, auto-hide state, generated groups, normalization, and version-1 snapshots.
+- `DockLayoutModel` is an opaque immutable value for main/floating roots, global active selection,
+  closed return state, auto-hide state, generated groups, normalization, and version-2 snapshots;
+  version-1 input is rejected without migration or defaulting.
 - `DockingControl` keeps authored declarations mounted but collapsed, installs one retained private
   runtime host, applies the actual TwoWay layout update path, publishes an empty initial default
   once, and suppresses source echoes/latest-only reentrant updates.
@@ -17,6 +18,9 @@
   unchanged; no old-model rollback is used.
 - CustomTabView selection/close/tab-drag callbacks and CustomSplitter callbacks are wired through
   weak Docking owners. Drag preview is a real visual adornment and does not reparent page content.
+- Whole-group title-bar dragging, indexed tab context actions, compact tab metrics, and authored
+  `show_when_empty` groups with a non-interactive `Drop here` hint are wired through retained
+  runtime hosts.
 - Normal tab selection uses a retained value-only path, and live splitter movement updates retained
   Grid tracks with arrange invalidation. CustomTabView caches private presenter references and the
   content presenter measures only the selected page while retaining hidden page ownership.
@@ -37,22 +41,19 @@
 
 ## Tests and verification state
 
-The focused `elwindui-docking` suite currently has 61 passing tests covering default
+The focused `elwindui-docking` suite currently has 68 passing tests covering default
 initialization/reset, activation, close/reopen, all four split/edge sides, snapshot round-trip,
 auto-hide state, typed invalid values, latest-only source logic, removed-authored-group repair,
 adjacent split-weight transformation, generated-group drag targets, retained runtime presentation,
 callback-driven selection/close, initial publication, dynamic registration, cross-window target
 root/geometry and offset conversion, positioned previews, floating source geometry, staged host
 failure/success, stable host identity, native close veto/accept, final-root cleanup, actual tab and
-splitter pointer paths, prepare/commit ordering, and unmount/weak-lifetime cleanup. The focused
-`elwindui-custom-controls` suite has 43 passing tests, including structural-selection counters,
-selected-only measurement/arrangement probes, and content-replacement geometry. Native GUI behavior
-still requires platform-host verification where noted below.
-
-The canonical command results are recorded in the PR #218 remediation report. Workspace failures
-are kept separate from Docking-specific results; in particular, the existing AppKit
-`control_template_window_rt4` fixture must not be treated as a Docking failure without change-specific
-evidence.
+splitter pointer paths, prepare/commit ordering, and unmount/weak-lifetime cleanup, including V2
+active-item round-trip, V1 rejection, clear/reset, whole-group movement, empty-group presentation,
+and indexed context-close actions. The focused `elwindui-custom-controls` suite has 7 library tests
+and 36 integration tests, including
+structural-selection counters and compact presentation. Native GUI behavior still requires
+platform-host verification where noted below.
 
 ## Platform boundaries
 

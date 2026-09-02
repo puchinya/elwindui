@@ -5,6 +5,7 @@ use crate::bindings;
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 use crate::bindings::Microsoft::UI::Xaml::{SizeChangedEventHandler, Window as XamlWindow};
 use crate::host::TreeHostPanel;
+use elwindui_core::base::Rect;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use windows::Graphics::{PointInt32, SizeInt32};
@@ -74,6 +75,8 @@ pub(crate) struct InnerWindow {
     /// wrapped, needs an independently clonable handle" reason `close_request_handler` is
     /// already `Rc`-wrapped) must not treat that as a second, independent user close request.
     framework_initiated_close: Rc<Cell<bool>>,
+    bounds_changed_handler: Rc<RefCell<Option<Rc<dyn Fn(Rect)>>>>,
+    bounds_changed_registered: Cell<bool>,
 }
 
 impl InnerWindow {
@@ -89,10 +92,13 @@ impl InnerWindow {
             close_request_handler: Rc::new(RefCell::new(None)),
             closing_registered: Cell::new(false),
             framework_initiated_close: Rc::new(Cell::new(false)),
+            bounds_changed_handler: Rc::new(RefCell::new(None)),
+            bounds_changed_registered: Cell::new(false),
         };
         // Best-effort: `AppWindow` is commonly already available by construction time, but isn't
         // guaranteed to be (see `closing_registered`'s own doc comment) — `show()` retries.
         inner.try_register_closing_handler();
+        inner.try_register_bounds_changed_handler();
         inner
     }
 
@@ -129,6 +135,64 @@ impl InnerWindow {
         });
         if app_window.Closing(&handler).is_ok() {
             self.closing_registered.set(true);
+        }
+    }
+
+    /// Registers the AppWindow geometry notification once the native AppWindow exists. The
+    /// callback reads the effective native position and size, so programmatic moves and user
+    /// drags share the same model-owned bounds publication path.
+    fn try_register_bounds_changed_handler(&self) {
+        if self.bounds_changed_registered.get() {
+            return;
+        }
+        let Some(app_window) = self.app_window() else {
+            return;
+        };
+        let bounds_changed_handler = Rc::clone(&self.bounds_changed_handler);
+        let handler =
+            windows::Foundation::TypedEventHandler::new(move |sender, args: &Option<_>| {
+                let args: &Option<
+                    crate::bindings::Microsoft::UI::Windowing::AppWindowChangedEventArgs,
+                > = args;
+                let Some(args) = args else {
+                    return Ok(());
+                };
+                let position_changed = args.DidPositionChange().unwrap_or(false);
+                let size_changed = args.DidSizeChange().unwrap_or(false);
+                if !position_changed && !size_changed {
+                    return Ok(());
+                }
+                let Some(observed_window) = sender.as_ref() else {
+                    return Ok(());
+                };
+                let Some(position) = observed_window.Position().ok() else {
+                    return Ok(());
+                };
+                let Some(size) = observed_window.Size().ok() else {
+                    return Ok(());
+                };
+                let bounds = Rect {
+                    x: position.X as f32,
+                    y: position.Y as f32,
+                    width: size.Width as f32,
+                    height: size.Height as f32,
+                };
+                if !bounds.x.is_finite()
+                    || !bounds.y.is_finite()
+                    || !bounds.width.is_finite()
+                    || !bounds.height.is_finite()
+                    || bounds.width <= 0.0
+                    || bounds.height <= 0.0
+                {
+                    return Ok(());
+                }
+                if let Some(callback) = bounds_changed_handler.borrow().clone() {
+                    callback(bounds);
+                }
+                Ok(())
+            });
+        if app_window.Changed(&handler).is_ok() {
+            self.bounds_changed_registered.set(true);
         }
     }
 
@@ -217,9 +281,14 @@ impl InnerWindow {
         // own `apply_always_on_top`/`app_window()` calls above already rely on that) — retry here
         // in case `new()`'s own best-effort attempt ran too early.
         self.try_register_closing_handler();
+        self.try_register_bounds_changed_handler();
         if !self.retained.replace(true) {
             crate::app::retain_window(&self.xaml);
         }
+        let _ = self.xaml.Activate();
+    }
+
+    pub(crate) fn activate(&self) {
         let _ = self.xaml.Activate();
     }
 
@@ -260,6 +329,11 @@ impl InnerWindow {
     /// `try_register_closing_handler`'s own registered `AppWindow.Closing` handler consults.
     pub(crate) fn set_close_request_handler(&self, handler: Option<Rc<dyn Fn() -> bool>>) {
         *self.close_request_handler.borrow_mut() = handler;
+    }
+
+    pub(crate) fn set_bounds_changed_handler(&self, handler: Option<Rc<dyn Fn(Rect)>>) {
+        *self.bounds_changed_handler.borrow_mut() = handler;
+        self.try_register_bounds_changed_handler();
     }
 
     #[cfg(test)]

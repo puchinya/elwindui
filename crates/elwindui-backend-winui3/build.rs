@@ -179,6 +179,7 @@ fn main() {
         "Microsoft.UI.Content.ContentCoordinateConverter".to_owned(),
         "Microsoft.UI.Content.ContentIsland".to_owned(),
         "Microsoft.UI.Windowing.AppWindow".to_owned(),
+        "Microsoft.UI.Windowing.AppWindowChangedEventArgs".to_owned(),
         "Microsoft.UI.Windowing.DisplayArea".to_owned(),
         "Microsoft.UI.Windowing.DisplayAreaFallback".to_owned(),
         "Microsoft.UI.Windowing.OverlappedPresenter".to_owned(),

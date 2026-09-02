@@ -8,14 +8,15 @@ use super::core::input::{
 };
 use super::core::layout::{GridLength, Visibility};
 use super::core::ui::{
-    ContentControlExt, Grid, GridExt, LayoutExt, Rectangle, TextBlockExt, UIElementExt,
+    ContentControlExt, Grid, GridExt, LayoutExt, Rectangle, TextBlock, TextBlockExt, UIElementExt,
     layout_root, unmount_subtree,
 };
 use super::core::visual_tree::find_all;
+use super::docking_control::DockTabContextAction;
 use super::id::{DockGroupId, DockItemId};
 use super::model::{
-    DefaultDockDefinition, DockLayoutModel, InternalDockGroupKey, InternalDockPlacement, Node,
-    RootKind, SplitAddress, WeightedNode,
+    DefaultDockDefinition, DockLayoutModel, InternalDockGroupKey, InternalDockGroupPlacement,
+    InternalDockPlacement, Node, RootKind, SplitAddress, WeightedNode,
 };
 use super::placement::{DockLayoutError, DockPlacement, DockSide};
 use super::runtime::{
@@ -117,9 +118,13 @@ impl FloatingWindowHost for FakeHost {
         self.log.bounds.set(Some(bounds));
     }
 
+    fn set_title(&self, _title: &str) {}
+
     fn show(&self) {
         self.log.events.borrow_mut().push("show");
     }
+
+    fn activate(&self) {}
 
     fn close(&self) {
         self.log.events.borrow_mut().push("close");
@@ -134,6 +139,8 @@ impl FloatingWindowHost for FakeHost {
         });
         *self.log.close_handler.borrow_mut() = handler;
     }
+
+    fn set_bounds_changed_handler(&self, _handler: Option<Rc<dyn Fn(Rect)>>) {}
 }
 
 fn fake_factory(
@@ -258,6 +265,25 @@ fn default_model() -> DockLayoutModel {
     DockLayoutModel::from_default(DefaultDockDefinition::new(Some(root)))
 }
 
+fn snapshot_group_items(
+    snapshot: &DockLayoutSnapshot,
+    target: &SnapshotGroupKey,
+) -> Option<Vec<DockItemId>> {
+    fn find(node: &SnapshotNode, target: &SnapshotGroupKey) -> Option<Vec<DockItemId>> {
+        match node {
+            SnapshotNode::Group { group, items, .. } if group == target => Some(items.clone()),
+            SnapshotNode::Group { .. } => None,
+            SnapshotNode::Split { children, .. } => {
+                children.iter().find_map(|child| find(&child.node, target))
+            }
+        }
+    }
+    snapshot
+        .main_root
+        .as_ref()
+        .and_then(|root| find(root, target))
+}
+
 fn authored_item(
     id: &str,
     title: &str,
@@ -329,6 +355,7 @@ fn floating_auto_hide_snapshot_model() -> DockLayoutModel {
         auto_hide,
         closed: Vec::new(),
         next_generated_group_id: 101,
+        active_item: None,
     })
     .expect("valid floating auto-hide snapshot")
 }
@@ -453,6 +480,177 @@ fn close_reopen_keeps_return_group_and_index() {
 }
 
 #[test]
+fn activation_is_global_and_close_repairs_to_the_same_group() {
+    let model = default_model();
+    let active = model.with_item_activated(&item("second")).unwrap();
+    assert_eq!(active.active_item(), Some(item("second")));
+    assert!(!active.is_item_active(&item("first")));
+    assert!(active.is_item_active(&item("second")));
+
+    let closed = active.with_item_closed(&item("second")).unwrap();
+    assert_eq!(closed.active_item(), Some(item("first")));
+    assert!(!closed.is_item_active(&item("second")));
+    assert!(closed.is_item_active(&item("first")));
+}
+
+#[test]
+fn same_group_indexed_moves_insert_before_or_after_without_reversing_order() {
+    let model = default_model();
+    let moved_to_end = model
+        .with_item_moved_internal(
+            &item("first"),
+            InternalDockPlacement::Group {
+                group: InternalDockGroupKey::Authored(group("documents")),
+                index: Some(2),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        snapshot_group_items(
+            &moved_to_end.snapshot(),
+            &SnapshotGroupKey::Authored(group("documents")),
+        ),
+        Some(vec![item("second"), item("first")])
+    );
+
+    let moved_to_front = model
+        .with_item_moved_internal(
+            &item("second"),
+            InternalDockPlacement::Group {
+                group: InternalDockGroupKey::Authored(group("documents")),
+                index: Some(0),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        snapshot_group_items(
+            &moved_to_front.snapshot(),
+            &SnapshotGroupKey::Authored(group("documents")),
+        ),
+        Some(vec![item("second"), item("first")])
+    );
+}
+
+#[test]
+fn group_moves_keep_the_group_node_and_all_pages_together() {
+    let model = default_model();
+    let split = model
+        .with_group_moved_internal(
+            &InternalDockGroupKey::Authored(group("documents")),
+            InternalDockGroupPlacement::SplitGroup {
+                group: InternalDockGroupKey::Authored(group("tools")),
+                side: DockSide::Right,
+                weight: 1.0,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        split.snapshot().main_root,
+        Some(SnapshotNode::Split { ref children, .. })
+            if children.iter().any(|child| matches!(
+                child.node,
+                SnapshotNode::Group { group: SnapshotGroupKey::Authored(ref id), ref items, .. }
+                    if id == &group("documents") && items == &vec![item("first"), item("second")]
+            ))
+    ));
+
+    let merged = model
+        .with_group_moved_internal(
+            &InternalDockGroupKey::Authored(group("documents")),
+            InternalDockGroupPlacement::Center {
+                group: InternalDockGroupKey::Authored(group("tools")),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        snapshot_group_items(
+            &merged.snapshot(),
+            &SnapshotGroupKey::Authored(group("tools")),
+        ),
+        Some(vec![item("third"), item("first"), item("second")])
+    );
+}
+
+#[test]
+fn snapshot_v2_round_trips_active_item_and_rejects_v1() {
+    let model = default_model()
+        .with_item_activated(&item("second"))
+        .unwrap();
+    let snapshot = model.snapshot();
+    assert_eq!(snapshot.version(), DockLayoutSnapshot::VERSION);
+    assert_eq!(snapshot.active_item, Some(item("second")));
+    assert_eq!(
+        DockLayoutModel::from_snapshot(snapshot.clone())
+            .unwrap()
+            .snapshot(),
+        snapshot
+    );
+
+    let mut v1 = snapshot;
+    v1.version = 1;
+    assert!(matches!(
+        DockLayoutModel::from_snapshot(v1),
+        Err(DockLayoutError::UnknownSnapshotVersion { version: 1 })
+    ));
+}
+
+#[test]
+fn clear_layout_closes_everything_and_reset_restores_authored_default() {
+    let model = default_model()
+        .with_item_activated(&item("third"))
+        .unwrap()
+        .with_item_moved(
+            &item("first"),
+            DockPlacement::Floating {
+                bounds: Rect {
+                    x: 20.0,
+                    y: 30.0,
+                    width: 400.0,
+                    height: 300.0,
+                },
+            },
+        )
+        .unwrap();
+    let cleared = model.with_cleared_layout().unwrap();
+    assert_eq!(cleared.active_item(), None);
+    assert!(cleared.snapshot().main_root.is_none());
+    assert!(cleared.snapshot().floating_roots.is_empty());
+    assert!(cleared.snapshot().auto_hide.iter().all(Vec::is_empty));
+    assert!(cleared.is_item_closed(&item("first")));
+    assert!(cleared.is_item_closed(&item("second")));
+    assert!(cleared.is_item_closed(&item("third")));
+
+    let reopened = default_model()
+        .with_cleared_layout()
+        .unwrap()
+        .with_item_reopened(&item("first"))
+        .unwrap()
+        .with_item_reopened(&item("second"))
+        .unwrap()
+        .with_item_reopened(&item("third"))
+        .unwrap();
+    assert_eq!(
+        snapshot_group_items(
+            &reopened.snapshot(),
+            &SnapshotGroupKey::Authored(group("documents"))
+        ),
+        Some(vec![item("first"), item("second")])
+    );
+    assert_eq!(
+        snapshot_group_items(
+            &reopened.snapshot(),
+            &SnapshotGroupKey::Authored(group("tools"))
+        ),
+        Some(vec![item("third")])
+    );
+
+    let reset = cleared.with_reset().unwrap();
+    assert!(reset.snapshot().main_root.is_some());
+    assert!(reset.snapshot().closed.is_empty());
+    assert_eq!(reset.active_item(), None);
+}
+
+#[test]
 fn group_split_and_outer_edge_cover_all_four_sides() {
     let model = default_model();
     for side in DockSide::ALL {
@@ -475,7 +673,7 @@ fn group_split_and_outer_edge_cover_all_four_sides() {
             )
             .unwrap();
         assert!(edge.contains_item(&item("first")));
-        assert_eq!(edge.snapshot().version(), 1);
+        assert_eq!(edge.snapshot().version(), DockLayoutSnapshot::VERSION);
     }
 }
 
@@ -731,14 +929,23 @@ fn private_root_edge_can_target_a_floating_root() {
     // Moving the source item out of the main root legitimately removes it from that root. The
     // assertion is about the private edge target: it must not add the item to a new main edge.
     assert_ne!(next.snapshot().main_root, main_before);
-    assert!(matches!(
-        next.snapshot().main_root,
-        Some(SnapshotNode::Split { ref children, .. })
-            if children.iter().all(|child| !matches!(
-                child.node,
-                SnapshotNode::Group { group: SnapshotGroupKey::Generated(_), .. }
-            ))
-    ));
+    fn has_generated(node: &SnapshotNode) -> bool {
+        match node {
+            SnapshotNode::Group { group, .. } => {
+                matches!(group, SnapshotGroupKey::Generated(_))
+            }
+            SnapshotNode::Split { children, .. } => {
+                children.iter().any(|child| has_generated(&child.node))
+            }
+        }
+    }
+    assert!(
+        !next
+            .snapshot()
+            .main_root
+            .as_ref()
+            .is_some_and(has_generated)
+    );
     assert!(matches!(
         next.snapshot().floating_roots[0].root,
         SnapshotNode::Split { .. }
@@ -2193,6 +2400,7 @@ fn restored_generated_group_allocator_advances_past_restored_ids() {
         auto_hide: std::array::from_fn(|_| Vec::new()),
         closed: Vec::new(),
         next_generated_group_id: 1,
+        active_item: None,
     };
     let model = DockLayoutModel::from_snapshot(snapshot).unwrap();
     let moved = model
@@ -2328,6 +2536,74 @@ fn authored_docking_declaration_is_collapsed_and_runtime_wrapper_is_visible() {
             .and_then(std::rc::Weak::upgrade)
             .is_some_and(|parent| parent.as_any().is::<CustomTabViewItem>())
     );
+}
+
+#[test]
+fn authored_show_when_empty_group_keeps_chrome_and_non_interactive_drop_hint() {
+    let (dock_item, _) = authored_item("empty-item", "Empty item", true);
+    let dock_group = DockGroup::new_group();
+    dock_group.set_id(group("empty-group"));
+    dock_group.set_show_when_empty(true);
+    dock_group.set_children(vec![dock_item]);
+
+    let docking = DockingControl::__new_unmounted();
+    docking.set_content(dock_group);
+    docking.mount(application_environment());
+    assert!(docking.apply_template());
+
+    let cleared = docking
+        .layout()
+        .with_cleared_layout()
+        .expect("clear should preserve the authored default metadata");
+    docking.set_layout(cleared);
+
+    let hints = find_all::<TextBlock>(docking.as_ref())
+        .into_iter()
+        .filter(|hint| {
+            hint.as_any()
+                .downcast_ref::<TextBlock>()
+                .is_some_and(|hint| hint.text.borrow().as_str() == "Drop here")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(hints.len(), 1);
+    assert_eq!(hints[0].visibility(), Visibility::Visible);
+    assert!(!hints[0].hit_test_visible());
+    assert!(
+        find_all::<CustomTabView>(docking.as_ref())
+            .into_iter()
+            .any(|view| view.visibility() == Visibility::Visible)
+    );
+}
+
+#[test]
+fn tab_context_indexed_close_actions_commit_once_and_preserve_protected_items() {
+    let docking = mounted_default_docking();
+    let callback_count = Rc::new(Cell::new(0));
+    let callback_count_for_handler = callback_count.clone();
+    docking.set_on_layout_change(Box::new(move |_| {
+        callback_count_for_handler.set(callback_count_for_handler.get() + 1);
+    }));
+
+    docking.handle_tab_context_action(item("second"), DockTabContextAction::CloseOthers);
+    let after_others = docking.layout();
+    assert!(after_others.is_item_closed(&item("first")));
+    assert!(!after_others.is_item_closed(&item("third")));
+    assert!(!after_others.is_item_closed(&item("second")));
+    assert_eq!(callback_count.get(), 1);
+
+    let docking = mounted_default_docking();
+    docking.handle_tab_context_action(item("second"), DockTabContextAction::CloseTabsToLeft);
+    let after_left = docking.layout();
+    assert!(after_left.is_item_closed(&item("first")));
+    assert!(!after_left.is_item_closed(&item("second")));
+    assert!(!after_left.is_item_closed(&item("third")));
+
+    let docking = mounted_default_docking();
+    docking.handle_tab_context_action(item("first"), DockTabContextAction::CloseTabsToRight);
+    let after_right = docking.layout();
+    assert!(!after_right.is_item_closed(&item("first")));
+    assert!(after_right.is_item_closed(&item("second")));
+    assert!(!after_right.is_item_closed(&item("third")));
 }
 
 #[test]

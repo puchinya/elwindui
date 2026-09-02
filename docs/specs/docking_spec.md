@@ -44,6 +44,19 @@ Selection-only changes and completed adjacent split-weight changes update the re
 bound value without rebuilding unchanged structural Dock content; live splitter movement only
 updates retained tracks and arrange state.
 
+Document and tool groups expose the authored tab-strip position and chrome appropriate to that
+position. Top-tab groups render tabs above their content; bottom-tab groups render the selected
+title bar and tabs below their content. A group title bar is also the explicit whole-group drag
+handle. Supported tab context actions are `Close`, `Close Others`, `Close Tabs to Left`,
+`Close Tabs to Right`, `Float`, and `Auto Hide / Pin`; each action uses the same capability checks
+and one model transaction as its pointer equivalent.
+
+An authored empty group remains visible only when `show_when_empty` is true. It keeps normal group
+chrome and displays a centered, non-interactive `Drop here` hint while remaining a valid drop target.
+`compact_tabs` selects the compact tab metrics for that group. Clear/reset operations remove the
+live presentation without consulting `can_close`, preserve the authored declaration, and restore
+the authored default deterministically.
+
 Drag movement changes only a custom drop-preview rectangle and candidate target. It never reparents
 page content or reconciles a preview model. Completion commits one normalized model, or cancels when
 there is no valid target. The private resolved target retains the destination root, target group,
@@ -85,11 +98,12 @@ remain valid there, while an interactive request to create a floating native hos
 
 ## Snapshots and lifetime
 
-`DockLayoutSnapshot::VERSION` is 1. Snapshots contain model state only; authored controls,
-capabilities, runtime wrappers, native windows, callbacks, and surface registry state are not
-serialized. Removed authored groups are repaired during normalization: surviving items move to the
-current authored default or deterministic root fallback, including closed and auto-hide return
-states.
+`DockLayoutSnapshot::VERSION` is 2. Snapshots contain model state only, including the optional
+globally active item; authored controls, capabilities, runtime wrappers, native windows, callbacks,
+and surface registry state are not serialized. Only version-2 snapshots are accepted. Older and
+unknown versions are rejected as typed errors; there is no version-1 migration or defaulting path.
+Removed authored groups are repaired during normalization: surviving items move to the current
+authored default or deterministic root fallback, including closed and auto-hide return states.
 
 Unmount cancels gestures, clears previews, clears native close handlers, closes floating hosts, and
 releases the surface registry. Runtime callbacks capture weak owners and do not form retained `Rc`

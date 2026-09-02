@@ -1,6 +1,6 @@
 use super::core::base::Point;
 use super::core::input::{MouseButton, PointerEventArgs};
-use super::core::ui::{ControlExt, ListExt, UIElementExt};
+use super::core::ui::{ControlExt, Grid, GridExt, ListExt, UIElementExt};
 use super::{
     CloseButtonPresentation, CustomTabContentPresenter, CustomTabContentPresenterExt,
     CustomTabStripPresenter, CustomTabStripPresenterExt, CustomTabViewItem, CustomTabViewItemExt,
@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 const TAB_STRIP_HEIGHT: f32 = 32.0;
+const COMPACT_TAB_STRIP_HEIGHT: f32 = 28.0;
 const TAB_DRAG_THRESHOLD: f32 = 4.0;
 
 #[cfg(test)]
@@ -61,6 +62,8 @@ pub struct CustomTabView {
     selected_index: usize,
     #[prop(default = TabStripPosition::Top)]
     tab_strip_position: TabStripPosition,
+    #[prop(default = false)]
+    compact: bool,
     #[prop(default = CloseButtonPresentation::Always)]
     close_button_presentation: CloseButtonPresentation,
     #[state(default = None)]
@@ -99,18 +102,27 @@ pub struct CustomTabView {
     grid_rows: Vec<elwindui::core::layout::GridLength>,
     #[state(default = Vec::new())]
     template_items: Vec<Rc<CustomTabViewItem>>,
+    #[state(default = None)]
+    last_presented_selected_index: Option<usize>,
+    #[state(default = None)]
+    last_presented_tab_strip_position: Option<TabStripPosition>,
+    #[state(default = None)]
+    last_presented_compact_tabs: Option<bool>,
+    #[state(default = None)]
+    last_presented_close_button_presentation: Option<CloseButtonPresentation>,
     #[computed(expr = template_items.clone())]
     tab_items: Vec<Rc<CustomTabViewItem>>,
     #[computed(expr = template_items.clone())]
     content_items: Vec<Rc<CustomTabViewItem>>,
     template: template_view!(|this: Self| {
-        on_update(children, template_items, selected_index, tab_strip_position, close_button_presentation) {
+        on_update(children, template_items, selected_index, tab_strip_position, compact, close_button_presentation) {
             this.reconcile_children();
         }
         let tab_strip = CustomTabStripPresenter {
             items: tab_items
             selected_index: selected_index
             tab_strip_position: tab_strip_position
+            compact: compact
             close_button_presentation: close_button_presentation
             Grid::row: tab_strip_row
         };
@@ -396,13 +408,16 @@ impl CustomTabView {
     fn sync_presenters_structural(&self, children: &[Rc<CustomTabViewItem>]) {
         let selected = self.selected_index();
         let position = self.tab_strip_position();
+        let compact = self.compact();
         let close = self.close_button_presentation();
 
+        self.sync_grid_rows();
         let (strip_presenter, content_presenter) = self.presenters();
         if let Some(presenter) = strip_presenter {
             presenter.set_items(children.to_vec());
             presenter.set_selected_index(selected);
             presenter.set_tab_strip_position(position);
+            presenter.set_compact(compact);
             presenter.set_close_button_presentation(close);
             presenter
                 .as_ui_element()
@@ -418,18 +433,37 @@ impl CustomTabView {
             presenter.reconcile_contents();
         }
         for (index, item) in children.iter().enumerate() {
-            item.set_presentation(index == selected, item.pointer_over(), position, close);
+            item.set_presentation(
+                index == selected,
+                item.pointer_over(),
+                position,
+                close,
+                compact,
+            );
         }
+        self.set_last_presented_selected_index(Some(selected));
+        self.set_last_presented_tab_strip_position(Some(position));
+        self.set_last_presented_compact_tabs(Some(compact));
+        self.set_last_presented_close_button_presentation(Some(close));
     }
 
     fn sync_presentation(&self, children: &[Rc<CustomTabViewItem>]) {
         let selected = self.selected_index();
         let position = self.tab_strip_position();
+        let compact = self.compact();
         let close = self.close_button_presentation();
+        self.sync_grid_rows();
         let (strip_presenter, content_presenter) = self.presenters();
+        let previous = self.last_presented_selected_index();
+        let selection_only = self.last_presented_tab_strip_position() == Some(position)
+            && self.last_presented_compact_tabs() == Some(compact)
+            && self.last_presented_close_button_presentation() == Some(close)
+            && previous != Some(selected);
+        let has_strip_presenter = strip_presenter.is_some();
         if let Some(presenter) = strip_presenter {
             presenter.set_selected_index(selected);
             presenter.set_tab_strip_position(position);
+            presenter.set_compact(compact);
             presenter.set_close_button_presentation(close);
             presenter
                 .as_ui_element()
@@ -441,9 +475,61 @@ impl CustomTabView {
                 .as_ui_element()
                 .set_attached::<i32>("Grid", "row", self.content_row());
         }
-        for (index, item) in children.iter().enumerate() {
-            item.set_presentation(index == selected, item.pointer_over(), position, close);
+        if !has_strip_presenter {
+            if selection_only {
+                for index in [previous, Some(selected)].into_iter().flatten() {
+                    if let Some(item) = children.get(index) {
+                        item.set_presentation(
+                            index == selected,
+                            item.pointer_over(),
+                            position,
+                            close,
+                            compact,
+                        );
+                    }
+                }
+            } else {
+                for (index, item) in children.iter().enumerate() {
+                    item.set_presentation(
+                        index == selected,
+                        item.pointer_over(),
+                        position,
+                        close,
+                        compact,
+                    );
+                }
+            }
         }
+        self.set_last_presented_selected_index(Some(selected));
+        self.set_last_presented_tab_strip_position(Some(position));
+        self.set_last_presented_compact_tabs(Some(compact));
+        self.set_last_presented_close_button_presentation(Some(close));
+    }
+
+    fn sync_grid_rows(&self) {
+        let Some(root) = self.__template_root() else {
+            return;
+        };
+        let Some(grid) = root.as_any().downcast_ref::<Grid>() else {
+            return;
+        };
+        let strip_height = if self.compact() {
+            COMPACT_TAB_STRIP_HEIGHT
+        } else {
+            TAB_STRIP_HEIGHT
+        };
+        let rows = if self.tab_strip_position() == TabStripPosition::Top {
+            vec![
+                elwindui::core::layout::GridLength::Fixed(strip_height),
+                elwindui::core::layout::GridLength::Star(1.0),
+            ]
+        } else {
+            vec![
+                elwindui::core::layout::GridLength::Star(1.0),
+                elwindui::core::layout::GridLength::Fixed(strip_height),
+            ]
+        };
+        grid.set_rows(rows);
     }
 
     fn validate_children(&self, children: &[Rc<CustomTabViewItem>]) {

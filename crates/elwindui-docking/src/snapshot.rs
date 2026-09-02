@@ -4,7 +4,7 @@ use elwindui_core::layout::Orientation;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-pub(crate) const SNAPSHOT_VERSION: u32 = 1;
+pub(crate) const SNAPSHOT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DockLayoutSnapshot {
@@ -14,6 +14,8 @@ pub struct DockLayoutSnapshot {
     pub(crate) auto_hide: [Vec<SnapshotAutoHideEntry>; 4],
     pub(crate) closed: Vec<SnapshotClosedEntry>,
     pub(crate) next_generated_group_id: u64,
+    /// The globally active item.
+    pub(crate) active_item: Option<DockItemId>,
 }
 
 impl DockLayoutSnapshot {

@@ -32,8 +32,76 @@ struct VisualStudioTheme {
     #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(0, 120, 215))))]
     link: BrushStyle,
 }
+
+#[elwindui::theme]
+struct DarkDockingTheme {
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(0, 120, 215))))]
+    primary: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(45, 45, 48))))]
+    secondary: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(37, 37, 38))))]
+    tertiary: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(241, 241, 241))))]
+    foreground: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(30, 30, 30))))]
+    background: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(30, 30, 30))))]
+    window_background: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(0, 120, 215))))]
+    tint: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgba(0, 120, 215, 90))))]
+    selection: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(80, 80, 80))))]
+    separator: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(180, 180, 180))))]
+    placeholder: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(75, 170, 255))))]
+    link: BrushStyle,
+}
+
+#[elwindui::viewmodel]
+mod docking_demo_view_model {
+    struct DockingDemoViewModel {
+        #[observable(default = elwindui_docking::DockLayoutModel::empty())]
+        layout: elwindui_docking::DockLayoutModel,
+        #[observable(default = None)]
+        saved_snapshot: Option<elwindui_docking::DockLayoutSnapshot>,
+    }
+
+    impl DockingDemoViewModel {
+        fn clear_layout(&self) {
+            let current = self.layout.borrow().clone();
+            if let Ok(next) = current.with_cleared_layout() {
+                layout = next;
+            }
+        }
+
+        fn reset_layout(&self) {
+            let current = self.layout.borrow().clone();
+            if let Ok(next) = current.with_reset() {
+                layout = next;
+            }
+        }
+
+        fn save_layout(&self) {
+            saved_snapshot = Some(self.layout.borrow().snapshot());
+        }
+
+        fn restore_layout(&self) {
+            let Some(snapshot) = self.saved_snapshot.borrow().clone() else {
+                return;
+            };
+            if let Ok(next) = elwindui_docking::DockLayoutModel::from_snapshot(snapshot) {
+                layout = next;
+            }
+        }
+    }
+}
+
 #[elwindui::component(inherits VerticalLayout)]
 struct DockingDemoSurface {
+    #[bindable]
+    vm: std::rc::Rc<DockingDemoViewModel>,
     #[computed(expr = elwindui_docking::DockItemId::from("document-a"))]
     document_a: elwindui_docking::DockItemId,
     #[computed(expr = elwindui_docking::DockItemId::from("document-b"))]
@@ -81,6 +149,8 @@ struct DockingDemoSurface {
         let solution = elwindui_docking::DockGroup {
             id: solution_tools
             tab_strip_position: elwindui_docking::TabStripPosition::Bottom
+            compact_tabs: true
+            show_when_empty: true
             weight: 1.0
             elwindui_docking::DockItem {
                 id: solution_explorer
@@ -97,6 +167,7 @@ struct DockingDemoSurface {
         let error = elwindui_docking::DockGroup {
             id: error_tools
             tab_strip_position: elwindui_docking::TabStripPosition::Bottom
+            show_when_empty: true
             weight: 1.0
             elwindui_docking::DockItem {
                 id: error_list
@@ -142,6 +213,7 @@ struct DockingDemoSurface {
         };
 
         let docking = elwindui_docking::DockingControl {
+            layout <=> vm.layout
             root
         };
         let menu = HorizontalLayout {
@@ -152,6 +224,34 @@ struct DockingDemoSurface {
             TextBlock { text: "Edit" foreground: BrushStyle::Foreground }
             TextBlock { text: "View" foreground: BrushStyle::Foreground }
             TextBlock { text: "Help" foreground: BrushStyle::Foreground }
+            Button {
+                text: "Clear layout"
+                tooltip: "Close every live item while keeping the authored layout for Reset"
+                on_click: vm.clear_layout
+            }
+            Button {
+                text: "Reset layout"
+                tooltip: "Restore the authored DockGroup/DockSplitPanel declaration"
+                on_click: vm.reset_layout
+            }
+            Button {
+                text: "Save snapshot"
+                tooltip: "Capture the version-2 layout snapshot"
+                on_click: vm.save_layout
+            }
+            Button {
+                text: "Restore snapshot"
+                tooltip: "Restore the last version-2 snapshot"
+                on_click: vm.restore_layout
+            }
+            Button {
+                text: "Light theme"
+                on_click: || { VisualStudioTheme.apply(&application_environment()); }
+            }
+            Button {
+                text: "Dark theme"
+                on_click: || { DarkDockingTheme.apply(&application_environment()); }
+            }
         };
         let docking_host = Grid {
             height: 574.0
@@ -175,11 +275,13 @@ impl DockingDemoSurface {}
 
 #[elwindui::component(inherits Window)]
 struct DockingDemoWindow {
+    #[bindable]
+    vm: std::rc::Rc<DockingDemoViewModel>,
     body: view! {
         title: "ElwindUI Docking Demo"
         width: 960.0
         height: 640.0
-        content: DockingDemoSurface {}
+        content: DockingDemoSurface { vm: vm }
     },
 }
 
@@ -189,6 +291,7 @@ impl DockingDemoWindow {}
 #[elwindui::main]
 fn main() {
     VisualStudioTheme.apply(&application_environment());
-    let window = DockingDemoWindow::new();
+    let vm = DockingDemoViewModel::new();
+    let window = elwindui::new!(DockingDemoWindow(vm: vm));
     window.show();
 }

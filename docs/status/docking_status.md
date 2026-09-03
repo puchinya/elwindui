@@ -39,8 +39,9 @@
   native floating reports `FloatingHostUnavailable` because the baseline has no usable Window
   implementation.
 - Docking chrome close, pin, and floating affordances use a shared cached 16x16 vector geometry with
-  round caps/joins and centered hit-test-transparent presentation. The former 3x3 rectangle mosaics
-  are no longer used.
+  round caps/joins and centered hit-test-transparent presentation. Their hosting title-bar and
+  auto-hide button surfaces use an alpha-zero brush, preserving the full hit area without a
+  contrasting rectangle. The former 3x3 rectangle mosaics are no longer used.
 - `examples/docking-demo` visibly composes documents, nested tools, and the retained DockingControl
   runtime; it no longer only serializes an empty model.
 

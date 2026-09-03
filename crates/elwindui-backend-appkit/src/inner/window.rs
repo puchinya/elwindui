@@ -9,11 +9,12 @@ use elwindui_core::input::FocusState;
 use elwindui_core::ui::UIElementExt;
 use objc2::rc::Retained;
 use objc2::runtime::Bool;
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
+use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor,
     NSFloatingWindowLevel, NSNormalWindowLevel, NSResponder, NSScreen, NSView, NSWindow,
-    NSWindowDidMoveNotification, NSWindowDidResizeNotification, NSWindowStyleMask,
+    NSWindowDelegate, NSWindowDidMoveNotification, NSWindowDidResizeNotification,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSRect, NSString};
 use std::cell::RefCell;
@@ -75,6 +76,11 @@ define_class!(
 
     unsafe impl NSObjectProtocol for ElwinduiWindow {}
 
+    // AppKit asks the window delegate about a title-bar close. Keep the delegate on the window
+    // subclass itself so the close bridge stored in its ivars is used for both the main window and
+    // docking-created floating windows.
+    unsafe impl NSWindowDelegate for ElwinduiWindow {}
+
     impl ElwinduiWindow {
         /// Detects a real, click/API-driven focus change (`ok == true`) and bridges it into
         /// `elwindui_core::focus`. Whether `responder` lands on a *native leaf* window's own
@@ -135,7 +141,10 @@ define_class!(
         /// for). No handler installed (`None` — before `mount_override` ever ran, or after
         /// `unmount_override` cleared it) means "allow the native default": `true`.
         #[unsafe(method(windowShouldClose:))]
-        fn window_should_close(&self, _sender: &NSWindow) -> bool {
+        fn window_should_close(&self, sender: &NSWindow) -> bool {
+            // A close handler may synchronously remove the floating host that owns `sender`. Keep
+            // the native window alive until AppKit has consumed this delegate return value.
+            let _sender_keep_alive = sender.retain();
             let handler = self.ivars().close_request_handler.borrow().clone();
             match handler {
                 None => true,
@@ -246,6 +255,7 @@ impl InnerWindow {
                 backing: NSBackingStoreType::Buffered,
                 defer: false,
             ];
+            window.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*window)));
             Retained::into_super(window)
         };
         let notifications = objc2_foundation::NSNotificationCenter::defaultCenter();

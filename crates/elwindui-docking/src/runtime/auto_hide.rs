@@ -2,7 +2,7 @@
 
 use crate::DockItemId;
 use crate::DockingControl;
-use crate::core::graphics::IconSource;
+use crate::core::graphics::{Color, IconSource};
 use crate::core::input::PointerEventArgs;
 use crate::core::layout::{GridLength, Visibility};
 use crate::core::theme::BrushStyle;
@@ -75,7 +75,8 @@ impl AutoHideOverlay {
         pane.set_attached("Grid", "column", 1i32);
         visual.children().add(pane.clone());
         let pin_button = Grid::new();
-        pin_button.set_background(themed_brush(BrushStyle::Secondary));
+        // Keep the full button hit-testable without painting a surface over the strip.
+        pin_button.set_background(Some(Color::TRANSPARENT.into()));
         pin_button.set_width(AUTO_HIDE_PIN_SIZE);
         pin_button.set_height(AUTO_HIDE_PIN_SIZE);
         pin_button.children().add(chrome_icon(

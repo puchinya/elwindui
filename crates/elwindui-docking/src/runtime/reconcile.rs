@@ -1,6 +1,7 @@
 //! Reconciliation boundary between the value model and stable runtime item wrappers.
 
 use crate::core::base::{Point, Rect};
+use crate::core::graphics::Color;
 use crate::core::input::PointerEventArgs;
 use crate::core::layout::{GridLength, HorizontalAlignment, VerticalAlignment, Visibility};
 use crate::core::theme::BrushStyle;
@@ -1536,7 +1537,8 @@ impl RuntimeRealization {
         empty_hint.set_attached("Grid", "column", 0i32);
 
         let pin_button = Grid::new();
-        pin_button.set_background(themed_brush(BrushStyle::Tertiary));
+        // Keep the full button hit-testable without painting a surface over the title bar.
+        pin_button.set_background(Some(Color::TRANSPARENT.into()));
         pin_button.set_width(TITLE_BUTTON_SIZE);
         pin_button.set_height(TITLE_BUTTON_SIZE);
         pin_button.set_attached("Grid", "row", 0i32);
@@ -1564,7 +1566,8 @@ impl RuntimeRealization {
         title_bar.children().add(pin_button.clone());
 
         let float_button = Grid::new();
-        float_button.set_background(themed_brush(BrushStyle::Tertiary));
+        // Keep the full button hit-testable without painting a surface over the title bar.
+        float_button.set_background(Some(Color::TRANSPARENT.into()));
         float_button.set_width(TITLE_BUTTON_SIZE);
         float_button.set_height(TITLE_BUTTON_SIZE);
         float_button.set_attached("Grid", "row", 0i32);
@@ -1592,7 +1595,8 @@ impl RuntimeRealization {
         title_bar.children().add(float_button.clone());
 
         let close_button = Grid::new();
-        close_button.set_background(themed_brush(BrushStyle::Tertiary));
+        // Keep the full button hit-testable without painting a surface over the title bar.
+        close_button.set_background(Some(Color::TRANSPARENT.into()));
         close_button.set_width(TITLE_BUTTON_SIZE);
         close_button.set_height(TITLE_BUTTON_SIZE);
         close_button.set_attached("Grid", "row", 0i32);

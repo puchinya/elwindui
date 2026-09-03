@@ -4,7 +4,7 @@ use crate::DockLayoutError;
 use crate::Rect;
 use crate::core::ui::{UIElementExt, WindowExt, WindowLifecycleHost};
 use crate::runtime::DockSurfaceView;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct FloatingHostId(u64);
@@ -81,11 +81,10 @@ fn close_handler(
     owner: &std::rc::Weak<crate::DockingControl>,
     host_id: FloatingHostId,
 ) -> Rc<dyn Fn() -> bool> {
-    let weak_owner = owner.clone();
+    let weak_owner: Weak<crate::DockingControl> = owner.clone();
     Rc::new(move || {
-        weak_owner
-            .upgrade()
-            .is_some_and(|owner| owner.handle_floating_close_host(host_id))
+        let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+        owner.is_some_and(|owner| owner.handle_floating_close_host(host_id))
     })
 }
 

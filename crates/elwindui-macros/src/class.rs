@@ -3506,7 +3506,8 @@ fn build_inherit_macros(
     // hop — the exact same two-mechanism protocol `expand_impl`'s own prelude already uses for the
     // immediate hop (`own_ext_policy_path`/`own_ext_bound_trait_ident`'s own doc comments); this is
     // that same protocol applied recursively, not a new one.
-    let continuation_ident = format_ident!("__elwindui_continue_recursive_inherits_of_{bare_name}");
+    let continuation_ident =
+        format_ident!("__elwindui_continue_recursive_inherits_of_{}", bare_name);
     // No further ancestor: recurse into a *local* (same-crate, `$crate::`-self-referenced) leftover-
     // `#[overrides]` check instead of the caller-supplied `recurse_macro_path` (ignored in this
     // case) — every "no inherits" class (true root mode's `UIElement`, or any other struct_only/
@@ -3521,7 +3522,7 @@ fn build_inherit_macros(
     // always resolves against the crate that generated *this* classify macro, regardless of caller.
     let (recurse_macro_path, terminal_check, continuation_macro) = match recurse_next {
         None => {
-            let terminal_ident = format_ident!("__elwindui_inherit_{bare_name}_terminal");
+            let terminal_ident = format_ident!("__elwindui_inherit_{}_terminal", bare_name);
             let path = quote! { $crate::#terminal_ident };
             let check = quote! {
                 #[doc(hidden)]
@@ -3634,18 +3635,10 @@ fn build_inherit_macros(
     // method *not* declared `#[overridable]` has only ever had one real implementor (the declaring
     // class), so `#dyn_ident`'s original "reflexive there, forward everywhere else" shape remains
     // correct and unchanged for it.
-    let (resolve_calls, resolve_macro) = if overridable_names.is_empty() {
-        (TokenStream2::new(), None)
+    let resolve_macro = if overridable_names.is_empty() {
+        None
     } else {
         let resolve_ident = inherit_resolve_ident(bare_name);
-        let mut resolve_calls = TokenStream2::new();
-        for (slot, name) in slot_idents.iter().zip(overridable_names.iter()) {
-            let accessor = per_method_accessor_ident(name);
-            let mut tokens = quote! { $crate:: };
-            append_tokens(&mut tokens, &resolve_ident);
-            tokens.extend(quote! { !($OwnTrait, #accessor; $( $#slot )?); });
-            resolve_calls.extend(tokens);
-        }
         let mut resolve_macro = quote! {
             #[doc(hidden)]
             #[macro_export]
@@ -3669,16 +3662,25 @@ fn build_inherit_macros(
                 };
             }
         });
-        (resolve_calls, Some(resolve_macro))
+        Some(resolve_macro)
     };
     let own_impl = (!skip_own_impl).then(|| {
-        quote! {
-            impl $OwnTrait for $SubType {
-                fn #dyn_ident(&self) -> &dyn $OwnTrait { self.base.#dyn_ident() }
-                #(#_extra_forwards)*
-                #resolve_calls
-            }
+        let mut implementation_body = quote! {
+            fn #dyn_ident(&self) -> &dyn $OwnTrait { self.base.#dyn_ident() }
+            #(#_extra_forwards)*
+        };
+        for (slot, name) in slot_idents.iter().zip(overridable_names.iter()) {
+            let accessor = per_method_accessor_ident(name);
+            let mut tokens = quote! { $crate:: };
+            append_tokens(&mut tokens, &inherit_resolve_ident(bare_name));
+            tokens.extend(quote! { !($OwnTrait, #accessor; $( $#slot )?); });
+            append_tokens(&mut implementation_body, &tokens);
         }
+        let mut implementation = quote! { impl $OwnTrait for $SubType };
+        implementation.extend(std::iter::once(proc_macro2::TokenTree::Group(
+            proc_macro2::Group::new(proc_macro2::Delimiter::Brace, implementation_body),
+        )));
+        implementation
     });
 
     // `#[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]`: this whole mechanism
@@ -6043,6 +6045,76 @@ mod class_interface_bridge_tests {
 
     fn is_real_compile_error(ts: &TokenStream2) -> bool {
         ts.to_string().trim_start().starts_with("compile_error")
+    }
+
+    // The generated Ext trait is used in both type and call positions.  A generic Ext path needs
+    // the turbofish form in the latter (`Ext::<T>::method`) but remains a normal generic type in
+    // the former (`dyn Ext::<T>`).  Exercise both ordinary and root expansion paths, including a
+    // default method and its per-method overridable accessor, so a future simplification cannot
+    // accidentally make one of the two positions parse as a comparison expression.
+    #[test]
+    fn generic_default_and_overridable_dispatch_use_valid_ext_path_forms() {
+        let (_ordinary_struct, ordinary_impl) = expand_pair(
+            quote! { inherits = some_crate::GenericDispatchParent<T> },
+            quote! {
+                pub struct GenericDispatchOrdinary<T: Clone> { value: T }
+            },
+            quote! {
+                impl<T: Clone> GenericDispatchOrdinary<T> {
+                    #[overridable]
+                    fn value(&self) -> T { self.value.clone() }
+                    fn construct(value: T) -> Self { Self { base: some_crate::GenericDispatchParent::construct(value) } }
+                }
+            },
+        );
+        assert!(
+            !is_real_compile_error(&ordinary_impl),
+            "generic ordinary expansion must succeed: {ordinary_impl}"
+        );
+        let ordinary = ordinary_impl.to_string();
+        assert!(
+            ordinary.contains("dyn GenericDispatchOrdinaryExt :: < T >"),
+            "generic ordinary Ext trait must remain a valid type-position path: {ordinary}"
+        );
+        assert!(
+            ordinary.contains("GenericDispatchOrdinaryExt :: < T > :: value"),
+            "generic ordinary default dispatch must use a turbofish call-position path: {ordinary}"
+        );
+        assert!(
+            ordinary.contains(&per_method_accessor_ident(&format_ident!("value")).to_string()),
+            "generic ordinary overridable methods must retain their generated dispatch accessor: {ordinary}"
+        );
+
+        let (_root_struct, root_impl) = expand_pair(
+            quote! {},
+            quote! {
+                pub struct GenericDispatchRoot<T: Clone> { value: T }
+            },
+            quote! {
+                impl<T: Clone> GenericDispatchRoot<T> {
+                    #[overridable]
+                    fn value(&self) -> T { self.value.clone() }
+                    fn construct(value: T) -> Self { Self { value } }
+                }
+            },
+        );
+        assert!(
+            !is_real_compile_error(&root_impl),
+            "generic root expansion must succeed: {root_impl}"
+        );
+        let root = root_impl.to_string();
+        assert!(
+            root.contains("dyn GenericDispatchRootExt :: < T >"),
+            "generic root Ext trait must remain a valid type-position path: {root}"
+        );
+        assert!(
+            root.contains("GenericDispatchRootExt :: < T > :: value"),
+            "generic root default dispatch must use a turbofish call-position path: {root}"
+        );
+        assert!(
+            root.contains(&per_method_accessor_ident(&format_ident!("value")).to_string()),
+            "generic root overridable methods must retain their generated dispatch accessor: {root}"
+        );
     }
 
     // T12: a `trait_only` interface generates its own `__elwindui_class_interface_*!` bridge macro.

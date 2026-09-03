@@ -473,12 +473,16 @@ impl CustomTabView {
             );
             if let Some(parent) = child.visual_parent() {
                 assert!(
-                    owner.as_ref().is_some_and(|owner| {
-                        parent
-                            .as_any()
-                            .downcast_ref::<CustomTabStripPresenter>()
-                            .is_some_and(|parent| std::ptr::eq(parent, owner.as_ref()))
-                    }),
+                    owner
+                        .as_ref()
+                        .is_some_and(|owner: &Rc<CustomTabStripPresenter>| {
+                            parent
+                                .as_any()
+                                .downcast_ref::<CustomTabStripPresenter>()
+                                .is_some_and(|parent: &CustomTabStripPresenter| {
+                                    std::ptr::eq(parent, owner.as_ref())
+                                })
+                        }),
                     "CustomTabViewItem is already owned by another Visual parent; detach it before attaching"
                 );
             }

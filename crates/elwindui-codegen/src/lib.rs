@@ -24,6 +24,21 @@ fn append_tokens<T: quote::ToTokens>(out: &mut TokenStream, value: &T) {
     quote::ToTokens::to_tokens(value, out);
 }
 
+fn grouped_tokens(delimiter: proc_macro2::Delimiter, tokens: TokenStream) -> TokenStream {
+    std::iter::once(proc_macro2::TokenTree::Group(proc_macro2::Group::new(
+        delimiter, tokens,
+    )))
+    .collect()
+}
+
+fn generic_type(prefix: TokenStream, target_type: &TokenStream) -> TokenStream {
+    let mut output = prefix;
+    output.extend(quote! { < });
+    append_tokens(&mut output, target_type);
+    output.extend(quote! { > });
+    output
+}
+
 /// Stable compile-time token used by the generic `template_view!` property bridge.  This is a
 /// 64-bit FNV-1a-style hash of the field-name literal, calculated during code generation; it is a
 /// code-generation key, not a runtime property lookup.  The generated component implements the
@@ -1211,6 +1226,36 @@ fn template_capture_clones(names: &[syn::Ident]) -> TokenStream {
         .collect()
 }
 
+fn template_body_uses_ident(body: &TokenStream, wanted: &str) -> bool {
+    struct IdentUse<'a> {
+        wanted: &'a str,
+        found: bool,
+    }
+
+    impl syn::visit::Visit<'_> for IdentUse<'_> {
+        fn visit_expr_path(&mut self, expression: &syn::ExprPath) {
+            if expression
+                .path
+                .get_ident()
+                .is_some_and(|ident| ident == self.wanted)
+            {
+                self.found = true;
+            }
+            syn::visit::visit_expr_path(self, expression);
+        }
+    }
+
+    let Ok(block) = syn::parse2::<syn::Block>(body.clone()) else {
+        return true;
+    };
+    let mut visitor = IdentUse {
+        wanted,
+        found: false,
+    };
+    visitor.visit_block(&block);
+    visitor.found
+}
+
 /// Emits the property-change subscriptions shared by every typed template factory.  Property
 /// reads are lowered into `TemplateProperty<KEY>` accesses; the corresponding subscription merely
 /// schedules the same refresh closure used by event wiring and dynamic regions.  Keeping this in
@@ -1220,9 +1265,6 @@ fn emit_template_property_subscriptions(
     target_type: &TokenStream,
     property_bounds: &Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
 ) -> TokenStream {
-    // The target is interpolated into generated tokens. Keep the input explicit for
-    // rust-analyzer, which does not model quote interpolation as a local use.
-    let _target_type_is_empty = target_type.is_empty();
     property_bounds
         .borrow()
         .keys()
@@ -1230,29 +1272,54 @@ fn emit_template_property_subscriptions(
         .map(|key| {
             let weak_parent = format_ident!("__elwindui_template_property_weak_{key}");
             let refresh_cell = format_ident!("__elwindui_template_property_refresh_cell_{key}");
-            quote! {
-                {
-                    let #weak_parent: std::rc::Weak<#target_type> =
-                        std::rc::Rc::downgrade(&__elwindui_template_parent);
-                    let #refresh_cell = std::rc::Rc::clone(&__elwindui_template_refresh_cell);
-                    __subscriptions.borrow_mut().push(
-                        <#target_type as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
-                            &*__elwindui_template_parent,
-                            move || {
-                                let parent: Option<std::rc::Rc<#target_type>> =
-                                    #weak_parent.upgrade();
-                                if parent.is_some() {
-                                    if let Some(__elwindui_template_refresh_callback) =
-                                        #refresh_cell.borrow().as_ref().cloned()
-                                    {
-                                        __elwindui_template_refresh_callback();
-                                    }
-                                }
-                            },
-                        ),
-                    );
+            let mut parent_declaration = quote! { let parent: Option< };
+            append_tokens(
+                &mut parent_declaration,
+                &generic_type(quote! { std::rc::Rc }, target_type),
+            );
+            parent_declaration.extend(quote! { > = #weak_parent.upgrade(); });
+            let mut callback_body = TokenStream::new();
+            append_tokens(&mut callback_body, &parent_declaration);
+            callback_body.extend(quote! {
+                if parent.is_some() {
+                    if let Some(__elwindui_template_refresh_callback) =
+                        #refresh_cell.borrow().as_ref().cloned()
+                    {
+                        __elwindui_template_refresh_callback();
+                    }
                 }
-            }
+            });
+            let mut callback = quote! { move || };
+            callback.extend(grouped_tokens(proc_macro2::Delimiter::Brace, callback_body));
+            let mut subscription_path = quote! { < };
+            append_tokens(&mut subscription_path, target_type);
+            subscription_path.extend(quote! {
+                as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe
+            });
+            let mut subscription_arguments = quote! { &*__elwindui_template_parent, };
+            append_tokens(&mut subscription_arguments, &callback);
+            subscription_path.extend(grouped_tokens(
+                proc_macro2::Delimiter::Parenthesis,
+                subscription_arguments,
+            ));
+            let mut push_arguments = TokenStream::new();
+            append_tokens(&mut push_arguments, &subscription_path);
+            let mut item_body = quote! { let #weak_parent: };
+            append_tokens(
+                &mut item_body,
+                &generic_type(quote! { std::rc::Weak }, target_type),
+            );
+            item_body.extend(quote! {
+                = std::rc::Rc::downgrade(&__elwindui_template_parent);
+                let #refresh_cell = std::rc::Rc::clone(&__elwindui_template_refresh_cell);
+                __subscriptions.borrow_mut().push
+            });
+            item_body.extend(grouped_tokens(
+                proc_macro2::Delimiter::Parenthesis,
+                push_arguments,
+            ));
+            item_body.extend(quote! { ; });
+            grouped_tokens(proc_macro2::Delimiter::Brace, item_body)
         })
         .collect()
 }
@@ -1285,20 +1352,47 @@ pub(crate) fn emit_compiled_template_factory(
             .on_mount
             .clone()
             .map(|body| {
-                quote! {
-                    {
+                let uses_environment = template_body_uses_ident(&body, "__environment");
+                let uses_subscriptions = template_body_uses_ident(&body, "__subscriptions");
+                let mut outer_mount_state = TokenStream::new();
+                if uses_environment {
+                    outer_mount_state.extend(quote! {
                         let __template_mount_environment = __environment.clone();
-                        let __template_mount_subscriptions = __subscriptions.clone();
-                        elwindui::core::ui::UIElementExt::add_mount_hook(
-                            &*__root,
-                            Box::new(move || {
-                                let __environment = __template_mount_environment.clone();
-                                let __subscriptions = __template_mount_subscriptions.clone();
-                                #body
-                            }),
-                        );
-                    }
+                    });
                 }
+                if uses_subscriptions {
+                    outer_mount_state.extend(quote! {
+                        let __template_mount_subscriptions = __subscriptions.clone();
+                    });
+                }
+                let mut callback_body = TokenStream::new();
+                if uses_environment {
+                    callback_body.extend(quote! {
+                        let __environment = __template_mount_environment.clone();
+                    });
+                }
+                if uses_subscriptions {
+                    callback_body.extend(quote! {
+                        let __subscriptions = __template_mount_subscriptions.clone();
+                    });
+                }
+                append_tokens(&mut callback_body, &body);
+                let mut closure = quote! { move || };
+                closure.extend(grouped_tokens(proc_macro2::Delimiter::Brace, callback_body));
+                let mut boxed_closure = quote! { Box::new };
+                boxed_closure.extend(grouped_tokens(proc_macro2::Delimiter::Parenthesis, closure));
+                let mut call_arguments = quote! { &*__root, };
+                call_arguments.extend(boxed_closure);
+                let mut mount_call = quote! { elwindui::core::ui::UIElementExt::add_mount_hook };
+                mount_call.extend(grouped_tokens(
+                    proc_macro2::Delimiter::Parenthesis,
+                    call_arguments,
+                ));
+                mount_call.extend(quote! { ; });
+                let mut outer_body = TokenStream::new();
+                append_tokens(&mut outer_body, &outer_mount_state);
+                append_tokens(&mut outer_body, &mount_call);
+                grouped_tokens(proc_macro2::Delimiter::Brace, outer_body)
             })
             .unwrap_or_default();
         let on_unmount_hook = body
@@ -1343,61 +1437,123 @@ pub(crate) fn emit_compiled_template_factory(
     let on_mount_hook = body
         .on_mount
         .clone()
-        .map(|body| {
+        .map(|_body| {
+            let uses_parent = template_body_uses_ident(&_body, "this");
+            let uses_environment = template_body_uses_ident(&_body, "__environment");
+            let uses_subscriptions = template_body_uses_ident(&_body, "__subscriptions");
             let weak_parent = format_ident!("__elwindui_template_mount_weak");
             let parent = format_ident!("__elwindui_template_parent");
-            quote! {
-                {
-                    let #weak_parent: std::rc::Weak<#target_type> =
-                        std::rc::Rc::downgrade(&#parent);
-                    let __template_mount_environment = __environment.clone();
-                    let __template_mount_subscriptions = __subscriptions.clone();
-                    elwindui::core::ui::UIElementExt::add_mount_hook(
-                        &*__root,
-                        Box::new(move || {
-                            let mount_parent: Option<std::rc::Rc<#target_type>> =
-                                #weak_parent.upgrade();
-                            if let Some(#parent) = mount_parent {
-                                let this: std::rc::Rc<#target_type> = #parent.clone();
-                                let __environment = __template_mount_environment.clone();
-                                let __subscriptions = __template_mount_subscriptions.clone();
-                                let _ = (&this, &__environment, &__subscriptions);
-                                #body
-                            }
-                        }),
-                    );
-                }
+            let mut mount_body = TokenStream::new();
+            if uses_parent {
+                mount_body.extend(quote! {
+                    let this: std::rc::Rc<#target_type> = #parent.clone();
+                });
             }
+            if uses_environment {
+                mount_body.extend(quote! {
+                    let __environment = __template_mount_environment.clone();
+                });
+            }
+            if uses_subscriptions {
+                mount_body.extend(quote! {
+                    let __subscriptions = __template_mount_subscriptions.clone();
+                });
+            }
+            append_tokens(&mut mount_body, &_body);
+            let mut outer_mount_state = TokenStream::new();
+            if uses_environment {
+                outer_mount_state.extend(quote! {
+                    let __template_mount_environment = __environment.clone();
+                });
+            }
+            if uses_subscriptions {
+                outer_mount_state.extend(quote! {
+                    let __template_mount_subscriptions = __subscriptions.clone();
+                });
+            }
+            let mount_guard = if uses_parent {
+                let mut guard = quote! { if let Some(#parent) = mount_parent };
+                guard.extend(grouped_tokens(proc_macro2::Delimiter::Brace, mount_body));
+                guard
+            } else {
+                let mut guard = quote! { if mount_parent.is_some() };
+                guard.extend(grouped_tokens(proc_macro2::Delimiter::Brace, mount_body));
+                guard
+            };
+            let mut callback_body = quote! {
+                let mount_parent: Option<std::rc::Rc<#target_type>> =
+                    #weak_parent.upgrade();
+            };
+            append_tokens(&mut callback_body, &mount_guard);
+            let mut closure = quote! { move || };
+            closure.extend(grouped_tokens(proc_macro2::Delimiter::Brace, callback_body));
+            let mut boxed_closure = quote! { Box::new };
+            boxed_closure.extend(grouped_tokens(proc_macro2::Delimiter::Parenthesis, closure));
+            let mut call_arguments = quote! { &*__root, };
+            call_arguments.extend(boxed_closure);
+            let mut mount_call = quote! { elwindui::core::ui::UIElementExt::add_mount_hook };
+            mount_call.extend(grouped_tokens(
+                proc_macro2::Delimiter::Parenthesis,
+                call_arguments,
+            ));
+            mount_call.extend(quote! { ; });
+            let mut outer_body = quote! {
+                let #weak_parent: std::rc::Weak<#target_type> =
+                    std::rc::Rc::downgrade(&#parent);
+            };
+            append_tokens(&mut outer_body, &outer_mount_state);
+            append_tokens(&mut outer_body, &mount_call);
+            grouped_tokens(proc_macro2::Delimiter::Brace, outer_body)
         })
         .unwrap_or_default();
-    let update_subscriptions: TokenStream = if let Some(update_body) = body.on_update.clone() {
-        body.lifecycle_keys
-            .iter()
-            .map(|key| {
-                let weak_parent = format_ident!("__elwindui_template_update_weak_{key}");
-                quote! {
-                    {
-                        let #weak_parent: std::rc::Weak<#target_type> =
-                            std::rc::Rc::downgrade(&__elwindui_template_parent);
-                        __subscriptions.borrow_mut().push(
-                            <#target_type as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
-                                &*__elwindui_template_parent,
-                                move || {
-                                    let update_parent: Option<std::rc::Rc<#target_type>> =
-                                        #weak_parent.upgrade();
-                                    if let Some(__elwindui_template_parent) = update_parent {
-                                        let this: std::rc::Rc<#target_type> =
-                                            __elwindui_template_parent.clone();
-                                        let _ = &this;
-                                        #update_body
-                                    }
-                                },
-                            ),
-                        );
-                    }
-                }
-            })
-            .collect::<TokenStream>()
+    let update_subscriptions: TokenStream = if body.on_update.is_some() {
+        let mut update_subscriptions = TokenStream::new();
+        for key in &body.lifecycle_keys {
+            let weak_parent = format_ident!("__elwindui_template_update_weak_{key}");
+            let mut update_guard_body = quote! {
+                let this: std::rc::Rc<#target_type> =
+                    __elwindui_template_parent.clone();
+                let _ = &this;
+            };
+            update_guard_body.extend(body.on_update.clone().expect("update body checked above"));
+            let mut update_guard = quote! {
+                if let Some(__elwindui_template_parent) = update_parent
+            };
+            update_guard.extend(grouped_tokens(
+                proc_macro2::Delimiter::Brace,
+                update_guard_body,
+            ));
+            let mut callback_body = quote! {
+                let update_parent: Option<std::rc::Rc<#target_type>> =
+                    #weak_parent.upgrade();
+            };
+            append_tokens(&mut callback_body, &update_guard);
+            let mut callback = quote! { move || };
+            callback.extend(grouped_tokens(proc_macro2::Delimiter::Brace, callback_body));
+            let mut subscription_arguments = quote! { &*__elwindui_template_parent, };
+            append_tokens(&mut subscription_arguments, &callback);
+            let mut subscription = quote! {
+                <#target_type as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe
+            };
+            subscription.extend(grouped_tokens(
+                proc_macro2::Delimiter::Parenthesis,
+                subscription_arguments,
+            ));
+            let mut push_arguments = TokenStream::new();
+            append_tokens(&mut push_arguments, &subscription);
+            let mut item_body = quote! {
+                let #weak_parent: std::rc::Weak<#target_type> =
+                    std::rc::Rc::downgrade(&__elwindui_template_parent);
+                __subscriptions.borrow_mut().push
+            };
+            item_body.extend(grouped_tokens(
+                proc_macro2::Delimiter::Parenthesis,
+                push_arguments,
+            ));
+            item_body.extend(quote! { ; });
+            update_subscriptions.extend(grouped_tokens(proc_macro2::Delimiter::Brace, item_body));
+        }
+        update_subscriptions
     } else {
         TokenStream::new()
     };
@@ -1508,61 +1664,123 @@ fn emit_view_factory(
     let on_mount_hook = body
         .on_mount
         .clone()
-        .map(|body| {
+        .map(|_body| {
+            let uses_parent = template_body_uses_ident(&_body, "this");
+            let uses_environment = template_body_uses_ident(&_body, "__environment");
+            let uses_subscriptions = template_body_uses_ident(&_body, "__subscriptions");
             let weak_parent = format_ident!("__elwindui_deferred_mount_weak");
             let parent = format_ident!("__elwindui_template_parent");
-            quote! {
-                {
-                    let #weak_parent: std::rc::Weak<#target_type> =
-                        std::rc::Rc::downgrade(&#parent);
-                    let __deferred_mount_environment = __environment.clone();
-                    let __deferred_mount_subscriptions = __subscriptions.clone();
-                    elwindui::core::ui::UIElementExt::add_mount_hook(
-                        &*__root,
-                        Box::new(move || {
-                            let mount_parent: Option<std::rc::Rc<#target_type>> =
-                                #weak_parent.upgrade();
-                            if let Some(#parent) = mount_parent {
-                                let this: std::rc::Rc<#target_type> = #parent.clone();
-                                let __environment = __deferred_mount_environment.clone();
-                                let __subscriptions = __deferred_mount_subscriptions.clone();
-                                let _ = (&this, &__environment, &__subscriptions);
-                                #body
-                            }
-                        }),
-                    );
-                }
+            let mut mount_body = TokenStream::new();
+            if uses_parent {
+                mount_body.extend(quote! {
+                    let this: std::rc::Rc<#target_type> = #parent.clone();
+                });
             }
+            if uses_environment {
+                mount_body.extend(quote! {
+                    let __environment = __deferred_mount_environment.clone();
+                });
+            }
+            if uses_subscriptions {
+                mount_body.extend(quote! {
+                    let __subscriptions = __deferred_mount_subscriptions.clone();
+                });
+            }
+            append_tokens(&mut mount_body, &_body);
+            let mut outer_mount_state = TokenStream::new();
+            if uses_environment {
+                outer_mount_state.extend(quote! {
+                    let __deferred_mount_environment = __environment.clone();
+                });
+            }
+            if uses_subscriptions {
+                outer_mount_state.extend(quote! {
+                    let __deferred_mount_subscriptions = __subscriptions.clone();
+                });
+            }
+            let mount_guard = if uses_parent {
+                let mut guard = quote! { if let Some(#parent) = mount_parent };
+                guard.extend(grouped_tokens(proc_macro2::Delimiter::Brace, mount_body));
+                guard
+            } else {
+                let mut guard = quote! { if mount_parent.is_some() };
+                guard.extend(grouped_tokens(proc_macro2::Delimiter::Brace, mount_body));
+                guard
+            };
+            let mut callback_body = quote! {
+                let mount_parent: Option<std::rc::Rc<#target_type>> =
+                    #weak_parent.upgrade();
+            };
+            append_tokens(&mut callback_body, &mount_guard);
+            let mut closure = quote! { move || };
+            closure.extend(grouped_tokens(proc_macro2::Delimiter::Brace, callback_body));
+            let mut boxed_closure = quote! { Box::new };
+            boxed_closure.extend(grouped_tokens(proc_macro2::Delimiter::Parenthesis, closure));
+            let mut call_arguments = quote! { &*__root, };
+            call_arguments.extend(boxed_closure);
+            let mut mount_call = quote! { elwindui::core::ui::UIElementExt::add_mount_hook };
+            mount_call.extend(grouped_tokens(
+                proc_macro2::Delimiter::Parenthesis,
+                call_arguments,
+            ));
+            mount_call.extend(quote! { ; });
+            let mut outer_body = quote! {
+                let #weak_parent: std::rc::Weak<#target_type> =
+                    std::rc::Rc::downgrade(&#parent);
+            };
+            append_tokens(&mut outer_body, &outer_mount_state);
+            append_tokens(&mut outer_body, &mount_call);
+            grouped_tokens(proc_macro2::Delimiter::Brace, outer_body)
         })
         .unwrap_or_default();
-    let update_subscriptions: TokenStream = if let Some(update_body) = body.on_update.clone() {
-        body.lifecycle_keys
-            .iter()
-            .map(|key| {
-                let weak_parent = format_ident!("__elwindui_deferred_update_weak_{key}");
-                quote! {
-                    {
-                        let #weak_parent: std::rc::Weak<#target_type> =
-                            std::rc::Rc::downgrade(&__elwindui_template_parent);
-                        __subscriptions.borrow_mut().push(
-                            <#target_type as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe(
-                                &*__elwindui_template_parent,
-                                move || {
-                                    let update_parent: Option<std::rc::Rc<#target_type>> =
-                                        #weak_parent.upgrade();
-                                    if let Some(__elwindui_template_parent) = update_parent {
-                                        let this: std::rc::Rc<#target_type> =
-                                            __elwindui_template_parent.clone();
-                                        let _ = &this;
-                                        #update_body
-                                    }
-                                },
-                            ),
-                        );
-                    }
-                }
-            })
-            .collect()
+    let update_subscriptions: TokenStream = if body.on_update.is_some() {
+        let mut update_subscriptions = TokenStream::new();
+        for key in &body.lifecycle_keys {
+            let weak_parent = format_ident!("__elwindui_deferred_update_weak_{key}");
+            let mut update_guard_body = quote! {
+                let this: std::rc::Rc<#target_type> =
+                    __elwindui_template_parent.clone();
+                let _ = &this;
+            };
+            update_guard_body.extend(body.on_update.clone().expect("update body checked above"));
+            let mut update_guard = quote! {
+                if let Some(__elwindui_template_parent) = update_parent
+            };
+            update_guard.extend(grouped_tokens(
+                proc_macro2::Delimiter::Brace,
+                update_guard_body,
+            ));
+            let mut callback_body = quote! {
+                let update_parent: Option<std::rc::Rc<#target_type>> =
+                    #weak_parent.upgrade();
+            };
+            append_tokens(&mut callback_body, &update_guard);
+            let mut callback = quote! { move || };
+            callback.extend(grouped_tokens(proc_macro2::Delimiter::Brace, callback_body));
+            let mut subscription_arguments = quote! { &*__elwindui_template_parent, };
+            append_tokens(&mut subscription_arguments, &callback);
+            let mut subscription = quote! {
+                <#target_type as elwindui::core::ui::TemplateProperty<#key>>::__template_subscribe
+            };
+            subscription.extend(grouped_tokens(
+                proc_macro2::Delimiter::Parenthesis,
+                subscription_arguments,
+            ));
+            let mut push_arguments = TokenStream::new();
+            append_tokens(&mut push_arguments, &subscription);
+            let mut item_body = quote! {
+                let #weak_parent: std::rc::Weak<#target_type> =
+                    std::rc::Rc::downgrade(&__elwindui_template_parent);
+                __subscriptions.borrow_mut().push
+            };
+            item_body.extend(grouped_tokens(
+                proc_macro2::Delimiter::Parenthesis,
+                push_arguments,
+            ));
+            item_body.extend(quote! { ; });
+            update_subscriptions.extend(grouped_tokens(proc_macro2::Delimiter::Brace, item_body));
+        }
+        update_subscriptions
     } else {
         TokenStream::new()
     };

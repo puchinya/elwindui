@@ -18,7 +18,10 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSRect, NSString};
 use std::cell::RefCell;
+use std::future::poll_fn;
 use std::rc::Rc;
+use std::task::Poll;
+use std::time::Duration;
 
 /// Walks up from `responder`'s own `NSView` ancestor chain looking for the nearest `TreeHostView`
 /// (the window's own top-level content host, or a nested one — `InnerTabView`'s per-tab host,
@@ -59,6 +62,26 @@ fn resolve_focus_owner(
 pub(crate) struct ElwinduiWindowIvars {
     close_request_handler: RefCell<Option<Rc<dyn Fn() -> bool>>>,
     bounds_changed_handler: RefCell<Option<Rc<dyn Fn(Rect)>>>,
+}
+
+/// Suspends a UI-affine future without blocking AppKit's main thread. The wake-up is delivered
+/// through the backend's local executor, so the continuation resumes on the next AppKit turn.
+async fn wait_for_appkit_turn(delay: Duration) {
+    let started = Rc::new(std::cell::Cell::new(false));
+    let started_on_poll = Rc::clone(&started);
+    poll_fn(move |context| {
+        if started_on_poll.replace(true) {
+            Poll::Ready(())
+        } else {
+            let waker = context.waker().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                waker.wake();
+            });
+            Poll::Pending
+        }
+    })
+    .await;
 }
 
 define_class!(
@@ -142,20 +165,29 @@ define_class!(
         /// `unmount_override` cleared it) means "allow the native default": `true`.
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, sender: &NSWindow) -> bool {
-            // A close handler may synchronously remove the floating host that owns `sender`. Keep
-            // the native window alive until AppKit has consumed this delegate return value.
-            let _sender_keep_alive = sender.retain();
-            let handler = self.ivars().close_request_handler.borrow().clone();
-            match handler {
-                None => true,
-                Some(handler) => {
-                    // The generated Window::close() this may call reaches back into AppKit
-                    // (InnerWindow::close -> self.ns.close()) — never re-entering this method
-                    // (see this fn's own doc comment) but still reentering *other* framework
-                    // code, so the handler is called with no borrow of our own ivars held.
-                    should_allow_native_close(handler())
+            let Some(handler) = self.ivars().close_request_handler.borrow().clone() else {
+                return true.into();
+            };
+
+            // Do not synchronously tear down the generated Window from windowShouldClose:. The
+            // native close request is still inside AppKit's window-transform transaction; dropping
+            // the Rust owner there can release the NSWindow while AppKit still owns its close
+            // animation. Veto this turn, retain the sender in a local-executor future, and finish
+            // the common close lifecycle after the delegate callback has returned.
+            let sender = sender.retain();
+            elwindui_core::task::spawn_local(async move {
+                wait_for_appkit_turn(Duration::from_millis(1)).await;
+                let handled = handler();
+                if should_allow_native_close(handled) {
+                    // `NSWindow::close` does not consult windowShouldClose:, so this cannot
+                    // re-enter the deferred handler. Keep the native window retained through the
+                    // close animation; releasing it immediately was the source of the AppKit
+                    // transform-animation use-after-free seen in the GUI smoke run.
+                    sender.close();
+                    wait_for_appkit_turn(Duration::from_millis(500)).await;
                 }
-            }
+            });
+            false.into()
         }
 
         #[unsafe(method(elwinduiWindowBoundsChanged:))]
@@ -255,6 +287,11 @@ impl InnerWindow {
                 backing: NSBackingStoreType::Buffered,
                 defer: false,
             ];
+            // These windows are owned explicitly by Rust rather than by an NSWindowController.
+            // Leaving AppKit's default `releasedWhenClosed` enabled makes `close` release the
+            // object behind Rust's `Retained<NSWindow>`, which becomes an over-release when the
+            // floating host is torn down during the close animation.
+            window.setReleasedWhenClosed(false);
             window.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*window)));
             Retained::into_super(window)
         };

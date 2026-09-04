@@ -69,8 +69,10 @@ reports only intentional `inactive-code` WeakWarnings (200 records, zero actiona
 
 - AppKit runtime interaction: run selection/close, tab drag targets/cancellation, splitter
   completion/cancellation, pin/auto-hide/unpin, floating/re-dock, and native close accept/reject
-  when macOS UI permissions are available. The latest attempt was NOT RUN because the macOS host
-  was locked and automatic unlock was unavailable.
+  when macOS UI permissions are available. The 2026-09-05 GUI smoke pass launched the real
+  `docking-demo`, visually confirmed transparent docking chrome, created two native floating
+  windows, and closed both without terminating the process; the full interaction matrix remains
+  unrun.
 - WinUI3 runtime interaction: run the equivalent matrix only when the separate Issue #207/#217
   Windows integration state permits it; those fixes are not part of #172/#218.
 - GTK4: compile as required by the workspace. Do not claim native floating runtime support without a

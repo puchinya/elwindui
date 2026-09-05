@@ -88,8 +88,9 @@ impl CustomTabCloseButton {
         if self.handlers_bound() {
             return;
         }
-        let weak_self = self.weak_self();
-        if weak_self.upgrade().is_none() {
+        let weak_self: std::rc::Weak<CustomTabCloseButton> = self.weak_self();
+        let self_handle: Option<Rc<CustomTabCloseButton>> = weak_self.upgrade();
+        if self_handle.is_none() {
             return;
         }
         self.set_handlers_bound(true);
@@ -98,13 +99,12 @@ impl CustomTabCloseButton {
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_pressed",
             Box::new(move |event, args| {
-                if args.handled.get()
-                    || event.button != Some(MouseButton::Left)
-                    || weak_self.upgrade().is_none()
+                let button: Option<Rc<CustomTabCloseButton>> = weak_self.upgrade();
+                if args.handled.get() || event.button != Some(MouseButton::Left) || button.is_none()
                 {
                     return;
                 }
-                let button = weak_self.upgrade().expect("close button alive");
+                let button = button.expect("close button alive");
                 if !button.slot_visible() {
                     return;
                 }
@@ -113,11 +113,12 @@ impl CustomTabCloseButton {
             }),
         );
 
-        let weak_self = self.weak_self();
+        let weak_self: std::rc::Weak<CustomTabCloseButton> = self.weak_self();
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
             Box::new(move |event, args| {
-                let Some(button) = weak_self.upgrade() else {
+                let button: Option<Rc<CustomTabCloseButton>> = weak_self.upgrade();
+                let Some(button) = button else {
                     return;
                 };
                 if !button.pressed() {
@@ -134,11 +135,12 @@ impl CustomTabCloseButton {
             }),
         );
 
-        let weak_self = self.weak_self();
+        let weak_self: std::rc::Weak<CustomTabCloseButton> = self.weak_self();
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_moved",
             Box::new(move |_, args| {
-                if let Some(button) = weak_self.upgrade() {
+                let button: Option<Rc<CustomTabCloseButton>> = weak_self.upgrade();
+                if let Some(button) = button {
                     if button.pressed() {
                         args.handled.set(true);
                     }
@@ -146,11 +148,12 @@ impl CustomTabCloseButton {
             }),
         );
 
-        let weak_self = self.weak_self();
+        let weak_self: std::rc::Weak<CustomTabCloseButton> = self.weak_self();
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_canceled",
             Box::new(move |_, args| {
-                if let Some(button) = weak_self.upgrade() {
+                let button: Option<Rc<CustomTabCloseButton>> = weak_self.upgrade();
+                if let Some(button) = button {
                     button.set_pressed(false);
                     args.handled.set(true);
                 }

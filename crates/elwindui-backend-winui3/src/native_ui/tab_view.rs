@@ -123,7 +123,7 @@ impl TabView {
             rebuilding: Cell::new(false),
             selected_index: Cell::new(0),
             on_close: RefCell::new(None),
-            weak_self: RefCell::new(Weak::new()),
+            weak_self: RefCell::new(Weak::<TabView>::new()),
         }
     }
 
@@ -138,39 +138,47 @@ impl TabView {
             .owner_rc()
             .expect("TabView::on_constructed: object must already be Rc-constructed");
         let any_rc: Rc<dyn Any> = node;
-        let this = any_rc
+        let this: Rc<TabView> = any_rc
             .downcast::<TabView>()
             .expect("TabView::on_constructed: owner must be this TabView");
         *self.weak_self.borrow_mut() = Rc::downgrade(&this);
-        let weak = Rc::downgrade(&this);
+        let weak: Weak<TabView> = Rc::downgrade(&this);
         self.inner
             .set_on_content_size_changed(Box::new(move |width, height| {
-                if let Some(this) = weak.upgrade() {
+                let this: Option<Rc<TabView>> = weak.upgrade();
+                if let Some(this) = this {
                     this.resize_active_content_host(width, height);
                 }
             }));
         // Always wire the native close event. Static tabs may provide only per-item `on_close`
         // handlers, so waiting for a TabView-level fallback to be assigned would leave their
         // close buttons disconnected entirely.
-        let weak = Rc::downgrade(&this);
+        let weak: Weak<TabView> = Rc::downgrade(&this);
         self.inner.set_on_close(Box::new(move |index| {
-            let Some(this) = weak.upgrade() else { return };
+            let this: Option<Rc<TabView>> = weak.upgrade();
+            let Some(this) = this else { return };
             // Drop the collection borrow before invoking user code: a close callback can
             // synchronously mutate the backing list and re-enter `ListExt::remove_at`.
-            let entry = {
+            let entry: Option<Rc<dyn elwindui_core::ui::TabViewItemExt>> = {
                 let children = this.children.borrow();
                 children.get(index).cloned()
             };
-            let handled = entry.is_some_and(|entry| {
-                if let Some(callback) = downcast_tab_view_item(&*entry).on_close.borrow().as_ref() {
-                    callback();
-                    true
-                } else {
-                    false
-                }
-            });
+            let handled: bool =
+                entry.is_some_and(|entry: Rc<dyn elwindui_core::ui::TabViewItemExt>| {
+                    let item: &TabViewItem = downcast_tab_view_item(&*entry);
+                    let callback: std::cell::Ref<'_, Option<Box<dyn Fn()>>> =
+                        item.on_close.borrow();
+                    if let Some(callback) = callback.as_ref() {
+                        callback();
+                        true
+                    } else {
+                        false
+                    }
+                });
             if !handled {
-                if let Some(callback) = this.on_close.borrow().as_ref() {
+                let on_close: &std::cell::RefCell<Option<Box<dyn Fn(usize)>>> = &this.on_close;
+                let callback: std::cell::Ref<'_, Option<Box<dyn Fn(usize)>>> = on_close.borrow();
+                if let Some(callback) = callback.as_ref() {
                     callback(index);
                 }
             }
@@ -196,9 +204,10 @@ impl TabView {
 
     #[inherent]
     pub fn set_on_select(&self, callback: Box<dyn Fn(usize)>) {
-        let weak = self.weak_self.borrow().clone();
+        let weak: Weak<TabView> = self.weak_self.borrow().clone();
         self.inner.set_on_select(Box::new(move |index| {
-            let Some(this) = weak.upgrade() else { return };
+            let this: Option<Rc<TabView>> = weak.upgrade();
+            let Some(this) = this else { return };
             // XAML raises transient selection changes synchronously while `rebuild` edits
             // `TabItems`. Publishing those intermediate indices can re-enter the declarative list
             // diff while it still holds collection borrows; the final model-selected index is
@@ -256,11 +265,12 @@ impl TabView {
     #[inherent]
     fn attach_header_listener(&self, item: &Rc<dyn elwindui_core::ui::TabViewItemExt>) {
         let key = tab_view_item_key(item);
-        let weak = self.weak_self.borrow().clone();
+        let weak: Weak<TabView> = self.weak_self.borrow().clone();
         *downcast_tab_view_item(&**item)
             .on_header_changed
             .borrow_mut() = Some(Box::new(move || {
-            if let Some(tab_view) = weak.upgrade() {
+            let tab_view: Option<Rc<TabView>> = weak.upgrade();
+            if let Some(tab_view) = tab_view {
                 tab_view.refresh_dynamic_header(key);
             }
         }));

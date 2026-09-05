@@ -431,6 +431,12 @@ mod hosted_xaml_regression_tests {
                 });
 
                 assert_text_style_round_trip(&canvas);
+                crate::inner::menu::live_menu_item_icon_tests::
+                    live_inner_menu_item_icon_set_replace_clear();
+                crate::inner::menu::live_menu_item_icon_tests::
+                    create_flyout_snapshots_icon_onto_a_distinct_realization();
+                crate::inner::menu::live_menu_item_icon_tests::
+                    failed_icon_conversion_does_not_remove_the_action();
 
                 crate::app::reset_window_lifecycle_test_state();
                 let lifecycle_window = InnerWindow::new();

@@ -161,6 +161,10 @@ use syn::{
     punctuated::Punctuated,
 };
 
+fn append_tokens<T: quote::ToTokens>(out: &mut TokenStream2, value: &T) {
+    quote::ToTokens::to_tokens(value, out);
+}
+
 /// Parsed `#[class(inherits = .., struct_only = .., abstract_class, sealed, no_ancestor_forward)]`
 /// arguments — every key is optional and any subset/order is accepted.
 #[derive(Default)]
@@ -1476,6 +1480,10 @@ fn inherit_macro_classify_ident(bare_name: &str) -> Ident {
     format_ident!("__elwindui_inherit_{}_classify", bare_name)
 }
 
+fn inherit_resolve_ident(bare_name: &str) -> Ident {
+    format_ident!("__elwindui_inherit_{bare_name}_resolve")
+}
+
 /// `ContentControl` -> `__elwindui_check_not_sealed_ContentControl`: see `#[sealed]`'s own handling
 /// in `build_sealed_check_macro`/`expand_impl`.
 fn sealed_check_ident(bare_name: &str) -> Ident {
@@ -1724,7 +1732,6 @@ fn turbofish_ext_path(ext_ident: &TokenStream2, ty_generics: &TokenStream2) -> T
 /// the default body must name which trait's method it means.
 fn build_dyn_default_methods(
     dyn_ident: &Ident,
-    ext_ty: &TokenStream2,
     ext_ty_call: &TokenStream2,
     sigs: &[syn::Signature],
     overridable_names: &[Ident],
@@ -1772,10 +1779,10 @@ fn build_dyn_default_methods(
             }
         })
         .collect();
-    out.push(quote! { fn #dyn_ident(&self) -> &dyn #ext_ty; });
+    out.push(quote! { fn #dyn_ident(&self) -> &dyn #ext_ty_call; });
     for name in overridable_names {
         let per_method = per_method_accessor_ident(name);
-        out.push(quote! { fn #per_method(&self) -> &dyn #ext_ty; });
+        out.push(quote! { fn #per_method(&self) -> &dyn #ext_ty_call; });
     }
     out
 }
@@ -3481,11 +3488,10 @@ fn build_inherit_macros(
         }
     });
 
-    let extra_forwards: Vec<TokenStream2> = extra_required_names
+    let _extra_forwards: Vec<TokenStream2> = extra_required_names
         .iter()
         .map(|name| quote! { fn #name(&self) -> &$RootConcrete { self.base.#name() } })
         .collect();
-    let extra_forwards = &extra_forwards;
 
     // PR #164 final remediation round (finding A6): recursing to the next layer no longer bakes a
     // pre-resolved ancestor trait as a literal token here (`next_trait`, formerly computed by the
@@ -3500,7 +3506,8 @@ fn build_inherit_macros(
     // hop — the exact same two-mechanism protocol `expand_impl`'s own prelude already uses for the
     // immediate hop (`own_ext_policy_path`/`own_ext_bound_trait_ident`'s own doc comments); this is
     // that same protocol applied recursively, not a new one.
-    let continuation_ident = format_ident!("__elwindui_continue_recursive_inherits_of_{bare_name}");
+    let continuation_ident =
+        format_ident!("__elwindui_continue_recursive_inherits_of_{}", bare_name);
     // No further ancestor: recurse into a *local* (same-crate, `$crate::`-self-referenced) leftover-
     // `#[overrides]` check instead of the caller-supplied `recurse_macro_path` (ignored in this
     // case) — every "no inherits" class (true root mode's `UIElement`, or any other struct_only/
@@ -3515,7 +3522,7 @@ fn build_inherit_macros(
     // always resolves against the crate that generated *this* classify macro, regardless of caller.
     let (recurse_macro_path, terminal_check, continuation_macro) = match recurse_next {
         None => {
-            let terminal_ident = format_ident!("__elwindui_inherit_{bare_name}_terminal");
+            let terminal_ident = format_ident!("__elwindui_inherit_{}_terminal", bare_name);
             let path = quote! { $crate::#terminal_ident };
             let check = quote! {
                 #[doc(hidden)]
@@ -3596,7 +3603,7 @@ fn build_inherit_macros(
     // The entry macro's own initial call: one literal empty `[]` per slot (no `$`/metavariable
     // involved here — this is the concrete starting value classify's own patterns above then match
     // against).
-    let empty_slots: Vec<TokenStream2> = slot_idents.iter().map(|_| quote! { [] }).collect();
+    let _empty_slots: Vec<TokenStream2> = slot_idents.iter().map(|_| quote! { [] }).collect();
 
     // `$crate::#classify_ident!` (not a bare `#classify_ident!`) in every self-reference below --
     // required whenever the entry/classify macros defined *here* are invoked from a *different*
@@ -3628,21 +3635,19 @@ fn build_inherit_macros(
     // method *not* declared `#[overridable]` has only ever had one real implementor (the declaring
     // class), so `#dyn_ident`'s original "reflexive there, forward everywhere else" shape remains
     // correct and unchanged for it.
-    let resolve_ident = format_ident!("__elwindui_inherit_{bare_name}_resolve");
-    let resolve_calls: Vec<TokenStream2> = slot_idents
-        .iter()
-        .zip(overridable_names.iter())
-        .map(|(slot, name)| {
-            let accessor = per_method_accessor_ident(name);
-            quote! { $crate::#resolve_ident!($OwnTrait, #accessor; $( $#slot )?); }
-        })
-        .collect();
-    let resolve_macro = (!overridable_names.is_empty()).then(|| {
-        quote! {
+    let resolve_macro = if overridable_names.is_empty() {
+        None
+    } else {
+        let resolve_ident = inherit_resolve_ident(bare_name);
+        let mut resolve_macro = quote! {
             #[doc(hidden)]
             #[macro_export]
             #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
-            macro_rules! #resolve_ident {
+            macro_rules!
+        };
+        append_tokens(&mut resolve_macro, &resolve_ident);
+        resolve_macro.extend(quote! {
+            {
                 // No override at this hop for this one method -- forward to whatever `self.base`
                 // itself resolves to (another override further up, or the original declaring
                 // class's own reflexive one).
@@ -3656,16 +3661,26 @@ fn build_inherit_macros(
                     $item
                 };
             }
-        }
-    });
+        });
+        Some(resolve_macro)
+    };
     let own_impl = (!skip_own_impl).then(|| {
-        quote! {
-            impl $OwnTrait for $SubType {
-                fn #dyn_ident(&self) -> &dyn $OwnTrait { self.base.#dyn_ident() }
-                #(#extra_forwards)*
-                #(#resolve_calls)*
-            }
+        let mut implementation_body = quote! {
+            fn #dyn_ident(&self) -> &dyn $OwnTrait { self.base.#dyn_ident() }
+            #(#_extra_forwards)*
+        };
+        for (slot, name) in slot_idents.iter().zip(overridable_names.iter()) {
+            let accessor = per_method_accessor_ident(name);
+            let mut tokens = quote! { $crate:: };
+            append_tokens(&mut tokens, &inherit_resolve_ident(bare_name));
+            tokens.extend(quote! { !($OwnTrait, #accessor; $( $#slot )?); });
+            append_tokens(&mut implementation_body, &tokens);
         }
+        let mut implementation = quote! { impl $OwnTrait for $SubType };
+        implementation.extend(std::iter::once(proc_macro2::TokenTree::Group(
+            proc_macro2::Group::new(proc_macro2::Delimiter::Brace, implementation_body),
+        )));
+        implementation
     });
 
     // `#[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]`: this whole mechanism
@@ -3687,7 +3702,7 @@ fn build_inherit_macros(
     // (classify invocation) simply never references it.
     let entry_body = entry_override.unwrap_or_else(|| {
         quote! {
-            $crate::#classify_ident!($SubType, $OwnTrait, $OwnConcrete, $RootConcrete; #(#empty_slots)*; []; $($overrides)*);
+            $crate::#classify_ident!($SubType, $OwnTrait, $OwnConcrete, $RootConcrete; #(#_empty_slots)*; []; $($overrides)*);
         }
     });
 
@@ -3866,6 +3881,12 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     let attrs = &attrs;
     let generics = &item.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    // These values are interpolated into generated items; keep the source-side references
+    // explicit for rust-analyzer, which does not model quote interpolation as a local use.
+    let _generic_parameter_list_is_empty = generics.params.is_empty();
+    let _impl_generics_tokens = quote::ToTokens::to_token_stream(&impl_generics);
+    let _type_generics_tokens = quote::ToTokens::to_token_stream(&ty_generics);
+    let _has_where_clause = where_clause.is_some();
 
     let existing_fields: Vec<Field> = match &item.fields {
         Fields::Named(named) => named.named.iter().cloned().collect(),
@@ -4016,8 +4037,7 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
     // `ext_ty` never carries generics here (no `#generics`/`ty_generics` splice above, even when
     // the `trait_only` trait itself declares its own) — call-position and type-position are
     // already identical, so no separate turbofish form is needed.
-    let dyn_methods =
-        build_dyn_default_methods(&dyn_ident, &ext_ty, &ext_ty, &sigs, &overridable_names);
+    let dyn_methods = build_dyn_default_methods(&dyn_ident, &ext_ty, &sigs, &overridable_names);
     let into_node_ident = into_node_ident(&bare_name);
     let into_node_default = build_into_node_default(&into_node_ident, &ext_ty);
 
@@ -4198,7 +4218,8 @@ fn build_rust_analyzer_shadow(
             .collect();
         quote! {
             pub fn new(#params) -> std::rc::Rc<Self> {
-                std::rc::Rc::new(Self::construct(#(#arg_names),*))
+                let instance: std::rc::Rc<Self> = std::rc::Rc::new(Self::construct(#(#arg_names),*));
+                instance
             }
         }
     });
@@ -4836,7 +4857,6 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             overridable_methods.iter().map(|f| f.sig.clone()).collect();
         let overridable_defaults = build_dyn_default_methods(
             &dyn_ident,
-            &ext_ty,
             &ext_ty_call,
             &overridable_sigs,
             &overridable_names,
@@ -4917,13 +4937,8 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         let own_sigs: Vec<syn::Signature> = own_methods.iter().map(|f| f.sig.clone()).collect();
         let ext_ty = quote! { #ext_ident #ty_generics };
         let ext_ty_call = turbofish_ext_path(&quote! { #ext_ident }, &quote! { #ty_generics });
-        let dyn_methods = build_dyn_default_methods(
-            &dyn_ident,
-            &ext_ty,
-            &ext_ty_call,
-            &own_sigs,
-            &overridable_names,
-        );
+        let dyn_methods =
+            build_dyn_default_methods(&dyn_ident, &ext_ty_call, &own_sigs, &overridable_names);
         let bodies = own_methods.iter().map(|f| quote! { #f });
         // See root mode's own identical treatment (above) for why each of *this* class's own
         // `#[overridable]` methods (if it declares any of its own, beyond just re-overriding an
@@ -4979,9 +4994,10 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             .collect();
         quote! {
             pub fn new(#(#public_params),*) -> std::rc::Rc<Self> {
-                let __obj = std::rc::Rc::new_cyclic(|__weak_self: &std::rc::Weak<Self>| {
-                    Self::__class_construct(__weak_self.clone(), #(#arg_names),*)
-                });
+                let __obj: std::rc::Rc<Self> =
+                    std::rc::Rc::<Self>::new_cyclic(|__weak_self: &std::rc::Weak<Self>| {
+                        Self::__class_construct(__weak_self.clone(), #(#arg_names),*)
+                    });
                 __obj.__elwindui_run_on_constructed();
                 __obj
             }
@@ -4996,7 +5012,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             // constructed ordinarily in one place and inside an `EnvironmentScope` in another.
             #[doc(hidden)]
             pub fn __new_unmounted(#(#public_params),*) -> std::rc::Rc<Self> {
-                std::rc::Rc::new_cyclic(|__weak_self: &std::rc::Weak<Self>| {
+                std::rc::Rc::<Self>::new_cyclic(|__weak_self: &std::rc::Weak<Self>| {
                     Self::__class_construct(__weak_self.clone(), #(#arg_names),*)
                 })
             }
@@ -5322,7 +5338,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                     Some(own_ext_policy_macro),
                 )
             }
-            Some(existing) if args.no_ancestor_forward => {
+            Some(_existing) if args.no_ancestor_forward => {
                 (None, None, None, None, None, None, None, None)
             }
             Some(existing) => {
@@ -6029,6 +6045,76 @@ mod class_interface_bridge_tests {
 
     fn is_real_compile_error(ts: &TokenStream2) -> bool {
         ts.to_string().trim_start().starts_with("compile_error")
+    }
+
+    // The generated Ext trait is used in both type and call positions.  A generic Ext path needs
+    // the turbofish form in the latter (`Ext::<T>::method`) but remains a normal generic type in
+    // the former (`dyn Ext::<T>`).  Exercise both ordinary and root expansion paths, including a
+    // default method and its per-method overridable accessor, so a future simplification cannot
+    // accidentally make one of the two positions parse as a comparison expression.
+    #[test]
+    fn generic_default_and_overridable_dispatch_use_valid_ext_path_forms() {
+        let (_ordinary_struct, ordinary_impl) = expand_pair(
+            quote! { inherits = some_crate::GenericDispatchParent<T> },
+            quote! {
+                pub struct GenericDispatchOrdinary<T: Clone> { value: T }
+            },
+            quote! {
+                impl<T: Clone> GenericDispatchOrdinary<T> {
+                    #[overridable]
+                    fn value(&self) -> T { self.value.clone() }
+                    fn construct(value: T) -> Self { Self { base: some_crate::GenericDispatchParent::construct(value) } }
+                }
+            },
+        );
+        assert!(
+            !is_real_compile_error(&ordinary_impl),
+            "generic ordinary expansion must succeed: {ordinary_impl}"
+        );
+        let ordinary = ordinary_impl.to_string();
+        assert!(
+            ordinary.contains("dyn GenericDispatchOrdinaryExt :: < T >"),
+            "generic ordinary Ext trait must remain a valid type-position path: {ordinary}"
+        );
+        assert!(
+            ordinary.contains("GenericDispatchOrdinaryExt :: < T > :: value"),
+            "generic ordinary default dispatch must use a turbofish call-position path: {ordinary}"
+        );
+        assert!(
+            ordinary.contains(&per_method_accessor_ident(&format_ident!("value")).to_string()),
+            "generic ordinary overridable methods must retain their generated dispatch accessor: {ordinary}"
+        );
+
+        let (_root_struct, root_impl) = expand_pair(
+            quote! {},
+            quote! {
+                pub struct GenericDispatchRoot<T: Clone> { value: T }
+            },
+            quote! {
+                impl<T: Clone> GenericDispatchRoot<T> {
+                    #[overridable]
+                    fn value(&self) -> T { self.value.clone() }
+                    fn construct(value: T) -> Self { Self { value } }
+                }
+            },
+        );
+        assert!(
+            !is_real_compile_error(&root_impl),
+            "generic root expansion must succeed: {root_impl}"
+        );
+        let root = root_impl.to_string();
+        assert!(
+            root.contains("dyn GenericDispatchRootExt :: < T >"),
+            "generic root Ext trait must remain a valid type-position path: {root}"
+        );
+        assert!(
+            root.contains("GenericDispatchRootExt :: < T > :: value"),
+            "generic root default dispatch must use a turbofish call-position path: {root}"
+        );
+        assert!(
+            root.contains(&per_method_accessor_ident(&format_ident!("value")).to_string()),
+            "generic root overridable methods must retain their generated dispatch accessor: {root}"
+        );
     }
 
     // T12: a `trait_only` interface generates its own `__elwindui_class_interface_*!` bridge macro.

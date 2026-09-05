@@ -19,6 +19,7 @@ windows = { version = "0.62", features = [
     "Foundation_Collections",
     "Foundation_Numerics",
     "ApplicationModel_Activation",
+    "ApplicationModel_DataTransfer",
     "Graphics",
     "Graphics_Imaging",
     "Graphics_DirectX",
@@ -29,6 +30,7 @@ windows = { version = "0.62", features = [
     "System",
     "UI",
     "UI_Core",
+    "UI_Composition",
     "UI_Input",
     "UI_Text",
 ] }

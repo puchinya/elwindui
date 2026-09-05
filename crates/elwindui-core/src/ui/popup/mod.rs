@@ -376,7 +376,8 @@ impl ContextMenuService {
                 PopupDismissState::Building | PopupDismissState::Dismissed => {}
                 PopupDismissState::Open(weak_handle) => {
                     drop(state);
-                    if let Some(handle) = weak_handle.upgrade() {
+                    let handle: Option<Rc<dyn PopupSurfaceHandle>> = weak_handle.upgrade();
+                    if let Some(handle) = handle {
                         handle.close();
                     }
                 }
@@ -477,7 +478,8 @@ impl ContextMenuService {
         let on_close: Rc<dyn Fn()> = Rc::new(move || {
             let weak_opt = slot_clone.borrow_mut().take();
             if let Some(weak_handle) = weak_opt {
-                if let Some(handle) = weak_handle.upgrade() {
+                let handle: Option<Rc<dyn PopupSurfaceHandle>> = weak_handle.upgrade();
+                if let Some(handle) = handle {
                     handle.close();
                 }
             }

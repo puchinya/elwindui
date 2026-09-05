@@ -217,8 +217,9 @@ impl CustomTabViewItem {
         if self.header_handlers_bound() {
             return;
         }
-        let weak_self = self.weak_self();
-        if weak_self.upgrade().is_none() {
+        let weak_self: std::rc::Weak<CustomTabViewItem> = self.weak_self();
+        let self_handle: Option<Rc<CustomTabViewItem>> = weak_self.upgrade();
+        if self_handle.is_none() {
             return;
         }
         self.set_header_handlers_bound(true);
@@ -228,7 +229,8 @@ impl CustomTabViewItem {
             "on_pointer_pressed",
             Box::new(move |event, args| {
                 if !args.handled.get() {
-                    if let Some(item) = weak_self.upgrade() {
+                    let item: Option<Rc<CustomTabViewItem>> = weak_self.upgrade();
+                    if let Some(item) = item {
                         if let Some(callback) = item.owner_pointer_callback() {
                             callback(TabItemPointerEvent::Pressed(*event));
                         }
@@ -236,12 +238,13 @@ impl CustomTabViewItem {
                 }
             }),
         );
-        let weak_self = self.weak_self();
+        let weak_self: std::rc::Weak<CustomTabViewItem> = self.weak_self();
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_moved",
             Box::new(move |event, args| {
                 if !args.handled.get() {
-                    if let Some(item) = weak_self.upgrade() {
+                    let item: Option<Rc<CustomTabViewItem>> = weak_self.upgrade();
+                    if let Some(item) = item {
                         if let Some(callback) = item.owner_pointer_callback() {
                             callback(TabItemPointerEvent::Moved(*event));
                         }
@@ -249,12 +252,13 @@ impl CustomTabViewItem {
                 }
             }),
         );
-        let weak_self = self.weak_self();
+        let weak_self: std::rc::Weak<CustomTabViewItem> = self.weak_self();
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
             Box::new(move |event, args| {
                 if !args.handled.get() {
-                    if let Some(item) = weak_self.upgrade() {
+                    let item: Option<Rc<CustomTabViewItem>> = weak_self.upgrade();
+                    if let Some(item) = item {
                         if let Some(callback) = item.owner_pointer_callback() {
                             callback(TabItemPointerEvent::Released(*event));
                         }
@@ -262,12 +266,13 @@ impl CustomTabViewItem {
                 }
             }),
         );
-        let weak_self = self.weak_self();
+        let weak_self: std::rc::Weak<CustomTabViewItem> = self.weak_self();
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_canceled",
             Box::new(move |event, args| {
                 if !args.handled.get() {
-                    if let Some(item) = weak_self.upgrade() {
+                    let item: Option<Rc<CustomTabViewItem>> = weak_self.upgrade();
+                    if let Some(item) = item {
                         if let Some(callback) = item.owner_pointer_callback() {
                             callback(TabItemPointerEvent::Canceled(*event));
                         }
@@ -275,12 +280,13 @@ impl CustomTabViewItem {
                 }
             }),
         );
-        let weak_self = self.weak_self();
+        let weak_self: std::rc::Weak<CustomTabViewItem> = self.weak_self();
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_entered",
             Box::new(move |_, args| {
                 if !args.handled.get() {
-                    if let Some(item) = weak_self.upgrade() {
+                    let item: Option<Rc<CustomTabViewItem>> = weak_self.upgrade();
+                    if let Some(item) = item {
                         item.update_pointer_over(true);
                         if let Some(callback) = item.owner_pointer_callback() {
                             callback(TabItemPointerEvent::Entered);
@@ -289,12 +295,13 @@ impl CustomTabViewItem {
                 }
             }),
         );
-        let weak_self = self.weak_self();
+        let weak_self: std::rc::Weak<CustomTabViewItem> = self.weak_self();
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_exited",
             Box::new(move |_, args| {
                 if !args.handled.get() {
-                    if let Some(item) = weak_self.upgrade() {
+                    let item: Option<Rc<CustomTabViewItem>> = weak_self.upgrade();
+                    if let Some(item) = item {
                         item.update_pointer_over(false);
                         if let Some(callback) = item.owner_pointer_callback() {
                             callback(TabItemPointerEvent::Exited);

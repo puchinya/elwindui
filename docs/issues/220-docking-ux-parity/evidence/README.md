@@ -9,7 +9,7 @@ not committed.
 - Issue: [#220](https://github.com/puchinya/elwindui/issues/220)
 - PR: [#221](https://github.com/puchinya/elwindui/pull/221)
 - Native-tested PR head: `f677d6970a61286aa68a23fbaf30c0d0992089e3`
-- Final post-master-sync PR head: `29833017528680f98a740a069cb2d67e21280c52` (updated in the final delivery commit)
+- Final post-master-sync PR head: `ce2c066` (the final synchronized evidence tree; the delivery metadata commit follows)
 - Integrated `origin/master`: `1517ecd92b8a3b477d6f5b0cdcfc14a9ab2ac5bf`
 - `origin/master` is an ancestor of the final PR head: yes
 - macOS: `26.6.2 (Build 25G83)`

@@ -22,6 +22,8 @@ pub(crate) const AUTO_HIDE_PIN_SIZE: f32 = 18.0;
 pub(crate) const AUTO_HIDE_ENTRY_WIDTH: f32 = 120.0;
 pub(crate) const AUTO_HIDE_ENTRY_HEIGHT: f32 = 24.0;
 pub(crate) const AUTO_HIDE_ICON_SIZE: f32 = 16.0;
+pub(crate) const AUTO_HIDE_PANEL_WIDTH: f32 = 320.0;
+pub(crate) const AUTO_HIDE_PANEL_HEIGHT: f32 = 240.0;
 
 pub(crate) const COMPASS_SIZE: f32 = 124.0;
 pub(crate) const COMPASS_BUTTON_SIZE: f32 = 36.0;

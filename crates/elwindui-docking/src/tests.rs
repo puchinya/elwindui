@@ -2094,10 +2094,55 @@ fn floating_surface_renders_and_presents_its_own_auto_hide_entries() {
         realization.borrow().open_auto_hide_item_on(&RootKind::Main),
         None
     );
+    let (_, page_host) = realization
+        .borrow()
+        .auto_hide_parts_for_test(&RootKind::Floating(0))
+        .expect("floating auto-hide keeps its popup parts");
+    let page_host_node: Rc<dyn UIElementExt> = page_host;
+    let page_parent = hidden_page
+        .visual_parent()
+        .expect("auto-hide popup should own the page content");
+    assert!(Rc::ptr_eq(&page_parent, &page_host_node));
     assert!(
         hidden_page
             .visual_parent()
             .is_some_and(|parent| parent.visual_parent().is_some())
+    );
+}
+
+#[test]
+fn auto_hide_popup_uses_side_aware_opaque_panel_geometry() {
+    let wrapper = CustomTabViewItem::new_item();
+    let page = TextBlock::new();
+    page.set_text("Popup body");
+    wrapper.set_content(page.clone());
+    let mut overlay = AutoHideOverlay::new();
+    overlay.open(item("right"), DockSide::Right);
+    overlay.present_open_item(Some(wrapper.clone()));
+
+    let page_host: Rc<dyn UIElementExt> = overlay.page_host_for_test();
+    let page_parent = page
+        .visual_parent()
+        .expect("popup should present the inherited page content");
+    assert!(Rc::ptr_eq(&page_parent, &page_host));
+    assert!(wrapper.visual_children().is_empty());
+
+    let visual = overlay.visual();
+    layout_root(
+        &visual,
+        Size {
+            width: 900.0,
+            height: 600.0,
+        },
+    );
+    let pane = overlay.pane_for_test();
+    assert_eq!(pane.arranged_width(), Some(320.0));
+    assert_eq!(pane.arranged_height(), Some(240.0));
+    assert_eq!(pane.arranged_offset(), Some(Point { x: 552.0, y: 180.0 }));
+    let pin_button = overlay.pin_button_for_test();
+    assert_eq!(
+        pin_button.arranged_offset(),
+        Some(Point { x: 302.0, y: 0.0 })
     );
 }
 
@@ -2787,9 +2832,9 @@ fn drag_preview_can_target_a_generated_runtime_group() {
 #[test]
 fn auto_hide_overlay_keeps_one_open_item_and_preview_clears() {
     let mut overlay = AutoHideOverlay::default();
-    assert_eq!(overlay.open(item("a")), None);
+    assert_eq!(overlay.open(item("a"), DockSide::Left), None);
     assert_eq!(overlay.current(), Some(&item("a")));
-    assert_eq!(overlay.open(item("b")), Some(item("a")));
+    assert_eq!(overlay.open(item("b"), DockSide::Right), Some(item("a")));
     assert_eq!(overlay.close(), Some(item("b")));
     assert_eq!(overlay.current(), None);
 

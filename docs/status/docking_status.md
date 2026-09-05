@@ -24,8 +24,10 @@
 - Normal tab selection uses a retained value-only path, and live splitter movement updates retained
   Grid tracks with arrange invalidation. CustomTabView caches private presenter references and the
   content presenter measures only the selected page while retaining hidden page ownership.
-- Four custom auto-hide strips, icon/title entries, a single wrapper-hosting overlay pane, and pin
-  affordances are present per Dock surface.
+- Four custom auto-hide strips, icon/title entries, a single side-aware overlay pane with an
+  opaque background and dedicated page-content host, and pin affordances are present per Dock
+  surface. The popup keeps the tab header wrapper out of the page surface and anchors its fixed
+  panel to the selected side.
 - Drop discovery carries the selected `RootKind`, target group, and exact surface-local preview
   rectangle together. Surface registration stores floating-root identity, corrects non-zero
   `DockSurfaceView` offsets, filters group hit testing by root, and keeps only the target surface's
@@ -52,7 +54,7 @@
 
 ## Tests and verification state
 
-The focused `elwindui-docking` suite currently has 85 passing tests covering default
+The focused `elwindui-docking` suite currently has 86 passing tests covering default
 initialization/reset, activation, close/reopen, all four split/edge sides, snapshot round-trip,
 auto-hide state, typed invalid values, latest-only source logic, removed-authored-group repair,
 adjacent split-weight transformation, generated-group drag targets, retained runtime presentation,
@@ -61,15 +63,16 @@ root/geometry and offset conversion, positioned previews, floating source geomet
 failure/success, stable host identity, native close veto/accept, final-root cleanup, actual tab and
 splitter pointer paths, prepare/commit ordering, and unmount/weak-lifetime cleanup, including V2
 active-item round-trip, V1 rejection, clear/reset, whole-group movement, empty-group presentation,
-indexed context-close actions, exact root/group target geometry, and resolved center insertion.
+indexed context-close actions, exact root/group target geometry, resolved center insertion, and
+auto-hide page-content ownership plus side-aware popup geometry.
 The focused `elwindui-custom-controls` suite has 9 library tests and 38 integration tests, including
 the 24-tab retained-selection operation budget, structural-selection counters, hidden-page measure
 checks, and compact presentation. Native GUI behavior still requires platform-host verification
 where noted below.
 
-The current workspace verification is `cargo test --workspace`: 82 suites, 1025 passed, 0 failed,
+The current workspace verification is `cargo test --workspace`: 82 suites, 1026 passed, 0 failed,
 3 ignored. `cargo check --workspace` passes, `cargo fmt --all -- --check` passes, and the repository
-rust-analyzer diagnostic gate passes with 222 intentional `Ra("inactive-code", WeakWarning)` records
+rust-analyzer diagnostic gate passes with 226 intentional `Ra("inactive-code", WeakWarning)` records
 and zero actionable diagnostics. `git diff --check` also passes. Cargo reports the repository's
 existing future-incompatibility warning; it is not a new test failure.
 
@@ -98,9 +101,10 @@ existing future-incompatibility warning; it is not a new test failure.
   click plus native floating close were re-run with driver success, process survival, and empty app
   stdout/stderr. V1 snapshot compatibility is not required; only the V2 save/reset/restore path is
   part of this acceptance.
-- Still not proven in this session: auto-hide popup visual correctness (the popup opens and changes
-  the active item, but its entry overlaps the document tab strip), the complete disabled-capability
-  interaction matrix, and independent interaction with two simultaneous floating windows. These
-  remain NOT RUN or FAIL as stated above rather than inferred from compilation or a screenshot.
+- Still not proven in this session: the complete disabled-capability interaction matrix and
+  independent interaction with two simultaneous floating windows. These remain NOT RUN rather
+  than inferred from compilation or a screenshot. Auto-hide popup visual correctness is PASS:
+  the fixed AppKit run opened the right-side popup without document-tab overlap, placed the pin in
+  the panel's top-right, and restored the docked item after unpin.
   WinUI3 native Docking acceptance is DEFERRED to a separate follow-up Issue; GTK4 native floating
   remains unavailable without a usable GTK Window implementation.

@@ -13,7 +13,8 @@ use crate::core::ui::{MenuExt, MenuItemExt};
 use crate::model::{RootKind, SplitAddress};
 use crate::snapshot::{SnapshotAutoHideEntry, SnapshotGroupKey, SnapshotNode, SnapshotOrientation};
 use crate::{
-    DockGroup, DockGroupId, DockItem, DockItemId, DockLayoutError, DockLayoutModel, DockSplitPanel,
+    DockGroup, DockGroupId, DockItem, DockItemId, DockLayoutError, DockLayoutModel, DockSide,
+    DockSplitPanel,
 };
 use elwindui_custom_controls::{
     CustomSplitter, CustomSplitterExt, CustomTabView, CustomTabViewExt, CustomTabViewItem,
@@ -287,12 +288,12 @@ struct ReconcilePlan {
     group_items: BTreeMap<SnapshotGroupKey, Vec<DockItemId>>,
     group_roots: BTreeMap<SnapshotGroupKey, RootKind>,
     group_selected: BTreeMap<SnapshotGroupKey, Option<DockItemId>>,
-    auto_hide_roots: BTreeMap<DockItemId, RootKind>,
+    auto_hide_roots: BTreeMap<DockItemId, (RootKind, DockSide)>,
     root: Option<RuntimeNode>,
     floating: Vec<PlannedFloatingRuntime>,
     surfaces: SurfaceRegistry,
     main_surface_child: Option<Rc<dyn UIElementExt>>,
-    open_auto_hide: Vec<(RootKind, DockItemId)>,
+    open_auto_hide: Vec<(RootKind, DockSide, DockItemId)>,
     host_sync: PreparedFloatingHostSync,
 }
 
@@ -303,7 +304,7 @@ pub struct RuntimeRealization {
     group_items: BTreeMap<SnapshotGroupKey, Vec<DockItemId>>,
     group_roots: BTreeMap<SnapshotGroupKey, RootKind>,
     group_selected: BTreeMap<SnapshotGroupKey, Option<DockItemId>>,
-    auto_hide_roots: BTreeMap<DockItemId, RootKind>,
+    auto_hide_roots: BTreeMap<DockItemId, (RootKind, DockSide)>,
     owners: BTreeMap<DockItemId, RuntimePresentationOwner>,
     root: Option<RuntimeNode>,
     floating: Vec<FloatingRuntime>,
@@ -501,8 +502,16 @@ impl RuntimeRealization {
         let desired_owners = desired_owners(&snapshot);
         let floating_count = snapshot.floating_roots.len();
         let mut auto_hide_roots = BTreeMap::new();
-        for entry in snapshot.auto_hide.iter().flatten() {
-            auto_hide_roots.insert(entry.item.clone(), auto_hide_root(entry, floating_count));
+        for (side_index, entries) in snapshot.auto_hide.iter().enumerate() {
+            let Some(side) = DockSide::ALL.get(side_index).copied() else {
+                continue;
+            };
+            for entry in entries {
+                auto_hide_roots.insert(
+                    entry.item.clone(),
+                    (auto_hide_root(entry, floating_count), side),
+                );
+            }
         }
 
         let mut groups = self.groups.clone();
@@ -584,9 +593,19 @@ impl RuntimeRealization {
         let open_auto_hide = snapshot
             .auto_hide
             .iter()
-            .flatten()
-            .filter(|entry| entry.open)
-            .map(|entry| (auto_hide_root(entry, floating_count), entry.item.clone()))
+            .enumerate()
+            .flat_map(|(side_index, entries)| {
+                let side = DockSide::ALL.get(side_index).copied();
+                entries.iter().filter_map(move |entry| {
+                    side.filter(|_| entry.open).map(|side| {
+                        (
+                            auto_hide_root(entry, floating_count),
+                            side,
+                            entry.item.clone(),
+                        )
+                    })
+                })
+            })
             .collect::<Vec<_>>();
         let floating_specs = floating
             .iter()
@@ -720,14 +739,14 @@ impl RuntimeRealization {
                 &self.owner,
             );
         }
-        for (root, item) in open_auto_hide {
+        for (root, side, item) in open_auto_hide {
             if let Some(surface) = match &root {
                 RootKind::Main => Some(&mut self.main_surface),
                 RootKind::Floating(index) => {
                     floating.get_mut(*index).map(|runtime| &mut runtime.surface)
                 }
             } {
-                surface.auto_hide.open(item.clone());
+                surface.auto_hide.open(item.clone(), side);
                 surface
                     .auto_hide
                     .present_open_item(self.registry.wrapper(&item));
@@ -1067,6 +1086,16 @@ impl RuntimeRealization {
     }
 
     #[cfg(test)]
+    pub(crate) fn auto_hide_parts_for_test(&self, root: &RootKind) -> Option<(Rc<Grid>, Rc<Grid>)> {
+        self.surface_runtime(root).map(|runtime| {
+            (
+                runtime.auto_hide.pane_for_test(),
+                runtime.auto_hide.page_host_for_test(),
+            )
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn preview_for_test(&self, root: &RootKind) -> Option<(crate::DockTarget, Rect)> {
         self.surface_runtime(root)
             .and_then(|runtime| runtime.preview.target().zip(runtime.preview.preview_rect()))
@@ -1261,12 +1290,12 @@ impl RuntimeRealization {
 
     #[allow(dead_code)]
     pub(crate) fn open_auto_hide(&mut self, item: DockItemId) -> Option<DockItemId> {
-        let root = self.auto_hide_roots.get(&item)?.clone();
+        let root = self.auto_hide_roots.get(&item)?.0.clone();
         self.open_auto_hide_on(root, item)
     }
 
     pub(crate) fn present_auto_hide(&self, item: &DockItemId) {
-        let Some(root) = self.auto_hide_roots.get(item) else {
+        let Some((root, _side)) = self.auto_hide_roots.get(item) else {
             return;
         };
         if let Some(surface) = self.surface_runtime(root) {
@@ -1283,8 +1312,9 @@ impl RuntimeRealization {
     ) -> Option<DockItemId> {
         self.clear_auto_hide_presentations();
         let wrapper = self.registry.wrapper(&item);
+        let side = self.auto_hide_roots.get(&item)?.1;
         self.surface_runtime_mut(&root).map(|surface| {
-            let previous = surface.auto_hide.open(item.clone());
+            let previous = surface.auto_hide.open(item.clone(), side);
             surface.auto_hide.present_open_item(wrapper);
             previous
         })?

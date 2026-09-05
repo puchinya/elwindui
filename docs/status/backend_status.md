@@ -28,7 +28,7 @@ Snapshot: 2026-09-02. Architecture is indexed in [`../design/README.md`](../desi
 
 ## WinUI 3 current gaps
 
-- Self-drawn Canvas pointer pressed/moved/released forwarding, native capture, optional normalized screen positions, and bidirectional root/screen conversion are implemented for #174. Windows verification is pending in Issue #178 and was intentionally separated from PR #175.
+- Self-drawn Canvas pointer pressed/moved/released forwarding, native capture, optional normalized screen positions, and bidirectional root/screen conversion remain implemented for #174. Issue #178 completed its current Windows evidence pass: build and automated gates passed, while the unresolved real-mouse and remaining coordinate/topology rows were classified and transferred to [#224](https://github.com/puchinya/elwindui/issues/224). Those transferred rows are not runtime-verified yet. This verification remains intentionally separate from PR #175.
 - Pointer cancellation/capture-loss handling is implemented for #179 through `PointerCanceled`, `PointerCaptureLost`, host deactivation, tree replacement/clear, and captured-subtree unmount. Windows verification is pending in Issue #180.
 - SVG group blend modes without direct `CanvasBlend` mappings, isolation, filters, and luminance-mask rasterization need an offscreen effect graph.
 - Cross-backend parity has been verified for the controls recorded in [`control_status.md`](control_status.md), but the entire backend contract has not been re-audited.

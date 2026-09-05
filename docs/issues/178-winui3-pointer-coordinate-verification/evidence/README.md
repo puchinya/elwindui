@@ -1,86 +1,109 @@
 # Issue #178 — WinUI3 pointer and coordinate verification evidence
 
-Verification was attempted on branch `feature/178-winui3-pointer-coordinate-verification` at commit `f2412f7ea807e66d780be57480c5be86453f07e6` (the Issue #178 baseline). This remained a verification-only change: no pointer or coordinate production code was changed.
+## Current verification — 2026-09-05
 
-## Environment
+**Status: BLOCKED by `ENVIRONMENT_LIMITATION`.** The latest-master build and automated WinUI3 gates pass, but the required live matrix could not be executed because the approved CUA surface exposed no native Windows apps or windows. No runtime `PASS` is claimed.
 
-- Windows edition/build: unavailable. `Get-CimInstance Win32_OperatingSystem` returned `Access denied` in this environment.
-- Architecture: `AMD64` / `x86_64-pc-windows-msvc`.
-- `rustc -Vv`: `rustc 1.97.1 (8bab26f4f 2026-07-14)`, commit `8bab26f4f68e0e26f0bb7960be334d5b520ea452`, LLVM `22.1.6`.
-- `cargo -V`: `cargo 1.97.1 (c980f4866 2026-06-30)`.
-- Real input method: none completed. The temporary public-API probe was prepared, but the WinUI3 crate failed to compile before a window could launch. No UI Automation pointer or capture result is claimed.
-- Display enumeration exposed one primary display, `\\.\DISPLAY17`, bounds `0,0–1108,652` and working area `0,0–1108,612`. DPI/scaling was unavailable; no runtime scenario used this display. No secondary monitor or negative-coordinate monitor was available to the probe.
+This remains verification-only. No product source, test, or backend implementation file was changed.
 
-## Probe and ownership surface
+## Environment and execution context
 
-The ignored temporary standalone Cargo application at `.agent-state/issues/178/verification-app/` uses only public ElwindUI APIs. It contains a self-drawn `TextBlock` glyph probe, routed pressed/moved/released/right-tapped handlers, bounded event traces, root/screen conversion calls, and adjacent native Button and TextBox controls. `cargo fmt --manifest-path .agent-state/issues/178/verification-app/Cargo.toml` passed. `cargo run` did not reach application launch because it hit the same backend compile failure recorded below.
+- Branch: `feature/178-winui3-pointer-coordinate-verification`
+- Verification commit after the required merge: `d96cd7a4fa2c992a2c3ffb49be8bbd0fbd7d6b14`
+- `origin/master`: `1b398f213744...`
+- Host: Windows `x86_64-pc-windows-msvc`, `rustc 1.97.1 (8bab26f4f 2026-07-14)`, `cargo 1.97.1 (c980f4866 2026-06-30)`
+- User token/integrity: standard interactive user, `Medium Mandatory Level`; no administrator-only success was used as acceptance.
+- Active display enumeration (`System.Windows.Forms.Screen::AllScreens`): primary `\\.\DISPLAY49`, bounds `0,0–1020,651`, working area `0,0–1020,611`, 32-bit color.
+- WMI exposed `192` logical pixels per inch for the generic monitor entries (200% scale), but no usable per-monitor mapping was available for a live probe window. No secondary or negative-coordinate desktop was available to the UI automation surface.
+- CUA state while the probe and `controls-demo` were running: `apps: []`; only the Codex in-app browser was listed. The WinUI3 processes were alive and responsive but had `MainWindowHandle = 0`, no discoverable title/rectangle, and no selectable UI surface.
 
-Source inspection confirmed that the renderer proxy sets `IsHitTestVisible(false)` for self-drawn `TextBlock` content and that native-control branches remain native-owned. This is code evidence only; no click counts were collected.
+## Probe and trace
 
-## Build and test results
+The ignored agent-local probe at `.agent-state/issues/178/verification-app/` was recreated with public ElwindUI APIs only. It contains:
 
-| Command | Result | Observation |
+- one self-drawn target with rendered glyph text and a blank interior;
+- routed `pressed` / `moved` / `released` / `right_tapped` handlers;
+- `root_to_screen` / `screen_to_root` calls;
+- adjacent native Button and TextBox controls;
+- a bounded JSONL trace under `.agent-state/issues/178/results/trace.jsonl`.
+
+The probe compiled successfully and entered its executable process. The trace contains only its metadata line; no pointer or native-control event was generated because no UI surface could be selected. The process was then stopped with Ctrl+C. `controls-demo` was also built and reached its executable process, but had the same `MainWindowHandle = 0` / CUA `apps: []` limitation and was stopped without input.
+
+## Automated build and test evidence
+
+All commands below were run after `. .\tools\setup-vs-env.ps1` unless noted otherwise.
+
+| Command | Result | Evidence |
 |---|---|---|
-| `. .\tools\setup-vs-env.ps1; cargo check -p elwindui-backend-winui3` | FAIL | 49 WinUI3 compile errors; generated bindings also reported 7,688 omitted unsupported metadata members. |
-| `. .\tools\setup-vs-env.ps1; cargo test -p elwindui-backend-winui3` | FAIL | Same 49-error backend compile blocker; tests did not run. |
+| `cargo check -p elwindui-backend-winui3` | PASS | Exit 0; only the known binding-generation omission warning. |
+| `cargo build -p controls-demo` | PASS | Exit 0. |
 | `cargo test -p elwindui-core pointer_dispatch_preserves_backend_screen_position_during_capture` | PASS | 1 passed, 0 failed. |
-| `cargo build -p controls-demo` | FAIL | Same WinUI3 backend compile blocker; demo did not launch. |
-| `cargo run --manifest-path .agent-state/issues/178/verification-app/Cargo.toml` | FAIL | Probe compilation stopped at the same backend blocker; no window launched. |
-| `cargo fmt --all` | PASS | No formatting changes. |
 | `cargo fmt --all -- --check` | PASS | Clean. |
-| `rust-analyzer diagnostics .` | FAIL | Exited 1 with 373 actionable `E0282` inference errors, 117 allowed inactive-code `WeakWarning`s, and 16 rustc-lint warnings. |
-| `cargo check --workspace` | FAIL | Same 49 WinUI3 backend compile errors. |
-| `cargo build --workspace` | FAIL | Same 49 WinUI3 backend compile errors. |
-| `cargo test --workspace` | FAIL | Same 49 WinUI3 backend compile errors. |
+| `rust-analyzer diagnostics .` | PASS | Exit 0 after setup-vs-env; only cfg-only inactive-code warnings were reported. |
+| `cargo check --workspace` | PASS | Exit 0. |
+| `cargo build --workspace` | PASS | Exit 0. |
+| `cargo test -p elwindui-backend-winui3` | PASS | 42 passed, 0 failed; hosted XAML Button/Text/Window assertions executed. |
+| `cargo test --workspace` | PASS | Exit 0; all workspace tests and doctests passed. |
+| `cargo fmt --manifest-path .agent-state/issues/178/verification-app/Cargo.toml -- --check` | PASS | Probe formatting clean. |
+| `cargo check --manifest-path .agent-state/issues/178/verification-app/Cargo.toml` | PASS | Probe compiles in WinUI3 host context. |
 | `git diff --check` | PASS | No whitespace errors. |
 
-The compile regression is tracked separately in [Issue #207](https://github.com/puchinya/elwindui/issues/207). Representative errors include missing `UI_Composition` bindings, missing generated WinUI types such as `IPropertySet`/`BitmapSource`, and unresolved `Point`, `Rect`, `UIElementExt`, `Microsoft`, and `AppWindowClosingEventArgs` references. No production fix was made in #178.
+The previous #207 compile blocker is not present on this branch: the focused backend check, `controls-demo` build, backend suite, workspace check/build/test, and probe check all pass. #207 is retained below only as historical context.
 
-## Pointer routing and ownership results
+## Pointer matrix
 
-No real pointer event trace was collected because the application could not launch. Therefore event counts, glyph/blank-area counts, drag-outside-element behavior, native capture release, right-tap delivery, and native-control before/after Core counts are all unavailable rather than passing.
+The contract requires real OS mouse input against the actual native window. Because CUA could not select a WinUI3 window, every live row is explicitly classified as `ENVIRONMENT_LIMITATION` and linked to follow-up [Issue #224](https://github.com/puchinya/elwindui/issues/224).
 
-## Coordinate table
+| Case | pressed | moved outside | released | target / result |
+|---|---:|---:|---:|---|
+| P1 blank-area click | — | — | — | `ENVIRONMENT_LIMITATION` — [#224](https://github.com/puchinya/elwindui/issues/224) |
+| P2 glyph click | — | — | — | `ENVIRONMENT_LIMITATION` — [#224](https://github.com/puchinya/elwindui/issues/224) |
+| P3 captured drag outside | — | — | — | target identity and capture not collected — `ENVIRONMENT_LIMITATION`, [#224](https://github.com/puchinya/elwindui/issues/224) |
+| P4 post-release / native Button | — | — | — | stuck capture and duplicate Core events not collected — `ENVIRONMENT_LIMITATION`, [#224](https://github.com/puchinya/elwindui/issues/224) |
+| P5 native TextBox/TextArea ownership | — | — | — | native input/focus and self-drawn counter not collected — `ENVIRONMENT_LIMITATION`, [#224](https://github.com/puchinya/elwindui/issues/224) |
+| P6 right tap | — | — | — | `on_right_tapped` / context-menu result not collected — `ENVIRONMENT_LIMITATION`, [#224](https://github.com/puchinya/elwindui/issues/224) |
 
-No `P`, `S`, `R`, or `P'` sample exists because no window was launched. `—` means not collected; no tolerance result is inferred.
+Issue #180 cancellation/capture-loss behavior was not intentionally exercised or claimed.
 
-| Monitor/scenario | `P` | `S` (`screen_position`) | `R` (`root_to_screen(P)`) | `P'` (`screen_to_root(S)`) | `|S-R|` x/y | `|P'-P|` x/y | Result (≤1.0 DIP/axis) |
-|---|---|---|---|---|---|---|---|
-| Primary `DISPLAY17` | — | — | — | — | — | — | FOLLOW-UP — [#207](https://github.com/puchinya/elwindui/issues/207) |
-| Secondary monitor | — | — | — | — | — | — | FOLLOW-UP — [#207](https://github.com/puchinya/elwindui/issues/207); no secondary display exposed |
-| Negative desktop coordinates | — | — | — | — | — | — | FOLLOW-UP — [#207](https://github.com/puchinya/elwindui/issues/207); no negative-coordinate display exposed |
-| Different-DPI monitor | — | — | — | — | — | — | FOLLOW-UP — [#207](https://github.com/puchinya/elwindui/issues/207); DPI unavailable |
+## Coordinate and topology matrix
 
-## Regression and acceptance matrix
+No `P`, `S`, `R`, or `P'` values are synthesized. The ≤1.0 DIP/axis comparison is therefore not evaluated.
 
-All runtime rows below are linked to #207 because the build failure prevented the required Windows application launch. This is not a claim that the product behavior failed at runtime.
+| Scenario | Monitor / bounds / DPI | P | S (`screen_position`) | R (`root_to_screen(P)`) | P' (`screen_to_root(S)`) | `|S-R|` x/y | `|P'-P|` x/y | Result |
+|---|---|---|---|---|---|---|---|---|
+| Primary | `\\.\DISPLAY49`, `0,0–1020,651`, WMI 192 PPI | — | — | — | — | — | — | `ENVIRONMENT_LIMITATION` — [#224](https://github.com/puchinya/elwindui/issues/224) |
+| Secondary | no selectable secondary display in active topology | — | — | — | — | — | — | `ENVIRONMENT_LIMITATION` — [#224](https://github.com/puchinya/elwindui/issues/224) |
+| Negative desktop coordinates | no selectable negative-coordinate monitor | — | — | — | — | — | — | `ENVIRONMENT_LIMITATION` — [#224](https://github.com/puchinya/elwindui/issues/224) |
+| Different DPI | no selectable second monitor / per-monitor mapping; WMI generic entries reported 192 PPI | — | — | — | — | — | — | `ENVIRONMENT_LIMITATION` — [#224](https://github.com/puchinya/elwindui/issues/224) |
 
-| Issue #178 item | Result | Evidence / follow-up |
+## Acceptance mapping
+
+| Requirement | Result | Owning evidence / follow-up |
 |---|---|---|
-| PointerPressed | FOLLOW-UP | No runtime sample; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| PointerMoved capture | FOLLOW-UP | No runtime sample; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| PointerReleased capture | FOLLOW-UP | No runtime sample; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| Drag outside element | FOLLOW-UP | No runtime sample; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| Native capture released | FOLLOW-UP | No runtime sample; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| TextBlock glyph hit | FOLLOW-UP | Probe prepared but not launched; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| No renderer dead zone | FOLLOW-UP | No runtime sample; code inspection only; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| NativeControl no duplicate | FOLLOW-UP | No runtime sample; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| root/screen round trip | FOLLOW-UP | No `P/S/R/P'` samples; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| negative desktop coordinates | FOLLOW-UP | Topology unavailable and no runtime sample; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| secondary monitor | FOLLOW-UP | No secondary display exposed and no runtime sample; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| different DPI | FOLLOW-UP | DPI unavailable and no runtime sample; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| screen_position match | FOLLOW-UP | No runtime sample; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| context-menu placement | FOLLOW-UP | `controls-demo` did not build; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| `on_right_tapped` | FOLLOW-UP | No runtime sample; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| Button | FOLLOW-UP | `controls-demo` did not build; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| TextArea/TextBox | FOLLOW-UP | `controls-demo` did not build; [#207](https://github.com/puchinya/elwindui/issues/207) |
-| TabView | FOLLOW-UP | `controls-demo` did not build; [#207](https://github.com/puchinya/elwindui/issues/207) |
+| self-drawn blank and glyph hit ownership | `ENVIRONMENT_LIMITATION` | No CUA-selectable native window; [#224](https://github.com/puchinya/elwindui/issues/224) |
+| pressed/moved/released cardinality and captured drag | `ENVIRONMENT_LIMITATION` | Trace contains metadata only; [#224](https://github.com/puchinya/elwindui/issues/224) |
+| post-release capture release and native Button ownership | `ENVIRONMENT_LIMITATION` | `controls-demo` process had no selectable UI surface; [#224](https://github.com/puchinya/elwindui/issues/224) |
+| native TextBox/TextArea input ownership | `ENVIRONMENT_LIMITATION` | No real input delivered; [#224](https://github.com/puchinya/elwindui/issues/224) |
+| right tap and context-menu placement | `ENVIRONMENT_LIMITATION` | No real input delivered; [#224](https://github.com/puchinya/elwindui/issues/224) |
+| root/screen round trip and screen-position match | `ENVIRONMENT_LIMITATION` | No `P/S/R/P'` sample; [#224](https://github.com/puchinya/elwindui/issues/224) |
+| secondary, negative-coordinate, and mixed-DPI topology | `ENVIRONMENT_LIMITATION` | Topology not available to the UI surface; [#224](https://github.com/puchinya/elwindui/issues/224) |
+| #180 cancellation/capture-loss separation | PASS (scope separation) | No cancellation behavior was intentionally exercised. |
 
-## Findings and related work
+## Findings and history
 
-- Implementation regression: the current #178 baseline cannot compile the WinUI3 backend. Follow-up: [Issue #207](https://github.com/puchinya/elwindui/issues/207).
-- Environment limitation: OS edition/build and DPI could not be queried; display enumeration exposed only one primary display. These limitations are recorded, not treated as runtime passes.
-- Cancellation/capture-loss work remains separate in [Issue #180](https://github.com/puchinya/elwindui/issues/180); it was not absorbed into #178.
-- Related implementation and verification context: [Issue #174](https://github.com/puchinya/elwindui/issues/174), [PR #175](https://github.com/puchinya/elwindui/pull/175), [Issue #172](https://github.com/puchinya/elwindui/issues/172), and [Issue #173](https://github.com/puchinya/elwindui/issues/173).
+- `ENVIRONMENT_LIMITATION`: live WinUI3 OS-input verification is blocked by the missing CUA/native-window surface. The focused environment follow-up is [Issue #224](https://github.com/puchinya/elwindui/issues/224), milestone `0.1.0`, `phase:requirements` + `blocked`.
+- `PASS`: latest-master automated build, backend tests, workspace tests, and probe compilation succeed in host context.
+- Historical #207 blocker: the earlier evidence recorded a 49-error WinUI3 compile failure and routed all runtime rows to [Issue #207](https://github.com/puchinya/elwindui/issues/207). That blocker is resolved on the current branch; it is not the reason for the present runtime limitation.
+- Issue #180 remains separate and is not absorbed into #178.
 
-No screenshots were committed because the probe never launched and there was no useful runtime state to capture.
+## Workflow state
+
+```text
+Issue #178: OPEN, phase:review
+PR #208: OPEN; verification docs updated with current environment limitation
+Issue #180: separate; not exercised
+topology / interactive-host follow-up: #224
+implementation regression issues: none
+```
+
+Completion is intentionally not claimed: PR #208 must not be merged and Issue #178 must not be closed until the required live matrix is executed, or the project owner explicitly accepts the classified environment follow-up.

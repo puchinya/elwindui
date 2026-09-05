@@ -72,7 +72,7 @@ where noted below.
 
 The current workspace verification is `cargo test --workspace`: 82 suites, 1026 passed, 0 failed,
 3 ignored. `cargo check --workspace` passes, `cargo fmt --all -- --check` passes, and the repository
-rust-analyzer diagnostic gate passes with 226 intentional `Ra("inactive-code", WeakWarning)` records
+rust-analyzer diagnostic gate passes with 227 intentional `Ra("inactive-code", WeakWarning)` records
 and zero actionable diagnostics. `git diff --check` also passes. Cargo reports the repository's
 existing future-incompatibility warning; it is not a new test failure.
 
@@ -90,6 +90,14 @@ existing future-incompatibility warning; it is not a new test failure.
   created a native `Document B` window and Close removed it from the tabs while the process stayed
   alive. Two independently created floating windows were also closed natively without a panic.
   The transparent chrome/icon backgrounds were visually confirmed.
+- PR #221 final AppKit closure evidence is PASS for the required native cases: Document A was
+  dragged from floating host A into floating host B and remained interactive in B while the
+  source host disappeared; floating bounds were recorded as A, changed natively to B, and
+  restored to C equal to A and different from B; horizontal and vertical Splitter drags each ran
+  for 12 seconds with 480 tracking steps; and the main-thread menu lifetime example retained the
+  native item and fired its callback exactly once after the caller's `Rc` was dropped. The
+  floating-to-floating and Snapshot captures are under `/private/tmp/pr221-e2e-logs/`, with the
+  corresponding stdout/stderr under `.agent-state/issues/220/logs/`.
 - AppKit GUI evidence is stored under `/private/tmp/pr221-e2e-logs/`; copied command stdout/stderr
   is retained under `.agent-state/issues/220/logs/`. Abnormal cases are reported with both streams,
   including the pre-fix inert context action, selector/foreground diagnostics, intermittent
@@ -101,9 +109,10 @@ existing future-incompatibility warning; it is not a new test failure.
   click plus native floating close were re-run with driver success, process survival, and empty app
   stdout/stderr. V1 snapshot compatibility is not required; only the V2 save/reset/restore path is
   part of this acceptance.
-- Still not proven in this session: the complete disabled-capability interaction matrix and
-  independent interaction with two simultaneous floating windows. These remain NOT RUN rather
-  than inferred from compilation or a screenshot. Auto-hide popup visual correctness is PASS:
+- The broader disabled-capability interaction matrix is outside the final #220/#221 AppKit
+  closure cases and is not represented as a required acceptance PASS. The required two-host
+  floating transfer is proven above; no required AppKit closure case remains NOT RUN. Auto-hide
+  popup visual correctness is PASS:
   the fixed AppKit run opened the right-side popup without document-tab overlap, placed the pin in
   the panel's top-right, and restored the docked item after unpin.
   WinUI3 native Docking acceptance is DEFERRED to a separate follow-up Issue; GTK4 native floating

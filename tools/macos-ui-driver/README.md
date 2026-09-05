@@ -39,11 +39,28 @@ evidence is collected. Terminal-launched execution is a valid fallback when Code
 the elevated execution path. A `doctor` result with either value false is a blocked GUI session,
 not a native PASS.
 
-Codex may delegate two bounded sidecar tasks: registering or refreshing the checked-out test
-artifact under `tools/macos-ui-driver/bin`, and executing the real AppKit E2E matrix. The main
-agent must review the file diff and evidence before recording results. This Codex-only rule is
-documented in [`docs/agents/appkit.md`](../../docs/agents/appkit.md) and does not change the
-Claude Code workflow.
+Codex must delegate the real AppKit E2E matrix to a bounded sub-agent before any driver action;
+the standard sub-agent is `gpt-5.6-luna` with standard reasoning effort (`medium`). Codex may
+also delegate a separate sidecar task for registering or refreshing the checked-out test artifact
+under `tools/macos-ui-driver/bin`. The main agent must review the file diff and evidence before
+recording results. This Codex-only routing gate is documented in
+[`docs/agents/appkit.md`](../../docs/agents/appkit.md) and does not change the Claude Code
+workflow. If delegation is unavailable, report BLOCKED instead of performing the E2E in the main
+agent.
+
+For a fast run, perform `doctor` once, launch the prebuilt demo once, reuse its PID across the
+compatible scenarios, batch window-state observations, and capture only the evidence required by
+the acceptance case. Rebuild or relaunch only when the binary changed or the process became
+unusable; save extra screenshots and verbose logs only for abnormal results.
+
+The assigned E2E sub-agent must complete its assigned scenarios itself and must not re-delegate
+them. It must return the required window values and separate stdout/stderr logs; an incomplete
+summary is NOT RUN and cannot be recorded as PASS.
+
+Each Driver CLI invocation is a separate process. The Codex window may regain foreground after it
+exits, so callers must frontmost `docking-demo` immediately before every GUI-acting invocation
+(`focus-window`, `point-click`, `click`, `resize`, and `capture-window`) instead of relying on a
+previous command's focus.
 
 When a driver command fails or a GUI result is abnormal, save its exact stdout and stderr with
 the command and case name. Keep high-volume logs under the Issue-scoped
@@ -142,6 +159,14 @@ macos-ui-driver drag --pid <pid> --window-id <id>
 macos-ui-driver drag --pid <pid> --window-id <floating-id> \
     --start-x <x> --start-y <y> --end-x <main-x> --end-y <main-y> \
     --allow-end-outside-window
+
+macos-ui-driver resize --pid <pid> --window-id <id> \
+    --delta-width <points> --delta-height <points> [--steps <n>] [--duration <seconds>] [--timeout <seconds>]
+# Grabs the target window's lower-right resize handle through real mouse events, applies the
+# requested deltas, and verifies the post-gesture AX size. Either delta may be zero, but not both.
+# The result includes before/after width and height plus changed=true only when AppKit reported a
+# different size.
+# {"success":true,"before":{"width":...,"height":...},"after":{"width":...,"height":...},"changed":true,...}
 
 macos-ui-driver type-text --pid <pid> [--window-id <id>] <selector> --text <string> [--clear]
     [--focus-via ax-attribute|click|none = ax-attribute] [--key-delay 0.02] [--timeout 1.0]

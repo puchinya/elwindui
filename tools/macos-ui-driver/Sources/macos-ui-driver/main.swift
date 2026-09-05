@@ -1,7 +1,7 @@
 // macos-ui-driver — Phase 1 + Phase 2 of docs/status/tooling_status.md (AI-agent-drivable
 // macOS GUI test CLI). Phase 1: app launch/terminate, window enumeration, per-window screenshot
 // capture, and permission diagnostics ("doctor"). Phase 2: Accessibility-tree walking
-// (`dump-tree`/`find`) and control interaction (`set-focus`/`click`/`point-click`/`drag`/
+// (`dump-tree`/`find`) and control interaction (`set-focus`/`click`/`point-click`/`drag`/`resize`/
 // `type-text`/`press-key`/`wait-for`) — driver-side only, see docs/status/tooling_status.md for
 // scope notes.
 // elwindui-internal state introspection and image-diff regression testing are later phases, not
@@ -1129,6 +1129,74 @@ func cmdDrag(_ args: Args) -> Never {
     emit(success: true, fields)
 }
 
+// MARK: - resize
+
+/// Resizes an AX window through the real lower-right resize handle. This is a specialized
+/// counterpart to `drag`: it derives the grab point from the window's current AX bounds, so a
+/// caller does not have to guess title-bar/frame coordinates, and it verifies that AppKit exposed
+/// a changed size after the gesture. The end point may be outside the original bounds when the
+/// requested delta grows the window; only the grab point needs to be inside the target window.
+func cmdResize(_ args: Args) -> Never {
+    let deltaWidth = args.double("delta-width") ?? 0.0
+    let deltaHeight = args.double("delta-height") ?? 0.0
+    guard deltaWidth.isFinite, deltaHeight.isFinite else {
+        fail("resize requires finite --delta-width and --delta-height")
+    }
+    guard deltaWidth != 0.0 || deltaHeight != 0.0 else {
+        fail("resize requires a non-zero --delta-width or --delta-height")
+    }
+
+    let (pid, _, window) = resolveContext(args)
+    let steps = args.int("steps") ?? 20
+    guard (1...10_000).contains(steps) else {
+        fail("--steps must be within 1...10000")
+    }
+    let duration = args.double("duration") ?? 0.5
+    guard duration.isFinite, duration >= 0.0 else {
+        fail("--duration must be a finite non-negative number")
+    }
+    let timeout = args.double("timeout") ?? 1.0
+    guard timeout.isFinite, timeout >= 0.0 else {
+        fail("--timeout must be a finite non-negative number")
+    }
+
+    let foreground = requireForeground(pid: pid, window: window)
+    guard let origin = axPoint(window, kAXPositionAttribute as String),
+        let size = axSize(window, kAXSizeAttribute as String),
+        size.width > 0.0,
+        size.height > 0.0
+    else {
+        fail("target window has no usable AX position/size", foreground)
+    }
+
+    let start = CGPoint(
+        x: origin.x + max(size.width - 2.0, 0.0),
+        y: origin.y + max(size.height - 2.0, 0.0))
+    let end = CGPoint(x: start.x + deltaWidth, y: start.y + deltaHeight)
+    requirePointInsideWindow(start, window: window)
+    guard postMouseDrag(
+        from: start, to: end, button: mouseButtonEvents("left")!, steps: steps, duration: duration)
+    else {
+        fail("failed to create resize events", foreground)
+    }
+
+    let changed = pollUntil(timeout: timeout) { () -> Bool? in
+        guard let current = axSize(window, kAXSizeAttribute as String) else { return nil }
+        return current.width != size.width || current.height != size.height ? true : nil
+    } == true
+    let after = axSize(window, kAXSizeAttribute as String)
+    var fields = foreground
+    fields["before"] = ["width": size.width, "height": size.height]
+    fields["after"] = after.map { ["width": $0.width, "height": $0.height] } as Any
+    fields["delta"] = ["width": deltaWidth, "height": deltaHeight]
+    fields["start"] = ["x": start.x, "y": start.y]
+    fields["end"] = ["x": end.x, "y": end.y]
+    fields["steps"] = steps
+    fields["duration_seconds"] = duration
+    fields["changed"] = changed
+    emit(success: changed, fields)
+}
+
 // MARK: - type-text
 
 /// Synthesizes real keyboard input character-by-character (not one bulk
@@ -1360,7 +1428,7 @@ func cmdWaitFor(_ args: Args) -> Never {
 let argv = Array(CommandLine.arguments.dropFirst())
 guard let command = argv.first else {
     fail(
-        "usage: macos-ui-driver <doctor|launch|terminate|list-windows|capture-window|focus-window|dump-tree|find|set-focus|click|point-click|drag|type-text|press-key|wait-for> [options]"
+        "usage: macos-ui-driver <doctor|launch|terminate|list-windows|capture-window|focus-window|dump-tree|find|set-focus|click|point-click|drag|resize|type-text|press-key|wait-for> [options]"
     )
 }
 let args = Args(Array(argv.dropFirst()))
@@ -1378,6 +1446,7 @@ case "set-focus": cmdSetFocus(args)
 case "click": cmdClick(args)
 case "point-click": cmdPointClick(args)
 case "drag": cmdDrag(args)
+case "resize": cmdResize(args)
 case "type-text": cmdTypeText(args)
 case "press-key": cmdPressKey(args)
 case "wait-for": cmdWaitFor(args)

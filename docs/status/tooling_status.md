@@ -13,7 +13,7 @@ Snapshot: 2026-08-30. Tool architecture is indexed in [`../design/README.md`](..
 
 ## macOS UI driver verification
 
-Implemented commands cover launching/locating a process or window, waiting for window state, bringing a window to the front, querying the Accessibility tree, setting supported values, and invoking supported actions. Accessibility permission and foreground restrictions remain environment constraints.
+Implemented commands cover launching/locating a process or window, waiting for window state, bringing a window to the front, querying the Accessibility tree, setting supported values, and invoking supported actions. The driver must be run outside the Codex workspace-write sandbox for native GUI evidence: in this environment its `doctor` reports both TCC checks false inside the sandbox and both true through the elevated execution path or Terminal. A false check blocks native acceptance rather than providing a partial GUI PASS.
 
 The command catalog and operational precautions belong in [`../agents/appkit.md`](../agents/appkit.md) and [`../../tools/macos-ui-driver/README.md`](../../tools/macos-ui-driver/README.md), not in status.
 

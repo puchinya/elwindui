@@ -19,6 +19,26 @@ swift build
 # binary at: $(swift build --show-bin-path)/macos-ui-driver
 ```
 
+## Codex execution
+
+When this driver is invoked by Codex for real AppKit GUI verification, request Sandbox-outside
+execution for every invocation. The workspace-write sandbox can start the binary but macOS TCC
+reports Accessibility and Screen Recording as unavailable, which makes foreground, Accessibility,
+and screenshot evidence invalid. Do not change Codex's global default to full access just for this
+driver; request the elevated execution per command and run `doctor` first.
+
+Use the checked-out binary when available:
+
+```bash
+BIN=/absolute/path/to/tools/macos-ui-driver/bin/macos-ui-driver
+"$BIN" doctor
+```
+
+The command must report `"accessibility":true` and `"screen_recording":true` before native GUI
+evidence is collected. Terminal-launched execution is a valid fallback when Codex cannot provide
+the elevated execution path. A `doctor` result with either value false is a blocked GUI session,
+not a native PASS.
+
 ## Commands
 
 ```bash

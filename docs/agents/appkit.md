@@ -27,6 +27,13 @@ BIN=$(cd tools/macos-ui-driver && swift build --show-bin-path)/macos-ui-driver
 "$BIN" terminate --pid <pid>                                        # Clean shutdown
 ```
 
+When these commands are run through Codex, request Sandbox-outside execution on every command
+that invokes `macos-ui-driver`. The workspace-write sandbox does not expose the macOS TCC grants
+needed by Accessibility and Screen Recording, even when the same binary succeeds from Terminal.
+Run `"$BIN" doctor` first and require both checks to be `true`; otherwise report native GUI
+acceptance as BLOCKED. Keep the normal Codex sandbox default unchanged and use per-command
+elevation rather than switching the global profile to full access.
+
 ### Fallback Method
 
 Get target window `CGWindowID` via Swift, then use `screencapture`:

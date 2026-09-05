@@ -52,7 +52,7 @@
 
 ## Tests and verification state
 
-The focused `elwindui-docking` suite currently has 71 passing tests covering default
+The focused `elwindui-docking` suite currently has 84 passing tests covering default
 initialization/reset, activation, close/reopen, all four split/edge sides, snapshot round-trip,
 auto-hide state, typed invalid values, latest-only source logic, removed-authored-group repair,
 adjacent split-weight transformation, generated-group drag targets, retained runtime presentation,
@@ -62,27 +62,26 @@ failure/success, stable host identity, native close veto/accept, final-root clea
 splitter pointer paths, prepare/commit ordering, and unmount/weak-lifetime cleanup, including V2
 active-item round-trip, V1 rejection, clear/reset, whole-group movement, empty-group presentation,
 indexed context-close actions, exact root/group target geometry, and resolved center insertion.
-The focused `elwindui-custom-controls` suite has 8 library tests and 38 integration tests, including
-structural-selection counters and compact presentation. Native GUI behavior still requires
-platform-host verification where noted below.
+The focused `elwindui-custom-controls` suite has 9 library tests and 38 integration tests, including
+the 24-tab retained-selection operation budget, structural-selection counters, hidden-page measure
+checks, and compact presentation. Native GUI behavior still requires platform-host verification
+where noted below.
 
-The current workspace verification is `1007 passed, 3 ignored`; `cargo check --workspace`, the
+The current workspace verification is `1024 passed, 3 ignored`; `cargo check --workspace`, the
 `rust_analyzer`-cfg check, and the repository rust-analyzer diagnostic gate all pass. The latter
-reports only intentional `inactive-code` WeakWarnings (204 records, zero actionable diagnostics).
+reports only intentional `inactive-code` WeakWarnings (222 records, zero actionable diagnostics).
 
 ## Platform boundaries
 
-- AppKit runtime interaction: a 2026-09-05 GUI pass launched the rebuilt real `docking-demo` and
-  PASSed initial rendering, active-item/live-status publication, ten rapid tab selections, all four
-  Split directions, all four root Dock directions, cross-group Center movement, whole-group movement,
-  splitter movement on both axes, light/dark theme switching with selection preservation,
-  Snapshot/Clear/Restore/Reset, ordinary tab close, `can_float=false`, and `can_dock=false`.
-  Native floating creation and close also PASSed: the real floating window opened, its native close
-  returned to the main window without a panic, the process stayed alive, and the toolbar repainted.
-  The GUI pass did not establish mid-drag 2px marker observation, exact cross-group midpoint
-  insertion, floating-to-floating transfer, simultaneous floating windows, native bounds persistence,
-  or the full context-command/long-duration splitter matrix; those remain NOT RUN at native level.
-- WinUI3 runtime interaction: run the equivalent matrix only when the separate Issue #207/#217
-  Windows integration state permits it; those fixes are not part of #172/#218.
+- AppKit runtime interaction: the rebuilt real `docking-demo` rendered successfully and its captured
+  GUI shows the retained Docking layout, live status row, and alpha-transparent chrome surfaces.
+  The required interactive rerun is BLOCKED: `macos-ui-driver focus-window` could not confirm that
+  the demo became frontmost (`frontmost_application_name` remained outside the demo), so native
+  pointer, floating move/resize, context, auto-hide, and long-duration splitter results are not
+  claimed. The prior observed native PASS items remain historical evidence only; they do not replace
+  the blocked final matrix.
+- WinUI3 runtime interaction: Issues #207 and #217 are closed and current master includes the
+  Windows gate recovery. No usable Windows GUI host was available in this macOS run, so canonical
+  WinUI3 build/native Docking execution was not run; compile-only evidence is not a native PASS.
 - GTK4: compile as required by the workspace. Do not claim native floating runtime support without a
   real GTK Window implementation.

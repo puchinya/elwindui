@@ -8,10 +8,20 @@ use super::{
     CloseButtonPresentation, CustomTabCloseButton, CustomTabCloseButtonExt, TabStripPosition,
     weak_self_from_visual_owner,
 };
+#[cfg(test)]
+use std::cell::RefCell;
+#[cfg(test)]
+use std::collections::HashMap;
 use std::rc::Rc;
 
 const TAB_HEADER_HEIGHT: f32 = 30.0;
 const COMPACT_TAB_HEADER_HEIGHT: f32 = 26.0;
+
+#[cfg(test)]
+thread_local! {
+    static PRESENTATION_UPDATE_COUNTS: RefCell<HashMap<usize, usize>> =
+        RefCell::new(HashMap::new());
+}
 
 /// One item displayed by [`CustomTabView`]. Its visual template is the tab header; its inherited
 /// `ContentControl` content remains the logical page presented by the private content presenter.
@@ -183,6 +193,8 @@ impl CustomTabViewItem {
         close_button_presentation: CloseButtonPresentation,
         compact_tabs: bool,
     ) {
+        #[cfg(test)]
+        self.note_presentation_update();
         if self.is_selected() != is_selected {
             self.set_is_selected(is_selected);
         }
@@ -208,6 +220,21 @@ impl CustomTabViewItem {
 
     pub(crate) fn refresh_theme(&self) {
         self.sync_close_button();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn presentation_update_count_for_test(&self) -> usize {
+        let key = self as *const Self as usize;
+        PRESENTATION_UPDATE_COUNTS.with(|counts| counts.borrow().get(&key).copied().unwrap_or(0))
+    }
+
+    #[cfg(test)]
+    fn note_presentation_update(&self) {
+        let key = self as *const Self as usize;
+        PRESENTATION_UPDATE_COUNTS.with(|counts| {
+            let mut counts = counts.borrow_mut();
+            *counts.entry(key).or_default() += 1;
+        });
     }
 
     fn sync_header_layout(&self) {

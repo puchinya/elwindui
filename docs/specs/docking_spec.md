@@ -77,6 +77,10 @@ separate retained target set; a root-edge target never aliases or highlights its
 group Split target. Both sets are non-hit-testable and the source drag coordinator remains the only
 input authority.
 
+For a tab drag, a pointer inside the target group's arranged tab-header rectangle takes precedence
+over the group's compass split bands. This makes the actual header midpoint available for Center
+insertion while whole-group drags continue to resolve the compass targets.
+
 For a Center drop, the resolved target also carries an optional tab insertion index. The index is
 resolved from the retained arranged header rectangles and their actual midpoints: the left side of
 a midpoint inserts before that header, the right side proceeds to the next header, and a point in the

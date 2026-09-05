@@ -125,13 +125,13 @@ impl CustomTabStripPresenter {
             let position = self.tab_strip_position();
             let compact = self.compact();
             let close = self.close_button_presentation();
-            if self.last_presented_tab_strip_position() == Some(position)
-                && self.last_presented_compact_tabs() == Some(compact)
-                && self.last_presented_close_button_presentation() == Some(close)
-                && self.last_presented_selected_index() != Some(selected)
-            {
+            let selection_changed = self.last_presented_selected_index() != Some(selected);
+            let presentation_changed = self.last_presented_tab_strip_position() != Some(position)
+                || self.last_presented_compact_tabs() != Some(compact)
+                || self.last_presented_close_button_presentation() != Some(close);
+            if selection_changed && !presentation_changed {
                 self.sync_selection_only(&items, self.last_presented_selected_index(), selected);
-            } else {
+            } else if presentation_changed {
                 self.sync_items(&items);
             }
         } else {

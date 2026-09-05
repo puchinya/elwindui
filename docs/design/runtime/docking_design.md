@@ -95,7 +95,8 @@ their target.
 
 Center insertion queries the retained `CustomTabStripPresenter` header arrangement, including
 unequal and compact headers, rather than estimating equal widths or reconciling the tab view. It
-returns the actual midpoint-derived index and the matching retained header boundary. One retained
+has precedence over compass split-band resolution while the pointer is inside that arranged header,
+then returns the actual midpoint-derived index and the matching retained header boundary. One retained
 two-logical-pixel insertion marker is arranged at that boundary using the semantic accent brush.
 Target, preview, marker, and commit consume the same resolved index; group drags never synthesize
 per-item insertion operations.

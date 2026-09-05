@@ -110,6 +110,11 @@ impl InsertionMarker {
         self.layer.set_rect(None);
     }
 
+    #[cfg(test)]
+    pub(crate) fn marker_rect_for_test(&self) -> Option<Rect> {
+        self.layer.marker_rect()
+    }
+
     pub(crate) fn visual(&self) -> Rc<dyn UIElementExt> {
         self.layer.clone()
     }

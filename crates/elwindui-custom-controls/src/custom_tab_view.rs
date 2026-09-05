@@ -21,6 +21,8 @@ const TAB_DRAG_THRESHOLD: f32 = 4.0;
 thread_local! {
     static STRUCTURAL_RECONCILIATION_COUNTS: RefCell<HashMap<usize, usize>> =
         RefCell::new(HashMap::new());
+    static PRESENTER_SEARCH_COUNTS: RefCell<HashMap<usize, usize>> =
+        RefCell::new(HashMap::new());
 }
 
 #[derive(Clone, Debug)]
@@ -418,6 +420,8 @@ impl CustomTabView {
     }
 
     fn cache_presenters(&self) {
+        #[cfg(test)]
+        self.note_presenter_search();
         let strip = super::core::visual_tree::find_all::<CustomTabStripPresenter>(self)
             .into_iter()
             .find_map(|node| {
@@ -514,23 +518,31 @@ impl CustomTabView {
             && self.last_presented_compact_tabs() == Some(compact)
             && self.last_presented_close_button_presentation() == Some(close)
             && previous != Some(selected);
-        let has_strip_presenter = strip_presenter.is_some();
-        if let Some(presenter) = strip_presenter {
-            presenter.set_selected_index(selected);
-            presenter.set_tab_strip_position(position);
-            presenter.set_compact(compact);
-            presenter.set_close_button_presentation(close);
-            presenter
-                .as_ui_element()
-                .set_attached::<i32>("Grid", "row", self.tab_strip_row());
+        if selection_only {
+            if let Some(presenter) = strip_presenter.as_ref() {
+                presenter.set_selected_index(selected);
+            }
+            if let Some(presenter) = content_presenter.as_ref() {
+                presenter.set_selected_index(selected);
+            }
+        } else {
+            if let Some(presenter) = strip_presenter.as_ref() {
+                presenter.set_selected_index(selected);
+                presenter.set_tab_strip_position(position);
+                presenter.set_compact(compact);
+                presenter.set_close_button_presentation(close);
+                presenter
+                    .as_ui_element()
+                    .set_attached::<i32>("Grid", "row", self.tab_strip_row());
+            }
+            if let Some(presenter) = content_presenter.as_ref() {
+                presenter.set_selected_index(selected);
+                presenter
+                    .as_ui_element()
+                    .set_attached::<i32>("Grid", "row", self.content_row());
+            }
         }
-        if let Some(presenter) = content_presenter {
-            presenter.set_selected_index(selected);
-            presenter
-                .as_ui_element()
-                .set_attached::<i32>("Grid", "row", self.content_row());
-        }
-        if !has_strip_presenter {
+        if strip_presenter.is_none() {
             if selection_only {
                 for index in [previous, Some(selected)].into_iter().flatten() {
                     if let Some(item) = children.get(index) {
@@ -828,6 +840,21 @@ impl CustomTabView {
         STRUCTURAL_RECONCILIATION_COUNTS
             .with(|counts| counts.borrow().get(&key).copied().unwrap_or(0))
     }
+
+    #[cfg(test)]
+    pub(crate) fn presenter_search_count_for_test(&self) -> usize {
+        let key = self as *const Self as usize;
+        PRESENTER_SEARCH_COUNTS.with(|counts| counts.borrow().get(&key).copied().unwrap_or(0))
+    }
+
+    #[cfg(test)]
+    fn note_presenter_search(&self) {
+        let key = self as *const Self as usize;
+        PRESENTER_SEARCH_COUNTS.with(|counts| {
+            let mut counts = counts.borrow_mut();
+            *counts.entry(key).or_default() += 1;
+        });
+    }
 }
 
 fn concrete_tab_item(item: Rc<dyn CustomTabViewItemExt>) -> Rc<CustomTabViewItem> {
@@ -854,7 +881,56 @@ fn concrete_element<T: 'static>(element: Rc<dyn UIElementExt>) -> Rc<T> {
 mod tests {
     use super::*;
     use crate::core::base::Size;
-    use crate::core::ui::layout_root;
+    use crate::core::ui::{ContentControlExt, UIElement, UIElementExt, layout_root};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[elwindui_macros::class(inherits = elwindui_core::ui::UIElement)]
+    struct SelectionPageProbe {
+        measure_count: Cell<usize>,
+        reported_size: Size,
+    }
+
+    #[elwindui_macros::class]
+    impl SelectionPageProbe {
+        #[overrides]
+        fn measure_override(&self, _available: Size) -> Size {
+            self.measure_count.set(self.measure_count.get() + 1);
+            self.reported_size
+        }
+
+        fn construct(reported_size: Size) -> Self {
+            Self {
+                base: UIElement::construct(),
+                measure_count: Cell::new(0),
+                reported_size,
+            }
+        }
+    }
+
+    impl SelectionPageProbe {
+        fn reset_counts(&self) {
+            self.measure_count.set(0);
+        }
+    }
+
+    fn probe_view(count: usize) -> (Rc<CustomTabView>, Vec<Rc<SelectionPageProbe>>) {
+        let view = CustomTabView::new_view();
+        let mut probes = Vec::with_capacity(count);
+        let mut items = Vec::with_capacity(count);
+        for index in 0..count {
+            let probe = SelectionPageProbe::new(Size {
+                width: 40.0 + index as f32,
+                height: 20.0,
+            });
+            let item = CustomTabViewItem::new_item();
+            item.set_content(probe.clone());
+            probes.push(probe);
+            items.push(item);
+        }
+        view.replace_children(items);
+        (view, probes)
+    }
 
     #[test]
     fn selection_only_updates_do_not_enter_structural_reconciliation() {
@@ -894,6 +970,81 @@ mod tests {
             },
         );
         view.replace_children(vec![item.clone(), item]);
+    }
+
+    #[test]
+    fn twenty_four_tab_selection_keeps_retained_runtime_and_update_budget() {
+        let (view, probes) = probe_view(24);
+        let root: Rc<dyn UIElementExt> = view.clone();
+        let size = Size {
+            width: 320.0,
+            height: 180.0,
+        };
+        layout_root(&root, size);
+
+        let items = view.children_values();
+        let original_items = items.clone();
+        let (_, content) = view.presenters();
+        let content = content.expect("the tab view should retain its content presenter");
+        let structural_reconciles = view.structural_reconciliation_count_for_test();
+        let content_reconciles = content.structural_reconciliation_count_for_test();
+        let presenter_searches = view.presenter_search_count_for_test();
+
+        for selected in [1, 7, 15, 23, 3] {
+            let before_updates = items
+                .iter()
+                .map(|item| item.presentation_update_count_for_test())
+                .collect::<Vec<_>>();
+            for probe in &probes {
+                probe.reset_counts();
+            }
+
+            assert!(view.select_index(selected));
+            layout_root(&root, size);
+
+            let header_updates = items
+                .iter()
+                .zip(before_updates)
+                .map(|(item, before)| item.presentation_update_count_for_test() - before)
+                .sum::<usize>();
+            assert!(
+                header_updates <= 2,
+                "selection updated {header_updates} tab headers"
+            );
+            assert!(
+                probes
+                    .iter()
+                    .enumerate()
+                    .all(|(index, probe)| index == selected || probe.measure_count.get() == 0),
+                "selection measured a hidden page"
+            );
+            assert!(
+                view.children_values()
+                    .iter()
+                    .zip(original_items.iter())
+                    .all(|(current, original)| Rc::ptr_eq(current, original)),
+                "selection replaced a retained tab wrapper"
+            );
+            let (_, current_content) = view.presenters();
+            let current_content = current_content.expect("content presenter should remain cached");
+            assert!(Rc::ptr_eq(&content, &current_content));
+            for (index, probe) in probes.iter().enumerate() {
+                let expected: Rc<dyn UIElementExt> = probe.clone();
+                let actual = content
+                    .content_for_test(index)
+                    .expect("every tab page should remain retained");
+                assert!(Rc::ptr_eq(&actual, &expected));
+            }
+            assert_eq!(
+                view.structural_reconciliation_count_for_test(),
+                structural_reconciles
+            );
+            assert_eq!(
+                content.structural_reconciliation_count_for_test(),
+                content_reconciles
+            );
+            assert_eq!(view.presenter_search_count_for_test(), presenter_searches);
+        }
     }
 }
 

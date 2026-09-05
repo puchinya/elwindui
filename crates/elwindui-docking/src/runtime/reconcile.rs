@@ -1041,6 +1041,13 @@ impl RuntimeRealization {
     }
 
     #[cfg(test)]
+    pub(crate) fn group_title_bar_for_test(&self, group: &SnapshotGroupKey) -> Option<Rc<Grid>> {
+        self.group_hosts
+            .get(group)
+            .map(|host| host.title_bar.clone())
+    }
+
+    #[cfg(test)]
     pub(crate) fn main_runtime_root_for_test(&self) -> Option<Rc<dyn UIElementExt>> {
         self.root.as_ref().map(RuntimeNode::element)
     }
@@ -1063,6 +1070,12 @@ impl RuntimeRealization {
     pub(crate) fn preview_for_test(&self, root: &RootKind) -> Option<(crate::DockTarget, Rect)> {
         self.surface_runtime(root)
             .and_then(|runtime| runtime.preview.target().zip(runtime.preview.preview_rect()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insertion_marker_for_test(&self, root: &RootKind) -> Option<Rect> {
+        self.surface_runtime(root)
+            .and_then(|runtime| runtime.insertion_marker.marker_rect_for_test())
     }
 
     #[cfg(test)]
@@ -1143,9 +1156,6 @@ impl RuntimeRealization {
             surface_local_point,
             groups.iter().cloned(),
         )?;
-        if target.target != crate::DockTarget::Center || self.group_drag.is_some() {
-            return Some(target);
-        }
         let Some(group) = target.group.as_ref() else {
             return Some(target);
         };
@@ -1159,6 +1169,21 @@ impl RuntimeRealization {
         let Some(group_view) = self.groups.get(group) else {
             return Some(target);
         };
+        let in_tab_strip = group_view
+            .tab_insertion_boundary(0)
+            .is_some_and(|header| local.y >= header.y && local.y <= header.y + header.height);
+        if self.drag.is_some() && in_tab_strip {
+            if let Some(index) = group_view.tab_insertion_index_at(local) {
+                let mut resolved = target;
+                resolved.target = crate::DockTarget::Center;
+                resolved.preview_rect = group_preview(*bounds, crate::DockTarget::Center)?;
+                resolved.tab_insert_index = Some(index);
+                return Some(resolved);
+            }
+        }
+        if target.target != crate::DockTarget::Center || self.group_drag.is_some() {
+            return Some(target);
+        }
         let index = group_view.tab_insertion_index_at(local);
         let mut resolved = target;
         resolved.tab_insert_index = index;
@@ -1340,10 +1365,23 @@ impl RuntimeRealization {
             .is_some_and(|item| item.can_float_value())
     }
 
+    pub(crate) fn can_dock(&self, item: &DockItemId) -> bool {
+        self.registry
+            .items
+            .get(item)
+            .is_some_and(|item| item.can_dock_value())
+    }
+
     pub(crate) fn can_float_group(&self, group: &SnapshotGroupKey) -> bool {
         self.group_items
             .get(group)
             .is_some_and(|items| !items.is_empty() && items.iter().all(|item| self.can_float(item)))
+    }
+
+    pub(crate) fn can_dock_group(&self, group: &SnapshotGroupKey) -> bool {
+        self.group_items
+            .get(group)
+            .is_some_and(|items| !items.is_empty() && items.iter().all(|item| self.can_dock(item)))
     }
 
     pub(crate) fn dispose(&mut self) {

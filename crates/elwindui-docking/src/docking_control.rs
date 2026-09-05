@@ -683,13 +683,13 @@ impl DockingControl {
         }
     }
 
-    pub(crate) fn handle_group_drag_moved(
-        &self,
-        _group: SnapshotGroupKey,
-        event: PointerEventArgs,
-    ) {
+    pub(crate) fn handle_group_drag_moved(&self, group: SnapshotGroupKey, event: PointerEventArgs) {
         if let Some(realization) = self.runtime_realization() {
             let mut realization = realization.borrow_mut();
+            if !realization.can_dock_group(&group) {
+                realization.clear_drag_target();
+                return;
+            }
             let Some(target) = realization.target_for_drop(event.screen_position, event.position)
             else {
                 realization.clear_drag_target();
@@ -701,7 +701,7 @@ impl DockingControl {
 
     pub(crate) fn handle_group_drag_completed(
         &self,
-        _group: SnapshotGroupKey,
+        group: SnapshotGroupKey,
         event: PointerEventArgs,
         canceled: bool,
     ) {
@@ -717,6 +717,10 @@ impl DockingControl {
             .borrow()
             .target_for_drop(event.screen_position, event.position);
         if let Some(target) = target {
+            if !realization.borrow().can_dock_group(&group) {
+                realization.borrow_mut().finish_drag(false);
+                return;
+            }
             let next = {
                 let mut current = realization.borrow_mut();
                 let _ = current.preview_drag(&target, 1.0);
@@ -978,7 +982,7 @@ impl DockingControl {
                     }
                 }
             });
-            return false;
+            false
         }
 
         #[cfg(any(not(target_os = "macos"), test))]

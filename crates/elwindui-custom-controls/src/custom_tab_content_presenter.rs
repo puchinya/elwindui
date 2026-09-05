@@ -219,6 +219,13 @@ impl CustomTabContentPresenter {
         CONTENT_STRUCTURAL_RECONCILIATION_COUNTS
             .with(|counts| counts.borrow().get(&key).copied().unwrap_or(0))
     }
+
+    #[cfg(test)]
+    pub(crate) fn content_for_test(&self, index: usize) -> Option<Rc<dyn UIElementExt>> {
+        self.entries()
+            .get(index)
+            .and_then(|(_, content)| content.clone())
+    }
 }
 
 #[cfg(test)]

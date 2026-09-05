@@ -614,7 +614,10 @@ fn new_local_expression(
             let value_tokens = generated_prop_initial_value(&ty, quote! { #expr });
             Some(quote! { #value.#setter(#value_tokens); })
         });
-    let mount = info.has_view.then(|| {
+    // Host-composition components (`inherits Window`) are mounted by their first `show()` call,
+    // not by `new!`.  Keep the constructor's pre-mount property-setting path, but leave the
+    // lifecycle transition to the generated Window override so `new!` preserves Created state.
+    let mount = (info.has_view && info.host_composition_base.is_none()).then(|| {
         quote! {
             #concrete::__mount(
             &#value,
@@ -18014,6 +18017,44 @@ mod tests {
         assert!(
             generated.contains("title , \"Text\""),
             "the title named value must be present in the property assignment: {generated}"
+        );
+    }
+
+    #[test]
+    fn local_host_composition_new_expression_preserves_created_state() {
+        let struct_src = r#"
+            struct HostedComponent {
+                body: view! {
+                    Window { title: "host" }
+                }
+            }
+        "#;
+        let module = component_module(Some("Window"), struct_src);
+        let table = build_symbol_table_with_builtins(&[module]);
+        let info = table
+            .resolve_unqualified("HostedComponent")
+            .expect("host-composition metadata should resolve");
+        let item_struct: syn::ItemStruct =
+            syn::parse_str(struct_src).expect("host-composition struct should parse");
+        let (source_component, view) =
+            crate::component_frontend::component_and_view_from_item_struct(
+                Some("Window".to_string()),
+                &item_struct,
+            )
+            .expect("host-composition component should build");
+
+        let target: syn::Path = syn::parse_str("HostedComponent").expect("target should parse");
+        let generated = new_local_expression(&target, &source_component, view.as_ref(), info, &[])
+            .expect("host-composition constructor should generate")
+            .to_string();
+
+        assert!(
+            generated.contains("HostedComponent :: __new_unmounted"),
+            "host-composition new! must construct without mounting: {generated}"
+        );
+        assert!(
+            !generated.contains("HostedComponent :: __mount"),
+            "host-composition new! must leave mounting to show(): {generated}"
         );
     }
 

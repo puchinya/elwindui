@@ -47,6 +47,7 @@ enum UiCallbackKind {
     PointerEvent,
     RightTapped,
     Index,
+    Size,
     Key,
     Text,
 }
@@ -74,6 +75,9 @@ fn remove_ui_callback(kind: UiCallbackKind, id: usize) {
             callbacks.borrow_mut().remove(&id);
         }),
         UiCallbackKind::Index => UI_INDEX_EVENT_CALLBACKS.try_with(|callbacks| {
+            callbacks.borrow_mut().remove(&id);
+        }),
+        UiCallbackKind::Size => UI_SIZE_EVENT_CALLBACKS.try_with(|callbacks| {
             callbacks.borrow_mut().remove(&id);
         }),
         UiCallbackKind::Key => UI_KEY_EVENT_CALLBACKS.try_with(|callbacks| {
@@ -187,6 +191,20 @@ impl UiCallbackRegistryOwner {
             .registrations
             .borrow_mut()
             .push((UiCallbackKind::Index, id));
+        id
+    }
+
+    /// Registers a `(width, height)` size-changed callback owned by this lifetime group — e.g.
+    /// `Window.SizeChanged` (Issue #225). Reuses the same `register_ui_size_event_callback` raw
+    /// insert `Window.SizeChanged`'s own registration already called directly; the fix here is
+    /// tracking the returned id in *this* owner's `registrations` (previously untracked, so the
+    /// TLS entry — and everything it captured — outlived the owning `InnerWindow`).
+    pub(crate) fn register_size(&self, callback: Rc<dyn Fn(f64, f64)>) -> usize {
+        let id = register_ui_size_event_callback(callback);
+        self.0
+            .registrations
+            .borrow_mut()
+            .push((UiCallbackKind::Size, id));
         id
     }
 
@@ -346,10 +364,11 @@ pub(crate) fn invoke_ui_f32_event_callback(id: usize, value: f32) {
 /// Issue #225: `Window.SizeChanged`'s handler is `TypedEventHandler<IInspectable,
 /// WindowSizeChangedEventArgs>` — a `Send`-bound WinRT delegate, same reason every other callback
 /// in this file goes through this numeric-key indirection instead of capturing `Rc` state
-/// directly. Registered once per `Window` for its whole life (`InnerWindow::new`), never removed
-/// early, so this uses the same no-removal-tracking shape as `register_ui_index_event_callback`/
-/// `register_ui_f32_event_callback` above rather than `UiCallbackRegistryOwner`'s per-element
-/// tracked-removal wrapper.
+/// directly. This is the low-level raw insert only — callers must go through
+/// `UiCallbackRegistryOwner::register_size` (like `register_index`, above, wraps
+/// `register_ui_index_event_callback`) so the returned id is tracked and removed when the owning
+/// `Window`/`InnerWindow` drops; calling this directly, untracked, previously let the TLS entry
+/// (and its captured `menu_wrapper`/`top_inset`/`Weak<TreeHostPanel>` state) outlive the `Window`.
 pub(crate) fn register_ui_size_event_callback(callback: Rc<dyn Fn(f64, f64)>) -> usize {
     let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
     UI_SIZE_EVENT_CALLBACKS.with(|callbacks| {
@@ -364,6 +383,11 @@ pub(crate) fn invoke_ui_size_event_callback(id: usize, width: f64, height: f64) 
     if let Some(callback) = callback {
         callback(width, height);
     }
+}
+
+#[cfg(test)]
+pub(crate) fn ui_size_event_callback_count() -> usize {
+    UI_SIZE_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().len())
 }
 
 /// Distinguishes a model-to-native property push from a real user-originated XAML event.
@@ -817,5 +841,80 @@ mod tests {
         assert_eq!(calls.get(), 2);
         remove_ui_callback(UiCallbackKind::Event, id);
         remove_ui_callback(UiCallbackKind::Event, outer_id);
+    }
+
+    /// T1/T2 (Issue #225 post-merge review, PR #227): `UiCallbackRegistryOwner::register_size`
+    /// tracks its id like every other kind, and the registered callback observes the exact
+    /// `(width, height)` it was invoked with.
+    #[test]
+    fn size_callback_registration_and_invocation_use_exact_values() {
+        let baseline = ui_size_event_callback_count();
+        let observed = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
+        let owner = UiCallbackRegistryOwner::default();
+        let observed_for_callback = observed.clone();
+        let id = owner.register_size(Rc::new(move |width, height| {
+            observed_for_callback.set((width, height));
+        }));
+
+        assert_eq!(ui_size_event_callback_count(), baseline + 1);
+        invoke_ui_size_event_callback(id, 640.0, 480.0);
+        assert_eq!(observed.get(), (640.0, 480.0));
+    }
+
+    /// T3: dropping the owning `UiCallbackRegistryOwner` removes the `Size` TLS entry (not just
+    /// "no panic on the next invocation") — this is exactly the lifetime leak PR #227 introduced,
+    /// since `register_ui_size_event_callback` was called directly, untracked, from
+    /// `InnerWindow::new`.
+    #[test]
+    fn size_callback_owner_drop_removes_entry_and_id_becomes_no_op() {
+        let baseline = ui_size_event_callback_count();
+        let observed = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
+        let owner = UiCallbackRegistryOwner::default();
+        let observed_for_callback = observed.clone();
+        let id = owner.register_size(Rc::new(move |width, height| {
+            observed_for_callback.set((width, height));
+        }));
+
+        invoke_ui_size_event_callback(id, 100.0, 200.0);
+        assert_eq!(observed.get(), (100.0, 200.0));
+
+        drop(owner);
+        assert_eq!(
+            ui_size_event_callback_count(),
+            baseline,
+            "dropping the owner must remove the Size registry entry, not just leave it unreachable"
+        );
+
+        invoke_ui_size_event_callback(id, 999.0, 999.0);
+        assert_eq!(
+            observed.get(),
+            (100.0, 200.0),
+            "invoking a removed id must be a safe no-op that does not reach the old callback"
+        );
+    }
+
+    /// T4: the leak regression itself — repeated Window-like create/destroy cycles must not
+    /// monotonically grow `UI_SIZE_EVENT_CALLBACKS`.
+    #[test]
+    fn size_callback_repeated_lifecycles_return_to_baseline() {
+        let baseline = ui_size_event_callback_count();
+
+        for _ in 0..8 {
+            let calls = Rc::new(Cell::new(0));
+            let calls_for_callback = calls.clone();
+            let owner = UiCallbackRegistryOwner::default();
+            let id = owner.register_size(Rc::new(move |_width, _height| {
+                calls_for_callback.set(calls_for_callback.get() + 1);
+            }));
+
+            assert_eq!(ui_size_event_callback_count(), baseline + 1);
+            invoke_ui_size_event_callback(id, 1.0, 2.0);
+            assert_eq!(calls.get(), 1);
+
+            drop(owner);
+            assert_eq!(ui_size_event_callback_count(), baseline);
+            invoke_ui_size_event_callback(id, 3.0, 4.0);
+            assert_eq!(calls.get(), 1);
+        }
     }
 }

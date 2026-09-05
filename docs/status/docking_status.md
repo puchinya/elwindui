@@ -76,22 +76,30 @@ existing future-incompatibility warning; it is not a new test failure.
 ## Platform boundaries
 
 - AppKit runtime interaction: the elevated `macos-ui-driver doctor` check reports
-  `accessibility=true` and `screen_recording=true`. A real foreground `docking-demo` session has
+  `accessibility=true` and `screen_recording=true`. Real foreground `docking-demo` sessions have
   confirmed initial render, rapid selection, same-group reorder, top/bottom/left/right group
   docking, cross-group tab docking, insertion-preview lifecycle, both splitter axes, V2 snapshot
-  save/reset/restore, auto-hide pin transition, light/dark theme switching, item and whole-group
-  tear-out, native floating move/resize, floating-to-main return, native floating close with
-  process survival, and the Docking context-menu capability states. The context-menu Float and
-  Close actions were re-run after retaining the menu-item wrappers: Float created a native
-  `Document B` window and Close removed it from the tabs while the process stayed alive. The
-  transparent chrome/icon backgrounds were also visually confirmed.
+  save/reset/restore, auto-hide pin and unpin semantics, light/dark theme switching, item and
+  whole-group tear-out, native floating move/resize, floating-to-main return by title-bar drag,
+  simultaneous native floating windows, native floating close with process survival, and the
+  context-menu Close/Close Others/Close Tabs to Left/Close Tabs to Right/Float actions. The
+  context-menu Float and Close actions were re-run after retaining the menu-item wrappers: Float
+  created a native `Document B` window and Close removed it from the tabs while the process stayed
+  alive. Two independently created floating windows were also closed natively without a panic.
+  The transparent chrome/icon backgrounds were visually confirmed.
 - AppKit GUI evidence is stored under `/private/tmp/pr221-e2e-logs/`; copied command stdout/stderr
   is retained under `.agent-state/issues/220/logs/`. Abnormal cases are reported with both streams,
-  including the pre-fix inert context action, the selector-ambiguity diagnostic, and intermittent
-  direct-driver permission-denied shell invocations. V1 snapshot compatibility is not required;
-  only the V2 save/reset/restore path is part of this acceptance.
-- Still not proven in this session: multiple simultaneous floating windows with independent
-  interaction, auto-hide popup/unpin, and a full matrix of every context-menu action beyond the
-  verified Float/Close paths. These remain NOT RUN rather than inferred from compilation or a
-  screenshot. WinUI3 native Docking acceptance is DEFERRED to a separate follow-up Issue; GTK4
-  native floating remains unavailable without a usable GTK Window implementation.
+  including the pre-fix inert context action, selector/foreground diagnostics, intermittent
+  direct-driver permission-denied shell invocations, and the application panic reproduced during
+  a native capability-control click. The panic is `RefCell already mutably borrowed` at
+  `crates/elwindui-docking/src/docking_control.rs:1009:43`, in the
+  `handle_floating_bounds_changed` reentrant path; its full application stderr and driver streams
+  are retained in the Issue log directory. This is a change-specific AppKit FAIL and blocks a
+  complete acceptance claim until fixed. V1 snapshot compatibility is not required; only the V2
+  save/reset/restore path is part of this acceptance.
+- Still not proven in this session: auto-hide popup visual correctness (the popup opens and changes
+  the active item, but its entry overlaps the document tab strip), the complete disabled-capability
+  interaction matrix, and independent interaction with two simultaneous floating windows. These
+  remain NOT RUN or FAIL as stated above rather than inferred from compilation or a screenshot.
+  WinUI3 native Docking acceptance is DEFERRED to a separate follow-up Issue; GTK4 native floating
+  remains unavailable without a usable GTK Window implementation.

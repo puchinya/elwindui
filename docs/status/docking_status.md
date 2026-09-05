@@ -52,7 +52,7 @@
 
 ## Tests and verification state
 
-The focused `elwindui-docking` suite currently has 84 passing tests covering default
+The focused `elwindui-docking` suite currently has 85 passing tests covering default
 initialization/reset, activation, close/reopen, all four split/edge sides, snapshot round-trip,
 auto-hide state, typed invalid values, latest-only source logic, removed-authored-group repair,
 adjacent split-weight transformation, generated-group drag targets, retained runtime presentation,
@@ -67,7 +67,7 @@ the 24-tab retained-selection operation budget, structural-selection counters, h
 checks, and compact presentation. Native GUI behavior still requires platform-host verification
 where noted below.
 
-The current workspace verification is `cargo test --workspace`: 82 suites, 1024 passed, 0 failed,
+The current workspace verification is `cargo test --workspace`: 82 suites, 1025 passed, 0 failed,
 3 ignored. `cargo check --workspace` passes, `cargo fmt --all -- --check` passes, and the repository
 rust-analyzer diagnostic gate passes with 222 intentional `Ra("inactive-code", WeakWarning)` records
 and zero actionable diagnostics. `git diff --check` also passes. Cargo reports the repository's
@@ -90,13 +90,14 @@ existing future-incompatibility warning; it is not a new test failure.
 - AppKit GUI evidence is stored under `/private/tmp/pr221-e2e-logs/`; copied command stdout/stderr
   is retained under `.agent-state/issues/220/logs/`. Abnormal cases are reported with both streams,
   including the pre-fix inert context action, selector/foreground diagnostics, intermittent
-  direct-driver permission-denied shell invocations, and the application panic reproduced during
-  a native capability-control click. The panic is `RefCell already mutably borrowed` at
+  direct-driver permission-denied shell invocations, and the pre-fix application panic reproduced
+  during a native capability-control click. The panic was `RefCell already mutably borrowed` at
   `crates/elwindui-docking/src/docking_control.rs:1009:43`, in the
-  `handle_floating_bounds_changed` reentrant path; its full application stderr and driver streams
-  are retained in the Issue log directory. This is a change-specific AppKit FAIL and blocks a
-  complete acceptance claim until fixed. V1 snapshot compatibility is not required; only the V2
-  save/reset/restore path is part of this acceptance.
+  `handle_floating_bounds_changed` reentrant path. The callback now exits safely when the
+  realization is already mutably borrowed; the regression test passes, and the same native control
+  click plus native floating close were re-run with driver success, process survival, and empty app
+  stdout/stderr. V1 snapshot compatibility is not required; only the V2 save/reset/restore path is
+  part of this acceptance.
 - Still not proven in this session: auto-hide popup visual correctness (the popup opens and changes
   the active item, but its entry overlaps the document tab strip), the complete disabled-capability
   interaction matrix, and independent interaction with two simultaneous floating windows. These

@@ -1006,7 +1006,12 @@ impl DockingControl {
             return;
         };
         let index = {
-            let realization = realization.borrow();
+            // AppKit may synchronously report the bounds while a native host sync still holds
+            // the realization mutably. That callback is part of the sync transaction and must not
+            // recursively borrow the same RefCell.
+            let Ok(realization) = realization.try_borrow() else {
+                return;
+            };
             if realization.native_bounds_syncing() {
                 return;
             }

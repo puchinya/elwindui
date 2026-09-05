@@ -79,6 +79,7 @@ struct FakeHostLog {
     content: RefCell<Option<Rc<dyn UIElementExt>>>,
     close_handler: RefCell<Option<Rc<dyn Fn() -> bool>>>,
     bounds_changed_handler: RefCell<Option<Rc<dyn Fn(Rect)>>>,
+    invoke_bounds_changed_on_set: Cell<bool>,
 }
 
 impl FakeHostLog {
@@ -90,6 +91,7 @@ impl FakeHostLog {
             content: RefCell::new(None),
             close_handler: RefCell::new(None),
             bounds_changed_handler: RefCell::new(None),
+            invoke_bounds_changed_on_set: Cell::new(false),
         })
     }
 
@@ -125,6 +127,9 @@ impl FloatingWindowHost for FakeHost {
     fn set_bounds(&self, bounds: Rect) {
         self.log.events.borrow_mut().push("set_bounds");
         self.log.bounds.set(Some(bounds));
+        if self.log.invoke_bounds_changed_on_set.get() {
+            self.log.invoke_bounds_changed(bounds);
+        }
     }
 
     fn set_title(&self, _title: &str) {}
@@ -2306,6 +2311,42 @@ fn floating_bounds_equal_native_echo_does_not_publish_again() {
     });
 
     assert_eq!(changes.get(), 0);
+}
+
+#[test]
+fn floating_bounds_callback_reentrant_during_native_sync_does_not_panic() {
+    let docking = mounted_default_docking();
+    let hosts = Rc::new(RefCell::new(Vec::new()));
+    docking.install_floating_host_factory_for_test(individual_fake_factory(hosts.clone()));
+    docking.set_layout(floating_model_with_items(
+        &docking.layout(),
+        &["first"],
+        Rect {
+            x: 900.0,
+            y: 100.0,
+            width: 420.0,
+            height: 260.0,
+        },
+    ));
+    let host = hosts.borrow()[0].clone();
+    host.log.invoke_bounds_changed_on_set.set(true);
+
+    docking.set_layout(floating_model_with_items(
+        &docking.layout(),
+        &["first"],
+        Rect {
+            x: 940.0,
+            y: 130.0,
+            width: 560.0,
+            height: 340.0,
+        },
+    ));
+
+    let bounds = docking.layout().snapshot().floating_roots[0].bounds;
+    assert_eq!(
+        (bounds.x, bounds.y, bounds.width, bounds.height),
+        (940.0, 130.0, 560.0, 340.0)
+    );
 }
 
 #[test]

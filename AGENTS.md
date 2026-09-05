@@ -59,6 +59,23 @@ An implementation task is not implementation-phase complete until all of the fol
 
 Do not report implementation completion at edit, test, commit, or push. If Pull Request creation or the phase transition fails, report the result as blocked with the exact blocker and relevant command/error. Overall Issue completion remains governed by [`docs/agent-workflow/review.md`](docs/agent-workflow/review.md).
 
+## Host-context live verification
+
+Platform live-runtime verification whose result depends on authentic operating-system
+security, package registration, desktop-session, native-GUI, or similar host semantics
+must run outside any agent sandbox that can alter those semantics.
+
+Sandbox execution remains valid for build/static checks and sandbox-safe tests. A
+sandbox-only live-runtime pass or failure is diagnostic evidence only and cannot satisfy
+or fail final platform acceptance until reproduced in host context.
+
+If host-context execution is unavailable, report the live gate as blocked rather than
+substituting sandbox evidence. Final runtime acceptance should use the normal,
+non-elevated host user unless the behavior under test explicitly requires elevation.
+
+See [`docs/agents/testing.md`](docs/agents/testing.md) for evidence validity and
+[`docs/agents/winui3.md`](docs/agents/winui3.md) for the Windows/WinUI3 command boundary.
+
 ## Document authority
 
 | Source | Authority | Question answered |
@@ -81,7 +98,7 @@ Do not use current code or status to mechanically redefine a normative specifica
 
 ## Code and documentation synchronization
 
-Before changing code, use [`docs/README.md`](docs/README.md) and the category README files to select only the relevant spec, design, source, and—when current-state context is needed—status document.
+Before changing code, use [`docs/README.md`](docs/README.md) and the category README files to select only the relevant spec, design, source, and窶背hen current-state context is needed窶敗tatus document.
 
 | Change | Required order |
 |---|---|

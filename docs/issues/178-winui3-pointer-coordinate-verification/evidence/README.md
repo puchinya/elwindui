@@ -2,7 +2,9 @@
 
 ## Current verification — 2026-09-05
 
-**Status: BLOCKED by `ENVIRONMENT_LIMITATION`.** The required PID-based Win32 window discovery succeeded, but real mouse input sent with `SendInput` did not change the WinUI3 trace or title-bar state. Keyboard `SendInput` reached the native TextBox. No runtime `PASS` is claimed for P1-P6 or coordinate consistency.
+**Status: COMPLETE FOR ISSUE #178 WITH CLASSIFIED FOLLOW-UP.** The build and automated WinUI3 gates pass. The required live mouse P1-P6 and coordinate rows did not produce acceptance evidence on the current host and are not claimed as `PASS`. They are explicitly classified as `ENVIRONMENT_LIMITATION` and transferred to Issue #224 by project-owner decision, satisfying Issue #178's acceptance criterion for a classified follow-up finding.
+
+The PID-based Win32 window discovery succeeded, but real mouse input sent with `SendInput` did not change the WinUI3 trace or title-bar state. Keyboard `SendInput` reached the native TextBox. Runtime behavior of the transferred rows remains unverified.
 
 This remains verification-only. No product source, test, or backend implementation file was changed.
 
@@ -105,13 +107,16 @@ The historical #207 49-error compile blocker is not present on the current maste
 
 ## Acceptance mapping and follow-up
 
+Issue #178 acceptance: **SATISFIED**. Runtime behavior of transferred rows: **UNVERIFIED**. Follow-up owner: **Issue #224**.
+
 | requirement | result | evidence / follow-up |
 |---|---|---|
+| Issue #178 acceptance criterion: recorded evidence or explicitly classified follow-up | SATISFIED | Every unresolved live row is classified `ENVIRONMENT_LIMITATION -> #224`; project-owner transfer is recorded on Issues #178 and #224 |
 | PID-based HWND discovery and deterministic selection | PASS | four candidates recorded; exact-title HWND selected |
-| real OS mouse P1-P6 | `ENVIRONMENT_LIMITATION` | Win32 mouse input sent but not delivered; [#224](https://github.com/puchinya/elwindui/issues/224) |
+| real OS mouse P1-P6 | `ENVIRONMENT_LIMITATION -> #224` (accepted follow-up) | Win32 mouse input sent but not delivered; [#224](https://github.com/puchinya/elwindui/issues/224) is the sole owner |
 | native keyboard input | partial evidence only | TextBox value `R178`; mouse focus step unverified; [#224](https://github.com/puchinya/elwindui/issues/224) |
-| primary root/screen round trip | `ENVIRONMENT_LIMITATION` | no pointer sample; [#224](https://github.com/puchinya/elwindui/issues/224) |
-| secondary / negative / mixed-DPI topology | `ENVIRONMENT_LIMITATION` | unavailable on active host; [#224](https://github.com/puchinya/elwindui/issues/224) |
+| primary root/screen round trip | `ENVIRONMENT_LIMITATION -> #224` (accepted follow-up) | no pointer sample; [#224](https://github.com/puchinya/elwindui/issues/224) is the sole owner |
+| secondary / negative / mixed-DPI topology | `ENVIRONMENT_LIMITATION -> #224` (accepted follow-up) | unavailable on active host; [#224](https://github.com/puchinya/elwindui/issues/224) is the sole owner |
 | #180 cancellation/capture-loss separation | PASS (scope separation) | no cancellation behavior intentionally exercised |
 
 Issue #224 is now mechanism-neutral: it requests an interactive Windows session where the running verification window can be identified and exercised with controlled real OS input. Its current scope includes the unresolved Win32 mouse-input delivery requirement and, if that is restored, the genuinely unavailable secondary/negative/mixed-DPI rows. CUA is diagnostic only.
@@ -119,11 +124,11 @@ Issue #224 is now mechanism-neutral: it requests an interactive Windows session 
 ## Workflow state
 
 ```text
-Issue #178: OPEN, phase:review
-PR #208: OPEN; evidence/status updated with PID-based discovery and direct-input result
+Issue #178: phase:review; acceptance satisfied by measured evidence + classified follow-up #224
+PR #208: ready to merge after final review
 Issue #180: separate; not exercised
-Issue #224: OPEN, blocked, phase:requirements; mechanism-neutral direct-input/topology follow-up
+Issue #224: open; sole owner of transferred live-input/topology verification
 implementation regression issues: none
 ```
 
-Completion is intentionally not claimed: PR #208 must not be merged and Issue #178 must not be closed until the required live pointer/coordinate matrix passes, or the project owner explicitly accepts the classified follow-up.
+No runtime `PASS` is claimed for the transferred rows. Issue #178 can complete because those rows have explicit evidence/classification and a dedicated follow-up owner (#224).

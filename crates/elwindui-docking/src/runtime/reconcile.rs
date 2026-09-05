@@ -2392,7 +2392,11 @@ fn add_tab_context_item(
             owner.handle_tab_context_action(item.clone(), action);
         }
     }));
-    menu.add_item(&*menu_item);
+    // Keep the Rust menu-item wrapper alive for as long as the native NSMenu retains the
+    // NSMenuItem. AppKit does not retain an NSMenuItem target, so using the backend-only
+    // `add_item` helper here drops `MenuItemTarget` immediately after construction; the menu
+    // remains visible, but Close/Float actions become inert when selected.
+    menu.items().add(menu_item);
 }
 
 #[cfg(all(not(test), target_os = "macos"))]

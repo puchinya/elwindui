@@ -3,7 +3,7 @@
 AI-agent-drivable CLI for launching, inspecting, screenshotting, and interacting with elwindui (or
 any) macOS app windows — see `docs/status/tooling_status.md` for what's implemented
 (Phase 1: launch/terminate/list-windows/capture-window/doctor/focus-window; Phase 2:
-dump-tree/find/set-focus/click/type-text/press-key/wait-for — driver-side only, see that doc for the
+dump-tree/find/set-focus/click/point-click/drag/type-text/press-key/wait-for — driver-side only, see that doc for the
 Rust-side accessibility-identifier wiring left out of scope) versus deferred (Phase 3+:
 elwindui-internal state introspection, image-diff regression testing).
 
@@ -38,6 +38,17 @@ The command must report `"accessibility":true` and `"screen_recording":true` bef
 evidence is collected. Terminal-launched execution is a valid fallback when Codex cannot provide
 the elevated execution path. A `doctor` result with either value false is a blocked GUI session,
 not a native PASS.
+
+Codex may delegate two bounded sidecar tasks: registering or refreshing the checked-out test
+artifact under `tools/macos-ui-driver/bin`, and executing the real AppKit E2E matrix. The main
+agent must review the file diff and evidence before recording results. This Codex-only rule is
+documented in [`docs/agents/appkit.md`](../../docs/agents/appkit.md) and does not change the
+Claude Code workflow.
+
+When a driver command fails or a GUI result is abnormal, save its exact stdout and stderr with
+the command and case name. Keep high-volume logs under the Issue-scoped
+`.agent-state/issues/<issue>/logs/` directory and report the path plus a short excerpt; do not
+replace an error with a screenshot-only result.
 
 ## Commands
 
@@ -111,6 +122,26 @@ macos-ui-driver click --pid <pid> [--window-id <id>] <selector> [--via mouse|ax-
 # There's no universal "click succeeded" AX signal, so this reports a before/after diff
 # (changed.focused / changed.value) as diagnostic data rather than guessing pass/fail.
 # {"success":true,"via":"mouse","click_point":{"x":...,"y":...},"before":{...},"after":{...},"changed":{"focused":true,"value":false}}
+
+macos-ui-driver point-click --pid <pid> --window-id <id> --x <screen-x> --y <screen-y>
+    [--button left|right] [--pause <seconds>]
+# Sends a real click at an explicit screen coordinate for custom controls that are absent from the
+# Accessibility tree. The target window must already be confirmed foreground by focus-window.
+# {"success":true,"point":{"x":...,"y":...},"button":"left",...}
+
+macos-ui-driver drag --pid <pid> --window-id <id>
+    --start-x <screen-x> --start-y <screen-y> --end-x <screen-x> --end-y <screen-y>
+    [--button left|right] [--steps <n>] [--duration <seconds>] [--allow-end-outside-window]
+# Sends real press/drag/release events with intermediate positions. Run a several-second drag in
+# one shell session and capture-window from another to inspect a live Docking preview or splitter.
+# By default both endpoints must be inside --window-id. The explicit --allow-end-outside-window
+# option keeps the start-point check but permits a cross-window release, such as floating -> main.
+# {"success":true,"start":{"x":...,"y":...},"end":{"x":...,"y":...},"steps":N,...}
+
+# Cross-window release (the press point is still required to be in --window-id)
+macos-ui-driver drag --pid <pid> --window-id <floating-id> \
+    --start-x <x> --start-y <y> --end-x <main-x> --end-y <main-y> \
+    --allow-end-outside-window
 
 macos-ui-driver type-text --pid <pid> [--window-id <id>] <selector> --text <string> [--clear]
     [--focus-via ax-attribute|click|none = ax-attribute] [--key-delay 0.02] [--timeout 1.0]

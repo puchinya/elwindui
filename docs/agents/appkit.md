@@ -34,6 +34,43 @@ Run `"$BIN" doctor` first and require both checks to be `true`; otherwise report
 acceptance as BLOCKED. Keep the normal Codex sandbox default unchanged and use per-command
 elevation rather than switching the global profile to full access.
 
+For Docking headers, tab strips, compass targets, and other custom surfaces that are absent from
+the Accessibility tree, use the driver's coordinate commands after focus-window has succeeded:
+
+~~~bash
+"$BIN" point-click --pid <pid> --window-id <id> --x <screen-x> --y <screen-y> [--button left|right]
+"$BIN" drag --pid <pid> --window-id <id> \
+  --start-x <screen-x> --start-y <screen-y> --end-x <screen-x> --end-y <screen-y> \
+  [--button left|right] [--steps <n>] [--duration <seconds>]
+~~~
+
+Both commands verify that the target window is still frontmost/main/focused and reject points
+outside its AX bounds. A long drag can remain running while a separate elevated invocation uses
+capture-window to record the real mid-drag preview.
+
+### Codex delegation for AppKit E2E
+
+This delegation rule applies to Codex only. The Codex main agent may assign a bounded
+sub-agent the preparation and registration of test artifacts (for example, rebuilding the
+driver and placing the executable at `tools/macos-ui-driver/bin/macos-ui-driver`) and may
+assign a separate bounded sub-agent the real AppKit E2E execution. The main agent remains
+responsible for reviewing the resulting file diff, evidence, and PASS/FAIL/NOT RUN/BLOCKED
+classification before updating the Issue or Pull Request. Delegated agents must not commit,
+push, or change Issue/PR state unless that scope is explicitly assigned.
+
+The E2E sub-agent must follow the same per-command Sandbox-outside requirement and `doctor`
+preflight above, use the checked-out driver directly, record concrete PID/window/capture
+evidence, and report unsupported or unobservable cases as NOT RUN rather than inferring a
+PASS. This does not alter the Claude Code workflow; Claude Code already uses its own
+sub-agent mechanism.
+
+For an abnormal result—non-zero driver exit, a failed foreground check, a missing window,
+an unexpected process exit, or a release that does not change the layout—retain the exact
+command, stdout, and stderr in the Issue-scoped `.agent-state/issues/<issue>/logs/` directory
+(or a temporary path when the log is only needed during the live session). Include the log
+path and a short diagnostic excerpt in the evidence report; do not paste high-volume raw logs
+into the Issue or Pull Request.
+
 ### Fallback Method
 
 Get target window `CGWindowID` via Swift, then use `screencapture`:

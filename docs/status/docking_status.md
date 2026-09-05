@@ -67,29 +67,31 @@ the 24-tab retained-selection operation budget, structural-selection counters, h
 checks, and compact presentation. Native GUI behavior still requires platform-host verification
 where noted below.
 
-The current workspace verification is `1024 passed, 3 ignored`; `cargo check --workspace`, the
-`rust_analyzer`-cfg check, and the repository rust-analyzer diagnostic gate all pass. The latter
-reports only intentional `inactive-code` WeakWarnings (222 records, zero actionable diagnostics).
+The current workspace verification is `cargo test --workspace`: 82 suites, 1024 passed, 0 failed,
+3 ignored. `cargo check --workspace` passes, `cargo fmt --all -- --check` passes, and the repository
+rust-analyzer diagnostic gate passes with 222 intentional `Ra("inactive-code", WeakWarning)` records
+and zero actionable diagnostics. `git diff --check` also passes. Cargo reports the repository's
+existing future-incompatibility warning; it is not a new test failure.
 
 ## Platform boundaries
 
-- AppKit runtime interaction: a real foreground `docking-demo` session was confirmed and the
-  following native interactions were observed: initial render, rapid selection, same-group tab
-  reorder, two-logical-pixel insertion marker during drag and clearing, item tear-out to a native
-  floating window, native floating-window close with process survival, a cross-group split/dock
-  commit, continuous vertical splitter tracking, and light/dark theme switching with selection
-  preserved. Chrome icons were observed without contrasting background rectangles. The native
-  close observation did not create a new crash report.
-- AppKit native acceptance remains BLOCKED for the unverified remainder of the contract. The
-  current UI-driver preflight reports both Accessibility and Screen Recording as unavailable, so
-  foreground attribution and screenshot evidence cannot be safely extended. Not yet proven in a
-  valid foreground session are all eight explicit split/edge targets, main-to-floating and
-  floating-to-floating moves, simultaneous floating windows, native floating move/resize and
-  snapshot bounds restore, whole-group moves/tear-out and capability gating, auto-hide pin/popup/
-  unpin, context close actions, and horizontal splitter tracking. These are not reported as native
-  PASS. The three AppKit CoreImage SVG golden tests remain unrelated baseline/environment failures
-  (`CIContext` creation returns NULL under the current host).
-- WinUI3 native Docking acceptance is DEFERRED to a separate follow-up Issue; it is not a PR #221
-  completion gate. Compile-only evidence is not a native PASS.
-- GTK4: compile as required by the workspace. Do not claim native floating runtime support without a
-  real GTK Window implementation.
+- AppKit runtime interaction: the elevated `macos-ui-driver doctor` check reports
+  `accessibility=true` and `screen_recording=true`. A real foreground `docking-demo` session has
+  confirmed initial render, rapid selection, same-group reorder, top/bottom/left/right group
+  docking, cross-group tab docking, insertion-preview lifecycle, both splitter axes, V2 snapshot
+  save/reset/restore, auto-hide pin transition, light/dark theme switching, item and whole-group
+  tear-out, native floating move/resize, floating-to-main return, native floating close with
+  process survival, and the Docking context-menu capability states. The context-menu Float and
+  Close actions were re-run after retaining the menu-item wrappers: Float created a native
+  `Document B` window and Close removed it from the tabs while the process stayed alive. The
+  transparent chrome/icon backgrounds were also visually confirmed.
+- AppKit GUI evidence is stored under `/private/tmp/pr221-e2e-logs/`; copied command stdout/stderr
+  is retained under `.agent-state/issues/220/logs/`. Abnormal cases are reported with both streams,
+  including the pre-fix inert context action, the selector-ambiguity diagnostic, and intermittent
+  direct-driver permission-denied shell invocations. V1 snapshot compatibility is not required;
+  only the V2 save/reset/restore path is part of this acceptance.
+- Still not proven in this session: multiple simultaneous floating windows with independent
+  interaction, auto-hide popup/unpin, and a full matrix of every context-menu action beyond the
+  verified Float/Close paths. These remain NOT RUN rather than inferred from compilation or a
+  screenshot. WinUI3 native Docking acceptance is DEFERRED to a separate follow-up Issue; GTK4
+  native floating remains unavailable without a usable GTK Window implementation.

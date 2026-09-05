@@ -9,7 +9,7 @@ Snapshot: 2026-08-30. Tool architecture is indexed in [`../design/README.md`](..
 | Preview | ⬜ | design exists; no workspace preview application |
 | `elwindui-hotreload` | 🚧 | tested Patch/Remount decision helper exists; artifact loading and live replacement pipeline are absent |
 | `elwindui-test` | 🚧 | render-tree dump exists; canvas/image snapshots absent |
-| `macos-ui-driver` | 🚧 | process/window control, focus, Accessibility tree queries/actions, and screenshots are implemented; full keyboard/mouse synthesis and every AX action are not complete |
+| `macos-ui-driver` | 🚧 | process/window control, focus, Accessibility tree queries/actions, screenshots, explicit coordinate clicks, and real press/drag/release gestures are implemented; full keyboard synthesis and every AX action are not complete |
 
 ## macOS UI driver verification
 

@@ -98,7 +98,7 @@ Do not use current code or status to mechanically redefine a normative specifica
 
 ## Code and documentation synchronization
 
-Before changing code, use [`docs/README.md`](docs/README.md) and the category README files to select only the relevant spec, design, source, and窶背hen current-state context is needed窶敗tatus document.
+Before changing code, use [`docs/README.md`](docs/README.md) and the category README files to select only the relevant spec, design, source, and—when current-state context is needed—status document.
 
 | Change | Required order |
 |---|---|

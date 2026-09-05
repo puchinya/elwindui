@@ -88,10 +88,10 @@ host-context.
 
 ## Other Cargo workspace commands
 
-- `cargo build --workspace` 窶・Build all workspace crates and examples.
-- `cargo check --workspace` 窶・Check all workspace crates and examples.
-- `cargo test --workspace` 窶・Run tests across all workspace crates.
-- `cargo run -p <example-name>` 窶・Run a specific example app from `examples/`.
+- `cargo build --workspace` — Build all workspace crates and examples.
+- `cargo check --workspace` — Check all workspace crates and examples.
+- `cargo test --workspace` — Run tests across all workspace crates.
+- `cargo run -p <example-name>` — Run a specific example app from `examples/`.
 
 When proc-macro, codegen, or rust-analyzer-shadow behavior changes, also run the additive
 companion check:

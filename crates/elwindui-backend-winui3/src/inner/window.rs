@@ -6,7 +6,6 @@ use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 use crate::bindings::Microsoft::UI::Xaml::{Window as XamlWindow, WindowSizeChangedEventArgs};
 use crate::ffi::{
     UiCallbackRegistryOwner, invoke_ui_bool_event_callback, invoke_ui_size_event_callback,
-    register_ui_size_event_callback,
 };
 use crate::host::TreeHostPanel;
 use std::cell::{Cell, RefCell};
@@ -125,24 +124,28 @@ impl InnerWindow {
         let _ = xaml.SetContent(&content_host.as_element());
         let menu_wrapper: Rc<RefCell<Option<Canvas>>> = Rc::new(RefCell::new(None));
         let top_inset = Rc::new(Cell::new(0.0f64));
+        let callback_owner = UiCallbackRegistryOwner::default();
 
-        // Issue #225: the single top-level Window sizing authority — registered once, for the
-        // Window's own life, regardless of whether/when a menu bar is later attached. The
-        // generated `Window.SizeChanged` delegate (`TypedEventHandler<IInspectable,
-        // WindowSizeChangedEventArgs>`) requires `Send`, which an `Rc`-holding closure is not —
-        // same reason every other native handler in this crate goes through `crate::ffi`'s
-        // numeric-key indirection (`register_ui_size_event_callback`/
-        // `invoke_ui_size_event_callback`) instead of capturing `Rc` state directly. The `Rc`-
-        // capturing logic below (upgrading `Weak<TreeHostPanel>`, reading `menu_wrapper`/
-        // `top_inset`) lives in the plain Rust closure handed to `register_ui_size_event_callback`
-        // — never a strong reference back to this `InnerWindow`/`Window`, so it safely no-ops once
-        // the content host has actually been dropped, rather than keeping it (or, transitively,
-        // this Window) alive.
+        // Issue #225 (PR #227 post-merge review): the single top-level Window sizing authority —
+        // registered once, for the Window's own life, regardless of whether/when a menu bar is
+        // later attached. The generated `Window.SizeChanged` delegate (`TypedEventHandler<
+        // IInspectable, WindowSizeChangedEventArgs>`) requires `Send`, which an `Rc`-holding
+        // closure is not — same reason every other native handler in this crate goes through
+        // `crate::ffi`'s numeric-key indirection instead of capturing `Rc` state directly. Unlike
+        // PR #227's original version, this goes through `callback_owner.register_size` (not the
+        // raw `register_ui_size_event_callback`) so the id is tracked and removed when
+        // `callback_owner` — moved into `self` below — drops with this `InnerWindow`; previously
+        // the TLS entry (and its captured `menu_wrapper`/`top_inset`/`Weak<TreeHostPanel>` state)
+        // outlived the `Window` indefinitely. The `Rc`-capturing logic below (upgrading
+        // `Weak<TreeHostPanel>`, reading `menu_wrapper`/`top_inset`) lives in the plain Rust
+        // closure handed to `register_size` — never a strong reference back to this
+        // `InnerWindow`/`Window`, so it safely no-ops once the content host has actually been
+        // dropped, rather than keeping it (or, transitively, this Window) alive.
         {
             let content_host_weak = Rc::downgrade(&content_host);
             let menu_wrapper = Rc::clone(&menu_wrapper);
             let top_inset = Rc::clone(&top_inset);
-            let callback_id = register_ui_size_event_callback(Rc::new(move |width, height| {
+            let callback_id = callback_owner.register_size(Rc::new(move |width, height| {
                 let Some(content_host) = Weak::upgrade(&content_host_weak) else {
                     return;
                 };
@@ -173,7 +176,7 @@ impl InnerWindow {
             retained: Cell::new(false),
             always_on_top: Cell::new(false),
             close_request_handler: Rc::new(RefCell::new(None)),
-            callback_owner: UiCallbackRegistryOwner::default(),
+            callback_owner,
             closing_registered: Cell::new(false),
             framework_initiated_close: Rc::new(Cell::new(false)),
         };

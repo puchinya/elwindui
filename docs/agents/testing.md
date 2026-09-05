@@ -62,12 +62,36 @@ workspace settings, adding a repository-wide ignore list, adding blanket `#[allo
 attributes, downgrading diagnostic severity, or replacing actual rust-analyzer verification with
 Cargo compilation.
 
+## Verification execution context
+
+Verification is either sandbox-safe or host-context live verification:
+
+- Sandbox-safe verification includes formatting, `rust-analyzer diagnostics .`,
+  `cargo check`, `cargo build`, and pure/unit/codegen tests that do not depend on native
+  host-runtime semantics. These may run inside an agent sandbox.
+- Host-context live verification includes native GUI startup, native OS
+  package/runtime bootstrap, AppX/MSIX package registration or package-graph behavior,
+  interactive desktop/window/input, native window lifecycle, and platform services whose
+  behavior can be altered by process-token or sandboxing rules. These must run outside the
+  agent sandbox for final acceptance.
+
+For every required live command, record whether it ran in `host-context` or `sandbox`.
+Sandbox-only live passes and failures are diagnostic evidence, not authoritative
+platform-runtime evidence. Reproduce a sandbox failure outside the sandbox before
+classifying it as a product defect. The final host-context run uses a normal,
+non-elevated user by default. If host execution is impossible, classify the required live
+verification as blocked. Do not weaken code or tests to make sandbox execution pass.
+
+If a broad command such as `cargo test --workspace` includes any required host-context
+live test on the current platform, its final acceptance run must also execute in
+host-context.
+
 ## Other Cargo workspace commands
 
-- `cargo build --workspace` — Build all workspace crates and examples.
-- `cargo check --workspace` — Check all workspace crates and examples.
-- `cargo test --workspace` — Run tests across all workspace crates.
-- `cargo run -p <example-name>` — Run a specific example app from `examples/`.
+- `cargo build --workspace` 窶・Build all workspace crates and examples.
+- `cargo check --workspace` 窶・Check all workspace crates and examples.
+- `cargo test --workspace` 窶・Run tests across all workspace crates.
+- `cargo run -p <example-name>` 窶・Run a specific example app from `examples/`.
 
 When proc-macro, codegen, or rust-analyzer-shadow behavior changes, also run the additive
 companion check:

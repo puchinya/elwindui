@@ -10,7 +10,7 @@ This remains verification-only. No product source, test, or backend implementati
 
 - Branch: `feature/178-winui3-pointer-coordinate-verification`
 - Required `origin/master` merge commit: `d96cd7a4fa2c992a2c3ffb49be8bbd0fbd7d6b14`
-- Current verification commit: `b379620` (`docs: record Issue 178 runtime environment limitation`)
+- Current verification branch head: `14e37b1` (`docs: clarify Issue 178 verification commit`)
 - `origin/master`: `1b398f213744...`
 - Host: Windows `x86_64-pc-windows-msvc`, `rustc 1.97.1 (8bab26f4f 2026-07-14)`, `cargo 1.97.1 (c980f4866 2026-06-30)`
 - User token/integrity: standard interactive user, `Medium Mandatory Level`; no administrator-only success was used as acceptance.

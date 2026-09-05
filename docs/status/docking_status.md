@@ -73,15 +73,23 @@ reports only intentional `inactive-code` WeakWarnings (222 records, zero actiona
 
 ## Platform boundaries
 
-- AppKit runtime interaction: the rebuilt real `docking-demo` rendered successfully and its captured
-  GUI shows the retained Docking layout, live status row, and alpha-transparent chrome surfaces.
-  The required interactive rerun is BLOCKED: `macos-ui-driver focus-window` could not confirm that
-  the demo became frontmost (`frontmost_application_name` remained outside the demo), so native
-  pointer, floating move/resize, context, auto-hide, and long-duration splitter results are not
-  claimed. The prior observed native PASS items remain historical evidence only; they do not replace
-  the blocked final matrix.
-- WinUI3 runtime interaction: Issues #207 and #217 are closed and current master includes the
-  Windows gate recovery. No usable Windows GUI host was available in this macOS run, so canonical
-  WinUI3 build/native Docking execution was not run; compile-only evidence is not a native PASS.
+- AppKit runtime interaction: a real foreground `docking-demo` session was confirmed and the
+  following native interactions were observed: initial render, rapid selection, same-group tab
+  reorder, two-logical-pixel insertion marker during drag and clearing, item tear-out to a native
+  floating window, native floating-window close with process survival, a cross-group split/dock
+  commit, continuous vertical splitter tracking, and light/dark theme switching with selection
+  preserved. Chrome icons were observed without contrasting background rectangles. The native
+  close observation did not create a new crash report.
+- AppKit native acceptance remains BLOCKED for the unverified remainder of the contract. The
+  current UI-driver preflight reports both Accessibility and Screen Recording as unavailable, so
+  foreground attribution and screenshot evidence cannot be safely extended. Not yet proven in a
+  valid foreground session are all eight explicit split/edge targets, main-to-floating and
+  floating-to-floating moves, simultaneous floating windows, native floating move/resize and
+  snapshot bounds restore, whole-group moves/tear-out and capability gating, auto-hide pin/popup/
+  unpin, context close actions, and horizontal splitter tracking. These are not reported as native
+  PASS. The three AppKit CoreImage SVG golden tests remain unrelated baseline/environment failures
+  (`CIContext` creation returns NULL under the current host).
+- WinUI3 native Docking acceptance is DEFERRED to a separate follow-up Issue; it is not a PR #221
+  completion gate. Compile-only evidence is not a native PASS.
 - GTK4: compile as required by the workspace. Do not claim native floating runtime support without a
   real GTK Window implementation.

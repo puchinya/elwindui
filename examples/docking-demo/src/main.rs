@@ -102,6 +102,10 @@ mod docking_demo_view_model {
 struct DockingDemoSurface {
     #[bindable]
     vm: std::rc::Rc<DockingDemoViewModel>,
+    #[environment(foreground)]
+    theme_foreground: BrushStyle,
+    #[environment(placeholder)]
+    theme_placeholder: BrushStyle,
     #[computed(expr = elwindui_docking::DockItemId::from("document-a"))]
     document_a: elwindui_docking::DockItemId,
     #[computed(expr = elwindui_docking::DockItemId::from("document-b"))]
@@ -129,6 +133,18 @@ struct DockingDemoSurface {
     #[computed(expr = elwindui::core::layout::Orientation::Vertical)]
     vertical: elwindui::core::layout::Orientation,
     body: view! {
+        on_mount {
+            for node in elwindui::core::visual_tree::find_all::<
+                elwindui_docking::DockingControl,
+            >(this.as_ref()) {
+                if let Some(docking) = node
+                    .as_any()
+                    .downcast_ref::<elwindui_docking::DockingControl>()
+                {
+                    docking.synchronize_layout_source();
+                }
+            }
+        }
         let documents = elwindui_docking::DockGroup {
             id: documents
             weight: 2.1
@@ -136,13 +152,13 @@ struct DockingDemoSurface {
                 id: document_a
                 title: "Document A"
                 can_pin: false
-                TextBlock { text: "Document A editor" foreground: BrushStyle::Foreground }
+                TextBlock { text: "Document A editor" foreground: theme_foreground }
             }
             elwindui_docking::DockItem {
                 id: document_b
                 title: "Document B"
                 can_pin: false
-                TextBlock { text: "Document B editor" foreground: BrushStyle::Foreground }
+                TextBlock { text: "Document B editor" foreground: theme_foreground }
             }
         };
 
@@ -155,12 +171,12 @@ struct DockingDemoSurface {
             elwindui_docking::DockItem {
                 id: solution_explorer
                 title: "Solution Explorer"
-                TextBlock { text: "Solution Explorer" foreground: BrushStyle::Foreground }
+                TextBlock { text: "Solution Explorer" foreground: theme_foreground }
             }
             elwindui_docking::DockItem {
                 id: git_changes
                 title: "Git Changes"
-                TextBlock { text: "Git Changes" foreground: BrushStyle::Foreground }
+                TextBlock { text: "Git Changes" foreground: theme_foreground }
             }
         };
 
@@ -172,7 +188,7 @@ struct DockingDemoSurface {
             elwindui_docking::DockItem {
                 id: error_list
                 title: "Error List"
-                TextBlock { text: "No errors" foreground: BrushStyle::Placeholder }
+                TextBlock { text: "No errors" foreground: theme_placeholder }
             }
         };
 
@@ -183,12 +199,12 @@ struct DockingDemoSurface {
             elwindui_docking::DockItem {
                 id: output
                 title: "Output"
-                TextBlock { text: "Build output" foreground: BrushStyle::Foreground }
+                TextBlock { text: "Build output" foreground: theme_foreground }
             }
             elwindui_docking::DockItem {
                 id: terminal
                 title: "Terminal"
-                TextBlock { text: "Terminal" foreground: BrushStyle::Foreground }
+                TextBlock { text: "Terminal" foreground: theme_foreground }
             }
         };
 
@@ -220,36 +236,42 @@ struct DockingDemoSurface {
             height: 32.0
             spacing: 18.0
             background: BrushStyle::Secondary
-            TextBlock { text: "File" foreground: BrushStyle::Foreground }
-            TextBlock { text: "Edit" foreground: BrushStyle::Foreground }
-            TextBlock { text: "View" foreground: BrushStyle::Foreground }
-            TextBlock { text: "Help" foreground: BrushStyle::Foreground }
+            TextBlock { text: "File" foreground: theme_foreground }
+            TextBlock { text: "Edit" foreground: theme_foreground }
+            TextBlock { text: "View" foreground: theme_foreground }
+            TextBlock { text: "Help" foreground: theme_foreground }
             Button {
                 text: "Clear layout"
+                foreground: theme_foreground
                 tooltip: "Close every live item while keeping the authored layout for Reset"
                 on_click: vm.clear_layout
             }
             Button {
                 text: "Reset layout"
+                foreground: theme_foreground
                 tooltip: "Restore the authored DockGroup/DockSplitPanel declaration"
                 on_click: vm.reset_layout
             }
             Button {
                 text: "Save snapshot"
+                foreground: theme_foreground
                 tooltip: "Capture the version-2 layout snapshot"
-                on_click: vm.save_layout
+                on_click: || { vm.save_layout(); }
             }
             Button {
                 text: "Restore snapshot"
+                foreground: theme_foreground
                 tooltip: "Restore the last version-2 snapshot"
                 on_click: vm.restore_layout
             }
             Button {
                 text: "Light theme"
+                foreground: theme_foreground
                 on_click: || { VisualStudioTheme.apply(&application_environment()); }
             }
             Button {
                 text: "Dark theme"
+                foreground: theme_foreground
                 on_click: || { DarkDockingTheme.apply(&application_environment()); }
             }
         };

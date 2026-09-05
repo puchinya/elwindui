@@ -206,6 +206,10 @@ impl CustomTabViewItem {
         self.is_pointer_over()
     }
 
+    pub(crate) fn refresh_theme(&self) {
+        self.sync_close_button();
+    }
+
     fn sync_header_layout(&self) {
         let Some(root) = self.__template_root() else {
             return;

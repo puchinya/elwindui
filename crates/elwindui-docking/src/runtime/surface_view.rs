@@ -87,6 +87,15 @@ impl SurfaceRuntime {
         self.surface.content_root().children().insert(0, child);
     }
 
+    pub(crate) fn refresh_theme(&self) {
+        self.surface
+            .content_root()
+            .set_background(themed_brush(BrushStyle::Background));
+        self.auto_hide.refresh_theme();
+        self.preview.refresh_theme();
+        self.targets.refresh_theme();
+    }
+
     pub(crate) fn render_strips(
         &self,
         titles: impl Iterator<Item = (usize, DockItemId, String, Option<IconSource>)>,

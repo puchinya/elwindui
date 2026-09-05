@@ -321,6 +321,29 @@ fn mounted_default_docking() -> Rc<DockingControl> {
     docking
 }
 
+fn mounted_default_docking_with_keep_empty_tools() -> Rc<DockingControl> {
+    let (first, _) = authored_item("first", "First", true);
+    let (second, _) = authored_item("second", "Second", true);
+    let (third, _) = authored_item("third", "Third", true);
+    let documents = DockGroup::new_group();
+    documents.set_id(group("documents"));
+    documents.set_children(vec![first, second]);
+    let tools = DockGroup::new_group();
+    tools.set_id(group("tools"));
+    tools.set_show_when_empty(true);
+    tools.set_children(vec![third]);
+    let split = DockSplitPanel::new_panel();
+    split.set_children(vec![
+        documents as Rc<dyn UIElementExt>,
+        tools as Rc<dyn UIElementExt>,
+    ]);
+    let docking = DockingControl::__new_unmounted();
+    docking.set_content(split);
+    docking.mount(application_environment());
+    assert!(docking.apply_template());
+    docking
+}
+
 fn floating_auto_hide_snapshot_model() -> DockLayoutModel {
     let mut auto_hide = empty_auto_hide();
     auto_hide[DockSide::Left.index()].push(SnapshotAutoHideEntry {
@@ -2174,6 +2197,42 @@ fn floating_native_close_commits_all_items_once_and_closes_one_host() {
     assert!(docking.layout().is_item_closed(&item("second")));
     assert_eq!(changes.get(), 1);
     assert_eq!(host.log.close_count.get(), 0);
+    assert!(host.log.close_handler.borrow().is_none());
+    assert_eq!(
+        docking
+            .realization_for_test()
+            .unwrap()
+            .borrow()
+            .floating_host_count_for_test(),
+        0
+    );
+}
+
+#[test]
+fn floating_native_close_removes_empty_authored_root_and_closes_one_host() {
+    let docking = mounted_default_docking_with_keep_empty_tools();
+    let hosts = Rc::new(RefCell::new(Vec::new()));
+    docking.install_floating_host_factory_for_test(individual_fake_factory(hosts.clone()));
+    let floating = docking
+        .layout()
+        .with_item_moved(
+            &item("third"),
+            DockPlacement::Floating {
+                bounds: Rect {
+                    x: 900.0,
+                    y: 100.0,
+                    width: 420.0,
+                    height: 260.0,
+                },
+            },
+        )
+        .expect("item should float");
+    docking.set_layout(floating);
+    let host = hosts.borrow()[0].clone();
+
+    assert!(!host.log.invoke_close());
+    assert!(docking.layout().is_item_closed(&item("third")));
+    assert!(docking.layout().snapshot().floating_roots.is_empty());
     assert!(host.log.close_handler.borrow().is_none());
     assert_eq!(
         docking

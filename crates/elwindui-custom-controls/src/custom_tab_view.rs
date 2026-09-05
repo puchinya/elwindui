@@ -277,6 +277,20 @@ impl CustomTabView {
         self.set_tab_drag_completed_callback(Some(Rc::from(callback)));
     }
 
+    /// Reapplies runtime-owned tab chrome that is resolved from the application theme.
+    pub fn refresh_theme(&self) {
+        for item in self.children_values() {
+            item.refresh_theme();
+        }
+        if let Some(presenter) = self
+            .content_presenter()
+            .and_then(|presenter| presenter.upgrade())
+        {
+            presenter.refresh_presentation();
+        }
+        self.invalidate_measure();
+    }
+
     fn children_values(&self) -> Vec<Rc<CustomTabViewItem>> {
         #[cfg(rust_analyzer)]
         {

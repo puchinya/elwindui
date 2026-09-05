@@ -77,6 +77,19 @@ impl NativeControl {
 }
 
 impl NativeControl {
+    /// Measures a native leaf after refreshing its text presentation. A native view can lose its
+    /// attributed title while a sibling subtree is replaced even though the resolved style is
+    /// unchanged, so controls that need repaint-on-reconcile can use this narrow path without
+    /// disabling the style cache for every native control.
+    pub(crate) fn measure_with_text_style_refresh(
+        &self,
+        available: elwindui_core::base::Size,
+    ) -> elwindui_core::base::Size {
+        self.reapply_text_style();
+        self.handle.as_nsview().setNeedsDisplay(true);
+        self.handle.measure(available)
+    }
+
     /// Pulls this element's resolved text style and pushes it to `handle`, but only when it
     /// actually differs from what was last applied — pull-based (called from `measure_override`,
     /// which `UIElementExt::measure` runs unconditionally every layout pass) rather than pushed

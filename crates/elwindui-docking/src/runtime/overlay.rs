@@ -10,6 +10,7 @@ use crate::core::ui::{
 use crate::runtime::drag::ResolvedDockTarget;
 use crate::runtime::metrics::{COMPASS_BUTTON_SIZE, COMPASS_GAP, COMPASS_SIZE};
 use crate::runtime::themed_brush;
+use std::cell::Cell;
 use std::rc::Rc;
 
 /// A retained, non-participating layout layer whose child is arranged in the surface's local
@@ -28,6 +29,7 @@ pub(crate) struct DropPreviewLayer {
 pub(crate) struct DockTargetOverlay {
     visual: Rc<Grid>,
     buttons: Vec<(DockTarget, Rc<Rectangle>)>,
+    selected: Cell<Option<DockTarget>>,
 }
 
 impl DockTargetOverlay {
@@ -76,10 +78,15 @@ impl DockTargetOverlay {
             })
             .collect();
         visual.set_visibility(Visibility::Collapsed);
-        Self { visual, buttons }
+        Self {
+            visual,
+            buttons,
+            selected: Cell::new(None),
+        }
     }
 
     pub(crate) fn show(&self, target: DockTarget) {
+        self.selected.set(Some(target));
         for (candidate, button) in &self.buttons {
             let selected = *candidate == target
                 || matches!(
@@ -99,7 +106,30 @@ impl DockTargetOverlay {
     }
 
     pub(crate) fn clear(&self) {
+        self.selected.set(None);
         self.visual.set_visibility(Visibility::Collapsed);
+    }
+
+    pub(crate) fn refresh_theme(&self) {
+        let selected = self.selected.get();
+        for (candidate, button) in &self.buttons {
+            let is_selected = selected.is_some_and(|target| {
+                *candidate == target
+                    || matches!(
+                        (candidate, target),
+                        (DockTarget::SplitLeft, DockTarget::DockLeft)
+                            | (DockTarget::SplitTop, DockTarget::DockTop)
+                            | (DockTarget::SplitRight, DockTarget::DockRight)
+                            | (DockTarget::SplitBottom, DockTarget::DockBottom)
+                    )
+            });
+            button.set_fill(themed_brush(if is_selected {
+                BrushStyle::Selection
+            } else {
+                BrushStyle::Tint
+            }));
+            button.set_stroke(themed_brush(BrushStyle::Separator));
+        }
     }
 
     pub(crate) fn visual(&self) -> Rc<dyn UIElementExt> {
@@ -198,6 +228,15 @@ impl DropPreview {
 
     pub(crate) fn visual(&self) -> Rc<dyn UIElementExt> {
         self.layer.clone()
+    }
+
+    pub(crate) fn refresh_theme(&self) {
+        if let Some(root) = self.layer.__template_root() {
+            root.as_any()
+                .downcast_ref::<Rectangle>()
+                .expect("drop preview template root is a Rectangle")
+                .set_fill(themed_brush(BrushStyle::Selection));
+        }
     }
 
     #[cfg(test)]

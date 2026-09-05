@@ -223,6 +223,30 @@ struct GroupRuntimeHost {
     close_button: Rc<Grid>,
 }
 
+impl GroupRuntimeHost {
+    fn refresh_theme(&self) {
+        self.title_bar
+            .set_background(themed_brush(BrushStyle::Secondary));
+        self.title
+            .set_foreground(themed_brush(BrushStyle::Foreground));
+        self.empty_hint
+            .set_foreground(themed_brush(BrushStyle::Tertiary));
+
+        self.pin_button.children().clear();
+        self.pin_button
+            .children()
+            .add(RuntimeRealization::private_icon(true));
+        self.float_button.children().clear();
+        self.float_button
+            .children()
+            .add(RuntimeRealization::float_icon());
+        self.close_button.children().clear();
+        self.close_button
+            .children()
+            .add(RuntimeRealization::private_icon(false));
+    }
+}
+
 struct PlannedGroup {
     view: Rc<CustomTabView>,
     host: GroupRuntimeHost,
@@ -451,6 +475,19 @@ impl RuntimeRealization {
 
     pub(crate) fn native_bounds_syncing(&self) -> bool {
         self.native_bounds_syncing.get()
+    }
+
+    pub(crate) fn refresh_theme(&self) {
+        self.main_surface.refresh_theme();
+        for floating in &self.floating {
+            floating.surface.refresh_theme();
+        }
+        for view in self.groups.values() {
+            view.refresh_theme();
+        }
+        for host in self.group_hosts.values() {
+            host.refresh_theme();
+        }
     }
 
     fn prepare_reconcile(

@@ -197,6 +197,14 @@ impl AutoHideOverlay {
     pub(crate) fn set_root(&self, root: RootKind) {
         *self.root_context.borrow_mut() = root;
     }
+
+    pub(crate) fn refresh_theme(&self) {
+        self.pin_button.children().clear();
+        self.pin_button.children().add(chrome_icon(
+            ChromeIcon::Pin,
+            themed_brush(BrushStyle::Foreground),
+        ));
+    }
 }
 
 impl Default for AutoHideOverlay {

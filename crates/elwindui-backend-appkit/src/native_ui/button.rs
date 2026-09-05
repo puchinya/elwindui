@@ -13,6 +13,11 @@ pub struct Button {
 
 #[elwindui_macros::class]
 impl Button {
+    #[overrides]
+    fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
+        self.base.measure_with_text_style_refresh(available)
+    }
+
     /// `#[routed] on_click` (`Button`'s `#[class]` declaration) is registered directly onto this
     /// widget's own `base` — real since construction (see `new`), and already wired (also in `new`)
     /// to fire `dispatch_routed` starting at this same node.
@@ -41,6 +46,10 @@ impl Button {
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
         self.base.reapply_text_style();
+        // `NSButton.setTitle` changes the fitting size. Resync can set the same authored title
+        // again after a sibling's layout was replaced, so invalidate unconditionally to ensure
+        // the button is measured and painted back into the containing layout group.
+        self.base.invalidate_measure();
     }
     fn set_role(&self, role: elwindui_core::ui::ButtonRole) {
         self.inner.set_role(role);

@@ -32,12 +32,12 @@
   positioned preview visible.
 - AppKit and WinUI3 have private native floating Window adapters with logical bounds, retained
   surface content, stable host IDs, staged prepare/commit creation, close interception, and
-  empty-host cleanup. A native close callback marks the host as closing, commits the model once, and
-  lets the original OS close continue without reentrant `close()`; rejected closes keep both the
-  model and native host intact. Interactive bounds preserve the source group's arranged size and
-  pointer offset, subject to a 160x120 minimum. GTK model floating remains valid but interactive
-  native floating reports `FloatingHostUnavailable` because the baseline has no usable Window
-  implementation.
+  empty-host cleanup. A native close callback marks the host as closing, hands the original OS
+  close back without reentrant `close()`, and commits the model on the following UI turn; rejected
+  closes keep both the model and native host intact. Interactive bounds preserve the source
+  group's arranged size and pointer offset, subject to a 160x120 minimum. GTK model floating
+  remains valid but interactive native floating reports `FloatingHostUnavailable` because the
+  baseline has no usable Window implementation.
 - Docking chrome close, pin, and floating affordances use a shared cached 16x16 vector geometry with
   round caps/joins and centered hit-test-transparent presentation. Their hosting title-bar and
   auto-hide button surfaces use an alpha-zero brush, preserving the full hit area without a
@@ -47,7 +47,7 @@
 
 ## Tests and verification state
 
-The focused `elwindui-docking` suite currently has 68 passing tests covering default
+The focused `elwindui-docking` suite currently has 69 passing tests covering default
 initialization/reset, activation, close/reopen, all four split/edge sides, snapshot round-trip,
 auto-hide state, typed invalid values, latest-only source logic, removed-authored-group repair,
 adjacent split-weight transformation, generated-group drag targets, retained runtime presentation,
@@ -61,18 +61,19 @@ and 36 integration tests, including
 structural-selection counters and compact presentation. Native GUI behavior still requires
 platform-host verification where noted below.
 
-The current workspace verification is `1001 passed, 3 ignored`; `cargo check --workspace`, the
+The current workspace verification is `1003 passed, 3 ignored`; `cargo check --workspace`, the
 `rust_analyzer`-cfg check, and the repository rust-analyzer diagnostic gate all pass. The latter
-reports only intentional `inactive-code` WeakWarnings (200 records, zero actionable diagnostics).
+reports only intentional `inactive-code` WeakWarnings (201 records, zero actionable diagnostics).
 
 ## Platform boundaries
 
 - AppKit runtime interaction: run selection/close, tab drag targets/cancellation, splitter
   completion/cancellation, pin/auto-hide/unpin, floating/re-dock, and native close accept/reject
-  when macOS UI permissions are available. The 2026-09-05 GUI smoke pass launched the real
-  `docking-demo`, visually confirmed transparent docking chrome, created two native floating
-  windows, and closed both without terminating the process; the full interaction matrix remains
-  unrun.
+  when macOS UI permissions are available. An earlier 2026-09-05 GUI smoke pass launched the real
+  `docking-demo`, visually confirmed transparent docking chrome, switched tabs and themes, exercised
+  snapshot/Clear/Restore/Reset, and created and closed native floating windows for Document A,
+  Document B, and Solution Explorer. After each close the process remained alive and the toolbar
+  actions were repainted. The full interaction matrix remains unrun.
 - WinUI3 runtime interaction: run the equivalent matrix only when the separate Issue #207/#217
   Windows integration state permits it; those fixes are not part of #172/#218.
 - GTK4: compile as required by the workspace. Do not claim native floating runtime support without a

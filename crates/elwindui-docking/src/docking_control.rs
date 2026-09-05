@@ -13,9 +13,34 @@ use elwindui_custom_controls::{
     SplitterDragCompletedEventArgs, SplitterDragDeltaEventArgs, SplitterDragStartedEventArgs,
     TabDragCompletedEventArgs, TabDragMovedEventArgs, TabDragStartedEventArgs,
 };
+#[cfg(all(target_os = "macos", not(test)))]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet};
+#[cfg(all(target_os = "macos", not(test)))]
+use std::future::poll_fn;
 use std::rc::Rc;
+#[cfg(all(target_os = "macos", not(test)))]
+use std::task::Poll;
+
+#[cfg(all(target_os = "macos", not(test)))]
+async fn wait_for_next_ui_turn() {
+    let started = Rc::new(Cell::new(false));
+    let started_on_poll = Rc::clone(&started);
+    poll_fn(move |context| {
+        if started_on_poll.replace(true) {
+            Poll::Ready(())
+        } else {
+            let waker = context.waker().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                waker.wake();
+            });
+            Poll::Pending
+        }
+    })
+    .await;
+}
 
 /// Private marker used to distinguish the visible retained runtime host from the collapsed
 /// authored declaration presenter. It is exported only as a hidden macro support type.
@@ -34,6 +59,28 @@ pub struct DockingControl {
     #[prop(default = crate::dock_layout_model::empty())]
     #[two_way]
     layout: crate::dock_layout_model,
+    #[environment(primary)]
+    primary_brush: crate::core::theme::BrushStyle,
+    #[environment(secondary)]
+    secondary_brush: crate::core::theme::BrushStyle,
+    #[environment(tertiary)]
+    tertiary_brush: crate::core::theme::BrushStyle,
+    #[environment(foreground)]
+    foreground_brush: crate::core::theme::BrushStyle,
+    #[environment(background)]
+    background_brush: crate::core::theme::BrushStyle,
+    #[environment(window_background)]
+    window_background_brush: crate::core::theme::BrushStyle,
+    #[environment(tint)]
+    tint_brush: crate::core::theme::BrushStyle,
+    #[environment(selection)]
+    selection_brush: crate::core::theme::BrushStyle,
+    #[environment(separator)]
+    separator_brush: crate::core::theme::BrushStyle,
+    #[environment(placeholder)]
+    placeholder_brush: crate::core::theme::BrushStyle,
+    #[environment(link)]
+    link_brush: crate::core::theme::BrushStyle,
     #[state(default = None)]
     layout_change_callback: Option<Rc<dyn Fn(DockLayoutModel)>>,
     #[state(default = None)]
@@ -57,8 +104,22 @@ pub struct DockingControl {
         on_unmount {
             this.dispose_runtime();
         }
-        on_update(layout) {
+        on_update(
+            layout,
+            primary_brush,
+            secondary_brush,
+            tertiary_brush,
+            foreground_brush,
+            background_brush,
+            window_background_brush,
+            tint_brush,
+            selection_brush,
+            separator_brush,
+            placeholder_brush,
+            link_brush
+        ) {
             this.handle_layout_update(layout);
+            this.refresh_runtime_theme();
         }
         Grid {
             rows: [crate::core::layout::GridLength::Star(1.0)]
@@ -71,6 +132,21 @@ pub struct DockingControl {
             }
         }
     }),
+}
+
+fn invalidate_visual_subtree(node: &Rc<dyn UIElementExt>) {
+    node.invalidate_measure();
+    for child in node.visual_children() {
+        invalidate_visual_subtree(&child);
+    }
+}
+
+fn visual_tree_root(node: &Rc<dyn UIElementExt>) -> Rc<dyn UIElementExt> {
+    let mut root = Rc::clone(node);
+    while let Some(parent) = root.visual_parent() {
+        root = parent;
+    }
+    root
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -96,6 +172,18 @@ impl DockingControl {
     /// Installs the callback raised once for each committed user layout change.
     pub fn set_on_layout_change(&self, callback: Box<dyn Fn(DockLayoutModel)>) {
         self.set_layout_change_callback(Some(Rc::from(callback)));
+    }
+
+    /// Publishes the current realized layout after a containing view has finished wiring its
+    /// two-way binding. The authored default can be realized while the parent is still being
+    /// constructed, before that binding callback exists.
+    #[doc(hidden)]
+    pub fn synchronize_layout_source(&self) {
+        let model = self.attach_current_default(self.layout());
+        self.set_layout(model.clone());
+        if let Some(callback) = self.layout_change_callback() {
+            callback(model);
+        }
     }
 
     /// Removes the user layout-change callback.
@@ -175,6 +263,12 @@ impl DockingControl {
 
     pub(crate) fn authored_content(&self) -> Option<Rc<dyn UIElementExt>> {
         self.__content_opt()
+    }
+
+    fn refresh_runtime_theme(&self) {
+        if let Some(realization) = self.runtime_realization() {
+            realization.borrow().refresh_theme();
+        }
     }
 
     fn apply_model(
@@ -320,6 +414,17 @@ impl DockingControl {
             }
         }
         self.set_applying_source(false);
+        // A DockingControl layout update can replace several native descendants while its
+        // containing view remains otherwise unchanged. In AppKit the containing layout group is
+        // also responsible for repainting sibling native controls (for example, a toolbar above
+        // the docking surface). Invalidate that containing subtree so those siblings get their
+        // native presentation refreshed even when their measured sizes did not change.
+        if let Some(parent) = self.visual_parent() {
+            let root = visual_tree_root(&parent);
+            invalidate_visual_subtree(&root);
+        } else {
+            self.invalidate_measure();
+        }
     }
 
     fn attach_current_default(&self, model: DockLayoutModel) -> DockLayoutModel {
@@ -818,6 +923,13 @@ impl DockingControl {
             };
             next = updated;
         }
+        let Ok(next_without_empty_host) = next.without_empty_floating_root(index) else {
+            realization
+                .borrow_mut()
+                .cancel_native_floating_close(host_id);
+            return true;
+        };
+        next = next_without_empty_host;
         if next == current {
             realization
                 .borrow_mut()
@@ -825,6 +937,43 @@ impl DockingControl {
             return false;
         }
 
+        #[cfg(all(target_os = "macos", not(test)))]
+        {
+            let weak_owner = crate::runtime::weak_self_from_visual_owner(self);
+            elwindui::core::task::spawn_local(async move {
+                // AppKit's close delegate calls this handler before the native window starts its
+                // close transaction. Let that callback return first; otherwise the main host can
+                // reconcile its sibling native islands while AppKit still owns the closing host.
+                wait_for_next_ui_turn().await;
+                let Some(owner) = weak_owner.upgrade() else {
+                    return;
+                };
+                if owner.layout() != current {
+                    owner.runtime_realization().map(|realization| {
+                        realization
+                            .borrow_mut()
+                            .cancel_native_floating_close(host_id)
+                    });
+                    return;
+                }
+                match owner.commit_user_model(next) {
+                    Ok(())
+                        if owner.runtime_realization().is_some_and(|realization| {
+                            realization.borrow().floating_root_index(host_id).is_none()
+                        }) => {}
+                    Ok(()) | Err(_) => {
+                        if let Some(realization) = owner.runtime_realization() {
+                            realization
+                                .borrow_mut()
+                                .cancel_native_floating_close(host_id);
+                        }
+                    }
+                }
+            });
+            return false;
+        }
+
+        #[cfg(any(not(target_os = "macos"), test))]
         match self.commit_user_model(next) {
             Ok(()) if realization.borrow().floating_root_index(host_id).is_none() => false,
             Ok(()) | Err(_) => {

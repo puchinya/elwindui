@@ -1134,7 +1134,6 @@ impl TreeHostView {
                 }
             }
         }
-
         // Cheap only relative to a `debug_assertions`/`render-stats` build that already pays for
         // `render::stats` bumps throughout this pass — a release build with neither never takes
         // this branch, so the `task_info` syscall and cache walk `record_memory_stats` does never

@@ -972,6 +972,46 @@ impl DockLayoutModel {
         items
     }
 
+    /// Removes a floating root after a native close has closed every item it contained.
+    ///
+    /// Authored groups may intentionally remain visible when empty, but an empty native
+    /// floating host has no useful presentation and must not outlive its model root. Return
+    /// states are remapped because floating-root indices are positional in the snapshot model.
+    pub(crate) fn without_empty_floating_root(
+        &self,
+        index: usize,
+    ) -> Result<Self, DockLayoutError> {
+        // Generated roots are already removed by `normalize` when their last item is closed.
+        // An authored root, on the other hand, is intentionally retained until this method
+        // removes the empty native host explicitly.
+        let Some(_) = self.workspace.floating_roots.get(index) else {
+            return Ok(self.clone());
+        };
+        if !self.floating_item_ids(index).is_empty() {
+            return Ok(self.clone());
+        }
+
+        fn remap(index: &mut Option<usize>, removed: usize) {
+            *index = match *index {
+                Some(value) if value == removed => None,
+                Some(value) if value > removed => Some(value - 1),
+                other => other,
+            };
+        }
+
+        let mut next = self.clone();
+        next.workspace.floating_roots.remove(index);
+        for side in &mut next.workspace.auto_hide {
+            for entry in side {
+                remap(&mut entry.return_state.floating_root, index);
+            }
+        }
+        for entry in &mut next.workspace.closed {
+            remap(&mut entry.return_state.floating_root, index);
+        }
+        Ok(next)
+    }
+
     pub(crate) fn selected_item_id(&self) -> Option<DockItemId> {
         fn selected(node: &Node) -> Option<DockItemId> {
             match node {

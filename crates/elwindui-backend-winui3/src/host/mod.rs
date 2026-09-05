@@ -1000,6 +1000,29 @@ impl TreeHostPanel {
         );
     }
 
+    /// Issue #225: pushes an owner-supplied logical viewport into this host's `Canvas` and
+    /// synchronously relays out — the single centralized form of the explicit `SetWidth`/
+    /// `SetHeight` + `force_relayout()` sequence `TabView`/`ScrollView` already use ad hoc for
+    /// their own "size pushed in explicitly" hosts. A negative or non-finite value is normalized
+    /// to `0.0` rather than handed to native `SetWidth`/`SetHeight` (whose own behavior for such
+    /// input is not a contract this host relies on).
+    pub(crate) fn set_viewport_size(&self, width: f64, height: f64) {
+        let width = if width.is_finite() {
+            width.max(0.0)
+        } else {
+            0.0
+        };
+        let height = if height.is_finite() {
+            height.max(0.0)
+        } else {
+            0.0
+        };
+        let element = self.as_element();
+        let _ = element.SetWidth(width);
+        let _ = element.SetHeight(height);
+        self.force_relayout();
+    }
+
     /// Activates or suspends this host's layout and rendering lifecycle.
     ///
     /// Suspending removes retained Composition and native children, clears focus, and turns later

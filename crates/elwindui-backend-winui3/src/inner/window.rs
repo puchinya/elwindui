@@ -3,15 +3,44 @@
 use super::InnerMenuBar;
 use crate::bindings;
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
-use crate::bindings::Microsoft::UI::Xaml::{SizeChangedEventHandler, Window as XamlWindow};
-use crate::ffi::{UiCallbackRegistryOwner, invoke_ui_bool_event_callback};
+use crate::bindings::Microsoft::UI::Xaml::{Window as XamlWindow, WindowSizeChangedEventArgs};
+use crate::ffi::{
+    UiCallbackRegistryOwner, invoke_ui_bool_event_callback, invoke_ui_size_event_callback,
+    register_ui_size_event_callback,
+};
 use crate::host::TreeHostPanel;
 use elwindui_core::base::Rect;
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use windows::Graphics::{PointInt32, SizeInt32};
 use windows::core::HSTRING;
 use windows::core::Interface;
+
+/// Issue #225: the single place that decides content-host (and, when a menu bar is present,
+/// menu-wrapper) sizing from a Window-logical `width`/`height` — shared by
+/// `InnerWindow::sync_content_host_to_window_bounds` (bootstrap: before the first `set_tree`, and
+/// right after `Activate()`) and the `Window.SizeChanged` handler registered once in `new()`
+/// (ongoing resize), so there is exactly one sizing authority rather than two independently
+/// computed ones. A non-positive width or negative height is treated as "not yet a real viewport"
+/// (e.g. a transient pre-activation `Bounds` of `0x0`) and left unapplied rather than promoted
+/// into a permanent `0x0` viewport for `TreeHostPanel::relayout_static`.
+fn apply_window_viewport(
+    content_host: &TreeHostPanel,
+    menu_wrapper: &RefCell<Option<Canvas>>,
+    top_inset: &Cell<f64>,
+    width: f64,
+    height: f64,
+) {
+    if !(width > 0.0) || !(height >= 0.0) {
+        return;
+    }
+    if let Some(wrapper) = menu_wrapper.borrow().as_ref() {
+        let _ = wrapper.SetWidth(width);
+        let _ = wrapper.SetHeight(height);
+    }
+    let content_height = (height - top_inset.get()).max(0.0);
+    content_host.set_viewport_size(width, content_height);
+}
 
 /// PR #165 review remediation, A1/T22-T24: pure decision logic for a native `AppWindow.Closing`
 /// event, extracted so it is unit-testable without any real WinRT/native window machinery — this
@@ -55,7 +84,18 @@ pub(crate) fn should_veto_native_close(handler_result: bool) -> bool {
 
 pub(crate) struct InnerWindow {
     xaml: XamlWindow,
-    content_host: TreeHostPanel,
+    /// Issue #225: `Rc`-wrapped so the `Window.SizeChanged` handler registered in `new()` can hold
+    /// only a `Weak<TreeHostPanel>` — never a strong back-reference to this `InnerWindow`/`Window`,
+    /// which the native `Window` itself owns the handler's lifetime alongside.
+    content_host: Rc<TreeHostPanel>,
+    /// Issue #225: the current menu-bar wrapping `Canvas` (`set_menu_bar`), if any — `None` for
+    /// the plain no-menu-bar case. Shared with the `Window.SizeChanged` handler via `Rc` so a
+    /// menu bar set after construction is still picked up by the one already-registered handler.
+    menu_wrapper: Rc<RefCell<Option<Canvas>>>,
+    /// Issue #225: vertical space `set_menu_bar` reserves above the content host (`0.0` when no
+    /// menu bar is set). Shared with the `Window.SizeChanged` handler for the same reason as
+    /// `menu_wrapper`.
+    top_inset: Rc<Cell<f64>>,
     retained: Cell<bool>,
     always_on_top: Cell<bool>,
     /// Issue #162 §3.19-§3.23: the common Window close callback a native close affordance
@@ -84,11 +124,55 @@ pub(crate) struct InnerWindow {
 impl InnerWindow {
     pub(crate) fn new() -> Self {
         let xaml = XamlWindow::new().expect("Window::new");
-        let content_host = TreeHostPanel::new();
+        let content_host = Rc::new(TreeHostPanel::new());
         let _ = xaml.SetContent(&content_host.as_element());
+        let menu_wrapper: Rc<RefCell<Option<Canvas>>> = Rc::new(RefCell::new(None));
+        let top_inset = Rc::new(Cell::new(0.0f64));
+
+        // Issue #225: the single top-level Window sizing authority — registered once, for the
+        // Window's own life, regardless of whether/when a menu bar is later attached. The
+        // generated `Window.SizeChanged` delegate (`TypedEventHandler<IInspectable,
+        // WindowSizeChangedEventArgs>`) requires `Send`, which an `Rc`-holding closure is not —
+        // same reason every other native handler in this crate goes through `crate::ffi`'s
+        // numeric-key indirection (`register_ui_size_event_callback`/
+        // `invoke_ui_size_event_callback`) instead of capturing `Rc` state directly. The `Rc`-
+        // capturing logic below (upgrading `Weak<TreeHostPanel>`, reading `menu_wrapper`/
+        // `top_inset`) lives in the plain Rust closure handed to `register_ui_size_event_callback`
+        // — never a strong reference back to this `InnerWindow`/`Window`, so it safely no-ops once
+        // the content host has actually been dropped, rather than keeping it (or, transitively,
+        // this Window) alive.
+        {
+            let content_host_weak = Rc::downgrade(&content_host);
+            let menu_wrapper = Rc::clone(&menu_wrapper);
+            let top_inset = Rc::clone(&top_inset);
+            let callback_id = register_ui_size_event_callback(Rc::new(move |width, height| {
+                let Some(content_host) = Weak::upgrade(&content_host_weak) else {
+                    return;
+                };
+                apply_window_viewport(&content_host, &menu_wrapper, &top_inset, width, height);
+            }));
+            let handler = windows::Foundation::TypedEventHandler::new(
+                move |_sender, args: windows::core::Ref<'_, WindowSizeChangedEventArgs>| {
+                    if let Some(args) = args.as_ref() {
+                        if let Ok(size) = args.Size() {
+                            invoke_ui_size_event_callback(
+                                callback_id,
+                                size.Width as f64,
+                                size.Height as f64,
+                            );
+                        }
+                    }
+                    Ok(())
+                },
+            );
+            let _ = xaml.SizeChanged(&handler);
+        }
+
         let inner = Self {
             xaml,
             content_host,
+            menu_wrapper,
+            top_inset,
             retained: Cell::new(false),
             always_on_top: Cell::new(false),
             close_request_handler: Rc::new(RefCell::new(None)),
@@ -103,6 +187,25 @@ impl InnerWindow {
         inner.try_register_closing_handler();
         inner.try_register_bounds_changed_handler();
         inner
+    }
+
+    /// Issue #225: applies the Window's current `Bounds` to the content host (and menu wrapper,
+    /// if any) right now, if those bounds already represent a real, initialized viewport. Called
+    /// from `set_content` (bounds may already be valid if `Window` was shown before its content
+    /// was replaced) and from `show()` immediately after `Activate()`, so the very first Core
+    /// layout pass does not have to wait for `Window.SizeChanged` to fire at all — it is still the
+    /// mechanism for every *subsequent* resize.
+    fn sync_content_host_to_window_bounds(&self) {
+        let Ok(bounds) = self.xaml.Bounds() else {
+            return;
+        };
+        apply_window_viewport(
+            &self.content_host,
+            &self.menu_wrapper,
+            &self.top_inset,
+            bounds.Width as f64,
+            bounds.Height as f64,
+        );
     }
 
     /// Issue #162 §3.22: registers `AppWindow.Closing` at most once. A no-op once already
@@ -209,6 +312,11 @@ impl InnerWindow {
     /// UIElement>` (layouts/shapes/text mixed freely with native controls, at any nesting depth)
     /// gets reflected into real XAML elements.
     pub(crate) fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElementExt>) {
+        // Issue #225: apply a currently-valid Window viewport (if any) before the tree bootstrap
+        // that `set_tree` performs synchronously below — a `Window` shown before its content is
+        // replaced already has real `Bounds`, and the new tree should not have to wait for the
+        // next `SizeChanged` to get one.
+        self.sync_content_host_to_window_bounds();
         self.content_host.set_tree(content);
     }
 
@@ -246,6 +354,18 @@ impl InnerWindow {
     /// stacking two elements inside a fresh outer `Canvas` sized/positioned manually, mirroring
     /// `TreeHostPanel`'s own "don't trust native auto-layout, position everything explicitly"
     /// approach.
+    ///
+    /// Issue #225: a plain `Canvas`'s children do not stretch to fill it the way `Window.Content`
+    /// stretches to fill the window, so this outer wrapper `Canvas` needs the same explicit
+    /// sizing `content_host` does in the no-menu-bar case. Rather than this method owning its own
+    /// independent `SizeChanged` handler (the previous approach — a second, competing sizing
+    /// authority alongside the one `new()` already registers on `Window` itself, and one this
+    /// investigation never actually confirmed fires reliably either, for the same "plain `Canvas`
+    /// set as `Window.Content`" reason the no-menu-bar path's own `Canvas.SizeChanged` does not),
+    /// this stores `outer` in `menu_wrapper` and the height inset in `top_inset` — the single
+    /// `Window.SizeChanged` handler `new()` already registered picks both up on the very next
+    /// resize, and `sync_content_host_to_window_bounds` (called below) applies the current
+    /// `Window.Bounds` immediately.
     pub(crate) fn set_menu_bar(&self, menu_bar: &InnerMenuBar) {
         const MENU_BAR_HEIGHT: f64 = 32.0;
         let outer = Canvas::new().expect("Canvas::new");
@@ -254,33 +374,10 @@ impl InnerWindow {
             let _ = children.Append(&self.content_host.as_element());
             let _ = Canvas::SetTop(&self.content_host.as_element(), MENU_BAR_HEIGHT);
         }
-        // A plain `Canvas`'s children do not stretch to fill it the way `Window.Content` stretches
-        // to fill the window — unlike the no-menu-bar case (`new`, above), where `content_host` is
-        // set directly as `Window.Content` and so inherits that automatic fill, here it is merely
-        // one more `Canvas` child and never receives an explicit `Width`/`Height` otherwise.
-        // Without this, `content_host.ActualWidth`/`ActualHeight` stay `0` forever (nothing ever
-        // sets or resizes them), so `TreeHostPanel::relayout_static` never lays anything out and
-        // its whole subtree — `TabView`, every native control and drawn primitive in it — never
-        // gets a visible size, even though property updates (e.g. `TextArea::set_text`) keep
-        // reaching the native controls underneath correctly. Mirrors the same `SizeChanged`-driven
-        // bootstrap `TreeHostPanel::new` already uses for its own `Canvas` in the no-menu-bar case.
-        let content_host = self.content_host.as_element();
-        let resize = {
-            let outer = outer.clone();
-            let content_host = content_host.clone();
-            move || {
-                let width = outer.ActualWidth().unwrap_or(0.0);
-                let height = (outer.ActualHeight().unwrap_or(0.0) - MENU_BAR_HEIGHT).max(0.0);
-                let _ = content_host.SetWidth(width);
-                let _ = content_host.SetHeight(height);
-            }
-        };
-        resize();
-        let _ = outer.SizeChanged(&SizeChangedEventHandler::new(move |_, _| {
-            resize();
-            Ok(())
-        }));
+        self.top_inset.set(MENU_BAR_HEIGHT);
+        *self.menu_wrapper.borrow_mut() = Some(outer.clone());
         let _ = self.xaml.SetContent(&outer);
+        self.sync_content_host_to_window_bounds();
     }
 
     /// Shows the window and retains its native wrapper until WinUI reports that it closed.
@@ -295,6 +392,12 @@ impl InnerWindow {
             crate::app::retain_window(&self.xaml);
         }
         let _ = self.xaml.Activate();
+        // Issue #225: `Window.Bounds` is commonly already valid immediately after `Activate()` —
+        // apply it now rather than waiting for the first `Window.SizeChanged` to fire, so the
+        // first Core layout pass after a fresh `show()` does not have to guess at a `0x0`
+        // viewport. `Window.SizeChanged` (registered once, in `new()`) remains the mechanism for
+        // every subsequent resize, and covers the case where `Bounds` is not valid yet even here.
+        self.sync_content_host_to_window_bounds();
     }
 
     pub(crate) fn activate(&self) {

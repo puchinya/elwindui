@@ -1,6 +1,6 @@
 # Backend status
 
-Snapshot: 2026-09-02. Architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-09-06. Architecture is indexed in [`../design/README.md`](../design/README.md).
 
 ## Support matrix
 
@@ -28,7 +28,8 @@ Snapshot: 2026-09-02. Architecture is indexed in [`../design/README.md`](../desi
 
 ## WinUI 3 current gaps
 
-- Self-drawn Canvas pointer pressed/moved/released forwarding, native capture, optional normalized screen positions, and bidirectional root/screen conversion are implemented for #174. Windows verification is pending in Issue #178 and was intentionally separated from PR #175.
+- Self-drawn Canvas pointer pressed/moved/released forwarding, native capture, optional normalized screen positions, and bidirectional root/screen conversion remain implemented for #174. Issue #178 completed its current Windows evidence pass: build and automated gates passed, while the unresolved real-mouse and remaining coordinate/topology rows were classified and transferred to [#224](https://github.com/puchinya/elwindui/issues/224). Those transferred rows are not runtime-verified yet. This verification remains intentionally separate from PR #175.
+- Issue #225 (Window content-host zero-size bootstrap, discovered during #224's live verification): a plain `Window.Content` `TreeHostPanel` `Canvas` never received a native `SizeChanged`, so the Core layout root was permanently arranged at `0x0` and no self-drawn element in any topology tested (direct `Window` content or `VerticalLayout`-wrapped) could ever be hit-tested, independent of and upstream of `VerticalLayout`/Core layout/pointer dispatch (all correctly propagated the invalid `0x0` they were handed). Fixed by making the top-level `Window` itself (`Window.Bounds`/`Window.SizeChanged`) the sole content-host viewport authority; see `docs/design/backends/winui3_backend_design.md`'s "Native hosting and layout" section. Host-context-verified: direct-content and menu-bar-content topologies both get a non-zero arranged size at first show and correctly re-arrange on a real native resize (`crates/elwindui/tests/window_content_host_size.rs`, executed, passing). Separately, real OS `SendInput` mouse delivery to this WinUI3 host's own native window chrome (confirmed via the native minimize button not responding) does not work on the current verification host at all — an environment limitation independent of this fix, consistent with Issue #178's original finding; #224's real-mouse pointer/coordinate matrix therefore remains blocked on that environment constraint, not on this Issue.
 - Pointer cancellation/capture-loss handling is implemented for #179 through `PointerCanceled`, `PointerCaptureLost`, host deactivation, tree replacement/clear, and captured-subtree unmount. Windows verification is pending in Issue #180.
 - SVG group blend modes without direct `CanvasBlend` mappings, isolation, filters, and luminance-mask rasterization need an offscreen effect graph.
 - Cross-backend parity has been verified for the controls recorded in [`control_status.md`](control_status.md), but the entire backend contract has not been re-audited.

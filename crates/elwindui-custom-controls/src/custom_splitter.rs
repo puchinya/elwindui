@@ -75,14 +75,15 @@ impl CustomSplitter {
     }
 
     fn bind_pointer_handlers(&self) {
-        let weak_self = self.weak_self();
+        let weak_self: std::rc::Weak<CustomSplitter> = self.weak_self();
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_pressed",
             Box::new(move |event, _| {
                 if event.button != Some(MouseButton::Left) {
                     return;
                 }
-                let Some(splitter) = weak_self.upgrade() else {
+                let splitter: Option<Rc<CustomSplitter>> = weak_self.upgrade();
+                let Some(splitter) = splitter else {
                     return;
                 };
                 splitter.set_gesture(Some(SplitterGesture {
@@ -100,11 +101,12 @@ impl CustomSplitter {
             }),
         );
 
-        let weak_self = self.weak_self();
+        let weak_self: std::rc::Weak<CustomSplitter> = self.weak_self();
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_moved",
             Box::new(move |event, _| {
-                let Some(splitter) = weak_self.upgrade() else {
+                let splitter: Option<Rc<CustomSplitter>> = weak_self.upgrade();
+                let Some(splitter) = splitter else {
                     return;
                 };
                 let Some(mut gesture) = splitter.gesture() else {
@@ -132,11 +134,12 @@ impl CustomSplitter {
             }),
         );
 
-        let weak_self = self.weak_self();
+        let weak_self: std::rc::Weak<CustomSplitter> = self.weak_self();
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
             Box::new(move |event, _| {
-                let Some(splitter) = weak_self.upgrade() else {
+                let splitter: Option<Rc<CustomSplitter>> = weak_self.upgrade();
+                let Some(splitter) = splitter else {
                     return;
                 };
                 let Some(mut gesture) = splitter.gesture() else {
@@ -161,11 +164,12 @@ impl CustomSplitter {
             }),
         );
 
-        let weak_self = self.weak_self();
+        let weak_self: std::rc::Weak<CustomSplitter> = self.weak_self();
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_canceled",
             Box::new(move |_, _| {
-                let Some(splitter) = weak_self.upgrade() else {
+                let splitter: Option<Rc<CustomSplitter>> = weak_self.upgrade();
+                let Some(splitter) = splitter else {
                     return;
                 };
                 let Some(gesture) = splitter.gesture() else {

@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet};
 #[cfg(all(target_os = "macos", not(test)))]
 use std::future::poll_fn;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 #[cfg(all(target_os = "macos", not(test)))]
 use std::task::Poll;
 
@@ -460,24 +460,27 @@ impl DockingControl {
     fn bind_registration_callbacks(&self, root: &dyn UIElementExt) {
         let weak = crate::runtime::weak_self_from_visual_owner(self);
         if let Some(group) = root.as_any().downcast_ref::<crate::DockGroup>() {
-            let weak_group = weak.clone();
+            let weak_group: Weak<crate::DockingControl> = weak.clone();
             group.bind_registration_callback(Some(Rc::new(move || {
-                if let Some(owner) = weak_group.upgrade() {
+                let owner: Option<Rc<crate::DockingControl>> = weak_group.upgrade();
+                if let Some(owner) = owner {
                     owner.on_registration_changed();
                 }
             })));
             for item in group.authored_children() {
-                let weak_item = weak.clone();
+                let weak_item: Weak<crate::DockingControl> = weak.clone();
                 item.bind_registration_callback(Some(Rc::new(move || {
-                    if let Some(owner) = weak_item.upgrade() {
+                    let owner: Option<Rc<crate::DockingControl>> = weak_item.upgrade();
+                    if let Some(owner) = owner {
                         owner.on_registration_changed();
                     }
                 })));
             }
         } else if let Some(panel) = root.as_any().downcast_ref::<crate::DockSplitPanel>() {
-            let weak_panel = weak.clone();
+            let weak_panel: Weak<crate::DockingControl> = weak.clone();
             panel.bind_registration_callback(Some(Rc::new(move || {
-                if let Some(owner) = weak_panel.upgrade() {
+                let owner: Option<Rc<crate::DockingControl>> = weak_panel.upgrade();
+                if let Some(owner) = owner {
                     owner.on_registration_changed();
                 }
             })));

@@ -47,9 +47,10 @@ impl ContentPresenter {
         this.content_subscription.borrow_mut().take();
         this.replace_presented_content(source.__content_opt());
 
-        let weak_presenter = Rc::downgrade(this);
+        let weak_presenter: std::rc::Weak<ContentPresenter> = Rc::downgrade(this);
         let subscription = source.__subscribe_content_changed(Rc::new(move |content| {
-            if let Some(presenter) = weak_presenter.upgrade() {
+            let presenter: Option<Rc<ContentPresenter>> = weak_presenter.upgrade();
+            if let Some(presenter) = presenter {
                 presenter.replace_presented_content(content);
             }
         }));

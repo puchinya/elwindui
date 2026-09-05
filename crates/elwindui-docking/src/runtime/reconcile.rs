@@ -1605,13 +1605,14 @@ impl RuntimeRealization {
         pin_button.set_attached("Grid", "row", 0i32);
         pin_button.set_attached("Grid", "column", 1i32);
         pin_button.children().add(Self::private_icon(true));
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let pin_group = group.clone();
         pin_button.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
             Box::new(move |_, args| {
                 args.handled.set(true);
-                if let Some(owner) = weak_owner.upgrade() {
+                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                if let Some(owner) = owner {
                     owner.handle_group_pin(pin_group.clone());
                 }
             }),
@@ -1634,13 +1635,14 @@ impl RuntimeRealization {
         float_button.set_attached("Grid", "row", 0i32);
         float_button.set_attached("Grid", "column", 2i32);
         float_button.children().add(Self::float_icon());
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let float_group = group.clone();
         float_button.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
             Box::new(move |_, args| {
                 args.handled.set(true);
-                if let Some(owner) = weak_owner.upgrade() {
+                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                if let Some(owner) = owner {
                     owner.handle_group_float(float_group.clone());
                 }
             }),
@@ -1663,13 +1665,14 @@ impl RuntimeRealization {
         close_button.set_attached("Grid", "row", 0i32);
         close_button.set_attached("Grid", "column", 3i32);
         close_button.children().add(Self::private_icon(false));
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let close_group = group.clone();
         close_button.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
             Box::new(move |_, args| {
                 args.handled.set(true);
-                if let Some(owner) = weak_owner.upgrade() {
+                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                if let Some(owner) = owner {
                     owner.handle_group_title_close(close_group.clone());
                 }
             }),
@@ -1683,7 +1686,7 @@ impl RuntimeRealization {
             }),
         );
         title_bar.children().add(close_button.clone());
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let drag_group = group.clone();
         title_bar.register_routed_handler::<PointerEventArgs>(
             "on_pointer_pressed",
@@ -1692,13 +1695,14 @@ impl RuntimeRealization {
                     && event.button == Some(crate::core::input::MouseButton::Left)
                 {
                     args.handled.set(true);
-                    if let Some(owner) = weak_owner.upgrade() {
+                    let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                    if let Some(owner) = owner {
                         owner.handle_group_drag_started(drag_group.clone(), *event);
                     }
                 }
             }),
         );
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let drag_group = group.clone();
         title_bar.register_routed_handler::<PointerEventArgs>(
             "on_pointer_moved",
@@ -1707,12 +1711,13 @@ impl RuntimeRealization {
                     return;
                 }
                 args.handled.set(true);
-                if let Some(owner) = weak_owner.upgrade() {
+                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                if let Some(owner) = owner {
                     owner.handle_group_drag_moved(drag_group.clone(), *event);
                 }
             }),
         );
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let drag_group = group.clone();
         title_bar.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
@@ -1721,12 +1726,13 @@ impl RuntimeRealization {
                     return;
                 }
                 args.handled.set(true);
-                if let Some(owner) = weak_owner.upgrade() {
+                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                if let Some(owner) = owner {
                     owner.handle_group_drag_completed(drag_group.clone(), *event, false);
                 }
             }),
         );
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let drag_group = group.clone();
         title_bar.register_routed_handler::<PointerEventArgs>(
             "on_pointer_canceled",
@@ -1735,7 +1741,8 @@ impl RuntimeRealization {
                     return;
                 }
                 args.handled.set(true);
-                if let Some(owner) = weak_owner.upgrade() {
+                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                if let Some(owner) = owner {
                     owner.handle_group_drag_completed(drag_group.clone(), *event, true);
                 }
             }),
@@ -1964,61 +1971,66 @@ impl RuntimeRealization {
     }
 
     fn wire_group_callbacks(&self, view: &Rc<CustomTabView>, group: SnapshotGroupKey) {
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let reconciling = self.reconciling.clone();
         let selected_group = group.clone();
         view.set_on_selected_index_change(Box::new(move |index| {
             if reconciling.get() {
                 return;
             }
-            if let Some(owner) = weak_owner.upgrade() {
+            let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+            if let Some(owner) = owner {
                 owner.handle_group_selected(selected_group.clone(), index);
             }
         }));
 
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let reconciling = self.reconciling.clone();
         let close_group = group.clone();
         view.set_on_close_request(Box::new(move |index| {
             if reconciling.get() {
                 return;
             }
-            if let Some(owner) = weak_owner.upgrade() {
+            let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+            if let Some(owner) = owner {
                 owner.handle_group_close(close_group.clone(), index);
             }
         }));
 
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let reconciling = self.reconciling.clone();
         let start_group = group.clone();
         view.set_on_tab_drag_started(Box::new(move |args| {
             if reconciling.get() {
                 return;
             }
-            if let Some(owner) = weak_owner.upgrade() {
+            let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+            if let Some(owner) = owner {
                 owner.handle_tab_drag_started(start_group.clone(), args);
             }
         }));
 
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let reconciling = self.reconciling.clone();
         let moved_group = group.clone();
         view.set_on_tab_drag_moved(Box::new(move |args| {
             if reconciling.get() {
                 return;
             }
-            if let Some(owner) = weak_owner.upgrade() {
+            let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+            if let Some(owner) = owner {
                 owner.handle_tab_drag_moved(moved_group.clone(), args);
             }
         }));
 
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let reconciling = self.reconciling.clone();
         view.set_on_tab_drag_completed(Box::new(move |args| {
             if reconciling.get() {
                 return;
             }
-            if let Some(owner) = weak_owner.upgrade() {
+            let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+            if let Some(owner) = owner {
                 owner.handle_tab_drag_completed(group.clone(), args);
             }
         }));
@@ -2032,7 +2044,7 @@ impl RuntimeRealization {
         boundary: usize,
         orientation: crate::Orientation,
     ) {
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let reconciling = self.reconciling.clone();
         let start_grid = grid.clone();
         let start_address = address.clone();
@@ -2040,7 +2052,8 @@ impl RuntimeRealization {
             if reconciling.get() {
                 return;
             }
-            if let Some(owner) = weak_owner.upgrade() {
+            let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+            if let Some(owner) = owner {
                 owner.handle_splitter_started(
                     start_address.clone(),
                     boundary,
@@ -2051,24 +2064,26 @@ impl RuntimeRealization {
             }
         }));
 
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let reconciling = self.reconciling.clone();
         splitter.set_on_drag_delta(Box::new(move |args: SplitterDragDeltaEventArgs| {
             if reconciling.get() {
                 return;
             }
-            if let Some(owner) = weak_owner.upgrade() {
+            let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+            if let Some(owner) = owner {
                 owner.handle_splitter_delta(args);
             }
         }));
 
-        let weak_owner = self.owner.clone();
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let reconciling = self.reconciling.clone();
         splitter.set_on_drag_completed(Box::new(move |args: SplitterDragCompletedEventArgs| {
             if reconciling.get() {
                 return;
             }
-            if let Some(owner) = weak_owner.upgrade() {
+            let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+            if let Some(owner) = owner {
                 owner.handle_splitter_completed(args);
             }
         }));

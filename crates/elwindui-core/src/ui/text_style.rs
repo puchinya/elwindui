@@ -213,7 +213,7 @@ pub fn inherited_cascaded_text_style(base: &UIElement) -> crate::graphics::Casca
     // `base` is the bare `UIElement` struct, not a `dyn UIElementExt` — read its `visual_parent`
     // field directly for this first hop (mirroring `request_relayout`'s identical first step);
     // every subsequent hop is a real `Rc<dyn UIElementExt>`, which does implement the trait method.
-    let mut current = base
+    let mut current: Option<Rc<dyn UIElementExt>> = base
         .visual_parent
         .borrow()
         .as_ref()

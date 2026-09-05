@@ -206,10 +206,9 @@ impl Menu {
     }
 
     #[inherent]
-    pub fn create_flyout(
+    pub(crate) fn create_flyout(
         &self,
-    ) -> Result<crate::bindings::Microsoft::UI::Xaml::Controls::MenuFlyout, windows::core::Error>
-    {
+    ) -> Result<crate::inner::InnerMenuFlyout, windows::core::Error> {
         self.inner.create_flyout()
     }
 }

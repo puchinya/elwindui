@@ -319,19 +319,21 @@ impl std::fmt::Debug for UIElement {
             )
             .field(
                 "has_parent",
-                &self
-                    .parent
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|p| p.upgrade().is_some()),
+                &self.parent.borrow().as_ref().is_some_and(
+                    |p: &std::rc::Weak<dyn UIElementExt>| {
+                        let parent: Option<Rc<dyn UIElementExt>> = p.upgrade();
+                        parent.is_some()
+                    },
+                ),
             )
             .field(
                 "has_visual_parent",
-                &self
-                    .visual_parent
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|p| p.upgrade().is_some()),
+                &self.visual_parent.borrow().as_ref().is_some_and(
+                    |p: &std::rc::Weak<dyn UIElementExt>| {
+                        let parent: Option<Rc<dyn UIElementExt>> = p.upgrade();
+                        parent.is_some()
+                    },
+                ),
             )
             .field("visual_children_len", &self.visual_collection.len())
             .field("invalidate_host", &self.invalidate_host.borrow().is_some())
@@ -1059,12 +1061,12 @@ impl UIElement {
 /// (not `&dyn UIElement`) so the caller — a default trait method, where `Self` isn't known to be
 /// `Sized`. A no-op if the Visual root has no registered host (e.g. a standalone test tree).
 pub(crate) fn request_relayout(base: &UIElement, kind: InvalidationKind) {
-    let mut current = base
+    let mut current: Option<Rc<dyn UIElementExt>> = base
         .visual_parent
         .borrow()
         .as_ref()
         .and_then(|w| w.upgrade());
-    let mut host = base.invalidate_host.borrow().clone();
+    let mut host: Option<Rc<dyn RelayoutHost>> = base.invalidate_host.borrow().clone();
     while let Some(element) = current {
         host = element
             .as_ui_element()
@@ -1120,12 +1122,12 @@ pub(crate) fn request_focus(target: &Rc<dyn UIElementExt>) -> bool {
 
 /// Finds the nearest coordinate host registered on `base`'s Visual ancestry.
 fn coordinate_host(base: &UIElement) -> Option<Rc<dyn CoordinateHost>> {
-    let mut current = base
+    let mut current: Option<Rc<dyn UIElementExt>> = base
         .visual_parent
         .borrow()
         .as_ref()
         .and_then(|weak| weak.upgrade());
-    let mut host = base.coordinate_host.borrow().clone();
+    let mut host: Option<Rc<dyn CoordinateHost>> = base.coordinate_host.borrow().clone();
     while let Some(element) = current {
         host = element
             .as_ui_element()
@@ -1140,12 +1142,12 @@ fn coordinate_host(base: &UIElement) -> Option<Rc<dyn CoordinateHost>> {
 
 /// Finds the nearest pointer-gesture host registered on `base`'s Visual ancestry.
 fn pointer_gesture_host(base: &UIElement) -> Option<Rc<dyn PointerGestureHost>> {
-    let mut current = base
+    let mut current: Option<Rc<dyn UIElementExt>> = base
         .visual_parent
         .borrow()
         .as_ref()
         .and_then(|weak| weak.upgrade());
-    let mut host = base.pointer_gesture_host.borrow().clone();
+    let mut host: Option<Rc<dyn PointerGestureHost>> = base.pointer_gesture_host.borrow().clone();
     while let Some(element) = current {
         host = element
             .as_ui_element()

@@ -211,17 +211,19 @@ pub(crate) fn reconcile_native_children(
                         // `RelayoutHost::request_relayout`).
                         let callback_owner = UiCallbackRegistryOwner::default();
                         let got_focus_id = callback_owner.register_event(Rc::new(move || {
-                            if let (Some(render_tree), Some(keyboard)) = (
-                                render_tree_for_gained.upgrade(),
-                                keyboard_for_gained.upgrade(),
-                            ) {
+                            let render_tree: Option<
+                                Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
+                            > = render_tree_for_gained.upgrade();
+                            let keyboard: Option<Rc<KeyboardDispatcher>> =
+                                keyboard_for_gained.upgrade();
+                            if let (Some(render_tree), Some(keyboard)) = (render_tree, keyboard) {
                                 let target = render_tree.borrow().as_ref().and_then(|rt| {
                                     elwindui_core::focus::resolve_native_focus_target(rt, owner_id)
                                 });
                                 if let Some(target) = target {
                                     elwindui_core::focus::native_focus_gained(
                                         &target,
-                                        &keyboard.focus,
+                                        &keyboard.as_ref().focus,
                                         FocusState::Pointer,
                                     );
                                 }
@@ -235,8 +237,13 @@ pub(crate) fn reconcile_native_children(
                             .ok();
                         let keyboard_for_lost = Rc::downgrade(keyboard);
                         let lost_focus_id = callback_owner.register_event(Rc::new(move || {
-                            if let Some(keyboard) = keyboard_for_lost.upgrade() {
-                                elwindui_core::focus::native_focus_lost(&keyboard.focus, owner_id);
+                            let keyboard: Option<Rc<KeyboardDispatcher>> =
+                                keyboard_for_lost.upgrade();
+                            if let Some(keyboard) = keyboard {
+                                elwindui_core::focus::native_focus_lost(
+                                    &keyboard.as_ref().focus,
+                                    owner_id,
+                                );
                             }
                         }));
                         let lost_focus_token = element

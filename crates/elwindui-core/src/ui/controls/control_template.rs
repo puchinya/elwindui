@@ -125,13 +125,13 @@ pub fn __make_control_template_provider<C: ControlExt + 'static>(
 
     ControlTemplateProvider {
         prepare: Box::new(move || {
-            let target = prepare_control
+            let target: Rc<C> = prepare_control
                 .upgrade()
                 .expect("ControlTemplate target was dropped before preparation");
             target.__prepare_template_presentation();
         }),
         build: Box::new(move |environment| {
-            let target = build_control
+            let target: Rc<C> = build_control
                 .upgrade()
                 .expect("ControlTemplate target was dropped before build");
             let selected = environment
@@ -143,7 +143,7 @@ pub fn __make_control_template_provider<C: ControlExt + 'static>(
             })
         }),
         on_applied: Box::new(move || {
-            let target = applied_control
+            let target: Rc<C> = applied_control
                 .upgrade()
                 .expect("ControlTemplate target was dropped before apply hook");
             target.on_apply_template();

@@ -26,13 +26,15 @@ impl SurfaceRegistry {
     }
 
     pub(crate) fn unregister(&mut self, root: RootKind) {
-        self.surfaces
-            .retain(|candidate| candidate.root != root && candidate.surface.strong_count() > 0);
+        let surfaces: &mut Vec<RegisteredSurface> = &mut self.surfaces;
+        surfaces.retain(|candidate| {
+            candidate.root != root && <Weak<dyn UIElementExt>>::strong_count(&candidate.surface) > 0
+        });
     }
 
     pub(crate) fn compact(&mut self) {
-        self.surfaces
-            .retain(|surface| surface.surface.strong_count() > 0);
+        let surfaces: &mut Vec<RegisteredSurface> = &mut self.surfaces;
+        surfaces.retain(|surface| <Weak<dyn UIElementExt>>::strong_count(&surface.surface) > 0);
     }
 
     pub(crate) fn entries(&self) -> Vec<(RootKind, Rc<dyn UIElementExt>)> {

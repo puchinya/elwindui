@@ -9,9 +9,9 @@ use crate::bindings::Microsoft::UI::Xaml::Input::KeyboardAccelerator;
 use crate::bindings::Microsoft::UI::Xaml::Media::ImageSource as XamlImageSource;
 use crate::bindings::Microsoft::UI::Xaml::Media::Imaging::BitmapImage as XamlBitmapImage;
 use crate::bindings::Microsoft::UI::Xaml::RoutedEventHandler;
-use crate::ffi::{invoke_ui_event_callback, register_ui_event_callback};
+use crate::ffi::{UiCallbackRegistryOwner, invoke_ui_event_callback, register_ui_event_callback};
 use elwindui_core::graphics::{IconSource, ImageData, ImageSource, SystemIcon};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use windows::Storage::Streams::{DataWriter, IRandomAccessStream, InMemoryRandomAccessStream};
 use windows::System::{VirtualKey, VirtualKeyModifiers};
@@ -299,6 +299,108 @@ fn xaml_image_source_to_icon_element(image_source: XamlImageSource) -> Option<Ic
     image_icon.cast::<IconElement>().ok()
 }
 
+/// A single native realization of a semantic menu. The callback owner is deliberately scoped to
+/// this temporary flyout rather than `InnerMenu`: one semantic menu can be realized many times,
+/// and callbacks from an older realization must disappear when that flyout closes.
+pub(crate) struct InnerMenuFlyout {
+    flyout: MenuFlyout,
+    callback_owner: UiCallbackRegistryOwner,
+}
+
+struct FlyoutLifetime {
+    realization: RefCell<Option<InnerMenuFlyout>>,
+    closed_token: Cell<Option<i64>>,
+}
+
+impl FlyoutLifetime {
+    fn release(&self) {
+        let token = self.closed_token.take();
+        let Some((flyout, callback_owner)) =
+            self.realization.borrow().as_ref().map(|realization| {
+                (
+                    realization.flyout.clone(),
+                    realization.callback_owner.clone(),
+                )
+            })
+        else {
+            return;
+        };
+        if let Some(token) = token {
+            let _ = flyout.RemoveClosed(token);
+        }
+        callback_owner.clear();
+        self.realization.borrow_mut().take();
+    }
+}
+
+impl InnerMenuFlyout {
+    /// Shows this realization and keeps it alive through the native flyout's terminal `Closed`
+    /// event. The close callback captures only its numeric registry id in the generated WinRT
+    /// delegate; the UI-thread-local lifetime state remains in the TLS callback registry.
+    pub(crate) fn show_at(
+        self,
+        target: &crate::bindings::Microsoft::UI::Xaml::FrameworkElement,
+    ) -> windows::core::Result<()> {
+        let lifetime = Rc::new(FlyoutLifetime {
+            realization: RefCell::new(Some(self)),
+            closed_token: Cell::new(None),
+        });
+        let owner = lifetime
+            .realization
+            .borrow()
+            .as_ref()
+            .expect("flyout realization must exist")
+            .callback_owner
+            .clone();
+        let lifetime_for_callback = Rc::clone(&lifetime);
+        let closed_callback_id = owner.register_event(Rc::new(move || {
+            lifetime_for_callback.release();
+        }));
+        drop(owner);
+
+        let closed_token = {
+            let flyout = lifetime
+                .realization
+                .borrow()
+                .as_ref()
+                .expect("flyout realization must exist")
+                .flyout
+                .clone();
+            match flyout.Closed(&windows::Foundation::EventHandler::new(move |_, _| {
+                invoke_ui_event_callback(closed_callback_id);
+                Ok(())
+            })) {
+                Ok(token) => token,
+                Err(error) => {
+                    lifetime.release();
+                    return Err(error);
+                }
+            }
+        };
+        lifetime.closed_token.set(Some(closed_token));
+
+        let show_result = {
+            let flyout = lifetime
+                .realization
+                .borrow()
+                .as_ref()
+                .expect("flyout realization must exist")
+                .flyout
+                .clone();
+            flyout.ShowAt(target)
+        };
+        if let Err(error) = show_result {
+            lifetime.release();
+            return Err(error);
+        }
+
+        // The native Closed delegate now owns the only strong reference to `lifetime` through the
+        // callback registry. It will explicitly clear all realization callbacks and release the
+        // flyout on close, so this local strong reference can end normally.
+        Ok(())
+    }
+}
+
 /// A dropdown attached to a `MenuBarItem` — see `elwindui_backend_appkit::inner::InnerMenu`'s doc
 /// comment. `items` is a plain `Vec` (not the native `MenuFlyoutItemBase` collection directly)
 /// since a `Menu` only ever becomes real XAML elements once installed into a `MenuBarItem`
@@ -350,8 +452,9 @@ impl InnerMenu {
         }
     }
 
-    pub(crate) fn create_flyout(&self) -> Result<MenuFlyout, windows::core::Error> {
+    pub(crate) fn create_flyout(&self) -> Result<InnerMenuFlyout, windows::core::Error> {
         let flyout = MenuFlyout::new()?;
+        let callback_owner = UiCallbackRegistryOwner::default();
         let items = flyout.Items()?;
         for item in self.items.borrow().iter() {
             let flyout_item = MenuFlyoutItem::new()?;
@@ -373,14 +476,20 @@ impl InnerMenu {
                 }
             }
             let item_clone = item.clone();
-            let _ = flyout_item.Click(&RoutedEventHandler::new(move |_, _| {
+            let callback_id = callback_owner.register_event(Rc::new(move || {
                 item_clone.select();
+            }));
+            let _ = flyout_item.Click(&RoutedEventHandler::new(move |_, _| {
+                invoke_ui_event_callback(callback_id);
                 Ok(())
             }));
             let base: MenuFlyoutItemBase = flyout_item.cast()?;
             let _ = items.Append(&base);
         }
-        Ok(flyout)
+        Ok(InnerMenuFlyout {
+            flyout,
+            callback_owner,
+        })
     }
 }
 
@@ -479,23 +588,17 @@ mod icon_tests {
     }
 }
 
-/// §9.7/§9.8/§9.9 of the PR #171 delta remediation contract. Unlike every existing test in this
-/// crate (pure logic — see `render::win2d_bitmap_tests`'s own doc comment for the same point about
-/// `render/win2d.rs`), these construct live `MenuFlyoutItem`/`SymbolIcon` XAML objects, which (per
-/// this crate's established test conventions — no prior test in this crate does this) may need a
-/// WinUI `DispatcherQueue`/`Application` context this test binary does not currently set up.
-/// **Unverified**: written but not run — no Windows build/runtime environment available in this
-/// remediation session. If XAML object construction fails inside `cargo test`'s default worker
-/// threads, that is the concrete "WinUI UI-thread test harness" gap the delta contract's §9.7
-/// anticipates; report it as a finding rather than assuming these pass.
+/// §9.7/§9.8/§9.9 of the PR #171 delta remediation contract. These construct live
+/// `MenuFlyoutItem`/`SymbolIcon` XAML objects and are therefore assertion helpers rather than
+/// independent `#[test]` functions: `hosted_xaml_regression_tests` invokes them inside the one
+/// hosted `Application` session used by this backend's live XAML regressions.
 #[cfg(test)]
-mod live_menu_item_icon_tests {
+pub(crate) mod live_menu_item_icon_tests {
     use super::*;
 
     /// §9.7: `InnerMenuItem::set_icon` set / replace / clear against the live `MenuFlyoutItem`,
     /// leaving `text`/`enabled`/`shortcut`/the select callback untouched.
-    #[test]
-    fn live_inner_menu_item_icon_set_replace_clear() {
+    pub(crate) fn live_inner_menu_item_icon_set_replace_clear() {
         let item = InnerMenuItem::new();
         item.set_text("Copy");
         item.set_enabled(true);
@@ -513,7 +616,6 @@ mod live_menu_item_icon_tests {
             .xaml
             .Icon()
             .ok()
-            .flatten()
             .expect("MenuFlyoutItem.Icon must be non-null after set_icon(System(Copy))");
         let symbol_icon: SymbolIcon = icon_after_copy
             .cast()
@@ -546,7 +648,6 @@ mod live_menu_item_icon_tests {
             .xaml
             .Icon()
             .ok()
-            .flatten()
             .expect("MenuFlyoutItem.Icon must be non-null after set_icon(Image(Rgba8))");
         let _image_icon: ImageIcon = icon_after_rgba8
             .cast()
@@ -556,7 +657,7 @@ mod live_menu_item_icon_tests {
         item.set_icon(None);
         assert!(item.icon().is_none());
         assert!(
-            item.xaml.Icon().ok().flatten().is_none(),
+            item.xaml.Icon().is_err(),
             "MenuFlyoutItem.Icon must be null after set_icon(None)"
         );
 
@@ -570,8 +671,7 @@ mod live_menu_item_icon_tests {
     /// §9.8: mandatory PR #156 regression — `InnerMenu::create_flyout()` snapshots the current
     /// icon onto a *newly*-realized `MenuFlyoutItem`, distinct from the live MenuBar-side item's
     /// own `xaml`, and reflects the latest semantic value on each subsequent call.
-    #[test]
-    fn create_flyout_snapshots_icon_onto_a_distinct_realization() {
+    pub(crate) fn create_flyout_snapshots_icon_onto_a_distinct_realization() {
         let item = InnerMenuItem::new();
         item.set_text("Copy");
         item.set_icon(Some(IconSource::System(SystemIcon::Copy)));
@@ -579,66 +679,80 @@ mod live_menu_item_icon_tests {
         let menu = InnerMenu::new();
         menu.add_item(&item);
 
-        let flyout = menu
-            .create_flyout()
-            .expect("create_flyout must succeed for a single-item menu");
-        let items = flyout.Items().expect("MenuFlyout.Items");
-        assert_eq!(items.Size().unwrap_or(0), 1);
-        let realized: MenuFlyoutItem = items
-            .GetAt(0)
-            .expect("realized flyout item")
-            .cast()
-            .expect("realized item casts to MenuFlyoutItem");
-        // Explicitly Symbol::Copy, not merely "has some icon" (second PR #171 review delta §A3 —
-        // a regression that always copied the *first* icon onto every later realization would
-        // still pass an `is_some()`-only check).
-        let realized_icon = realized
-            .Icon()
-            .ok()
-            .flatten()
-            .expect("the newly-realized MenuFlyoutItem must have an icon");
-        let realized_symbol: SymbolIcon = realized_icon
-            .cast()
-            .expect("realized icon must be a SymbolIcon");
+        let baseline = crate::ffi::ui_event_callback_count();
+        let first_realized = {
+            let flyout = menu
+                .create_flyout()
+                .expect("create_flyout must succeed for a single-item menu");
+            let items = flyout.flyout.Items().expect("MenuFlyout.Items");
+            assert_eq!(items.Size().unwrap_or(0), 1);
+            let realized: MenuFlyoutItem = items
+                .GetAt(0)
+                .expect("realized flyout item")
+                .cast()
+                .expect("realized item casts to MenuFlyoutItem");
+            // Explicitly Symbol::Copy, not merely "has some icon" (second PR #171 review delta
+            // §A3 — a regression that always copied the *first* icon onto every later realization
+            // would still pass an `is_some()`-only check).
+            let realized_icon = realized
+                .Icon()
+                .ok()
+                .expect("the newly-realized MenuFlyoutItem must have an icon");
+            let realized_symbol: SymbolIcon = realized_icon
+                .cast()
+                .expect("realized icon must be a SymbolIcon");
+            assert_eq!(
+                realized_symbol.Symbol().expect("SymbolIcon.Symbol"),
+                Symbol::Copy,
+                "first realization must carry the current semantic icon, Symbol::Copy"
+            );
+            assert_ne!(
+                realized, item.xaml,
+                "create_flyout() must not reuse the live MenuBar-side MenuFlyoutItem instance (PR #156)"
+            );
+            realized
+        };
         assert_eq!(
-            realized_symbol.Symbol().expect("SymbolIcon.Symbol"),
-            Symbol::Copy,
-            "first realization must carry the current semantic icon, Symbol::Copy"
-        );
-        assert_ne!(
-            realized, item.xaml,
-            "create_flyout() must not reuse the live MenuBar-side MenuFlyoutItem instance (PR #156)"
+            crate::ffi::ui_event_callback_count(),
+            baseline,
+            "dropping a menu realization must remove its callback registrations"
         );
 
         // Latest semantic value flows into the next realization: change to Delete before the
         // second create_flyout() call.
         item.set_icon(Some(IconSource::System(SystemIcon::Delete)));
-        let flyout2 = menu
-            .create_flyout()
-            .expect("second create_flyout must also succeed");
-        let items2 = flyout2.Items().expect("MenuFlyout.Items");
-        let realized2: MenuFlyoutItem = items2
-            .GetAt(0)
-            .expect("second realized flyout item")
-            .cast()
-            .expect("second realized item casts to MenuFlyoutItem");
-        let realized2_icon = realized2
-            .Icon()
-            .ok()
-            .flatten()
-            .expect("second realization must have an icon");
-        let realized2_symbol: SymbolIcon = realized2_icon
-            .cast()
-            .expect("second realized icon must be a SymbolIcon");
+        {
+            let flyout2 = menu
+                .create_flyout()
+                .expect("second create_flyout must also succeed");
+            let items2 = flyout2.flyout.Items().expect("MenuFlyout.Items");
+            let realized2: MenuFlyoutItem = items2
+                .GetAt(0)
+                .expect("second realized flyout item")
+                .cast()
+                .expect("second realized item casts to MenuFlyoutItem");
+            let realized2_icon = realized2
+                .Icon()
+                .ok()
+                .expect("second realization must have an icon");
+            let realized2_symbol: SymbolIcon = realized2_icon
+                .cast()
+                .expect("second realized icon must be a SymbolIcon");
+            assert_eq!(
+                realized2_symbol.Symbol().expect("SymbolIcon.Symbol"),
+                Symbol::Delete,
+                "second realization must carry the *updated* semantic icon, Symbol::Delete — not the \
+                 first realization's stale Symbol::Copy"
+            );
+            assert_ne!(
+                first_realized, realized2,
+                "each create_flyout() call must produce its own new realization, not reuse the previous one"
+            );
+        }
         assert_eq!(
-            realized2_symbol.Symbol().expect("SymbolIcon.Symbol"),
-            Symbol::Delete,
-            "second realization must carry the *updated* semantic icon, Symbol::Delete — not the \
-             first realization's stale Symbol::Copy"
-        );
-        assert_ne!(
-            realized, realized2,
-            "each create_flyout() call must produce its own new realization, not reuse the previous one"
+            crate::ffi::ui_event_callback_count(),
+            baseline,
+            "repeated menu realization lifecycles must return to the callback baseline"
         );
     }
 
@@ -646,8 +760,7 @@ mod live_menu_item_icon_tests {
     /// remediation — kept here as a regression guard using the still-legitimately-fallible
     /// incompatible `ImageData::Backend` case) omits the icon but leaves the item fully
     /// functional: text preserved, still selectable, callback still fires exactly once.
-    #[test]
-    fn failed_icon_conversion_does_not_remove_the_action() {
+    pub(crate) fn failed_icon_conversion_does_not_remove_the_action() {
         let item = InnerMenuItem::new();
         item.set_text("Broken Icon Action");
         let selected = std::rc::Rc::new(std::cell::Cell::new(0u32));
@@ -662,7 +775,7 @@ mod live_menu_item_icon_tests {
         item.set_icon(Some(IconSource::Image(ImageSource::Raster(incompatible))));
 
         assert!(
-            item.xaml.Icon().ok().flatten().is_none(),
+            item.xaml.Icon().is_err(),
             "an incompatible backend handle must omit the icon, not synthesize one"
         );
         assert_eq!(item.text(), "Broken Icon Action");

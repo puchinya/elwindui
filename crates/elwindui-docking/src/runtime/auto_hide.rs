@@ -18,7 +18,7 @@ use crate::runtime::metrics::{
 use crate::runtime::themed_brush;
 use elwindui_custom_controls::{ChromeIcon, chrome_icon};
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 /// Only one auto-hide item owns the open overlay at a time.
 pub(crate) struct AutoHideOverlay {
@@ -149,12 +149,13 @@ impl AutoHideOverlay {
             text.set_text(&title);
             text.set_attached("Grid", "column", 1i32);
             entry.children().add(text);
-            let weak_owner = owner.clone();
+            let weak_owner: Weak<DockingControl> = owner.clone();
             let entry_root = root.clone();
             entry.register_routed_handler::<PointerEventArgs>(
                 "on_pointer_released",
                 Box::new(move |_, _| {
-                    if let Some(owner) = weak_owner.upgrade() {
+                    let owner: Option<Rc<DockingControl>> = weak_owner.upgrade();
+                    if let Some(owner) = owner {
                         owner.handle_auto_hide_open(entry_root.clone(), item.clone());
                     }
                 }),
@@ -182,11 +183,12 @@ impl AutoHideOverlay {
     pub(crate) fn bind_pin_handler(&self, owner: &std::rc::Weak<DockingControl>, root: RootKind) {
         *self.root_context.borrow_mut() = root;
         let root_context = self.root_context.clone();
-        let weak_owner = owner.clone();
+        let weak_owner: Weak<DockingControl> = owner.clone();
         self.pin_button.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
             Box::new(move |_, _| {
-                if let Some(owner) = weak_owner.upgrade() {
+                let owner: Option<Rc<DockingControl>> = weak_owner.upgrade();
+                if let Some(owner) = owner {
                     let root = root_context.borrow().clone();
                     owner.handle_pin_gesture(root);
                 }

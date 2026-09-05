@@ -1,3 +1,4 @@
+use super::core::base::{Point, Rect};
 use super::core::ui::{LayoutExt, UIElementExt};
 use super::{CloseButtonPresentation, CustomTabViewItem, TabStripPosition};
 use std::rc::Rc;
@@ -37,6 +38,80 @@ pub(crate) struct CustomTabStripPresenter {
 }
 
 impl CustomTabStripPresenter {
+    /// Resolves a point against the retained arranged tab headers. This intentionally reads only
+    /// the last layout result: a drag preview must not reconcile the presenter or measure pages.
+    pub(crate) fn tab_insertion_index_at(&self, point: Point) -> Option<usize> {
+        let width = self.arranged_width()?;
+        let height = self.arranged_height()?;
+        if !width.is_finite()
+            || !height.is_finite()
+            || width < 0.0
+            || height < 0.0
+            || !point.x.is_finite()
+            || !point.y.is_finite()
+            || point.x < 0.0
+            || point.x > width
+            || point.y < 0.0
+            || point.y > height
+        {
+            return None;
+        }
+        let items = self.items();
+        if items.is_empty() {
+            return Some(0);
+        }
+        for (index, item) in items.iter().enumerate() {
+            let offset = item.arranged_offset()?;
+            let item_width = item.arranged_width()?;
+            if !offset.x.is_finite() || !item_width.is_finite() || item_width < 0.0 {
+                return None;
+            }
+            if point.x <= offset.x + item_width * 0.5 {
+                return Some(index);
+            }
+        }
+        Some(items.len())
+    }
+
+    /// Returns the retained header boundary for an insertion index. `width` is zero so the
+    /// docking runtime can apply its single shared marker width without changing tab geometry.
+    pub(crate) fn tab_insertion_boundary(&self, index: usize) -> Option<Rect> {
+        let height = self.arranged_height()?;
+        let items = self.items();
+        if index > items.len() || !height.is_finite() || height < 0.0 {
+            return None;
+        }
+        if items.is_empty() {
+            return (index == 0).then_some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height,
+            });
+        }
+        let (x, y, item_height) = if index == items.len() {
+            let item = items.last()?;
+            let offset = item.arranged_offset()?;
+            (
+                offset.x + item.arranged_width()?,
+                offset.y,
+                item.arranged_height()?,
+            )
+        } else {
+            let item = items.get(index)?;
+            let offset = item.arranged_offset()?;
+            (offset.x, offset.y, item.arranged_height()?)
+        };
+        (x.is_finite() && y.is_finite() && item_height.is_finite() && item_height >= 0.0).then_some(
+            Rect {
+                x,
+                y,
+                width: 0.0,
+                height: item_height,
+            },
+        )
+    }
+
     fn sync_property_update(&self) {
         let items = self.items();
         let unchanged = self.bound_items().len() == items.len()

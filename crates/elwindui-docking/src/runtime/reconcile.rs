@@ -31,9 +31,9 @@ use super::floating_window::FloatingHostFactory;
 use super::floating_window::{FloatingHostId, FloatingHostRegistry, PreparedFloatingHostSync};
 use super::group_view::replace_group_items;
 use super::metrics::{
-    GROUP_DOCK_BAND_FRACTION, GROUP_DOCK_BAND_MAX, GROUP_DOCK_BAND_MIN, ROOT_DOCK_BAND,
-    SPLITTER_HIT_SIZE, TITLE_BAR_HEIGHT, TITLE_BUTTON_COLUMN_WIDTH, TITLE_BUTTON_SIZE,
-    TITLE_TEXT_MARGIN,
+    GROUP_DOCK_BAND_FRACTION, GROUP_DOCK_BAND_MAX, GROUP_DOCK_BAND_MIN, ROOT_TARGET_SIZE,
+    SPLITTER_HIT_SIZE, TAB_INSERTION_MARKER_WIDTH, TITLE_BAR_HEIGHT, TITLE_BUTTON_COLUMN_WIDTH,
+    TITLE_BUTTON_SIZE, TITLE_TEXT_MARGIN,
 };
 use super::split_view::SplitterSession;
 use super::surface_registry::SurfaceRegistry;
@@ -310,7 +310,6 @@ pub struct RuntimeRealization {
     split_views: BTreeMap<SplitAddress, (Rc<Grid>, Vec<Rc<CustomSplitter>>)>,
     drag: Option<DragSession>,
     group_drag: Option<GroupDragSession>,
-    drag_target_index: Cell<Option<usize>>,
     splitter: Option<SplitterSession>,
     floating_hosts: FloatingHostRegistry,
     surfaces: SurfaceRegistry,
@@ -394,7 +393,6 @@ impl RuntimeRealization {
             split_views: BTreeMap::new(),
             drag: None,
             group_drag: None,
-            drag_target_index: Cell::new(None),
             splitter: None,
             floating_hosts: FloatingHostRegistry::default(),
             surfaces,
@@ -482,7 +480,11 @@ impl RuntimeRealization {
         for floating in &self.floating {
             floating.surface.refresh_theme();
         }
-        for view in self.groups.values() {
+        for (group, view) in &self.groups {
+            // Theme/template refreshes can recreate the visible tab presentation. Restore the
+            // retained model selection before refreshing its chrome so a theme switch cannot
+            // briefly or permanently show index zero for a different active item.
+            view.set_selected_index(self.selected_group_index(group).unwrap_or(0));
             view.refresh_theme();
         }
         for host in self.group_hosts.values() {
@@ -654,6 +656,8 @@ impl RuntimeRealization {
         }
         self.main_surface.auto_hide.close();
         self.main_surface.preview.clear();
+        self.main_surface.targets.clear();
+        self.main_surface.insertion_marker.clear();
         self.main_surface.reset_visual_children();
         if let Some(element) = main_surface_child.clone() {
             self.main_surface.add_main_child(element);
@@ -672,6 +676,8 @@ impl RuntimeRealization {
             surface.set_root(root.clone());
             surface.auto_hide.close();
             surface.preview.clear();
+            surface.targets.clear();
+            surface.insertion_marker.clear();
             surface.reset_visual_children();
             let element =
                 self.apply_planned_node(&planned.node, root.clone(), &[], &planned_splits);
@@ -818,7 +824,6 @@ impl RuntimeRealization {
             source_geometry,
         )?);
         self.group_drag = None;
-        self.drag_target_index.set(None);
         self.clear_previews();
         Ok(())
     }
@@ -868,7 +873,6 @@ impl RuntimeRealization {
             },
         )?);
         self.drag = None;
-        self.drag_target_index.set(None);
         self.clear_previews();
         Ok(())
     }
@@ -915,8 +919,8 @@ impl RuntimeRealization {
         target: &ResolvedDockTarget,
         weight: f32,
     ) -> Result<(), DockLayoutError> {
+        let insertion_marker = self.insertion_marker_rect(target);
         if let Some(drag) = self.drag.as_mut() {
-            drag.set_center_index(self.drag_target_index.get());
             drag.preview(target, weight)?;
         } else if let Some(drag) = self.group_drag.as_mut() {
             drag.preview(target, weight)?;
@@ -936,6 +940,7 @@ impl RuntimeRealization {
         };
         surface.preview.show(target);
         surface.targets.show(target.target);
+        surface.insertion_marker.show(insertion_marker);
         Ok(())
     }
 
@@ -1062,10 +1067,12 @@ impl RuntimeRealization {
 
     #[cfg(test)]
     pub(crate) fn show_preview_for_test(&mut self, target: ResolvedDockTarget) {
+        let insertion_marker = self.insertion_marker_rect(&target);
         self.clear_previews();
         if let Some(surface) = self.surface_runtime_mut(&target.root) {
             surface.preview.show(&target);
             surface.targets.show(target.target);
+            surface.insertion_marker.show(insertion_marker);
         }
     }
 
@@ -1089,7 +1096,6 @@ impl RuntimeRealization {
             .as_ref()
             .map(DragSession::source_root)
             .or_else(|| self.group_drag.as_ref().map(GroupDragSession::source_root))?;
-        self.drag_target_index.set(None);
         let (root, surface, surface_local_point) = if let Some(screen) = screen_position {
             self.surfaces
                 .entries()
@@ -1137,27 +1143,46 @@ impl RuntimeRealization {
             surface_local_point,
             groups.iter().cloned(),
         )?;
-        if target.target == crate::DockTarget::Center {
-            if let Some(group) = target.group.as_ref() {
-                if let Some((_, bounds)) = groups.iter().find(|(key, _)| key == group) {
-                    let local = Point {
-                        x: surface_local_point.x - bounds.x,
-                        y: surface_local_point.y - bounds.y,
-                    };
-                    let index = self.group_items.get(group).map(|items| {
-                        if items.is_empty() || bounds.width <= 0.0 {
-                            0
-                        } else {
-                            ((local.x / bounds.width) * items.len() as f32)
-                                .round()
-                                .clamp(0.0, items.len() as f32) as usize
-                        }
-                    });
-                    self.drag_target_index.set(index);
-                }
-            }
+        if target.target != crate::DockTarget::Center || self.group_drag.is_some() {
+            return Some(target);
         }
-        Some(target)
+        let Some(group) = target.group.as_ref() else {
+            return Some(target);
+        };
+        let Some((_, bounds)) = groups.iter().find(|(key, _)| key == group) else {
+            return Some(target);
+        };
+        let local = Point {
+            x: surface_local_point.x - bounds.x,
+            y: surface_local_point.y - bounds.y,
+        };
+        let Some(group_view) = self.groups.get(group) else {
+            return Some(target);
+        };
+        let index = group_view.tab_insertion_index_at(local);
+        let mut resolved = target;
+        resolved.tab_insert_index = index;
+        Some(resolved)
+    }
+
+    fn insertion_marker_rect(&self, target: &ResolvedDockTarget) -> Option<Rect> {
+        if target.target != crate::DockTarget::Center {
+            return None;
+        }
+        let group = target.group.as_ref()?;
+        let index = target.tab_insert_index?;
+        let group_view = self.groups.get(group)?;
+        let surface_runtime = self.surface_runtime(&target.root)?;
+        let surface: Rc<dyn UIElementExt> = surface_runtime.surface.clone();
+        let group_node: Rc<dyn UIElementExt> = group_view.clone();
+        let group_bounds = SurfaceRegistry::bounds_in_surface_local(&group_node, &surface)?;
+        let boundary = group_view.tab_insertion_boundary(index)?;
+        Some(Rect {
+            x: group_bounds.x + boundary.x,
+            y: group_bounds.y + boundary.y,
+            width: TAB_INSERTION_MARKER_WIDTH,
+            height: boundary.height,
+        })
     }
 
     pub(crate) fn finish_drag(&mut self, commit: bool) -> Option<DockLayoutModel> {
@@ -1177,7 +1202,6 @@ impl RuntimeRealization {
             })
         };
         self.clear_previews();
-        self.drag_target_index.set(None);
         result
     }
 
@@ -2171,9 +2195,11 @@ impl RuntimeRealization {
     fn clear_previews(&mut self) {
         self.main_surface.preview.clear();
         self.main_surface.targets.clear();
+        self.main_surface.insertion_marker.clear();
         for runtime in &mut self.floating {
             runtime.surface.preview.clear();
             runtime.surface.targets.clear();
+            runtime.surface.insertion_marker.clear();
         }
     }
 
@@ -2195,9 +2221,13 @@ impl RuntimeRealization {
         }
         self.main_surface.auto_hide.close();
         self.main_surface.preview.clear();
+        self.main_surface.targets.clear();
+        self.main_surface.insertion_marker.clear();
         for runtime in &mut self.floating {
             runtime.surface.auto_hide.close();
             runtime.surface.preview.clear();
+            runtime.surface.targets.clear();
+            runtime.surface.insertion_marker.clear();
             runtime.surface.surface.content_root().children().clear();
             detach_runtime_node(&runtime.node);
         }
@@ -2377,7 +2407,7 @@ fn resolve_local_target(
     {
         return None;
     }
-    let outer_band = ROOT_DOCK_BAND;
+    let outer_band = ROOT_TARGET_SIZE;
     let outer = [
         (
             surface_local_point.x <= outer_band,
@@ -2402,6 +2432,7 @@ fn resolve_local_target(
             target,
             group: None,
             preview_rect: outer_preview(surface_bounds, target)?,
+            tab_insert_index: None,
         });
     }
 
@@ -2445,6 +2476,7 @@ fn resolve_local_target(
         target,
         group: Some(group),
         preview_rect: group_preview(bounds, target)?,
+        tab_insert_index: None,
     })
 }
 

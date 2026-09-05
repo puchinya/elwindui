@@ -20,8 +20,8 @@ use super::model::{
 };
 use super::placement::{DockLayoutError, DockPlacement, DockSide};
 use super::runtime::{
-    AutoHideOverlay, DockSurfaceView, DragSession, DragSourceGeometry, DropPreview,
-    FloatingHostFactory, FloatingHostRegistry, FloatingWindowHost, LatestOnlyQueue,
+    AutoHideOverlay, DockSurfaceView, DockTargetOverlay, DragSession, DragSourceGeometry,
+    DropPreview, FloatingHostFactory, FloatingHostRegistry, FloatingWindowHost, LatestOnlyQueue,
     ResolvedDockTarget, SurfaceRegistry, resolve_local_target_for_test,
 };
 use super::snapshot::{
@@ -234,6 +234,7 @@ fn resolved_target(target: DockTarget, group: Option<SnapshotGroupKey>) -> Resol
             width: 100.0,
             height: 80.0,
         },
+        tab_insert_index: None,
     }
 }
 
@@ -1323,7 +1324,43 @@ fn preview_geometry_matches_all_nine_resolved_targets() {
         .expect("target should resolve");
         assert_eq!(target.target, target_kind);
         assert_eq!(target.preview_rect, expected_rect);
+        assert_eq!(target.tab_insert_index, None);
     }
+}
+
+#[test]
+fn root_and_group_target_visuals_are_retained_and_never_alias_highlights() {
+    let overlay = DockTargetOverlay::new();
+    assert_eq!(overlay.button_counts(), (5, 4));
+    overlay.show(DockTarget::DockLeft);
+    assert_eq!(overlay.selected_target(), Some(DockTarget::DockLeft));
+    let visual = overlay.visual();
+    super::core::ui::layout_root(
+        &visual,
+        Size {
+            width: 400.0,
+            height: 240.0,
+        },
+    );
+    let rects = overlay.button_rects();
+    let left = rects
+        .iter()
+        .find(|(target, _)| *target == DockTarget::DockLeft)
+        .and_then(|(_, rect)| *rect)
+        .expect("root left target should be arranged");
+    assert_eq!(
+        left,
+        Rect {
+            x: 16.0,
+            y: 100.0,
+            width: 40.0,
+            height: 40.0
+        }
+    );
+    overlay.show(DockTarget::SplitLeft);
+    assert_eq!(overlay.selected_target(), Some(DockTarget::SplitLeft));
+    overlay.clear();
+    assert_eq!(overlay.selected_target(), None);
 }
 
 #[test]
@@ -1338,6 +1375,7 @@ fn drop_preview_layer_arranges_the_rectangle_at_the_resolved_surface_rect() {
             width: 163.0,
             height: 119.0,
         },
+        tab_insert_index: None,
     };
     let mut preview = DropPreview::new();
     preview.show(&target);
@@ -1864,6 +1902,7 @@ fn floating_surface_runtime_keeps_its_chrome_across_reconciliation() {
             width: 105.0,
             height: 260.0,
         },
+        tab_insert_index: None,
     };
     realization.borrow_mut().show_preview_for_test(target);
     assert_eq!(realization.borrow().preview_for_test(&RootKind::Main), None);
@@ -2318,6 +2357,26 @@ fn drag_preview_commit_and_capture_loss_are_transactional() {
         .unwrap();
     assert!(committed.commit().is_some());
     assert!(committed.commit().is_none());
+}
+
+#[test]
+fn drag_commit_uses_the_resolved_center_insertion_index() {
+    let model = default_model();
+    let mut drag = test_drag(&model, item("first"));
+    let mut target = resolved_target(
+        DockTarget::Center,
+        Some(SnapshotGroupKey::Authored(group("tools"))),
+    );
+    target.tab_insert_index = Some(0);
+    drag.preview(&target, 1.0).unwrap();
+    let committed = drag.commit().expect("preview should commit once");
+    assert_eq!(
+        snapshot_group_items(
+            &committed.snapshot(),
+            &SnapshotGroupKey::Authored(group("tools")),
+        ),
+        Some(vec![item("first"), item("third")])
+    );
 }
 
 #[test]

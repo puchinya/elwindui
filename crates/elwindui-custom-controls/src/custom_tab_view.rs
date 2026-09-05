@@ -1,4 +1,4 @@
-use super::core::base::Point;
+use super::core::base::{Point, Rect};
 use super::core::input::{MouseButton, PointerEventArgs};
 use super::core::ui::{ControlExt, Grid, GridExt, ListExt, UIElementExt};
 use super::{
@@ -153,6 +153,33 @@ impl CustomTabView {
 /// A templated splitter that reports logical-axis drag deltas.
 
 impl CustomTabView {
+    /// Resolves a group-local point against the retained tab-strip header geometry.
+    #[doc(hidden)]
+    pub fn tab_insertion_index_at(&self, point: Point) -> Option<usize> {
+        let (strip, _) = self.presenters();
+        let strip = strip?;
+        let offset = strip.arranged_offset()?;
+        strip.tab_insertion_index_at(Point {
+            x: point.x - offset.x,
+            y: point.y - offset.y,
+        })
+    }
+
+    /// Returns an insertion boundary in this tab view's local coordinates.
+    #[doc(hidden)]
+    pub fn tab_insertion_boundary(&self, index: usize) -> Option<Rect> {
+        let (strip, _) = self.presenters();
+        let strip = strip?;
+        let offset = strip.arranged_offset()?;
+        let boundary = strip.tab_insertion_boundary(index)?;
+        Some(Rect {
+            x: offset.x + boundary.x,
+            y: offset.y + boundary.y,
+            width: boundary.width,
+            height: boundary.height,
+        })
+    }
+
     /// Returns a newly constructed tab view.
     pub fn new_view() -> Rc<Self> {
         Self::new()
@@ -279,9 +306,14 @@ impl CustomTabView {
 
     /// Reapplies runtime-owned tab chrome that is resolved from the application theme.
     pub fn refresh_theme(&self) {
-        for item in self.children_values() {
+        let children = self.children_values();
+        for item in &children {
             item.refresh_theme();
         }
+        // Theme changes can refresh a template before the next normal property pass. Reapply the
+        // retained selection presentation immediately so the visible header/content pair cannot
+        // fall back to index zero while the DockLayoutModel still names another active item.
+        self.sync_presentation(&children);
         if let Some(presenter) = self
             .content_presenter()
             .and_then(|presenter| presenter.upgrade())

@@ -71,6 +71,24 @@ Preview geometry is the complete target group for Center, the corresponding half
 corresponding quarter of the surface for an outer Dock target. The rectangle is arranged by a
 retained surface-local overlay layer.
 
+The five group targets are a retained compass (`SplitTop`, `SplitLeft`, `Center`, `SplitRight`,
+`SplitBottom`). The four root-edge targets (`DockLeft`, `DockTop`, `DockRight`, `DockBottom`) are a
+separate retained target set; a root-edge target never aliases or highlights its similarly oriented
+group Split target. Both sets are non-hit-testable and the source drag coordinator remains the only
+input authority.
+
+For a Center drop, the resolved target also carries an optional tab insertion index. The index is
+resolved from the retained arranged header rectangles and their actual midpoints: the left side of
+a midpoint inserts before that header, the right side proceeds to the next header, and a point in the
+content body has no insertion index. Empty strips resolve index zero. A same-group move removes the
+source once before applying the resolved index. Preview, highlight, insertion marker, and release
+commit all use this same resolved target; group drags remain atomic and do not carry an item index.
+
+Center tab insertion displays one retained two-logical-pixel semantic-accent marker at the exact
+resolved boundary. The marker is updated in place and cleared on target change, cancellation,
+completion, unmount, and other transient cancellation paths; it never participates in layout or
+hit testing.
+
 ## Auto-hide and floating
 
 Every surface has four private custom-rendered auto-hide strips, a single overlay pane, a custom

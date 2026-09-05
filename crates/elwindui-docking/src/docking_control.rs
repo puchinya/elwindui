@@ -331,6 +331,7 @@ impl DockingControl {
         if let Some(callback) = self.layout_change_callback() {
             callback(model);
         }
+        self.invalidate_containing_visual_subtree();
     }
 
     fn commit_source_model(&self, model: DockLayoutModel) -> Result<(), DockLayoutError> {
@@ -419,6 +420,10 @@ impl DockingControl {
         // also responsible for repainting sibling native controls (for example, a toolbar above
         // the docking surface). Invalidate that containing subtree so those siblings get their
         // native presentation refreshed even when their measured sizes did not change.
+        self.invalidate_containing_visual_subtree();
+    }
+
+    fn invalidate_containing_visual_subtree(&self) {
         if let Some(parent) = self.visual_parent() {
             let root = visual_tree_root(&parent);
             invalidate_visual_subtree(&root);

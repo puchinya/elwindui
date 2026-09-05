@@ -82,19 +82,29 @@ discovery). Bounds are computed from arranged dimensions and the visual-parent c
 visual root. Screen-position target discovery converts screen -> host-root with
 `screen_to_root`, then host-root -> surface-local by subtracting the registered surface origin;
 without a screen position only the source surface's root-relative point is eligible. Surface edge
-bands are 10% of the smaller extent clamped to 24..64 pixels. Group split bands are 25% with the
-same clamp. Edge ties use Left, Top, Right, Bottom.
+bands use the centralized 40-pixel root-target size. Group split bands are 25% with the same
+24..64-pixel clamp. Edge ties use Left, Top, Right, Bottom.
 
 Target discovery returns one private `ResolvedDockTarget` containing the destination `RootKind`,
-`DockTarget`, optional group key, and computed surface-local preview rectangle. Outer Dock targets
-use the selected surface's root; group targets are filtered to groups belonging to that root. The
-preview is the group bounds, a half-group split, or a quarter-surface outer band as appropriate.
+`DockTarget`, optional group key, computed surface-local preview rectangle, and an optional Center
+tab insertion index. Outer Dock targets use the selected surface's root; group targets are filtered
+to groups belonging to that root. The preview is the group bounds, a half-group split, or a
+quarter-surface outer band as appropriate. The five group compass buttons and four root-edge buttons
+are distinct retained visuals, all non-hit-testable, and only the source drag coordinator resolves
+their target.
+
+Center insertion queries the retained `CustomTabStripPresenter` header arrangement, including
+unequal and compact headers, rather than estimating equal widths or reconciling the tab view. It
+returns the actual midpoint-derived index and the matching retained header boundary. One retained
+two-logical-pixel insertion marker is arranged at that boundary using the semantic accent brush.
+Target, preview, marker, and commit consume the same resolved index; group drags never synthesize
+per-item insertion operations.
 
 `DragSession` retains the committed model, source `RootKind`, source group bounds in host-root
 coordinates, pointer offset, and a runtime-only candidate placement. Moving a tab updates only
-`DropPreview`, whose retained layer arranges a rectangle in surface-local coordinates. It never
-applies candidate ownership. Cancel, capture loss, source removal, source application, and unmount
-clear every surface preview/session.
+`DropPreview`, the target highlight, and the retained insertion marker; it never applies candidate
+ownership, reparents content, measures pages, or reconciles the model. Cancel, capture loss, source
+removal, source application, and unmount clear every surface preview, marker, and session.
 
 ## Auto-hide and native floating hosts
 
@@ -102,8 +112,9 @@ clear every surface preview/session.
 pin affordance. It attaches the stable wrapper to the pane, so auto-hide never creates a second page.
 The bound model controls which entry is open and which remembered return state is used.
 
-`SurfaceRuntime` retains one surface, auto-hide controller, and preview controller for the main root
-and for every floating root. `FloatingHostRegistry` maps model floating-root positions to native
+`SurfaceRuntime` retains one surface, auto-hide controller, preview controller, target sets, and one
+insertion marker for the main root and for every floating root. `FloatingHostRegistry` maps model
+floating-root positions to native
 windows on AppKit and WinUI3. The adapter implements a private `FloatingWindowHost` contract for
 content, logical bounds, show, activation, close, and native close interception. Native move/resize
 notifications update the model's floating bounds through the same source/property transaction

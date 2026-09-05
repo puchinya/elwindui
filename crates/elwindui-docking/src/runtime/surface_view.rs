@@ -8,7 +8,7 @@ use crate::core::theme::BrushStyle;
 use crate::core::ui::{ContentControlExt, Grid, GridExt, LayoutExt, UIElementExt};
 use crate::model::RootKind;
 use crate::runtime::auto_hide::AutoHideOverlay;
-use crate::runtime::overlay::{DockTargetOverlay, DropPreview};
+use crate::runtime::overlay::{DockTargetOverlay, DropPreview, InsertionMarker};
 use crate::runtime::themed_brush;
 use std::rc::Rc;
 
@@ -47,6 +47,7 @@ pub(crate) struct SurfaceRuntime {
     pub(crate) auto_hide: AutoHideOverlay,
     pub(crate) preview: DropPreview,
     pub(crate) targets: DockTargetOverlay,
+    pub(crate) insertion_marker: InsertionMarker,
 }
 
 impl SurfaceRuntime {
@@ -59,12 +60,14 @@ impl SurfaceRuntime {
         auto_hide.bind_pin_handler(owner, root.clone());
         let preview = DropPreview::new();
         let targets = DockTargetOverlay::new();
+        let insertion_marker = InsertionMarker::new();
         let runtime = Self {
             root,
             surface,
             auto_hide,
             preview,
             targets,
+            insertion_marker,
         };
         runtime.reset_visual_children();
         runtime
@@ -81,6 +84,7 @@ impl SurfaceRuntime {
         root.children().add(self.auto_hide.visual());
         root.children().add(self.preview.visual());
         root.children().add(self.targets.visual());
+        root.children().add(self.insertion_marker.visual());
     }
 
     pub(crate) fn add_main_child(&self, child: Rc<dyn UIElementExt>) {
@@ -94,6 +98,7 @@ impl SurfaceRuntime {
         self.auto_hide.refresh_theme();
         self.preview.refresh_theme();
         self.targets.refresh_theme();
+        self.insertion_marker.refresh_theme();
     }
 
     pub(crate) fn render_strips(

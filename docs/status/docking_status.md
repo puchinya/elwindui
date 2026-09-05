@@ -28,8 +28,12 @@
   affordances are present per Dock surface.
 - Drop discovery carries the selected `RootKind`, target group, and exact surface-local preview
   rectangle together. Surface registration stores floating-root identity, corrects non-zero
-  DockSurfaceView offsets, filters group hit testing by root, and keeps only the target surface's
-  positioned preview visible.
+  `DockSurfaceView` offsets, filters group hit testing by root, and keeps only the target surface's
+  positioned preview visible. The retained five-button group compass and four-button root Dock set
+  are visually distinct and never alias highlights; both are non-hit-testable. Center tab insertion
+  uses actual retained arranged header midpoints, carries `tab_insert_index` in the resolved target,
+  and paints one retained two-logical-pixel semantic-accent insertion marker without preview
+  reconciliation or page measurement.
 - AppKit and WinUI3 have private native floating Window adapters with logical bounds, retained
   surface content, stable host IDs, staged prepare/commit creation, close interception, and
   empty-host cleanup. A native close callback marks the host as closing, hands the original OS
@@ -43,11 +47,12 @@
   auto-hide button surfaces use an alpha-zero brush, preserving the full hit area without a
   contrasting rectangle. The former 3x3 rectangle mosaics are no longer used.
 - `examples/docking-demo` visibly composes documents, nested tools, and the retained DockingControl
-  runtime; it no longer only serializes an empty model.
+  runtime; it exposes active-item, floating-window-count, and latest-layout status values, plus
+  authored `can_close=false`, `can_float=false`, and `can_dock=false` capability examples.
 
 ## Tests and verification state
 
-The focused `elwindui-docking` suite currently has 69 passing tests covering default
+The focused `elwindui-docking` suite currently has 71 passing tests covering default
 initialization/reset, activation, close/reopen, all four split/edge sides, snapshot round-trip,
 auto-hide state, typed invalid values, latest-only source logic, removed-authored-group repair,
 adjacent split-weight transformation, generated-group drag targets, retained runtime presentation,
@@ -56,24 +61,27 @@ root/geometry and offset conversion, positioned previews, floating source geomet
 failure/success, stable host identity, native close veto/accept, final-root cleanup, actual tab and
 splitter pointer paths, prepare/commit ordering, and unmount/weak-lifetime cleanup, including V2
 active-item round-trip, V1 rejection, clear/reset, whole-group movement, empty-group presentation,
-and indexed context-close actions. The focused `elwindui-custom-controls` suite has 8 library tests
-and 36 integration tests, including
+indexed context-close actions, exact root/group target geometry, and resolved center insertion.
+The focused `elwindui-custom-controls` suite has 8 library tests and 38 integration tests, including
 structural-selection counters and compact presentation. Native GUI behavior still requires
 platform-host verification where noted below.
 
-The current workspace verification is `1003 passed, 3 ignored`; `cargo check --workspace`, the
+The current workspace verification is `1007 passed, 3 ignored`; `cargo check --workspace`, the
 `rust_analyzer`-cfg check, and the repository rust-analyzer diagnostic gate all pass. The latter
-reports only intentional `inactive-code` WeakWarnings (201 records, zero actionable diagnostics).
+reports only intentional `inactive-code` WeakWarnings (204 records, zero actionable diagnostics).
 
 ## Platform boundaries
 
-- AppKit runtime interaction: run selection/close, tab drag targets/cancellation, splitter
-  completion/cancellation, pin/auto-hide/unpin, floating/re-dock, and native close accept/reject
-  when macOS UI permissions are available. An earlier 2026-09-05 GUI smoke pass launched the real
-  `docking-demo`, visually confirmed transparent docking chrome, switched tabs and themes, exercised
-  snapshot/Clear/Restore/Reset, and created and closed native floating windows for Document A,
-  Document B, and Solution Explorer. After each close the process remained alive and the toolbar
-  actions were repainted. The full interaction matrix remains unrun.
+- AppKit runtime interaction: a 2026-09-05 GUI pass launched the rebuilt real `docking-demo` and
+  PASSed initial rendering, active-item/live-status publication, ten rapid tab selections, all four
+  Split directions, all four root Dock directions, cross-group Center movement, whole-group movement,
+  splitter movement on both axes, light/dark theme switching with selection preservation,
+  Snapshot/Clear/Restore/Reset, ordinary tab close, `can_float=false`, and `can_dock=false`.
+  Native floating creation and close also PASSed: the real floating window opened, its native close
+  returned to the main window without a panic, the process stayed alive, and the toolbar repainted.
+  The GUI pass did not establish mid-drag 2px marker observation, exact cross-group midpoint
+  insertion, floating-to-floating transfer, simultaneous floating windows, native bounds persistence,
+  or the full context-command/long-duration splitter matrix; those remain NOT RUN at native level.
 - WinUI3 runtime interaction: run the equivalent matrix only when the separate Issue #207/#217
   Windows integration state permits it; those fixes are not part of #172/#218.
 - GTK4: compile as required by the workspace. Do not claim native floating runtime support without a

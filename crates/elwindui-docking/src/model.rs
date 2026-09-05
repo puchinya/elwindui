@@ -281,6 +281,11 @@ impl DockLayoutModel {
         self.workspace.active_item.clone()
     }
 
+    /// Returns the number of live floating roots in the workspace.
+    pub fn floating_root_count(&self) -> usize {
+        self.workspace.floating_roots.len()
+    }
+
     /// Returns whether the item is currently represented by an auto-hide entry.
     pub fn is_item_auto_hidden(&self, item: &DockItemId) -> bool {
         self.workspace

@@ -8,8 +8,8 @@ use elwindui_custom_controls::core::input::{
 };
 use elwindui_custom_controls::core::layout::GridLength;
 use elwindui_custom_controls::core::ui::{
-    ContentControlExt, ControlExt, Grid, ListExt, Rectangle, RectangleExt, UIElementExt,
-    dispatch_routed, hit_test, layout_root, unmount_subtree,
+    ContentControlExt, ControlExt, Grid, ListExt, UIElementExt, dispatch_routed, hit_test,
+    layout_root, unmount_subtree,
 };
 use elwindui_custom_controls::{
     CloseButtonPresentation, CustomSplitter, CustomSplitterExt, CustomTabView, CustomTabViewExt,
@@ -914,6 +914,111 @@ fn tab_header_render_tree_is_composed_from_standard_visuals() {
     let texts = rendered_texts(&RenderTree::new::<()>(&root));
     assert!(texts.iter().any(|text| text == "document"));
     assert!(close_icon_is_vector(&item));
+}
+
+#[test]
+fn tab_insertion_uses_retained_unequal_header_midpoints_and_boundaries() {
+    let first = CustomTabViewItem::new_item();
+    first.set_header("A".to_string());
+    first.set_width(80.0);
+    let second = CustomTabViewItem::new_item();
+    second.set_header("B".to_string());
+    second.set_width(140.0);
+    let third = CustomTabViewItem::new_item();
+    third.set_header("C".to_string());
+    third.set_width(80.0);
+    let view = CustomTabView::new_view();
+    view.set_children(vec![first, second, third]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 300.0,
+            height: 120.0,
+        },
+    );
+
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 40.0, y: 16.0 }),
+        Some(0)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 41.0, y: 16.0 }),
+        Some(1)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 150.0, y: 16.0 }),
+        Some(1)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 151.0, y: 16.0 }),
+        Some(2)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 260.0, y: 16.0 }),
+        Some(2)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 261.0, y: 16.0 }),
+        Some(3)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 150.0, y: 60.0 }),
+        None
+    );
+    assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(0.0));
+    assert_eq!(
+        view.tab_insertion_boundary(1).map(|rect| rect.x),
+        Some(80.0)
+    );
+    assert_eq!(
+        view.tab_insertion_boundary(2).map(|rect| rect.x),
+        Some(220.0)
+    );
+    assert_eq!(
+        view.tab_insertion_boundary(3).map(|rect| rect.x),
+        Some(300.0)
+    );
+}
+
+#[test]
+fn compact_and_empty_tab_strips_share_the_retained_geometry_path() {
+    let first = CustomTabViewItem::new_item();
+    first.set_header("compact".to_string());
+    first.set_width(120.0);
+    let view = CustomTabView::new_view();
+    view.set_compact(true);
+    view.set_children(vec![first]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 60.0, y: 14.0 }),
+        Some(0)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 121.0, y: 14.0 }),
+        Some(1)
+    );
+
+    view.set_children(Vec::new());
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 20.0, y: 14.0 }),
+        Some(0)
+    );
+    assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(0.0));
 }
 
 #[test]

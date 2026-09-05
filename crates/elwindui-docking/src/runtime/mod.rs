@@ -23,7 +23,7 @@ pub(crate) use floating_window::PreparedFloatingHostSync;
 #[cfg(test)]
 pub(crate) use floating_window::{FloatingHostFactory, FloatingHostRegistry, FloatingWindowHost};
 #[cfg(test)]
-pub(crate) use overlay::DropPreview;
+pub(crate) use overlay::{DockTargetOverlay, DropPreview};
 pub(crate) use reconcile::RuntimeRealization;
 #[cfg(test)]
 pub(crate) use reconcile::{LatestOnlyQueue, resolve_local_target_for_test};

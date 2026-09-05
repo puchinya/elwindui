@@ -7,7 +7,9 @@ pub(crate) const TITLE_BUTTON_SIZE: f32 = 22.0;
 pub(crate) const TITLE_TEXT_MARGIN: f32 = 8.0;
 
 pub(crate) const SPLITTER_HIT_SIZE: f32 = 6.0;
-pub(crate) const ROOT_DOCK_BAND: f32 = 40.0;
+pub(crate) const ROOT_TARGET_SIZE: f32 = 40.0;
+pub(crate) const ROOT_TARGET_EDGE_INSET: f32 = 16.0;
+pub(crate) const TAB_INSERTION_MARKER_WIDTH: f32 = 2.0;
 pub(crate) const GROUP_DOCK_BAND_FRACTION: f32 = 0.25;
 pub(crate) const GROUP_DOCK_BAND_MIN: f32 = 24.0;
 pub(crate) const GROUP_DOCK_BAND_MAX: f32 = 64.0;

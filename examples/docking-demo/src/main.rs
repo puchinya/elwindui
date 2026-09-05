@@ -64,27 +64,56 @@ mod docking_demo_view_model {
     struct DockingDemoViewModel {
         #[observable(default = elwindui_docking::DockLayoutModel::empty())]
         layout: elwindui_docking::DockLayoutModel,
+        #[observable(default = elwindui_docking::DockLayoutModel::empty())]
+        authored_layout: elwindui_docking::DockLayoutModel,
         #[observable(default = None)]
         saved_snapshot: Option<elwindui_docking::DockLayoutSnapshot>,
+        #[observable(default = String::from("Ready — release a drag to publish one layout change"))]
+        latest_status: String,
+        #[observable(default = String::from("Active item: none"))]
+        active_status: String,
+        #[observable(default = String::from("Floating windows: 0"))]
+        floating_status: String,
     }
 
     impl DockingDemoViewModel {
+        fn publish_layout_status(&self, model: elwindui_docking::DockLayoutModel) {
+            if self.authored_layout.borrow().is_empty() && !model.is_empty() {
+                self.set_authored_layout(model.clone());
+            }
+            self.set_layout(model.clone());
+            self.set_active_status(format!(
+                "Active item: {}",
+                model
+                    .active_item()
+                    .map(|item| format!("{:?}", item))
+                    .unwrap_or_else(|| "none".to_owned())
+            ));
+            self.set_floating_status(format!("Floating windows: {}", model.floating_root_count()));
+            self.set_latest_status("Committed a live layout change".to_owned());
+        }
+
         fn clear_layout(&self) {
             let current = self.layout.borrow().clone();
             if let Ok(next) = current.with_cleared_layout() {
-                layout = next;
+                layout = next.clone();
+                self.publish_layout_status(next);
+                latest_status = "Cleared live items; authored groups remain available".to_owned();
             }
         }
 
         fn reset_layout(&self) {
-            let current = self.layout.borrow().clone();
-            if let Ok(next) = current.with_reset() {
-                layout = next;
+            let authored = self.authored_layout.borrow().clone();
+            if let Ok(next) = authored.with_reset() {
+                layout = next.clone();
+                self.publish_layout_status(next);
+                latest_status = "Reset to the authored docking declaration".to_owned();
             }
         }
 
         fn save_layout(&self) {
             saved_snapshot = Some(self.layout.borrow().snapshot());
+            latest_status = "Saved the current V2 snapshot".to_owned();
         }
 
         fn restore_layout(&self) {
@@ -92,7 +121,11 @@ mod docking_demo_view_model {
                 return;
             };
             if let Ok(next) = elwindui_docking::DockLayoutModel::from_snapshot(snapshot) {
-                layout = next;
+                layout = next.clone();
+                self.publish_layout_status(next);
+                latest_status = "Restored the saved V2 snapshot".to_owned();
+            } else {
+                latest_status = "Snapshot restore rejected".to_owned();
             }
         }
     }
@@ -141,7 +174,12 @@ struct DockingDemoSurface {
                     .as_any()
                     .downcast_ref::<elwindui_docking::DockingControl>()
                 {
+                    let status_vm = std::rc::Rc::clone(&vm);
+                    docking.set_on_layout_change(Box::new(move |layout| {
+                        status_vm.publish_layout_status(layout);
+                    }));
                     docking.synchronize_layout_source();
+                    vm.set_latest_status("Ready — release a drag to publish one layout change".to_owned());
                 }
             }
         }
@@ -176,6 +214,7 @@ struct DockingDemoSurface {
             elwindui_docking::DockItem {
                 id: git_changes
                 title: "Git Changes"
+                can_dock: false
                 TextBlock { text: "Git Changes" foreground: theme_foreground }
             }
         };
@@ -188,6 +227,7 @@ struct DockingDemoSurface {
             elwindui_docking::DockItem {
                 id: error_list
                 title: "Error List"
+                can_close: false
                 TextBlock { text: "No errors" foreground: theme_placeholder }
             }
         };
@@ -199,6 +239,7 @@ struct DockingDemoSurface {
             elwindui_docking::DockItem {
                 id: output
                 title: "Output"
+                can_float: false
                 TextBlock { text: "Build output" foreground: theme_foreground }
             }
             elwindui_docking::DockItem {
@@ -281,12 +322,27 @@ struct DockingDemoSurface {
             columns: [elwindui::core::layout::GridLength::Star(1.0)]
             docking
         };
+        let status = HorizontalLayout {
+            height: 26.0
+            spacing: 18.0
+            background: BrushStyle::Tertiary
+            TextBlock {
+                text: vm.active_status
+                foreground: theme_foreground
+            }
+            TextBlock {
+                text: vm.floating_status
+                foreground: theme_foreground
+            }
+            TextBlock { text: vm.latest_status foreground: theme_foreground }
+        };
 
         spacing: 0.0
         background: BrushStyle::WindowBackground
         VerticalLayout {
             spacing: 0.0
             menu
+            status
             docking_host
         }
     },

@@ -3,7 +3,7 @@
 AI-agent-drivable CLI for launching, inspecting, screenshotting, and interacting with elwindui (or
 any) macOS app windows — see `docs/status/tooling_status.md` for what's implemented
 (Phase 1: launch/terminate/list-windows/capture-window/doctor/focus-window; Phase 2:
-dump-tree/find/set-focus/click/point-click/drag/type-text/press-key/wait-for — driver-side only, see that doc for the
+dump-tree/find/set-focus/click/point-click/drag/resize/type-text/press-key/wait-for — driver-side only, see that doc for the
 Rust-side accessibility-identifier wiring left out of scope) versus deferred (Phase 3+:
 elwindui-internal state introspection, image-diff regression testing).
 
@@ -43,8 +43,8 @@ Codex must delegate the real AppKit E2E matrix to a bounded sub-agent before any
 the standard sub-agent is `gpt-5.6-luna` with standard reasoning effort (`medium`). Codex may
 also delegate a separate sidecar task for registering or refreshing the checked-out test artifact
 under `tools/macos-ui-driver/bin`. The main agent must review the file diff and evidence before
-recording results. This Codex-only routing gate is documented in
-[`docs/agents/appkit.md`](../../docs/agents/appkit.md) and does not change the Claude Code
+recording results. This Codex-only routing gate and the fixed tester instruction example are
+documented in [`docs/agents/appkit-e2e.md`](../../docs/agents/appkit-e2e.md) and do not change the Claude Code
 workflow. If delegation is unavailable, report BLOCKED instead of performing the E2E in the main
 agent.
 

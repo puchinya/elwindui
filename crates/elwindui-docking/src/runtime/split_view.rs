@@ -2,7 +2,7 @@
 
 use crate::core::layout::GridLength;
 use crate::core::layout::Orientation;
-use crate::core::ui::{Grid, UIElementExt};
+use crate::core::ui::{Grid, LayoutExt, UIElementExt};
 use crate::model::{DockLayoutModel, SplitAddress};
 use std::rc::Rc;
 
@@ -18,6 +18,12 @@ pub(crate) struct SplitterSession {
     right_track_index: usize,
     left_weight: f32,
     right_weight: f32,
+    left_min: f32,
+    right_min: f32,
+    left_max: f32,
+    right_max: f32,
+    left_size: f32,
+    right_size: f32,
     last_cumulative_delta: f32,
     captured: bool,
 }
@@ -51,6 +57,31 @@ impl SplitterSession {
             GridLength::Star(weight) if weight.is_finite() && *weight > 0.0 => *weight,
             _ => return None,
         };
+        let axis_size = |element: &Rc<dyn UIElementExt>| match orientation {
+            Orientation::Horizontal => element.arranged_width(),
+            Orientation::Vertical => element.arranged_height(),
+        };
+        let children = grid.children().to_vec();
+        let left_child = children.get(boundary.checked_mul(2)?)?;
+        let right_child = children.get(right_track_index)?;
+        let left_size =
+            axis_size(left_child).unwrap_or(extent * left_weight / (left_weight + right_weight));
+        let right_size =
+            axis_size(right_child).unwrap_or(extent * right_weight / (left_weight + right_weight));
+        let (left_min, right_min, left_max, right_max) = match orientation {
+            Orientation::Horizontal => (
+                left_child.min_width().unwrap_or(0.0),
+                right_child.min_width().unwrap_or(0.0),
+                left_child.max_width().unwrap_or(f32::INFINITY),
+                right_child.max_width().unwrap_or(f32::INFINITY),
+            ),
+            Orientation::Vertical => (
+                left_child.min_height().unwrap_or(0.0),
+                right_child.min_height().unwrap_or(0.0),
+                left_child.max_height().unwrap_or(f32::INFINITY),
+                right_child.max_height().unwrap_or(f32::INFINITY),
+            ),
+        };
         Some(Self {
             original: model.clone(),
             address,
@@ -63,6 +94,12 @@ impl SplitterSession {
             right_track_index,
             left_weight,
             right_weight,
+            left_min: left_min.max(0.0),
+            right_min: right_min.max(0.0),
+            left_max: left_max.max(left_min.max(0.0)),
+            right_max: right_max.max(right_min.max(0.0)),
+            left_size,
+            right_size,
             last_cumulative_delta: 0.0,
             captured: true,
         })
@@ -72,7 +109,8 @@ impl SplitterSession {
         if !self.captured || !cumulative_delta.is_finite() {
             return;
         }
-        let Some(tracks) = self.preview_tracks(cumulative_delta) else {
+        let delta = self.clamped_delta(cumulative_delta);
+        let Some(tracks) = self.preview_tracks(delta) else {
             return;
         };
         match self.orientation {
@@ -80,7 +118,8 @@ impl SplitterSession {
             Orientation::Vertical => *self.grid.rows.borrow_mut() = tracks,
         }
         self.grid.invalidate_arrange();
-        self.last_cumulative_delta = cumulative_delta;
+        self.grid.flush_interactive_relayout();
+        self.last_cumulative_delta = delta;
     }
 
     pub(crate) fn cancel(&mut self) {
@@ -139,5 +178,11 @@ impl SplitterSession {
         tracks[self.left_track_index] = GridLength::Star(left / pair_total * total);
         tracks[self.right_track_index] = GridLength::Star(right / pair_total * total);
         Some(tracks)
+    }
+
+    fn clamped_delta(&self, delta: f32) -> f32 {
+        let lower = (self.left_min - self.left_size).max(self.right_size - self.right_max);
+        let upper = (self.left_max - self.left_size).min(self.right_size - self.right_min);
+        delta.clamp(lower.min(upper), upper.max(lower))
     }
 }

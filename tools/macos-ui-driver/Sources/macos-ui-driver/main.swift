@@ -1,8 +1,9 @@
 // macos-ui-driver — Phase 1 + Phase 2 of docs/status/tooling_status.md (AI-agent-drivable
 // macOS GUI test CLI). Phase 1: app launch/terminate, window enumeration, per-window screenshot
 // capture, and permission diagnostics ("doctor"). Phase 2: Accessibility-tree walking
-// (`dump-tree`/`find`) and control interaction (`set-focus`/`click`/`type-text`/`press-key`/
-// `wait-for`) — driver-side only, see docs/status/tooling_status.md for scope notes.
+// (`dump-tree`/`find`) and control interaction (`set-focus`/`click`/`point-click`/`drag`/`resize`/
+// `type-text`/`press-key`/`wait-for`) — driver-side only, see docs/status/tooling_status.md for
+// scope notes.
 // elwindui-internal state introspection and image-diff regression testing are later phases, not
 // implemented here.
 //
@@ -404,6 +405,35 @@ func baseDiagnostics(pid: pid_t, runningApp: NSRunningApplication) -> [String: A
     ]
 }
 
+/// Verifies the observed foreground state before a coordinate-based input is sent. AX controls
+/// expose their own geometry, but custom elwindui surfaces such as Docking headers do not; keeping
+/// this check in the coordinate commands prevents a successful CGEventPost from being mistaken for
+/// input delivered to the intended app.
+func requireForeground(pid: pid_t, window: AXUIElement) -> [String: Any] {
+    guard let runningApp = NSRunningApplication(processIdentifier: pid) else {
+        fail("no running application with pid \(pid)", ["pid": Int(pid)])
+    }
+    let appElement = AXUIElementCreateApplication(pid)
+    guard let focused = axCopyAttribute(appElement, kAXFocusedWindowAttribute as String) else {
+        fail(
+            "target application has no focused AX window",
+            baseDiagnostics(pid: pid, runningApp: runningApp))
+    }
+    let isActive = runningApp.isActive
+    let isFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+    let isMain = axBool(window, kAXMainAttribute as String)
+    let isFocused = CFEqual(focused, window)
+    var diagnostics = baseDiagnostics(pid: pid, runningApp: runningApp)
+    diagnostics["ax_main"] = isMain
+    diagnostics["ax_focused_window_matches_target"] = isFocused
+    guard isActive && isFrontmost && isMain && isFocused else {
+        diagnostics["error"] =
+            "target window is not confirmed frontmost/main/focused; run focus-window first"
+        fail("coordinate input requires a confirmed foreground target", diagnostics)
+    }
+    return diagnostics
+}
+
 // MARK: - list-windows
 
 func cmdListWindows(_ args: Args) -> Never {
@@ -737,6 +767,105 @@ func resolveContext(_ args: Args) -> (pid: pid_t, appElement: AXUIElement, windo
     return (pid, appElement, window)
 }
 
+struct MouseButtonEvents {
+    let down: CGEventType
+    let dragged: CGEventType
+    let up: CGEventType
+    let button: CGMouseButton
+}
+
+func mouseButtonEvents(_ raw: String) -> MouseButtonEvents? {
+    switch raw.lowercased() {
+    case "left":
+        return MouseButtonEvents(
+            down: .leftMouseDown, dragged: .leftMouseDragged, up: .leftMouseUp, button: .left)
+    case "right":
+        return MouseButtonEvents(
+            down: .rightMouseDown, dragged: .rightMouseDragged, up: .rightMouseUp, button: .right)
+    default:
+        return nil
+    }
+}
+
+func requirePointInsideWindow(_ point: CGPoint, window: AXUIElement) {
+    guard let origin = axPoint(window, kAXPositionAttribute as String),
+        let size = axSize(window, kAXSizeAttribute as String),
+        point.x >= origin.x,
+        point.y >= origin.y,
+        point.x <= origin.x + size.width,
+        point.y <= origin.y + size.height
+    else {
+        fail(
+            "coordinate is outside the target window",
+            ["point": ["x": point.x, "y": point.y]])
+    }
+}
+
+/// Sends a real mouse click at an explicit screen coordinate. This is intentionally separate from
+/// `click`, which resolves an AX element, because custom elwindui surfaces are often not exposed in
+/// the Accessibility tree. The foreground and target-window checks keep this useful for evidence,
+/// rather than turning it into an unrestricted global click primitive.
+func postPointClick(at point: CGPoint, button: MouseButtonEvents, pause: Double) -> Bool {
+    let down = CGEvent(
+        mouseEventSource: nil, mouseType: button.down, mouseCursorPosition: point,
+        mouseButton: button.button)
+    let up = CGEvent(
+        mouseEventSource: nil, mouseType: button.up, mouseCursorPosition: point,
+        mouseButton: button.button)
+    guard let down, let up else { return false }
+    down.post(tap: .cghidEventTap)
+    if pause > 0.0 {
+        Thread.sleep(forTimeInterval: pause)
+    }
+    up.post(tap: .cghidEventTap)
+    return true
+}
+
+/// Sends a real press-move-release gesture at screen coordinates, preserving intermediate events
+/// for drag-preview and splitter tracking tests. The caller can capture the target window from a
+/// second process while this command is running to inspect mid-drag state.
+func postMouseDrag(
+    from start: CGPoint,
+    to end: CGPoint,
+    button: MouseButtonEvents,
+    steps: Int,
+    duration: Double
+) -> Bool {
+    let move = CGEvent(
+        mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: start, mouseButton: button.button)
+    let down = CGEvent(
+        mouseEventSource: nil, mouseType: button.down, mouseCursorPosition: start,
+        mouseButton: button.button)
+    guard let move, let down else { return false }
+    move.post(tap: .cghidEventTap)
+    down.post(tap: .cghidEventTap)
+
+    let interval = duration / Double(steps)
+    for step in 1...steps {
+        if interval > 0.0 {
+            Thread.sleep(forTimeInterval: interval)
+        }
+        let fraction = Double(step) / Double(steps)
+        let point = CGPoint(
+            x: start.x + (end.x - start.x) * fraction,
+            y: start.y + (end.y - start.y) * fraction)
+        guard
+            let dragged = CGEvent(
+                mouseEventSource: nil, mouseType: button.dragged, mouseCursorPosition: point,
+                mouseButton: button.button)
+        else { return false }
+        dragged.post(tap: .cghidEventTap)
+    }
+
+    guard
+        let up = CGEvent(
+            mouseEventSource: nil, mouseType: button.up, mouseCursorPosition: end,
+            mouseButton: button.button)
+    else { return false }
+    up.post(tap: .cghidEventTap)
+    return true
+}
+
 /// Shared mouse-click synthesis used by `click --via mouse`, `type-text --focus-via click`, and
 /// `press-key --focus-via click` — a real `CGEventPost` down/up pair at `.cghidEventTap`, computed
 /// from the element's own `AXPosition`/`AXSize`. Deliberately not `postToPid`-targeted: the whole
@@ -914,6 +1043,158 @@ func cmdClick(_ args: Args) -> Never {
         "value": axValueDescription(before.value) != axValueDescription(after.value),
     ]
     emit(success: true, fields)
+}
+
+// MARK: - point-click
+
+/// Clicks an explicit screen coordinate after resolving and verifying the target AX window. This
+/// is the coordinate counterpart to `click` for custom controls that intentionally have no AX node.
+func cmdPointClick(_ args: Args) -> Never {
+    let (pid, _, window) = resolveContext(args)
+    guard let x = args.double("x"), let y = args.double("y"), x.isFinite, y.isFinite else {
+        fail("point-click requires finite --x and --y")
+    }
+    let point = CGPoint(x: x, y: y)
+    let buttonName = args.string("button") ?? "left"
+    guard let button = mouseButtonEvents(buttonName) else {
+        fail("unknown --button \(buttonName) (expected left or right)")
+    }
+    let pause = args.double("pause") ?? 0.05
+    guard pause.isFinite, pause >= 0.0 else {
+        fail("--pause must be a finite non-negative number")
+    }
+    let foreground = requireForeground(pid: pid, window: window)
+    requirePointInsideWindow(point, window: window)
+    guard postPointClick(at: point, button: button, pause: pause) else {
+        fail("failed to create point-click events", foreground)
+    }
+    var fields = foreground
+    fields["point"] = ["x": point.x, "y": point.y]
+    fields["button"] = buttonName.lowercased()
+    fields["pause_seconds"] = pause
+    emit(success: true, fields)
+}
+
+// MARK: - drag
+
+/// Drags between explicit screen coordinates after resolving and verifying the target AX window.
+/// A caller can run this for several seconds and capture the window from another process while the
+/// command is in flight to inspect a real preview or splitter mid-drag. By default both endpoints
+/// must be inside the target window. `--allow-end-outside-window` is an explicit escape hatch for a
+/// verified cross-window gesture (for example, returning a native floating host to the main host);
+/// the press point remains protected by the normal in-window check.
+func cmdDrag(_ args: Args) -> Never {
+    guard
+        let startX = args.double("start-x"),
+        let startY = args.double("start-y"),
+        let endX = args.double("end-x"),
+        let endY = args.double("end-y"),
+        startX.isFinite,
+        startY.isFinite,
+        endX.isFinite,
+        endY.isFinite
+    else {
+        fail("drag requires finite --start-x/--start-y/--end-x/--end-y")
+    }
+    let (pid, _, window) = resolveContext(args)
+    let start = CGPoint(x: startX, y: startY)
+    let end = CGPoint(x: endX, y: endY)
+    let buttonName = args.string("button") ?? "left"
+    guard let button = mouseButtonEvents(buttonName) else {
+        fail("unknown --button \(buttonName) (expected left or right)")
+    }
+    let steps = args.int("steps") ?? 20
+    guard (1...10_000).contains(steps) else {
+        fail("--steps must be within 1...10000")
+    }
+    let duration = args.double("duration") ?? 0.5
+    guard duration.isFinite, duration >= 0.0 else {
+        fail("--duration must be a finite non-negative number")
+    }
+
+    let foreground = requireForeground(pid: pid, window: window)
+    requirePointInsideWindow(start, window: window)
+    if !args.flag("allow-end-outside-window") {
+        requirePointInsideWindow(end, window: window)
+    }
+    guard postMouseDrag(from: start, to: end, button: button, steps: steps, duration: duration) else {
+        fail("failed to create drag events", foreground)
+    }
+    var fields = foreground
+    fields["start"] = ["x": start.x, "y": start.y]
+    fields["end"] = ["x": end.x, "y": end.y]
+    fields["button"] = buttonName.lowercased()
+    fields["steps"] = steps
+    fields["duration_seconds"] = duration
+    emit(success: true, fields)
+}
+
+// MARK: - resize
+
+/// Resizes an AX window through the real lower-right resize handle. This is a specialized
+/// counterpart to `drag`: it derives the grab point from the window's current AX bounds, so a
+/// caller does not have to guess title-bar/frame coordinates, and it verifies that AppKit exposed
+/// a changed size after the gesture. The end point may be outside the original bounds when the
+/// requested delta grows the window; only the grab point needs to be inside the target window.
+func cmdResize(_ args: Args) -> Never {
+    let deltaWidth = args.double("delta-width") ?? 0.0
+    let deltaHeight = args.double("delta-height") ?? 0.0
+    guard deltaWidth.isFinite, deltaHeight.isFinite else {
+        fail("resize requires finite --delta-width and --delta-height")
+    }
+    guard deltaWidth != 0.0 || deltaHeight != 0.0 else {
+        fail("resize requires a non-zero --delta-width or --delta-height")
+    }
+
+    let (pid, _, window) = resolveContext(args)
+    let steps = args.int("steps") ?? 20
+    guard (1...10_000).contains(steps) else {
+        fail("--steps must be within 1...10000")
+    }
+    let duration = args.double("duration") ?? 0.5
+    guard duration.isFinite, duration >= 0.0 else {
+        fail("--duration must be a finite non-negative number")
+    }
+    let timeout = args.double("timeout") ?? 1.0
+    guard timeout.isFinite, timeout >= 0.0 else {
+        fail("--timeout must be a finite non-negative number")
+    }
+
+    let foreground = requireForeground(pid: pid, window: window)
+    guard let origin = axPoint(window, kAXPositionAttribute as String),
+        let size = axSize(window, kAXSizeAttribute as String),
+        size.width > 0.0,
+        size.height > 0.0
+    else {
+        fail("target window has no usable AX position/size", foreground)
+    }
+
+    let start = CGPoint(
+        x: origin.x + max(size.width - 2.0, 0.0),
+        y: origin.y + max(size.height - 2.0, 0.0))
+    let end = CGPoint(x: start.x + deltaWidth, y: start.y + deltaHeight)
+    requirePointInsideWindow(start, window: window)
+    guard postMouseDrag(
+        from: start, to: end, button: mouseButtonEvents("left")!, steps: steps, duration: duration)
+    else {
+        fail("failed to create resize events", foreground)
+    }
+
+    let changed = pollUntil(timeout: timeout) { () -> Bool? in
+        guard let current = axSize(window, kAXSizeAttribute as String) else { return nil }
+        return current.width != size.width || current.height != size.height ? true : nil
+    } == true
+    let after = axSize(window, kAXSizeAttribute as String)
+    var fields = foreground
+    fields["before"] = ["width": size.width, "height": size.height]
+    fields["after"] = after.map { ["width": $0.width, "height": $0.height] } as Any
+    fields["delta"] = ["width": deltaWidth, "height": deltaHeight]
+    fields["start"] = ["x": start.x, "y": start.y]
+    fields["end"] = ["x": end.x, "y": end.y]
+    fields["steps"] = steps
+    fields["duration_seconds"] = duration
+    fields["changed"] = changed
+    emit(success: changed, fields)
 }
 
 // MARK: - type-text
@@ -1147,7 +1428,7 @@ func cmdWaitFor(_ args: Args) -> Never {
 let argv = Array(CommandLine.arguments.dropFirst())
 guard let command = argv.first else {
     fail(
-        "usage: macos-ui-driver <doctor|launch|terminate|list-windows|capture-window|focus-window|dump-tree|find|set-focus|click|type-text|press-key|wait-for> [options]"
+        "usage: macos-ui-driver <doctor|launch|terminate|list-windows|capture-window|focus-window|dump-tree|find|set-focus|click|point-click|drag|resize|type-text|press-key|wait-for> [options]"
     )
 }
 let args = Args(Array(argv.dropFirst()))
@@ -1163,6 +1444,9 @@ case "dump-tree": cmdDumpTree(args)
 case "find": cmdFind(args)
 case "set-focus": cmdSetFocus(args)
 case "click": cmdClick(args)
+case "point-click": cmdPointClick(args)
+case "drag": cmdDrag(args)
+case "resize": cmdResize(args)
 case "type-text": cmdTypeText(args)
 case "press-key": cmdPressKey(args)
 case "wait-for": cmdWaitFor(args)

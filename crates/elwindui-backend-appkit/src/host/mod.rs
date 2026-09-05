@@ -156,6 +156,15 @@ impl RelayoutHost for AppKitRelayoutHost {
         }
         view.setNeedsLayout(true);
     }
+
+    fn flush_interactive_relayout(&self) {
+        let Some(view) = self.0.load() else { return };
+        if view.ivars().relaying_out.get() {
+            view.ivars().needs_another_pass.set(true);
+            return;
+        }
+        view.relayout();
+    }
 }
 
 /// `elwindui_core::ui::FocusHost` for `TreeHostView` — the `FocusHost` counterpart to
@@ -1125,7 +1134,6 @@ impl TreeHostView {
                 }
             }
         }
-
         // Cheap only relative to a `debug_assertions`/`render-stats` build that already pays for
         // `render::stats` bumps throughout this pass — a release build with neither never takes
         // this branch, so the `task_info` syscall and cache walk `record_memory_stats` does never

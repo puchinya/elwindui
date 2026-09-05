@@ -1,14 +1,15 @@
 use elwindui_custom_controls::core::base::{Point, Size};
 use elwindui_custom_controls::core::graphics::{
-    Brush, IconSource, RenderCommand, RenderGroup, RenderTree, SystemIcon,
+    IconSource, RenderCommand, RenderGroup, RenderTree, SystemIcon,
 };
 use elwindui_custom_controls::core::input::{
     KeyModifiers, MouseButton, PointerEventArgs, RawPointerEvent, RawPointerEventKind,
     RoutedEventArgs,
 };
+use elwindui_custom_controls::core::layout::GridLength;
 use elwindui_custom_controls::core::ui::{
-    ContentControlExt, ListExt, UIElementExt, dispatch_routed, hit_test, layout_root,
-    unmount_subtree,
+    ContentControlExt, ControlExt, Grid, ListExt, UIElementExt, dispatch_routed, hit_test,
+    layout_root, unmount_subtree,
 };
 use elwindui_custom_controls::{
     CloseButtonPresentation, CustomSplitter, CustomSplitterExt, CustomTabView, CustomTabViewExt,
@@ -56,24 +57,6 @@ fn rendered_texts(tree: &RenderTree) -> Vec<String> {
         .collect()
 }
 
-fn visible_rendered_texts(tree: &RenderTree) -> Vec<String> {
-    let mut commands = Vec::new();
-    render_commands(&tree.root, &mut commands);
-    commands
-        .into_iter()
-        .filter_map(|command| match command {
-            RenderCommand::Text {
-                content,
-                foreground,
-                ..
-            } if !matches!(foreground, Some(Brush::Solid(color)) if color.a == 0) => {
-                Some(content.clone())
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 fn find_visual(node: &Rc<dyn UIElementExt>, name: &str) -> Option<Rc<dyn UIElementExt>> {
     if node.type_name().contains(name) {
         return Some(node.clone());
@@ -84,6 +67,21 @@ fn find_visual(node: &Rc<dyn UIElementExt>, name: &str) -> Option<Rc<dyn UIEleme
         }
     }
     None
+}
+
+fn close_icon_is_vector(item: &Rc<CustomTabViewItem>) -> bool {
+    let close = item.close_button();
+    let close: Rc<dyn UIElementExt> = close;
+    find_visual(&close, "IconSourceElement").is_some()
+}
+
+fn item_indicator(item: &Rc<CustomTabViewItem>) -> Rc<dyn UIElementExt> {
+    item.__template_root()
+        .expect("tab item template root")
+        .visual_children()
+        .into_iter()
+        .nth(1)
+        .expect("tab item indicator")
 }
 
 fn absolute_offset(node: &Rc<dyn UIElementExt>) -> Point {
@@ -144,6 +142,38 @@ fn tab_view_owns_ordered_items_and_exposes_public_presentation_properties() {
     assert!(first.visual_parent().is_none());
     assert!(second.visual_parent().is_none());
     assert!(replacement.visual_parent().is_some());
+}
+
+#[test]
+fn compact_tab_metrics_update_the_retained_tab_view_grid() {
+    let item = CustomTabViewItem::new_item();
+    item.set_header("compact".to_string());
+    let view = CustomTabView::new_view();
+    view.set_children(vec![item]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+
+    let template = view.__template_root().expect("tab view template root");
+    let grid = template
+        .as_any()
+        .downcast_ref::<Grid>()
+        .expect("tab view template root is a Grid");
+    assert!(matches!(
+        grid.rows.borrow().first(),
+        Some(GridLength::Fixed(height)) if (*height - 32.0).abs() < f32::EPSILON
+    ));
+
+    view.set_compact(true);
+    assert!(matches!(
+        grid.rows.borrow().first(),
+        Some(GridLength::Fixed(height)) if (*height - 28.0).abs() < f32::EPSILON
+    ));
 }
 
 #[test]
@@ -555,8 +585,7 @@ fn pointer_over_hover_changes_close_template_without_width_jitter() {
         close.arranged_height(),
         close.arranged_offset(),
     );
-    let texts_before = visible_rendered_texts(&RenderTree::new::<()>(&root));
-    assert!(!texts_before.iter().any(|text| text == "×"));
+    assert!(!close_icon_is_vector(&item));
 
     let target: Rc<dyn UIElementExt> = item.clone();
     let args = pointer(Point { x: 1.0, y: 1.0 }, None);
@@ -584,8 +613,7 @@ fn pointer_over_hover_changes_close_template_without_width_jitter() {
         ),
         close_arranged_before
     );
-    let texts_hovered = visible_rendered_texts(&RenderTree::new::<()>(&root));
-    assert!(texts_hovered.iter().any(|text| text == "×"));
+    assert!(close_icon_is_vector(&item));
     dispatch_routed(
         &target,
         "on_pointer_exited",
@@ -610,8 +638,7 @@ fn pointer_over_hover_changes_close_template_without_width_jitter() {
         ),
         close_arranged_before
     );
-    let texts_after = visible_rendered_texts(&RenderTree::new::<()>(&root));
-    assert!(!texts_after.iter().any(|text| text == "×"));
+    assert!(!close_icon_is_vector(&item));
 }
 
 #[test]
@@ -870,7 +897,7 @@ fn tab_header_render_tree_is_composed_from_standard_visuals() {
     item.set_header("document".to_string());
     item.set_icon(Some(IconSource::System(SystemIcon::Add)));
     let view = CustomTabView::new_view();
-    view.set_children(vec![item]);
+    view.set_children(vec![item.clone()]);
     let root: Rc<dyn UIElementExt> = view.clone();
     layout_root(
         &root,
@@ -886,7 +913,112 @@ fn tab_header_render_tree_is_composed_from_standard_visuals() {
     assert!(find_visual(&root, "Rectangle").is_some());
     let texts = rendered_texts(&RenderTree::new::<()>(&root));
     assert!(texts.iter().any(|text| text == "document"));
-    assert!(texts.iter().any(|text| text == "×"));
+    assert!(close_icon_is_vector(&item));
+}
+
+#[test]
+fn tab_insertion_uses_retained_unequal_header_midpoints_and_boundaries() {
+    let first = CustomTabViewItem::new_item();
+    first.set_header("A".to_string());
+    first.set_width(80.0);
+    let second = CustomTabViewItem::new_item();
+    second.set_header("B".to_string());
+    second.set_width(140.0);
+    let third = CustomTabViewItem::new_item();
+    third.set_header("C".to_string());
+    third.set_width(80.0);
+    let view = CustomTabView::new_view();
+    view.set_children(vec![first, second, third]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 300.0,
+            height: 120.0,
+        },
+    );
+
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 40.0, y: 16.0 }),
+        Some(0)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 41.0, y: 16.0 }),
+        Some(1)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 150.0, y: 16.0 }),
+        Some(1)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 151.0, y: 16.0 }),
+        Some(2)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 260.0, y: 16.0 }),
+        Some(2)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 261.0, y: 16.0 }),
+        Some(3)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 150.0, y: 60.0 }),
+        None
+    );
+    assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(0.0));
+    assert_eq!(
+        view.tab_insertion_boundary(1).map(|rect| rect.x),
+        Some(80.0)
+    );
+    assert_eq!(
+        view.tab_insertion_boundary(2).map(|rect| rect.x),
+        Some(220.0)
+    );
+    assert_eq!(
+        view.tab_insertion_boundary(3).map(|rect| rect.x),
+        Some(300.0)
+    );
+}
+
+#[test]
+fn compact_and_empty_tab_strips_share_the_retained_geometry_path() {
+    let first = CustomTabViewItem::new_item();
+    first.set_header("compact".to_string());
+    first.set_width(120.0);
+    let view = CustomTabView::new_view();
+    view.set_compact(true);
+    view.set_children(vec![first]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 60.0, y: 14.0 }),
+        Some(0)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 121.0, y: 14.0 }),
+        Some(1)
+    );
+
+    view.set_children(Vec::new());
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 20.0, y: 14.0 }),
+        Some(0)
+    );
+    assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(0.0));
 }
 
 #[test]
@@ -955,10 +1087,8 @@ fn selected_indicator_moves_without_recreating_header_items() {
             height: 120.0,
         },
     );
-    let first_indicator = find_visual(&(first.clone() as Rc<dyn UIElementExt>), "Rectangle")
-        .expect("first indicator");
-    let second_indicator = find_visual(&(second.clone() as Rc<dyn UIElementExt>), "Rectangle")
-        .expect("second indicator");
+    let first_indicator = item_indicator(&first);
+    let second_indicator = item_indicator(&second);
     assert_eq!(
         first_indicator.visibility(),
         elwindui_custom_controls::core::layout::Visibility::Visible
@@ -1005,7 +1135,7 @@ fn tab_item_header_and_indicator_tracks_follow_strip_position() {
     );
     let item_root: Rc<dyn UIElementExt> = item.clone();
     let header = find_visual(&item_root, "HorizontalLayout").expect("header row");
-    let indicator = find_visual(&item_root, "Rectangle").expect("indicator row");
+    let indicator = item_indicator(&item);
     assert_eq!(header.arranged_offset().expect("header offset").y, 0.0);
     assert_eq!(header.arranged_height(), Some(30.0));
     assert_eq!(
@@ -1453,8 +1583,7 @@ fn close_affordance_is_composed_and_respects_presentation() {
     );
 
     let always_width = item.arranged_width().expect("tab width");
-    let always = RenderTree::new::<()>(&root);
-    assert!(rendered_texts(&always).iter().any(|text| text == "×"));
+    assert!(close_icon_is_vector(&item));
 
     view.set_close_button_presentation(CloseButtonPresentation::Never);
     layout_root(
@@ -1465,12 +1594,8 @@ fn close_affordance_is_composed_and_respects_presentation() {
         },
     );
     let never_width = item.arranged_width().expect("tab width");
-    let never = RenderTree::new::<()>(&root);
-    assert!(
-        !visible_rendered_texts(&never)
-            .iter()
-            .any(|text| text == "×")
-    );
+    let _never = RenderTree::new::<()>(&root);
+    assert!(!close_icon_is_vector(&item));
     assert_eq!(always_width, never_width + 20.0);
 
     view.set_close_button_presentation(CloseButtonPresentation::OnPointerOver);

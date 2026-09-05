@@ -1,6 +1,6 @@
 # Tooling status
 
-Snapshot: 2026-08-30. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-09-06. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
 
 | Tool | State | Current capability / gap |
 |---|---|---|
@@ -9,13 +9,13 @@ Snapshot: 2026-08-30. Tool architecture is indexed in [`../design/README.md`](..
 | Preview | ⬜ | design exists; no workspace preview application |
 | `elwindui-hotreload` | 🚧 | tested Patch/Remount decision helper exists; artifact loading and live replacement pipeline are absent |
 | `elwindui-test` | 🚧 | render-tree dump exists; canvas/image snapshots absent |
-| `macos-ui-driver` | 🚧 | process/window control, focus, Accessibility tree queries/actions, and screenshots are implemented; full keyboard/mouse synthesis and every AX action are not complete |
+| `macos-ui-driver` | 🚧 | process/window control, focus, Accessibility tree queries/actions, screenshots, explicit coordinate clicks, real press/drag/release gestures, and native lower-right window resize gestures are implemented; full keyboard synthesis and every AX action are not complete |
 
 ## macOS UI driver verification
 
-Implemented commands cover launching/locating a process or window, waiting for window state, bringing a window to the front, querying the Accessibility tree, setting supported values, and invoking supported actions. Accessibility permission and foreground restrictions remain environment constraints.
+Implemented commands cover launching/locating a process or window, waiting for window state, bringing a window to the front, querying the Accessibility tree, setting supported values, invoking supported actions, and applying a real lower-right native window resize gesture with before/after AX bounds. The driver must be run outside the Codex workspace-write sandbox for native GUI evidence: in this environment its `doctor` reports both TCC checks false inside the sandbox and both true through the elevated execution path or Terminal. A false check blocks native acceptance rather than providing a partial GUI PASS.
 
-The command catalog and operational precautions belong in [`../agents/appkit.md`](../agents/appkit.md) and [`../../tools/macos-ui-driver/README.md`](../../tools/macos-ui-driver/README.md), not in status.
+The command catalog belongs in [`../../tools/macos-ui-driver/README.md`](../../tools/macos-ui-driver/README.md); the native E2E operational procedure and fixed tester instruction example belong in [`../agents/appkit-e2e.md`](../agents/appkit-e2e.md), not in status.
 
 On 2026-08-30, `cargo run -p control-template-demo` reached executable
 startup after the public-path remediation. Computer Use then captured the same

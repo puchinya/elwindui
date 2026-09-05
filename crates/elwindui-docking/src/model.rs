@@ -33,6 +33,7 @@ pub(crate) struct DefaultDockDefinition {
     pub(crate) root: Option<Node>,
     pub(crate) item_groups: BTreeMap<DockItemId, DockGroupId>,
     pub(crate) groups: BTreeSet<DockGroupId>,
+    pub(crate) keep_empty_groups: BTreeSet<DockGroupId>,
 }
 
 impl DefaultDockDefinition {
@@ -45,8 +46,17 @@ impl DefaultDockDefinition {
         Self {
             root,
             item_groups,
+            keep_empty_groups: BTreeSet::new(),
             groups,
         }
+    }
+
+    pub(crate) fn with_keep_empty_groups(
+        mut self,
+        keep_empty_groups: impl IntoIterator<Item = DockGroupId>,
+    ) -> Self {
+        self.keep_empty_groups = keep_empty_groups.into_iter().collect();
+        self
     }
 }
 
@@ -126,6 +136,7 @@ struct Workspace {
     auto_hide: [Vec<AutoHideEntry>; 4],
     closed: Vec<ClosedEntry>,
     next_generated_group_id: u64,
+    active_item: Option<DockItemId>,
 }
 
 impl Workspace {
@@ -136,6 +147,7 @@ impl Workspace {
             auto_hide: std::array::from_fn(|_| Vec::new()),
             closed: Vec::new(),
             next_generated_group_id: 1,
+            active_item: None,
         }
     }
 }
@@ -174,6 +186,27 @@ pub(crate) enum InternalDockPlacement {
     },
     AutoHide {
         side: DockSide,
+    },
+}
+
+/// Runtime-only placement target for moving an entire realized group as one unit.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum InternalDockGroupPlacement {
+    Center {
+        group: InternalDockGroupKey,
+    },
+    SplitGroup {
+        group: InternalDockGroupKey,
+        side: DockSide,
+        weight: f32,
+    },
+    RootEdge {
+        root: RootKind,
+        side: DockSide,
+        weight: f32,
+    },
+    Floating {
+        bounds: Rect,
     },
 }
 
@@ -220,6 +253,12 @@ impl DockLayoutModel {
 
     /// Returns whether an item is selected or owns the active auto-hide overlay.
     pub fn is_item_active(&self, item: &DockItemId) -> bool {
+        if self.workspace.active_item.as_ref() == Some(item) {
+            return true;
+        }
+        if self.workspace.active_item.is_some() {
+            return false;
+        }
         if self
             .workspace
             .auto_hide
@@ -235,6 +274,16 @@ impl DockLayoutModel {
                 .floating_roots
                 .iter()
                 .any(|root| self.group_is_active(&Some(root.root.clone()), item))
+    }
+
+    /// Returns the globally active item, if one has been activated.
+    pub fn active_item(&self) -> Option<DockItemId> {
+        self.workspace.active_item.clone()
+    }
+
+    /// Returns the number of live floating roots in the workspace.
+    pub fn floating_root_count(&self) -> usize {
+        self.workspace.floating_roots.len()
     }
 
     /// Returns whether the item is currently represented by an auto-hide entry.
@@ -269,6 +318,10 @@ impl DockLayoutModel {
                 }
             }
         }
+        if next.workspace.active_item.as_ref() != Some(item) {
+            next.workspace.active_item = Some(item.clone());
+            changed = true;
+        }
         if !changed && next.is_item_active(item) {
             return Ok(next);
         }
@@ -285,14 +338,24 @@ impl DockLayoutModel {
         if next.is_item_closed(item) {
             return Ok(next);
         }
+        let was_active = next.is_item_active(item);
         let return_state = next
             .remove_live_item(item)
             .unwrap_or_else(|| next.fallback_return_state());
+        let return_group = return_state.group.clone();
         next.workspace.closed.push(ClosedEntry {
             item: item.clone(),
             return_state,
         });
+        if was_active {
+            next.workspace.active_item = None;
+        }
         next.normalize();
+        if was_active {
+            next.workspace.active_item = next
+                .selected_item_in_group(&return_group)
+                .or_else(|| next.selected_item_id());
+        }
         Ok(next)
     }
 
@@ -327,6 +390,9 @@ impl DockLayoutModel {
             .expect("auto-hide side was found above");
         let return_state = entries.remove(position).return_state;
         next.restore_at(item.clone(), return_state);
+        if next.workspace.active_item.is_none() {
+            next.workspace.active_item = Some(item.clone());
+        }
         next.normalize();
         Ok(next)
     }
@@ -395,7 +461,292 @@ impl DockLayoutModel {
             .remove_live_item(item)
             .or_else(|| next.remove_closed_item(item))
             .unwrap_or_else(|| next.fallback_return_state());
+        let source_group = return_state.group.clone();
+        let placement = match placement {
+            InternalDockPlacement::Group {
+                group,
+                index: Some(index),
+            } if group == source_group => InternalDockPlacement::Group {
+                group,
+                index: Some(if return_state.index < index {
+                    index.saturating_sub(1)
+                } else {
+                    index
+                }),
+            },
+            other => other,
+        };
         next.place_item(item.clone(), placement, return_state)?;
+        next.normalize();
+        Ok(next)
+    }
+
+    pub(crate) fn validate_item_placement(
+        &self,
+        item: &DockItemId,
+        placement: &InternalDockPlacement,
+    ) -> Result<(), DockLayoutError> {
+        if !self.contains_item(item) {
+            return Err(DockLayoutError::UnknownItem(item.clone()));
+        }
+        match placement {
+            InternalDockPlacement::Group { group, .. }
+            | InternalDockPlacement::SplitGroup { group, .. } => {
+                if !self.contains_group(group) {
+                    return Err(match group {
+                        InternalDockGroupKey::Authored(group) => {
+                            DockLayoutError::UnknownGroup(group.clone())
+                        }
+                        InternalDockGroupKey::Generated(_) => DockLayoutError::InvalidSnapshot {
+                            reason: "generated target group is no longer present".to_owned(),
+                        },
+                    });
+                }
+            }
+            InternalDockPlacement::RootEdge { root, weight, .. } => {
+                if !valid_weight(*weight) {
+                    return Err(DockLayoutError::InvalidWeight);
+                }
+                if let RootKind::Floating(index) = root
+                    && self.workspace.floating_roots.get(*index).is_none()
+                {
+                    return Err(DockLayoutError::InvalidFloatingRoot { index: *index });
+                }
+            }
+            InternalDockPlacement::Floating { bounds } => {
+                if !valid_bounds(*bounds) {
+                    return Err(DockLayoutError::InvalidBounds);
+                }
+            }
+            InternalDockPlacement::AutoHide { .. } => {}
+        }
+        if let InternalDockPlacement::SplitGroup { weight, .. } = placement
+            && !valid_weight(*weight)
+        {
+            return Err(DockLayoutError::InvalidWeight);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_group_placement(
+        &self,
+        group: &InternalDockGroupKey,
+        placement: &InternalDockGroupPlacement,
+    ) -> Result<(), DockLayoutError> {
+        if !self.contains_group(group) {
+            return Err(DockLayoutError::InvalidSnapshot {
+                reason: "source group is no longer present".to_owned(),
+            });
+        }
+        match placement {
+            InternalDockGroupPlacement::Center { group: target }
+            | InternalDockGroupPlacement::SplitGroup { group: target, .. }
+                if !self.contains_group(target) =>
+            {
+                Err(DockLayoutError::InvalidSnapshot {
+                    reason: "target group is no longer present".to_owned(),
+                })
+            }
+            InternalDockGroupPlacement::SplitGroup { weight, .. }
+            | InternalDockGroupPlacement::RootEdge { weight, .. }
+                if !valid_weight(*weight) =>
+            {
+                Err(DockLayoutError::InvalidWeight)
+            }
+            InternalDockGroupPlacement::RootEdge {
+                root: RootKind::Floating(index),
+                ..
+            } if self.workspace.floating_roots.get(*index).is_none() => {
+                Err(DockLayoutError::InvalidFloatingRoot { index: *index })
+            }
+            InternalDockGroupPlacement::Floating { bounds } if !valid_bounds(*bounds) => {
+                Err(DockLayoutError::InvalidBounds)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn with_group_moved_internal(
+        &self,
+        group: &InternalDockGroupKey,
+        placement: InternalDockGroupPlacement,
+    ) -> Result<Self, DockLayoutError> {
+        self.validate_group_placement(group, &placement)?;
+        if matches!(&placement, InternalDockGroupPlacement::Center { group: target } if target == group)
+        {
+            return Ok(self.clone());
+        }
+
+        let mut next = self.clone();
+        let mut source_node = None;
+        if let Some(root) = next.workspace.main_root.take() {
+            let (remaining, detached) = detach_group(root, group);
+            next.workspace.main_root = remaining;
+            source_node = detached;
+        }
+        let mut removed_floating_index = None;
+        if source_node.is_none() {
+            let mut index = 0;
+            while index < next.workspace.floating_roots.len() {
+                let floating = next.workspace.floating_roots.remove(index);
+                let (remaining, detached) = detach_group(floating.root, group);
+                if let Some(root) = remaining {
+                    next.workspace.floating_roots.insert(
+                        index,
+                        FloatingRoot {
+                            bounds: floating.bounds,
+                            root,
+                        },
+                    );
+                } else if detached.is_some() {
+                    removed_floating_index = Some(index);
+                }
+                if detached.is_some() {
+                    source_node = detached;
+                    break;
+                }
+                index += 1;
+            }
+        }
+        let Some(source_node) = source_node else {
+            return Err(DockLayoutError::InvalidSnapshot {
+                reason: "source group is no longer present".to_owned(),
+            });
+        };
+
+        let placement = if let Some(source_index) = removed_floating_index {
+            match placement {
+                InternalDockGroupPlacement::RootEdge {
+                    root: RootKind::Floating(index),
+                    ..
+                } if index == source_index => {
+                    return Ok(self.clone());
+                }
+                InternalDockGroupPlacement::RootEdge {
+                    root: RootKind::Floating(index),
+                    side,
+                    weight,
+                } => InternalDockGroupPlacement::RootEdge {
+                    root: RootKind::Floating(if index > source_index {
+                        index - 1
+                    } else {
+                        index
+                    }),
+                    side,
+                    weight,
+                },
+                other => other,
+            }
+        } else {
+            placement
+        };
+
+        match placement {
+            InternalDockGroupPlacement::Center { group: target } => {
+                let Node::Group {
+                    items, selected, ..
+                } = source_node
+                else {
+                    return Err(DockLayoutError::InvalidSnapshot {
+                        reason: "group source is not a group node".to_owned(),
+                    });
+                };
+                let mut placed = next.workspace.main_root.as_mut().is_some_and(|root| {
+                    append_group_items(root, &target, &items, selected.clone())
+                });
+                if !placed {
+                    for floating in &mut next.workspace.floating_roots {
+                        if append_group_items(&mut floating.root, &target, &items, selected.clone())
+                        {
+                            placed = true;
+                            break;
+                        }
+                    }
+                }
+                if !placed {
+                    return Err(DockLayoutError::InvalidSnapshot {
+                        reason: "target group is no longer present".to_owned(),
+                    });
+                }
+            }
+            InternalDockGroupPlacement::SplitGroup {
+                group: target,
+                side,
+                weight,
+            } => {
+                let mut placed = next.workspace.main_root.as_mut().is_some_and(|root| {
+                    split_group(root, &target, source_node.clone(), side, weight)
+                });
+                if !placed {
+                    for floating in &mut next.workspace.floating_roots {
+                        if split_group(
+                            &mut floating.root,
+                            &target,
+                            source_node.clone(),
+                            side,
+                            weight,
+                        ) {
+                            placed = true;
+                            break;
+                        }
+                    }
+                }
+                if !placed {
+                    return Err(DockLayoutError::InvalidSnapshot {
+                        reason: "target group is no longer present".to_owned(),
+                    });
+                }
+            }
+            InternalDockGroupPlacement::RootEdge { root, side, weight } => {
+                let wrap = |old_root: Option<Node>| match old_root {
+                    None => source_node.clone(),
+                    Some(old_root) => Node::Split {
+                        orientation: side.orientation(),
+                        children: if side.is_leading() {
+                            vec![
+                                WeightedNode {
+                                    weight,
+                                    node: source_node.clone(),
+                                },
+                                WeightedNode {
+                                    weight: 1.0,
+                                    node: old_root,
+                                },
+                            ]
+                        } else {
+                            vec![
+                                WeightedNode {
+                                    weight: 1.0,
+                                    node: old_root,
+                                },
+                                WeightedNode {
+                                    weight,
+                                    node: source_node.clone(),
+                                },
+                            ]
+                        },
+                    },
+                };
+                match root {
+                    RootKind::Main => {
+                        next.workspace.main_root = Some(wrap(next.workspace.main_root.take()));
+                    }
+                    RootKind::Floating(index) => {
+                        let old_root = std::mem::replace(
+                            &mut next.workspace.floating_roots[index].root,
+                            source_node.clone(),
+                        );
+                        next.workspace.floating_roots[index].root = wrap(Some(old_root));
+                    }
+                }
+            }
+            InternalDockGroupPlacement::Floating { bounds } => {
+                next.workspace.floating_roots.push(FloatingRoot {
+                    bounds,
+                    root: source_node,
+                });
+            }
+        }
         next.normalize();
         Ok(next)
     }
@@ -409,6 +760,63 @@ impl DockLayoutModel {
         next.workspace = Workspace::empty();
         next.workspace.main_root = default_definition.root.clone();
         next.normalize();
+        Ok(next)
+    }
+
+    /// Clears the current presentation while retaining the authored declaration for reset.
+    /// This operation intentionally does not consult item close capabilities.
+    pub fn with_cleared_layout(&self) -> Result<Self, DockLayoutError> {
+        let mut next = self.clone();
+        let items = next.item_ids();
+        let mut closed = Vec::new();
+        for item in &items {
+            if next.is_item_closed(item) {
+                continue;
+            }
+            // Capture every return index against the same pre-clear workspace. Removing items
+            // while collecting these states would shift later same-group indices and make a
+            // deterministic reopen sequence reverse the original tab order.
+            let mut probe = next.clone();
+            let mut return_state = probe
+                .remove_live_item(item)
+                .unwrap_or_else(|| next.fallback_return_state());
+            return_state.floating_root = None;
+            closed.push(ClosedEntry {
+                item: item.clone(),
+                return_state,
+            });
+        }
+        for item in &items {
+            next.remove_live_item(item);
+        }
+        next.workspace.main_root = next
+            .default_definition
+            .as_ref()
+            .and_then(|definition| definition.root.as_ref().map(empty_authored_root));
+        next.workspace.floating_roots.clear();
+        next.workspace.auto_hide = std::array::from_fn(|_| Vec::new());
+        next.workspace.closed.extend(closed);
+        next.workspace.active_item = None;
+        next.normalize();
+        Ok(next)
+    }
+
+    pub(crate) fn with_floating_bounds(
+        &self,
+        index: usize,
+        bounds: Rect,
+    ) -> Result<Self, DockLayoutError> {
+        if !valid_bounds(bounds) {
+            return Err(DockLayoutError::InvalidBounds);
+        }
+        let mut next = self.clone();
+        let Some(root) = next.workspace.floating_roots.get_mut(index) else {
+            return Err(DockLayoutError::InvalidFloatingRoot { index });
+        };
+        if root.bounds == bounds {
+            return Ok(next);
+        }
+        root.bounds = bounds;
         Ok(next)
     }
 
@@ -446,10 +854,11 @@ impl DockLayoutModel {
                 })
                 .collect(),
             next_generated_group_id: self.workspace.next_generated_group_id,
+            active_item: self.workspace.active_item.clone(),
         }
     }
 
-    /// Restores a model from a validated version-1 snapshot without an authored default.
+    /// Restores a model from a validated version-2 snapshot without an authored default.
     pub fn from_snapshot(snapshot: DockLayoutSnapshot) -> Result<Self, DockLayoutError> {
         validate_snapshot(&snapshot)?;
         let DockLayoutSnapshot {
@@ -458,6 +867,7 @@ impl DockLayoutModel {
             auto_hide,
             closed,
             next_generated_group_id,
+            active_item,
             ..
         } = snapshot;
         let mut model = Self {
@@ -487,6 +897,7 @@ impl DockLayoutModel {
                     .map(TryInto::try_into)
                     .collect::<Result<Vec<_>, _>>()?,
                 next_generated_group_id: next_generated_group_id.max(1),
+                active_item,
             },
             default_definition: None,
         };
@@ -566,6 +977,46 @@ impl DockLayoutModel {
         items
     }
 
+    /// Removes a floating root after a native close has closed every item it contained.
+    ///
+    /// Authored groups may intentionally remain visible when empty, but an empty native
+    /// floating host has no useful presentation and must not outlive its model root. Return
+    /// states are remapped because floating-root indices are positional in the snapshot model.
+    pub(crate) fn without_empty_floating_root(
+        &self,
+        index: usize,
+    ) -> Result<Self, DockLayoutError> {
+        // Generated roots are already removed by `normalize` when their last item is closed.
+        // An authored root, on the other hand, is intentionally retained until this method
+        // removes the empty native host explicitly.
+        let Some(_) = self.workspace.floating_roots.get(index) else {
+            return Ok(self.clone());
+        };
+        if !self.floating_item_ids(index).is_empty() {
+            return Ok(self.clone());
+        }
+
+        fn remap(index: &mut Option<usize>, removed: usize) {
+            *index = match *index {
+                Some(value) if value == removed => None,
+                Some(value) if value > removed => Some(value - 1),
+                other => other,
+            };
+        }
+
+        let mut next = self.clone();
+        next.workspace.floating_roots.remove(index);
+        for side in &mut next.workspace.auto_hide {
+            for entry in side {
+                remap(&mut entry.return_state.floating_root, index);
+            }
+        }
+        for entry in &mut next.workspace.closed {
+            remap(&mut entry.return_state.floating_root, index);
+        }
+        Ok(next)
+    }
+
     pub(crate) fn selected_item_id(&self) -> Option<DockItemId> {
         fn selected(node: &Node) -> Option<DockItemId> {
             match node {
@@ -587,6 +1038,30 @@ impl DockLayoutModel {
             })
     }
 
+    fn selected_item_in_group(&self, target: &InternalDockGroupKey) -> Option<DockItemId> {
+        fn find(node: &Node, target: &InternalDockGroupKey) -> Option<DockItemId> {
+            match node {
+                Node::Group {
+                    group, selected, ..
+                } if group == target => selected.clone(),
+                Node::Group { .. } => None,
+                Node::Split { children, .. } => {
+                    children.iter().find_map(|child| find(&child.node, target))
+                }
+            }
+        }
+        self.workspace
+            .main_root
+            .as_ref()
+            .and_then(|root| find(root, target))
+            .or_else(|| {
+                self.workspace
+                    .floating_roots
+                    .iter()
+                    .find_map(|root| find(&root.root, target))
+            })
+    }
+
     #[cfg(test)]
     pub(crate) fn from_default(definition: DefaultDockDefinition) -> Self {
         Self::empty().attach_default(definition)
@@ -603,6 +1078,15 @@ impl DockLayoutModel {
         }
         ids.extend(self.workspace.closed.iter().map(|entry| entry.item.clone()));
         ids
+    }
+
+    fn contains_group(&self, target: &InternalDockGroupKey) -> bool {
+        let roots = self
+            .workspace
+            .main_root
+            .iter()
+            .chain(self.workspace.floating_roots.iter().map(|root| &root.root));
+        roots.into_iter().any(|root| contains_group(root, target))
     }
 
     fn group_is_active(&self, root: &Option<Node>, item: &DockItemId) -> bool {
@@ -701,6 +1185,20 @@ impl DockLayoutModel {
                     return;
                 }
             }
+        }
+        if self.workspace.main_root.is_none() {
+            self.workspace.main_root = self
+                .default_definition
+                .as_ref()
+                .and_then(|definition| definition.root.as_ref().map(empty_authored_root));
+        }
+        if let Some(default_definition) = &self.default_definition {
+            let empty_root = default_definition.root.as_ref().map(empty_authored_root);
+            ensure_authored_group(
+                &mut self.workspace.main_root,
+                &state.group,
+                empty_root.as_ref(),
+            );
         }
         if self.workspace.main_root.as_mut().is_some_and(|root| {
             append_to_group(root, &state.group, item.clone(), Some(state.index))
@@ -945,6 +1443,10 @@ impl DockLayoutModel {
             .default_definition
             .as_ref()
             .map(|definition| &definition.groups);
+        let keep_empty_groups = self
+            .default_definition
+            .as_ref()
+            .map(|definition| &definition.keep_empty_groups);
         let mut orphaned = Vec::new();
         let mut seen = HashSet::new();
         self.workspace.main_root = self.workspace.main_root.take().and_then(|root| {
@@ -952,6 +1454,7 @@ impl DockLayoutModel {
                 root,
                 registered.as_ref(),
                 valid_groups,
+                keep_empty_groups,
                 &mut seen,
                 &mut orphaned,
             )
@@ -963,6 +1466,7 @@ impl DockLayoutModel {
                 floating.root,
                 registered.as_ref(),
                 valid_groups,
+                keep_empty_groups,
                 &mut seen,
                 &mut orphaned,
             ) {
@@ -1060,6 +1564,37 @@ impl DockLayoutModel {
                 }
             }
         }
+        if let Some(active) = self.workspace.active_item.clone() {
+            let active_is_live = !self.is_item_closed(&active)
+                && (self
+                    .workspace
+                    .main_root
+                    .as_ref()
+                    .is_some_and(|root| node_contains_item(root, &active))
+                    || self
+                        .workspace
+                        .floating_roots
+                        .iter()
+                        .any(|root| node_contains_item(&root.root, &active))
+                    || self
+                        .workspace
+                        .auto_hide
+                        .iter()
+                        .flatten()
+                        .any(|entry| entry.item == active));
+            if !active_is_live {
+                let fallback_group = self
+                    .workspace
+                    .closed
+                    .iter()
+                    .find(|entry| entry.item == active)
+                    .map(|entry| entry.return_state.group.clone());
+                self.workspace.active_item = fallback_group
+                    .as_ref()
+                    .and_then(|group| self.selected_item_in_group(group))
+                    .or_else(|| self.selected_item_id());
+            }
+        }
         if self.workspace.next_generated_group_id <= self.max_generated_group_id() {
             self.workspace.next_generated_group_id = self.max_generated_group_id() + 1;
         }
@@ -1093,6 +1628,15 @@ fn collect_node_items(root: &Option<Node>, out: &mut Vec<DockItemId>) {
     }
     if let Some(root) = root {
         visit(root, out);
+    }
+}
+
+fn node_contains_item(node: &Node, item: &DockItemId) -> bool {
+    match node {
+        Node::Group { items, .. } => items.iter().any(|candidate| candidate == item),
+        Node::Split { children, .. } => children
+            .iter()
+            .any(|child| node_contains_item(&child.node, item)),
     }
 }
 
@@ -1182,6 +1726,90 @@ fn append_to_group(
     }
 }
 
+fn append_group_items(
+    node: &mut Node,
+    target: &InternalDockGroupKey,
+    source_items: &[DockItemId],
+    source_selected: Option<DockItemId>,
+) -> bool {
+    match node {
+        Node::Group {
+            group,
+            items,
+            selected,
+        } if group == target => {
+            items.extend(source_items.iter().cloned());
+            if source_selected.is_some() {
+                *selected = source_selected;
+            }
+            true
+        }
+        Node::Group { .. } => false,
+        Node::Split { children, .. } => children.iter_mut().any(|child| {
+            append_group_items(
+                &mut child.node,
+                target,
+                source_items,
+                source_selected.clone(),
+            )
+        }),
+    }
+}
+
+fn detach_group(node: Node, target: &InternalDockGroupKey) -> (Option<Node>, Option<Node>) {
+    match node {
+        Node::Group {
+            group,
+            items,
+            selected,
+        } if &group == target => (
+            None,
+            Some(Node::Group {
+                group,
+                items,
+                selected,
+            }),
+        ),
+        Node::Group { .. } => (Some(node), None),
+        Node::Split {
+            orientation,
+            mut children,
+        } => {
+            let mut index = 0;
+            while index < children.len() {
+                let child = children.remove(index);
+                let (remaining, detached) = detach_group(child.node, target);
+                if let Some(node) = remaining {
+                    children.insert(
+                        index,
+                        WeightedNode {
+                            weight: child.weight,
+                            node,
+                        },
+                    );
+                }
+                if detached.is_some() {
+                    return (
+                        Some(Node::Split {
+                            orientation,
+                            children,
+                        }),
+                        detached,
+                    );
+                }
+                index += 1;
+            }
+            (
+                Some(Node::Split {
+                    orientation,
+                    children,
+                }),
+                None,
+            )
+        }
+    }
+}
+
 fn split_group(
     node: &mut Node,
     target: &InternalDockGroupKey,
@@ -1222,6 +1850,7 @@ fn normalize_node(
     node: Node,
     registered: Option<&BTreeSet<DockItemId>>,
     valid_groups: Option<&BTreeSet<DockGroupId>>,
+    keep_empty_groups: Option<&BTreeSet<DockGroupId>>,
     seen: &mut HashSet<DockItemId>,
     orphaned: &mut Vec<DockItemId>,
 ) -> Option<Node> {
@@ -1253,15 +1882,18 @@ fn normalize_node(
             let selected = selected
                 .filter(|item| items.contains(item))
                 .or_else(|| items.first().cloned());
-            if items.is_empty() && matches!(group, InternalDockGroupKey::Generated(_)) {
-                None
-            } else {
-                Some(Node::Group {
-                    group,
-                    items,
-                    selected,
-                })
-            }
+            let remove_empty = match &group {
+                InternalDockGroupKey::Generated(_) => items.is_empty(),
+                InternalDockGroupKey::Authored(group) => {
+                    items.is_empty()
+                        && keep_empty_groups.is_some_and(|groups| !groups.contains(group))
+                }
+            };
+            (!remove_empty).then_some(Node::Group {
+                group,
+                items,
+                selected,
+            })
         }
         Node::Split {
             orientation,
@@ -1270,12 +1902,18 @@ fn normalize_node(
             let mut children = children
                 .into_iter()
                 .filter_map(|child| {
-                    normalize_node(child.node, registered, valid_groups, seen, orphaned).map(
-                        |node| WeightedNode {
-                            weight: child.weight,
-                            node,
-                        },
+                    normalize_node(
+                        child.node,
+                        registered,
+                        valid_groups,
+                        keep_empty_groups,
+                        seen,
+                        orphaned,
                     )
+                    .map(|node| WeightedNode {
+                        weight: child.weight,
+                        node,
+                    })
                 })
                 .collect::<Vec<_>>();
             if children.is_empty() {
@@ -1338,6 +1976,29 @@ fn find_authored_group(root: &Node, target: &DockGroupId) -> Option<Node> {
         Node::Split { children, .. } => children
             .iter()
             .find_map(|child| find_authored_group(&child.node, target)),
+    }
+}
+
+fn empty_authored_root(root: &Node) -> Node {
+    match root {
+        Node::Group { group, .. } => Node::Group {
+            group: group.clone(),
+            items: Vec::new(),
+            selected: None,
+        },
+        Node::Split {
+            orientation,
+            children,
+        } => Node::Split {
+            orientation: *orientation,
+            children: children
+                .iter()
+                .map(|child| WeightedNode {
+                    weight: child.weight,
+                    node: empty_authored_root(&child.node),
+                })
+                .collect(),
+        },
     }
 }
 

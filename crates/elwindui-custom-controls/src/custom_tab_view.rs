@@ -1,6 +1,6 @@
-use super::core::base::Point;
+use super::core::base::{Point, Rect};
 use super::core::input::{MouseButton, PointerEventArgs};
-use super::core::ui::{ControlExt, ListExt, UIElementExt};
+use super::core::ui::{ControlExt, Grid, GridExt, ListExt, UIElementExt};
 use super::{
     CloseButtonPresentation, CustomTabContentPresenter, CustomTabContentPresenterExt,
     CustomTabStripPresenter, CustomTabStripPresenterExt, CustomTabViewItem, CustomTabViewItemExt,
@@ -14,11 +14,14 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 const TAB_STRIP_HEIGHT: f32 = 32.0;
+const COMPACT_TAB_STRIP_HEIGHT: f32 = 28.0;
 const TAB_DRAG_THRESHOLD: f32 = 4.0;
 
 #[cfg(test)]
 thread_local! {
     static STRUCTURAL_RECONCILIATION_COUNTS: RefCell<HashMap<usize, usize>> =
+        RefCell::new(HashMap::new());
+    static PRESENTER_SEARCH_COUNTS: RefCell<HashMap<usize, usize>> =
         RefCell::new(HashMap::new());
 }
 
@@ -61,6 +64,8 @@ pub struct CustomTabView {
     selected_index: usize,
     #[prop(default = TabStripPosition::Top)]
     tab_strip_position: TabStripPosition,
+    #[prop(default = false)]
+    compact: bool,
     #[prop(default = CloseButtonPresentation::Always)]
     close_button_presentation: CloseButtonPresentation,
     #[state(default = None)]
@@ -99,18 +104,27 @@ pub struct CustomTabView {
     grid_rows: Vec<elwindui::core::layout::GridLength>,
     #[state(default = Vec::new())]
     template_items: Vec<Rc<CustomTabViewItem>>,
+    #[state(default = None)]
+    last_presented_selected_index: Option<usize>,
+    #[state(default = None)]
+    last_presented_tab_strip_position: Option<TabStripPosition>,
+    #[state(default = None)]
+    last_presented_compact_tabs: Option<bool>,
+    #[state(default = None)]
+    last_presented_close_button_presentation: Option<CloseButtonPresentation>,
     #[computed(expr = template_items.clone())]
     tab_items: Vec<Rc<CustomTabViewItem>>,
     #[computed(expr = template_items.clone())]
     content_items: Vec<Rc<CustomTabViewItem>>,
     template: template_view!(|this: Self| {
-        on_update(children, template_items, selected_index, tab_strip_position, close_button_presentation) {
+        on_update(children, template_items, selected_index, tab_strip_position, compact, close_button_presentation) {
             this.reconcile_children();
         }
         let tab_strip = CustomTabStripPresenter {
             items: tab_items
             selected_index: selected_index
             tab_strip_position: tab_strip_position
+            compact: compact
             close_button_presentation: close_button_presentation
             Grid::row: tab_strip_row
         };
@@ -141,6 +155,33 @@ impl CustomTabView {
 /// A templated splitter that reports logical-axis drag deltas.
 
 impl CustomTabView {
+    /// Resolves a group-local point against the retained tab-strip header geometry.
+    #[doc(hidden)]
+    pub fn tab_insertion_index_at(&self, point: Point) -> Option<usize> {
+        let (strip, _) = self.presenters();
+        let strip = strip?;
+        let offset = strip.arranged_offset()?;
+        strip.tab_insertion_index_at(Point {
+            x: point.x - offset.x,
+            y: point.y - offset.y,
+        })
+    }
+
+    /// Returns an insertion boundary in this tab view's local coordinates.
+    #[doc(hidden)]
+    pub fn tab_insertion_boundary(&self, index: usize) -> Option<Rect> {
+        let (strip, _) = self.presenters();
+        let strip = strip?;
+        let offset = strip.arranged_offset()?;
+        let boundary = strip.tab_insertion_boundary(index)?;
+        Some(Rect {
+            x: offset.x + boundary.x,
+            y: offset.y + boundary.y,
+            width: boundary.width,
+            height: boundary.height,
+        })
+    }
+
     /// Returns a newly constructed tab view.
     pub fn new_view() -> Rc<Self> {
         Self::new()
@@ -265,6 +306,25 @@ impl CustomTabView {
         self.set_tab_drag_completed_callback(Some(Rc::from(callback)));
     }
 
+    /// Reapplies runtime-owned tab chrome that is resolved from the application theme.
+    pub fn refresh_theme(&self) {
+        let children = self.children_values();
+        for item in &children {
+            item.refresh_theme();
+        }
+        // Theme changes can refresh a template before the next normal property pass. Reapply the
+        // retained selection presentation immediately so the visible header/content pair cannot
+        // fall back to index zero while the DockLayoutModel still names another active item.
+        self.sync_presentation(&children);
+        if let Some(presenter) = self
+            .content_presenter()
+            .and_then(|presenter| presenter.upgrade())
+        {
+            presenter.refresh_presentation();
+        }
+        self.invalidate_measure();
+    }
+
     fn children_values(&self) -> Vec<Rc<CustomTabViewItem>> {
         #[cfg(rust_analyzer)]
         {
@@ -360,6 +420,8 @@ impl CustomTabView {
     }
 
     fn cache_presenters(&self) {
+        #[cfg(test)]
+        self.note_presenter_search();
         let strip = super::core::visual_tree::find_all::<CustomTabStripPresenter>(self)
             .into_iter()
             .find_map(|node| {
@@ -405,13 +467,16 @@ impl CustomTabView {
     fn sync_presenters_structural(&self, children: &[Rc<CustomTabViewItem>]) {
         let selected = self.selected_index();
         let position = self.tab_strip_position();
+        let compact = self.compact();
         let close = self.close_button_presentation();
 
+        self.sync_grid_rows();
         let (strip_presenter, content_presenter) = self.presenters();
         if let Some(presenter) = strip_presenter {
             presenter.set_items(children.to_vec());
             presenter.set_selected_index(selected);
             presenter.set_tab_strip_position(position);
+            presenter.set_compact(compact);
             presenter.set_close_button_presentation(close);
             presenter
                 .as_ui_element()
@@ -427,32 +492,111 @@ impl CustomTabView {
             presenter.reconcile_contents();
         }
         for (index, item) in children.iter().enumerate() {
-            item.set_presentation(index == selected, item.pointer_over(), position, close);
+            item.set_presentation(
+                index == selected,
+                item.pointer_over(),
+                position,
+                close,
+                compact,
+            );
         }
+        self.set_last_presented_selected_index(Some(selected));
+        self.set_last_presented_tab_strip_position(Some(position));
+        self.set_last_presented_compact_tabs(Some(compact));
+        self.set_last_presented_close_button_presentation(Some(close));
     }
 
     fn sync_presentation(&self, children: &[Rc<CustomTabViewItem>]) {
         let selected = self.selected_index();
         let position = self.tab_strip_position();
+        let compact = self.compact();
         let close = self.close_button_presentation();
+        self.sync_grid_rows();
         let (strip_presenter, content_presenter) = self.presenters();
-        if let Some(presenter) = strip_presenter {
-            presenter.set_selected_index(selected);
-            presenter.set_tab_strip_position(position);
-            presenter.set_close_button_presentation(close);
-            presenter
-                .as_ui_element()
-                .set_attached::<i32>("Grid", "row", self.tab_strip_row());
+        let previous = self.last_presented_selected_index();
+        let selection_only = self.last_presented_tab_strip_position() == Some(position)
+            && self.last_presented_compact_tabs() == Some(compact)
+            && self.last_presented_close_button_presentation() == Some(close)
+            && previous != Some(selected);
+        if selection_only {
+            if let Some(presenter) = strip_presenter.as_ref() {
+                presenter.set_selected_index(selected);
+            }
+            if let Some(presenter) = content_presenter.as_ref() {
+                presenter.set_selected_index(selected);
+            }
+        } else {
+            if let Some(presenter) = strip_presenter.as_ref() {
+                presenter.set_selected_index(selected);
+                presenter.set_tab_strip_position(position);
+                presenter.set_compact(compact);
+                presenter.set_close_button_presentation(close);
+                presenter
+                    .as_ui_element()
+                    .set_attached::<i32>("Grid", "row", self.tab_strip_row());
+            }
+            if let Some(presenter) = content_presenter.as_ref() {
+                presenter.set_selected_index(selected);
+                presenter
+                    .as_ui_element()
+                    .set_attached::<i32>("Grid", "row", self.content_row());
+            }
         }
-        if let Some(presenter) = content_presenter {
-            presenter.set_selected_index(selected);
-            presenter
-                .as_ui_element()
-                .set_attached::<i32>("Grid", "row", self.content_row());
+        if strip_presenter.is_none() {
+            if selection_only {
+                for index in [previous, Some(selected)].into_iter().flatten() {
+                    if let Some(item) = children.get(index) {
+                        item.set_presentation(
+                            index == selected,
+                            item.pointer_over(),
+                            position,
+                            close,
+                            compact,
+                        );
+                    }
+                }
+            } else {
+                for (index, item) in children.iter().enumerate() {
+                    item.set_presentation(
+                        index == selected,
+                        item.pointer_over(),
+                        position,
+                        close,
+                        compact,
+                    );
+                }
+            }
         }
-        for (index, item) in children.iter().enumerate() {
-            item.set_presentation(index == selected, item.pointer_over(), position, close);
-        }
+        self.set_last_presented_selected_index(Some(selected));
+        self.set_last_presented_tab_strip_position(Some(position));
+        self.set_last_presented_compact_tabs(Some(compact));
+        self.set_last_presented_close_button_presentation(Some(close));
+    }
+
+    fn sync_grid_rows(&self) {
+        let Some(root) = self.__template_root() else {
+            return;
+        };
+        let Some(grid) = root.as_any().downcast_ref::<Grid>() else {
+            return;
+        };
+        let strip_height = if self.compact() {
+            COMPACT_TAB_STRIP_HEIGHT
+        } else {
+            TAB_STRIP_HEIGHT
+        };
+        let rows = if self.tab_strip_position() == TabStripPosition::Top {
+            vec![
+                elwindui::core::layout::GridLength::Fixed(strip_height),
+                elwindui::core::layout::GridLength::Star(1.0),
+            ]
+        } else {
+            vec![
+                elwindui::core::layout::GridLength::Star(1.0),
+                elwindui::core::layout::GridLength::Fixed(strip_height),
+            ]
+        };
+        grid.set_rows(rows);
     }
 
     fn validate_children(&self, children: &[Rc<CustomTabViewItem>]) {
@@ -696,6 +840,21 @@ impl CustomTabView {
         STRUCTURAL_RECONCILIATION_COUNTS
             .with(|counts| counts.borrow().get(&key).copied().unwrap_or(0))
     }
+
+    #[cfg(test)]
+    pub(crate) fn presenter_search_count_for_test(&self) -> usize {
+        let key = self as *const Self as usize;
+        PRESENTER_SEARCH_COUNTS.with(|counts| counts.borrow().get(&key).copied().unwrap_or(0))
+    }
+
+    #[cfg(test)]
+    fn note_presenter_search(&self) {
+        let key = self as *const Self as usize;
+        PRESENTER_SEARCH_COUNTS.with(|counts| {
+            let mut counts = counts.borrow_mut();
+            *counts.entry(key).or_default() += 1;
+        });
+    }
 }
 
 fn concrete_tab_item(item: Rc<dyn CustomTabViewItemExt>) -> Rc<CustomTabViewItem> {
@@ -722,7 +881,56 @@ fn concrete_element<T: 'static>(element: Rc<dyn UIElementExt>) -> Rc<T> {
 mod tests {
     use super::*;
     use crate::core::base::Size;
-    use crate::core::ui::layout_root;
+    use crate::core::ui::{ContentControlExt, UIElement, UIElementExt, layout_root};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[elwindui_macros::class(inherits = elwindui_core::ui::UIElement)]
+    struct SelectionPageProbe {
+        measure_count: Cell<usize>,
+        reported_size: Size,
+    }
+
+    #[elwindui_macros::class]
+    impl SelectionPageProbe {
+        #[overrides]
+        fn measure_override(&self, _available: Size) -> Size {
+            self.measure_count.set(self.measure_count.get() + 1);
+            self.reported_size
+        }
+
+        fn construct(reported_size: Size) -> Self {
+            Self {
+                base: UIElement::construct(),
+                measure_count: Cell::new(0),
+                reported_size,
+            }
+        }
+    }
+
+    impl SelectionPageProbe {
+        fn reset_counts(&self) {
+            self.measure_count.set(0);
+        }
+    }
+
+    fn probe_view(count: usize) -> (Rc<CustomTabView>, Vec<Rc<SelectionPageProbe>>) {
+        let view = CustomTabView::new_view();
+        let mut probes = Vec::with_capacity(count);
+        let mut items = Vec::with_capacity(count);
+        for index in 0..count {
+            let probe = SelectionPageProbe::new(Size {
+                width: 40.0 + index as f32,
+                height: 20.0,
+            });
+            let item = CustomTabViewItem::new_item();
+            item.set_content(probe.clone());
+            probes.push(probe);
+            items.push(item);
+        }
+        view.replace_children(items);
+        (view, probes)
+    }
 
     #[test]
     fn selection_only_updates_do_not_enter_structural_reconciliation() {
@@ -762,6 +970,81 @@ mod tests {
             },
         );
         view.replace_children(vec![item.clone(), item]);
+    }
+
+    #[test]
+    fn twenty_four_tab_selection_keeps_retained_runtime_and_update_budget() {
+        let (view, probes) = probe_view(24);
+        let root: Rc<dyn UIElementExt> = view.clone();
+        let size = Size {
+            width: 320.0,
+            height: 180.0,
+        };
+        layout_root(&root, size);
+
+        let items = view.children_values();
+        let original_items = items.clone();
+        let (_, content) = view.presenters();
+        let content = content.expect("the tab view should retain its content presenter");
+        let structural_reconciles = view.structural_reconciliation_count_for_test();
+        let content_reconciles = content.structural_reconciliation_count_for_test();
+        let presenter_searches = view.presenter_search_count_for_test();
+
+        for selected in [1, 7, 15, 23, 3] {
+            let before_updates = items
+                .iter()
+                .map(|item| item.presentation_update_count_for_test())
+                .collect::<Vec<_>>();
+            for probe in &probes {
+                probe.reset_counts();
+            }
+
+            assert!(view.select_index(selected));
+            layout_root(&root, size);
+
+            let header_updates = items
+                .iter()
+                .zip(before_updates)
+                .map(|(item, before)| item.presentation_update_count_for_test() - before)
+                .sum::<usize>();
+            assert!(
+                header_updates <= 2,
+                "selection updated {header_updates} tab headers"
+            );
+            assert!(
+                probes
+                    .iter()
+                    .enumerate()
+                    .all(|(index, probe)| index == selected || probe.measure_count.get() == 0),
+                "selection measured a hidden page"
+            );
+            assert!(
+                view.children_values()
+                    .iter()
+                    .zip(original_items.iter())
+                    .all(|(current, original)| Rc::ptr_eq(current, original)),
+                "selection replaced a retained tab wrapper"
+            );
+            let (_, current_content) = view.presenters();
+            let current_content = current_content.expect("content presenter should remain cached");
+            assert!(Rc::ptr_eq(&content, &current_content));
+            for (index, probe) in probes.iter().enumerate() {
+                let expected: Rc<dyn UIElementExt> = probe.clone();
+                let actual = content
+                    .content_for_test(index)
+                    .expect("every tab page should remain retained");
+                assert!(Rc::ptr_eq(&actual, &expected));
+            }
+            assert_eq!(
+                view.structural_reconciliation_count_for_test(),
+                structural_reconciles
+            );
+            assert_eq!(
+                content.structural_reconciliation_count_for_test(),
+                content_reconciles
+            );
+            assert_eq!(view.presenter_search_count_for_test(), presenter_searches);
+        }
     }
 }
 

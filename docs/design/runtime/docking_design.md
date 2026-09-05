@@ -23,12 +23,18 @@ complete desired ownership map, detaches wrappers from old group/overlay parents
 structural children, then attaches the same wrappers to their desired parents. Group views,
 splitter collections, and split Grids are retained by authored/generated group identity and
 `SplitAddress`. Metadata refresh updates header/icon/capability chrome without replacing page
-content; dynamic page replacement is outside V1. A normal tab selection updates only the existing
+content; dynamic page replacement is outside this design scope. A normal tab selection updates only the existing
 group's selected bookkeeping and the bound value when its fast-path preconditions hold. It does
 not rebuild groups, splitters, surfaces, wrappers, or native hosts.
 
 The runtime owns presentation only. It does not serialize wrappers, visual parents, native Window
 handles, callbacks, or surface registrations in `DockLayoutSnapshot`.
+
+Group title bars are retained whole-group drag handles. Tab context menus dispatch capability-
+checked close, indexed-close, float, and pin operations through the same model transaction
+boundary as pointer gestures. Empty authored groups marked `show_when_empty` retain their group
+host and display a non-hit-testable drop hint; other empty groups are normalized away. Per-group
+`compact_tabs` is applied to the retained tab view without replacing wrappers or page content.
 
 ## Main surface and split realization
 
@@ -76,19 +82,30 @@ discovery). Bounds are computed from arranged dimensions and the visual-parent c
 visual root. Screen-position target discovery converts screen -> host-root with
 `screen_to_root`, then host-root -> surface-local by subtracting the registered surface origin;
 without a screen position only the source surface's root-relative point is eligible. Surface edge
-bands are 10% of the smaller extent clamped to 24..64 pixels. Group split bands are 25% with the
-same clamp. Edge ties use Left, Top, Right, Bottom.
+bands use the centralized 40-pixel root-target size. Group split bands are 25% with the same
+24..64-pixel clamp. Edge ties use Left, Top, Right, Bottom.
 
 Target discovery returns one private `ResolvedDockTarget` containing the destination `RootKind`,
-`DockTarget`, optional group key, and computed surface-local preview rectangle. Outer Dock targets
-use the selected surface's root; group targets are filtered to groups belonging to that root. The
-preview is the group bounds, a half-group split, or a quarter-surface outer band as appropriate.
+`DockTarget`, optional group key, computed surface-local preview rectangle, and an optional Center
+tab insertion index. Outer Dock targets use the selected surface's root; group targets are filtered
+to groups belonging to that root. The preview is the group bounds, a half-group split, or a
+quarter-surface outer band as appropriate. The five group compass buttons and four root-edge buttons
+are distinct retained visuals, all non-hit-testable, and only the source drag coordinator resolves
+their target.
+
+Center insertion queries the retained `CustomTabStripPresenter` header arrangement, including
+unequal and compact headers, rather than estimating equal widths or reconciling the tab view. It
+has precedence over compass split-band resolution while the pointer is inside that arranged header,
+then returns the actual midpoint-derived index and the matching retained header boundary. One retained
+two-logical-pixel insertion marker is arranged at that boundary using the semantic accent brush.
+Target, preview, marker, and commit consume the same resolved index; group drags never synthesize
+per-item insertion operations.
 
 `DragSession` retains the committed model, source `RootKind`, source group bounds in host-root
 coordinates, pointer offset, and a runtime-only candidate placement. Moving a tab updates only
-`DropPreview`, whose retained layer arranges a rectangle in surface-local coordinates. It never
-applies candidate ownership. Cancel, capture loss, source removal, source application, and unmount
-clear every surface preview/session.
+`DropPreview`, the target highlight, and the retained insertion marker; it never applies candidate
+ownership, reparents content, measures pages, or reconciles the model. Cancel, capture loss, source
+removal, source application, and unmount clear every surface preview, marker, and session.
 
 ## Auto-hide and native floating hosts
 
@@ -96,10 +113,13 @@ clear every surface preview/session.
 pin affordance. It attaches the stable wrapper to the pane, so auto-hide never creates a second page.
 The bound model controls which entry is open and which remembered return state is used.
 
-`SurfaceRuntime` retains one surface, auto-hide controller, and preview controller for the main root
-and for every floating root. `FloatingHostRegistry` maps model floating-root positions to native
+`SurfaceRuntime` retains one surface, auto-hide controller, preview controller, target sets, and one
+insertion marker for the main root and for every floating root. `FloatingHostRegistry` maps model
+floating-root positions to native
 windows on AppKit and WinUI3. The adapter implements a private `FloatingWindowHost` contract for
-content, logical bounds, show, close, and native close interception. A new host follows
+content, logical bounds, show, activation, close, and native close interception. Native move/resize
+notifications update the model's floating bounds through the same source/property transaction
+path. A new host follows
 prepare -> runtime commit -> owner model/property commit -> callback -> registry synchronization
 -> show; preparation failure therefore does not require changing committed wrapper ownership.
 GTK deliberately has no adapter in this change. Native close handlers capture only weak Docking state and a stable private

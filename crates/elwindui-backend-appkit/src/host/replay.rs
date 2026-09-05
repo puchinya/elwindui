@@ -141,6 +141,16 @@ pub(crate) struct GroupCacheEntry {
     fast_path_layers: Vec<Option<Retained<CALayer>>>,
 }
 
+fn append_cached_native_order(
+    entry: &GroupCacheEntry,
+    visible: bool,
+    new_native_order: &mut Vec<usize>,
+) {
+    if visible {
+        new_native_order.extend(entry.native_controls.iter().map(|(identity, ..)| *identity));
+    }
+}
+
 /// Everything a replay pass reads or writes that is not the live `CALayer`/`NSView` tree itself —
 /// held by `TreeHostIvars` as a single `RefCell<ReplayState>` so a pass takes exactly one borrow
 /// across its own recursion instead of the many small ones this used to take. Fully ObjC-free
@@ -544,6 +554,7 @@ pub(crate) fn replay_group(
             if let Some(entry) = state.group_cache.get(&group.id) {
                 live_native_controls
                     .extend(entry.native_controls.iter().map(|(identity, ..)| *identity));
+                append_cached_native_order(entry, true, new_native_order);
                 live_image_ids.extend(&entry.image_ids);
                 live_vector_image_ids.extend(&entry.vector_image_ids);
             }
@@ -617,6 +628,7 @@ pub(crate) fn replay_group(
         if let Some(entry) = state.group_cache.get(&group.id) {
             live_native_controls
                 .extend(entry.native_controls.iter().map(|(identity, ..)| *identity));
+            append_cached_native_order(entry, visible, new_native_order);
             live_image_ids.extend(&entry.image_ids);
             live_vector_image_ids.extend(&entry.vector_image_ids);
         }
@@ -1252,6 +1264,52 @@ mod tests {
             }
             state.group_order = new_group_order;
         }
+    }
+
+    #[test]
+    fn a_visible_cached_group_restores_native_traversal_order() {
+        let entry = GroupCacheEntry {
+            key: GroupCacheKey {
+                clip: ClipRelation::Unclipped,
+                transform: AffineTransform::identity(),
+                opacity: 1.0,
+                generation: 0,
+                scale: 1.0,
+            },
+            native_controls: vec![
+                (
+                    17,
+                    1,
+                    Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 0.0,
+                        height: 0.0,
+                    },
+                ),
+                (
+                    23,
+                    2,
+                    Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 0.0,
+                        height: 0.0,
+                    },
+                ),
+            ],
+            image_ids: Vec::new(),
+            vector_image_ids: Vec::new(),
+            command_kinds: Vec::new(),
+            fast_path_layers: Vec::new(),
+        };
+        let mut native_order = vec![3];
+
+        append_cached_native_order(&entry, true, &mut native_order);
+        assert_eq!(native_order, vec![3, 17, 23]);
+
+        append_cached_native_order(&entry, false, &mut native_order);
+        assert_eq!(native_order, vec![3, 17, 23]);
     }
 
     /// The §22 no-op assertion: replaying an unchanged tree a second time must mutate the Core

@@ -4,8 +4,9 @@ use super::core::environment::application_environment;
 use super::core::input::{MouseButton, PointerEventArgs};
 use super::core::layout::Visibility;
 use super::core::theme::{BrushStyle, ResolvedValue};
-use super::core::ui::{ControlExt, TextStyleOwner, UIElementExt};
+use super::core::ui::{ControlExt, Grid, LayoutExt, UIElementExt};
 use super::weak_self_from_visual_owner;
+use super::{ChromeIcon, chrome_icon};
 use std::rc::Rc;
 
 /// Private close-slot control used by [`CustomTabViewItem`]'s authored header template.
@@ -26,6 +27,7 @@ pub(crate) struct CustomTabCloseButton {
     template: template_view!(|this: Self| {
         on_mount {
             this.bind_pointer_handlers();
+            this.sync_glyph_paint();
         }
         on_update(glyph_visible) {
             this.sync_glyph_paint();
@@ -34,11 +36,6 @@ pub(crate) struct CustomTabCloseButton {
             width: 20.0
             height: 32.0
             visibility: slot_visibility
-            TextBlock {
-                text: "×"
-                foreground: elwindui::core::theme::BrushStyle::Foreground
-                text_alignment: elwindui::core::ui::TextAlignment::Center
-            }
         }
     }),
 }
@@ -58,25 +55,25 @@ impl CustomTabCloseButton {
 
 impl CustomTabCloseButton {
     pub(crate) fn sync_glyph_paint(&self) {
-        let Some(glyph) = core::visual_tree::find_all::<core::ui::TextBlock>(self)
-            .into_iter()
-            .next()
-        else {
-            return;
-        };
-        let Some(glyph) = glyph.as_any().downcast_ref::<core::ui::TextBlock>() else {
-            return;
-        };
-        if self.glyph_visible() {
-            let foreground = match BrushStyle::Foreground.resolve(&application_environment()) {
+        let foreground = if self.glyph_visible() {
+            match BrushStyle::Foreground.resolve(&application_environment()) {
                 ResolvedValue::Value(brush) => Some(brush),
                 ResolvedValue::PlatformDefault => None,
-            };
-            glyph.set_foreground(foreground);
+            }
         } else {
-            glyph.set_foreground(Some(core::graphics::Brush::Solid(
-                core::graphics::Color::TRANSPARENT,
-            )));
+            None
+        };
+        let Some(slot_node) = core::visual_tree::find_all::<Grid>(self).into_iter().next() else {
+            return;
+        };
+        let Some(slot) = slot_node.as_any().downcast_ref::<Grid>() else {
+            return;
+        };
+        slot.children().clear();
+        if self.glyph_visible() {
+            let glyph = chrome_icon(ChromeIcon::Close, foreground);
+            glyph.set_hit_test_visible(false);
+            slot.children().add(glyph);
         }
     }
 

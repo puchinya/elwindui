@@ -8,7 +8,7 @@ use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAccessibility, NSButton, NSCellImagePosition, NSColor, NSControlSize, NSImage,
 };
-use objc2_foundation::{NSObjectProtocol, NSString};
+use objc2_foundation::{NSAttributedString, NSObjectProtocol, NSString};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -50,7 +50,17 @@ impl InnerButton {
 
     /// Used by `TabChipImpl` to rename a tab's title button when its document's file name changes.
     pub(crate) fn set_text(&self, text: &str) {
-        self.ns.setTitle(&NSString::from_str(text));
+        let title = NSString::from_str(text);
+        self.ns.setTitle(&title);
+        // AppKit keeps `attributedTitle` separately from `title`. Reset it to the same plain
+        // string before NativeControl reapplies the cascaded style; otherwise a later `setTitle`
+        // during a containing layout reconciliation can leave the button with a stale/empty
+        // attributed payload even though Accessibility reports the new plain title correctly.
+        let plain = unsafe {
+            NSAttributedString::initWithString_attributes(NSAttributedString::alloc(), &title, None)
+        };
+        self.ns.setAttributedTitle(&plain);
+        self.handle.as_nsview().setNeedsDisplay(true);
     }
 
     /// Applies a `ButtonRole`'s native emphasis, always resetting both knobs so switching roles at

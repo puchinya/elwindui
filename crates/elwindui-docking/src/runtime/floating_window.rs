@@ -12,9 +12,12 @@ pub(crate) struct FloatingHostId(u64);
 pub(crate) trait FloatingWindowHost {
     fn set_content(&self, content: Rc<dyn UIElementExt>);
     fn set_bounds(&self, bounds: Rect);
+    fn set_title(&self, title: &str);
     fn show(&self);
+    fn activate(&self);
     fn close(&self);
     fn set_close_request_handler(&self, handler: Option<Rc<dyn Fn() -> bool>>);
+    fn set_bounds_changed_handler(&self, handler: Option<Rc<dyn Fn(Rect)>>);
 }
 
 #[cfg(target_os = "macos")]
@@ -40,8 +43,16 @@ impl FloatingWindowHost for PlatformFloatingHost {
         self.window.set_height(bounds.height);
     }
 
+    fn set_title(&self, title: &str) {
+        self.window.set_title(title);
+    }
+
     fn show(&self) {
         self.window.show();
+    }
+
+    fn activate(&self) {
+        WindowLifecycleHost::activate(self.window.as_ref());
     }
 
     fn close(&self) {
@@ -50,6 +61,10 @@ impl FloatingWindowHost for PlatformFloatingHost {
 
     fn set_close_request_handler(&self, handler: Option<Rc<dyn Fn() -> bool>>) {
         self.window.set_close_request_handler(handler);
+    }
+
+    fn set_bounds_changed_handler(&self, handler: Option<Rc<dyn Fn(Rect)>>) {
+        WindowLifecycleHost::set_bounds_changed_handler(self.window.as_ref(), handler);
     }
 }
 
@@ -88,6 +103,18 @@ fn close_handler(
     })
 }
 
+fn bounds_changed_handler(
+    owner: &std::rc::Weak<crate::DockingControl>,
+    host_id: FloatingHostId,
+) -> Rc<dyn Fn(Rect)> {
+    let weak_owner = owner.clone();
+    Rc::new(move |bounds| {
+        if let Some(owner) = weak_owner.upgrade() {
+            owner.handle_floating_bounds_changed(host_id, bounds);
+        }
+    })
+}
+
 pub(crate) struct PreparedFloatingHost {
     pub(crate) id: FloatingHostId,
     pub(crate) root_index: usize,
@@ -98,6 +125,7 @@ pub(crate) struct PreparedFloatingHost {
 
 impl PreparedFloatingHost {
     pub(crate) fn abort(self) {
+        self.host.set_bounds_changed_handler(None);
         self.host.set_close_request_handler(None);
         self.host.close();
     }
@@ -109,6 +137,10 @@ pub(crate) struct FloatingHostState {
     pub(crate) bounds: Rect,
     pub(crate) surface: Rc<DockSurfaceView>,
     pub(crate) host: Rc<dyn FloatingWindowHost>,
+    /// Set while this host is being closed by the native window manager. The native callback is
+    /// still on the stack, so the committed model removes the host from our registry and lets the
+    /// original native close continue instead of calling `close()` reentrantly.
+    pub(crate) native_close_in_flight: bool,
 }
 
 struct PreparedExistingHostUpdate {
@@ -117,6 +149,7 @@ struct PreparedExistingHostUpdate {
     bounds: Rect,
     surface: Rc<DockSurfaceView>,
     close_handler: Rc<dyn Fn() -> bool>,
+    bounds_changed_handler: Rc<dyn Fn(Rect)>,
 }
 
 /// Native floating-host changes prepared without touching the committed registry.
@@ -207,6 +240,7 @@ impl FloatingHostRegistry {
         let id = Self::allocate_id(&mut next_id);
         let host = (self.factory)()?;
         Self::configure_host(&host, &surface, bounds, close_handler(owner, id));
+        host.set_bounds_changed_handler(Some(bounds_changed_handler(owner, id)));
         Ok(PreparedFloatingHost {
             id,
             root_index: 0,
@@ -230,6 +264,7 @@ impl FloatingHostRegistry {
             bounds: prepared.bounds,
             surface: prepared.surface,
             host: prepared.host,
+            native_close_in_flight: false,
         });
         id
     }
@@ -237,6 +272,18 @@ impl FloatingHostRegistry {
     pub(crate) fn show(&self, id: FloatingHostId) {
         if let Some(host) = self.hosts.iter().find(|host| host.id == id) {
             host.host.show();
+        }
+    }
+
+    pub(crate) fn activate(&self, id: FloatingHostId) {
+        if let Some(host) = self.hosts.iter().find(|host| host.id == id) {
+            host.host.activate();
+        }
+    }
+
+    pub(crate) fn set_title(&self, root_index: usize, title: &str) {
+        if let Some(host) = self.hosts.iter().find(|host| host.root_index == root_index) {
+            host.host.set_title(title);
         }
     }
 
@@ -277,6 +324,7 @@ impl FloatingHostRegistry {
                     bounds: *bounds,
                     surface: surface.clone(),
                     close_handler: close_handler(owner, host.id),
+                    bounds_changed_handler: bounds_changed_handler(owner, host.id),
                 });
                 used.push(host.id);
             } else {
@@ -291,6 +339,7 @@ impl FloatingHostRegistry {
                     }
                 };
                 Self::configure_host(&host, surface, *bounds, close_handler(owner, host_id));
+                host.set_bounds_changed_handler(Some(bounds_changed_handler(owner, host_id)));
                 new_hosts.push(PreparedFloatingHost {
                     id: host_id,
                     root_index: index,
@@ -333,6 +382,8 @@ impl FloatingHostRegistry {
                 host.host.set_content(content);
                 host.host
                     .set_close_request_handler(Some(update.close_handler));
+                host.host
+                    .set_bounds_changed_handler(Some(update.bounds_changed_handler));
             }
         }
 
@@ -345,6 +396,7 @@ impl FloatingHostRegistry {
                 bounds: host.bounds,
                 surface: host.surface,
                 host: host.host,
+                native_close_in_flight: false,
             });
         }
 
@@ -352,8 +404,12 @@ impl FloatingHostRegistry {
         let mut retained = Vec::with_capacity(self.hosts.len());
         for host in self.hosts.drain(..) {
             if stale_ids.contains(&host.id) {
+                let native_close_in_flight = host.native_close_in_flight;
+                host.host.set_bounds_changed_handler(None);
                 host.host.set_close_request_handler(None);
-                host.host.close();
+                if !native_close_in_flight {
+                    host.host.close();
+                }
             } else {
                 retained.push(host);
             }
@@ -362,6 +418,7 @@ impl FloatingHostRegistry {
 
         for id in new_ids {
             self.show(id);
+            self.activate(id);
         }
     }
 
@@ -372,10 +429,31 @@ impl FloatingHostRegistry {
             .map(|host| host.root_index)
     }
 
+    pub(crate) fn begin_native_close(&mut self, id: FloatingHostId) -> bool {
+        let Some(host) = self.hosts.iter_mut().find(|host| host.id == id) else {
+            return false;
+        };
+        if host.native_close_in_flight {
+            return false;
+        }
+        host.native_close_in_flight = true;
+        true
+    }
+
+    pub(crate) fn cancel_native_close(&mut self, id: FloatingHostId) {
+        if let Some(host) = self.hosts.iter_mut().find(|host| host.id == id) {
+            host.native_close_in_flight = false;
+        }
+    }
+
     pub(crate) fn close_empty(&mut self) {
         for host in self.hosts.drain(..) {
+            let native_close_in_flight = host.native_close_in_flight;
+            host.host.set_bounds_changed_handler(None);
             host.host.set_close_request_handler(None);
-            host.host.close();
+            if !native_close_in_flight {
+                host.host.close();
+            }
         }
     }
 

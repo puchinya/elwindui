@@ -142,6 +142,16 @@ impl CustomTabContentPresenter {
         self.invalidate_measure();
     }
 
+    /// Forces the selected page to be arranged again after its retained presenter is reattached
+    /// to a new visual parent (for example, when a containing template is refreshed for a theme
+    /// change). The content entries themselves remain retained; only the stale arrangement cache
+    /// is discarded.
+    pub(crate) fn refresh_presentation(&self) {
+        self.set_structure_dirty(true);
+        self.set_last_arranged_selected_index(None);
+        self.invalidate_measure();
+    }
+
     fn replace_item_content(
         &self,
         item: &CustomTabViewItem,
@@ -208,6 +218,13 @@ impl CustomTabContentPresenter {
         let key = self as *const Self as usize;
         CONTENT_STRUCTURAL_RECONCILIATION_COUNTS
             .with(|counts| counts.borrow().get(&key).copied().unwrap_or(0))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn content_for_test(&self, index: usize) -> Option<Rc<dyn UIElementExt>> {
+        self.entries()
+            .get(index)
+            .and_then(|(_, content)| content.clone())
     }
 }
 

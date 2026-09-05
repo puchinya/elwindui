@@ -7138,6 +7138,22 @@ fn generate_view(
     // Irrelevant (the base's own root, not this component's) when `is_inherited_view_composition`.
     let root_binding = &plan.last().expect("view must have a root element").binding;
 
+    // A composed component wrapper is not itself the node embedded in the visual tree. When its
+    // root is an ordinary view, invalidating the wrapper cannot reach the backend host; target the
+    // stored root node instead. Shape/inherited compositions are themselves UI elements, while a
+    // Window host deliberately has no UIElementExt implementation.
+    let component_root_invalidation = if is_host_composition {
+        None
+    } else if is_shape_composition || is_inherited_view_composition {
+        Some(quote! { self.invalidate(); })
+    } else {
+        Some(quote! {
+            if let Some(root) = self.#root_binding.get() {
+                elwindui::core::ui::UIElementExt::invalidate(&**root);
+            }
+        })
+    };
+
     // A plain virtual-builtin-rooted view (`VerticalLayout`, say — `DocumentView`'s actual root, if
     // it weren't wrapped in `ContentControl`) needs no special-casing here anymore: `plan_element`
     // now stores every root node — virtual builtin or not — under the same rule as any other node
@@ -8081,6 +8097,7 @@ fn generate_view(
         table,
         true,
         is_shape_composition || is_host_composition,
+        !is_host_composition,
     ));
     let implicit_property_resync_methods: TokenStream = mark_inherent(property_resync_methods_for(
         &implicit_bind_owners,
@@ -8090,10 +8107,12 @@ fn generate_view(
         table,
         true,
         is_shape_composition || is_host_composition,
+        !is_host_composition,
     ));
     let property_resync_methods: TokenStream =
         quote! { #property_resync_methods #implicit_property_resync_methods };
     let lazy_leaves_for_own_resync = collect_lazy_leaves(&plan);
+    let invalidate_component_resync = component_root_invalidation.clone();
     let component_property_resync_methods: TokenStream = component_property_variants
         .iter()
         .map(|property| {
@@ -8127,6 +8146,7 @@ fn generate_view(
             quote! {
                 fn #method(&self) {
                     #statements
+                    #invalidate_component_resync
                 }
             }
         })
@@ -8471,6 +8491,7 @@ fn generate_view(
         let resync_method = mark_inherent(quote! {
             fn resync(&self) {
                 #resync_stmts
+                #invalidate_component_resync
             }
         });
         let root_embed_method = mark_inherent(root_embed_method);
@@ -8776,6 +8797,7 @@ fn generate_view(
 
                 fn resync(&self) {
                     #resync_stmts
+                    #invalidate_component_resync
                 }
 
                 #plain_unmount_method
@@ -16525,6 +16547,9 @@ fn property_resync_methods_for(
     // Whether `plan`'s own root (`plan.last()`) is a shape/host-composition root with no separate
     // `self.#binding` field of its own — see `emit_wiring`/`emit_resync`'s matching doc comments.
     root_is_self: bool,
+    // Host compositions such as `inherits Window` do not implement `UIElementExt`, so their
+    // generated resync methods must not request a visual relayout on the host object itself.
+    invalidate_component: bool,
 ) -> TokenStream {
     let root_binding = plan.last().map(|r| r.binding.clone());
     let lazy_leaves = collect_lazy_leaves(plan);
@@ -16622,7 +16647,26 @@ fn property_resync_methods_for(
                     }
                     let refresh =
                         include_refresh.then(|| quote! { self.__refresh_dynamic_regions(); });
-                    quote! { #property_name => { #statements #refresh } }
+                    let invalidate = if invalidate_component {
+                        if root_is_self {
+                            Some(quote! { self.invalidate(); })
+                        } else if let Some(root_binding) = &root_binding {
+                            Some(quote! {
+                                if let Some(root) = self.#root_binding.get() {
+                                    elwindui::core::ui::UIElementExt::invalidate(&**root);
+                                }
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    // A property-driven resync can change the size or native realization of one
+                    // descendant while leaving sibling controls in the same component's visual
+                    // group untouched. Invalidate the component after applying the dependent
+                    // values so the backend records the complete group again.
+                    quote! { #property_name => { #statements #refresh #invalidate } }
                 })
                 .collect();
             quote! {
@@ -16894,8 +16938,7 @@ fn emit_resync_with_receiver(
             let name_literal = syn::LitStr::new(name, proc_macro2::Span::call_site());
             let value = emit_expr(expr, ctx, &self_mode);
             let environment = semantic_brush_resync_environment(node, ctx);
-            let reactive = attribute.kind == AssignmentKind::Normal
-                && view_expr_has_reactive_dependency(expr, ctx);
+            let reactive = view_expr_has_reactive_dependency(expr, ctx);
             let resync_call = quote! {
                 #ctor_macro!(
                     @resync_named #receiver, #name_literal, #value, #environment,

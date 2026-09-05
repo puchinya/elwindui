@@ -258,6 +258,11 @@ impl InnerMenu {
     pub(crate) fn new() -> Self {
         let m = mtm();
         let ns = NSMenu::initWithTitle(m.alloc::<NSMenu>(), &NSString::from_str(""));
+        // Context-menu items carry their explicit capability state from DockItem. AppKit's
+        // default auto-enabling asks the responder chain to validate the custom `perform:` target
+        // and disables every item because that target intentionally exposes no validation method.
+        // Keep the explicit `setEnabled` value authoritative for both context and regular menus.
+        ns.setAutoenablesItems(false);
         Self { ns }
     }
 

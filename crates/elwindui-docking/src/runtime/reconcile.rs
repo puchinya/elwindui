@@ -1,16 +1,20 @@
 //! Reconciliation boundary between the value model and stable runtime item wrappers.
 
 use crate::core::base::{Point, Rect};
+use crate::core::graphics::Color;
 use crate::core::input::PointerEventArgs;
-use crate::core::layout::{GridLength, Visibility};
+use crate::core::layout::{GridLength, HorizontalAlignment, VerticalAlignment, Visibility};
 use crate::core::theme::BrushStyle;
 use crate::core::ui::{
     Grid, GridExt, LayoutExt, TextBlock, TextBlockExt, TextStyleOwner, UIElementExt,
 };
+#[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
+use crate::core::ui::{MenuExt, MenuItemExt};
 use crate::model::{RootKind, SplitAddress};
 use crate::snapshot::{SnapshotAutoHideEntry, SnapshotGroupKey, SnapshotNode, SnapshotOrientation};
 use crate::{
-    DockGroup, DockGroupId, DockItem, DockItemId, DockLayoutError, DockLayoutModel, DockSplitPanel,
+    DockGroup, DockGroupId, DockItem, DockItemId, DockLayoutError, DockLayoutModel, DockSide,
+    DockSplitPanel,
 };
 use elwindui_custom_controls::{
     CustomSplitter, CustomSplitterExt, CustomTabView, CustomTabViewExt, CustomTabViewItem,
@@ -22,15 +26,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::rc::Weak;
 
-use super::drag::{DragSession, DragSourceGeometry, ResolvedDockTarget};
+use super::drag::{DragSession, DragSourceGeometry, GroupDragSession, ResolvedDockTarget};
 #[cfg(test)]
 use super::floating_window::FloatingHostFactory;
 use super::floating_window::{FloatingHostId, FloatingHostRegistry, PreparedFloatingHostSync};
 use super::group_view::replace_group_items;
+use super::metrics::{
+    GROUP_DOCK_BAND_FRACTION, GROUP_DOCK_BAND_MAX, GROUP_DOCK_BAND_MIN, ROOT_TARGET_SIZE,
+    SPLITTER_HIT_SIZE, TAB_INSERTION_MARKER_WIDTH, TITLE_BAR_HEIGHT, TITLE_BUTTON_COLUMN_WIDTH,
+    TITLE_BUTTON_SIZE, TITLE_TEXT_MARGIN,
+};
 use super::split_view::SplitterSession;
 use super::surface_registry::SurfaceRegistry;
 use super::surface_view::{DockSurfaceView, SurfaceRuntime};
 use super::themed_brush;
+use elwindui_custom_controls::{ChromeIcon, chrome_icon};
 
 /// Stable registration-to-presentation map for one authored docking surface.
 ///
@@ -43,6 +53,8 @@ pub(crate) struct StableItemRegistry {
     items: BTreeMap<DockItemId, Rc<DockItem>>,
     wrappers: BTreeMap<DockItemId, Rc<CustomTabViewItem>>,
     group_positions: BTreeMap<DockGroupId, TabStripPosition>,
+    group_compact_tabs: BTreeMap<DockGroupId, bool>,
+    group_show_when_empty: BTreeMap<DockGroupId, bool>,
 }
 
 impl StableItemRegistry {
@@ -59,7 +71,15 @@ impl StableItemRegistry {
     ) -> Result<(), DockLayoutError> {
         let mut items = BTreeMap::new();
         let mut groups = BTreeMap::new();
-        collect_authored(root, &mut items, &mut groups)?;
+        let mut compact_tabs = BTreeMap::new();
+        let mut show_when_empty = BTreeMap::new();
+        collect_authored(
+            root,
+            &mut items,
+            &mut groups,
+            &mut compact_tabs,
+            &mut show_when_empty,
+        )?;
 
         let removed = self
             .items
@@ -82,12 +102,14 @@ impl StableItemRegistry {
             wrapper.set_header(item.title_value());
             wrapper.set_icon(item.icon_value());
             wrapper.set_closable(item.can_close_value());
-            // Page replacement is deliberately not a V1 registration operation. Keeping the
+            // Page replacement is deliberately not a registration-time operation. Keeping the
             // existing wrapper content untouched preserves page identity and avoids an implicit
             // unmount/remount during metadata-only authored refreshes.
             self.items.insert(id, item);
         }
         self.group_positions = groups;
+        self.group_compact_tabs = compact_tabs;
+        self.group_show_when_empty = show_when_empty;
         Ok(())
     }
 
@@ -101,12 +123,22 @@ impl StableItemRegistry {
             .copied()
             .unwrap_or(TabStripPosition::Top)
     }
+
+    pub(crate) fn group_compact_tabs(&self, id: &DockGroupId) -> bool {
+        self.group_compact_tabs.get(id).copied().unwrap_or(false)
+    }
+
+    pub(crate) fn group_show_when_empty(&self, id: &DockGroupId) -> bool {
+        self.group_show_when_empty.get(id).copied().unwrap_or(false)
+    }
 }
 
 fn collect_authored(
     node: &dyn UIElementExt,
     items: &mut BTreeMap<DockItemId, Rc<DockItem>>,
     groups: &mut BTreeMap<DockGroupId, TabStripPosition>,
+    compact_tabs: &mut BTreeMap<DockGroupId, bool>,
+    show_when_empty: &mut BTreeMap<DockGroupId, bool>,
 ) -> Result<(), DockLayoutError> {
     if let Some(group) = node.as_any().downcast_ref::<DockGroup>() {
         let id = group.id_value();
@@ -119,6 +151,8 @@ fn collect_authored(
                 reason: format!("duplicate or empty authored DockGroupId: {id}"),
             });
         }
+        compact_tabs.insert(id.clone(), group.compact_tabs_value());
+        show_when_empty.insert(id.clone(), group.show_when_empty_value());
         for item in group.authored_children() {
             let item_id = item.id_value();
             if item_id.as_ref().is_empty() || items.insert(item_id.clone(), item).is_some() {
@@ -131,7 +165,7 @@ fn collect_authored(
     }
     if let Some(panel) = node.as_any().downcast_ref::<DockSplitPanel>() {
         for child in panel.authored_children() {
-            collect_authored(child.as_ref(), items, groups)?;
+            collect_authored(child.as_ref(), items, groups, compact_tabs, show_when_empty)?;
         }
         return Ok(());
     }
@@ -184,8 +218,34 @@ struct GroupRuntimeHost {
     container: Rc<Grid>,
     title_bar: Rc<Grid>,
     title: Rc<TextBlock>,
+    empty_hint: Rc<TextBlock>,
     pin_button: Rc<Grid>,
+    float_button: Rc<Grid>,
     close_button: Rc<Grid>,
+}
+
+impl GroupRuntimeHost {
+    fn refresh_theme(&self) {
+        self.title_bar
+            .set_background(themed_brush(BrushStyle::Secondary));
+        self.title
+            .set_foreground(themed_brush(BrushStyle::Foreground));
+        self.empty_hint
+            .set_foreground(themed_brush(BrushStyle::Tertiary));
+
+        self.pin_button.children().clear();
+        self.pin_button
+            .children()
+            .add(RuntimeRealization::private_icon(true));
+        self.float_button.children().clear();
+        self.float_button
+            .children()
+            .add(RuntimeRealization::float_icon());
+        self.close_button.children().clear();
+        self.close_button
+            .children()
+            .add(RuntimeRealization::private_icon(false));
+    }
 }
 
 struct PlannedGroup {
@@ -195,9 +255,12 @@ struct PlannedGroup {
     items: Vec<DockItemId>,
     selected: Option<DockItemId>,
     tab_position: TabStripPosition,
+    compact_tabs: bool,
     title: String,
+    visibility: Visibility,
     title_visibility: Visibility,
     pin_visibility: Visibility,
+    float_visibility: Visibility,
     close_visibility: Visibility,
 }
 
@@ -225,12 +288,12 @@ struct ReconcilePlan {
     group_items: BTreeMap<SnapshotGroupKey, Vec<DockItemId>>,
     group_roots: BTreeMap<SnapshotGroupKey, RootKind>,
     group_selected: BTreeMap<SnapshotGroupKey, Option<DockItemId>>,
-    auto_hide_roots: BTreeMap<DockItemId, RootKind>,
+    auto_hide_roots: BTreeMap<DockItemId, (RootKind, DockSide)>,
     root: Option<RuntimeNode>,
     floating: Vec<PlannedFloatingRuntime>,
     surfaces: SurfaceRegistry,
     main_surface_child: Option<Rc<dyn UIElementExt>>,
-    open_auto_hide: Vec<(RootKind, DockItemId)>,
+    open_auto_hide: Vec<(RootKind, DockSide, DockItemId)>,
     host_sync: PreparedFloatingHostSync,
 }
 
@@ -241,12 +304,13 @@ pub struct RuntimeRealization {
     group_items: BTreeMap<SnapshotGroupKey, Vec<DockItemId>>,
     group_roots: BTreeMap<SnapshotGroupKey, RootKind>,
     group_selected: BTreeMap<SnapshotGroupKey, Option<DockItemId>>,
-    auto_hide_roots: BTreeMap<DockItemId, RootKind>,
+    auto_hide_roots: BTreeMap<DockItemId, (RootKind, DockSide)>,
     owners: BTreeMap<DockItemId, RuntimePresentationOwner>,
     root: Option<RuntimeNode>,
     floating: Vec<FloatingRuntime>,
     split_views: BTreeMap<SplitAddress, (Rc<Grid>, Vec<Rc<CustomSplitter>>)>,
     drag: Option<DragSession>,
+    group_drag: Option<GroupDragSession>,
     splitter: Option<SplitterSession>,
     floating_hosts: FloatingHostRegistry,
     surfaces: SurfaceRegistry,
@@ -255,6 +319,7 @@ pub struct RuntimeRealization {
     main_surface_child: Option<Rc<dyn UIElementExt>>,
     owner: Weak<crate::DockingControl>,
     reconciling: Rc<Cell<bool>>,
+    native_bounds_syncing: Cell<bool>,
     #[cfg(test)]
     fail_after_reconcile_plan: bool,
     #[cfg(test)]
@@ -328,6 +393,7 @@ impl RuntimeRealization {
             floating: Vec::new(),
             split_views: BTreeMap::new(),
             drag: None,
+            group_drag: None,
             splitter: None,
             floating_hosts: FloatingHostRegistry::default(),
             surfaces,
@@ -336,6 +402,7 @@ impl RuntimeRealization {
             main_surface_child: None,
             owner,
             reconciling: Rc::new(Cell::new(false)),
+            native_bounds_syncing: Cell::new(false),
             #[cfg(test)]
             fail_after_reconcile_plan: false,
             #[cfg(test)]
@@ -352,6 +419,7 @@ impl RuntimeRealization {
         // native gesture. Cancel both transient sessions before the next model reconciliation;
         // this is safer than allowing a stale wrapper to commit into the new registry.
         self.drag = None;
+        self.group_drag = None;
         if let Some(mut splitter) = self.splitter.take() {
             splitter.cancel();
         }
@@ -361,6 +429,7 @@ impl RuntimeRealization {
 
     pub(crate) fn cancel_transient(&mut self) {
         self.drag = None;
+        self.group_drag = None;
         if let Some(mut splitter) = self.splitter.take() {
             splitter.cancel();
         }
@@ -375,7 +444,7 @@ impl RuntimeRealization {
         model: &DockLayoutModel,
     ) -> Result<(), DockLayoutError> {
         let host_sync = self.apply_staged(model)?;
-        self.floating_hosts.commit_sync(host_sync);
+        self.commit_floating_host_sync(host_sync);
         Ok(())
     }
 
@@ -388,7 +457,40 @@ impl RuntimeRealization {
     }
 
     pub(crate) fn commit_floating_host_sync(&mut self, host_sync: PreparedFloatingHostSync) {
+        self.native_bounds_syncing.set(true);
         self.floating_hosts.commit_sync(host_sync);
+        self.native_bounds_syncing.set(false);
+        for (index, runtime) in self.floating.iter().enumerate() {
+            let title = runtime
+                .identity
+                .iter()
+                .find_map(|group| self.group_selected.get(group).and_then(Clone::clone))
+                .and_then(|item| self.registry.items.get(&item))
+                .map(|item| item.title_value())
+                .unwrap_or_else(|| "Floating".to_owned());
+            self.floating_hosts.set_title(index, &title);
+        }
+    }
+
+    pub(crate) fn native_bounds_syncing(&self) -> bool {
+        self.native_bounds_syncing.get()
+    }
+
+    pub(crate) fn refresh_theme(&self) {
+        self.main_surface.refresh_theme();
+        for floating in &self.floating {
+            floating.surface.refresh_theme();
+        }
+        for (group, view) in &self.groups {
+            // Theme/template refreshes can recreate the visible tab presentation. Restore the
+            // retained model selection before refreshing its chrome so a theme switch cannot
+            // briefly or permanently show index zero for a different active item.
+            view.set_selected_index(self.selected_group_index(group).unwrap_or(0));
+            view.refresh_theme();
+        }
+        for host in self.group_hosts.values() {
+            host.refresh_theme();
+        }
     }
 
     fn prepare_reconcile(
@@ -400,8 +502,16 @@ impl RuntimeRealization {
         let desired_owners = desired_owners(&snapshot);
         let floating_count = snapshot.floating_roots.len();
         let mut auto_hide_roots = BTreeMap::new();
-        for entry in snapshot.auto_hide.iter().flatten() {
-            auto_hide_roots.insert(entry.item.clone(), auto_hide_root(entry, floating_count));
+        for (side_index, entries) in snapshot.auto_hide.iter().enumerate() {
+            let Some(side) = DockSide::ALL.get(side_index).copied() else {
+                continue;
+            };
+            for entry in entries {
+                auto_hide_roots.insert(
+                    entry.item.clone(),
+                    (auto_hide_root(entry, floating_count), side),
+                );
+            }
         }
 
         let mut groups = self.groups.clone();
@@ -483,9 +593,19 @@ impl RuntimeRealization {
         let open_auto_hide = snapshot
             .auto_hide
             .iter()
-            .flatten()
-            .filter(|entry| entry.open)
-            .map(|entry| (auto_hide_root(entry, floating_count), entry.item.clone()))
+            .enumerate()
+            .flat_map(|(side_index, entries)| {
+                let side = DockSide::ALL.get(side_index).copied();
+                entries.iter().filter_map(move |entry| {
+                    side.filter(|_| entry.open).map(|side| {
+                        (
+                            auto_hide_root(entry, floating_count),
+                            side,
+                            entry.item.clone(),
+                        )
+                    })
+                })
+            })
             .collect::<Vec<_>>();
         let floating_specs = floating
             .iter()
@@ -555,6 +675,8 @@ impl RuntimeRealization {
         }
         self.main_surface.auto_hide.close();
         self.main_surface.preview.clear();
+        self.main_surface.targets.clear();
+        self.main_surface.insertion_marker.clear();
         self.main_surface.reset_visual_children();
         if let Some(element) = main_surface_child.clone() {
             self.main_surface.add_main_child(element);
@@ -573,6 +695,8 @@ impl RuntimeRealization {
             surface.set_root(root.clone());
             surface.auto_hide.close();
             surface.preview.clear();
+            surface.targets.clear();
+            surface.insertion_marker.clear();
             surface.reset_visual_children();
             let element =
                 self.apply_planned_node(&planned.node, root.clone(), &[], &planned_splits);
@@ -615,14 +739,14 @@ impl RuntimeRealization {
                 &self.owner,
             );
         }
-        for (root, item) in open_auto_hide {
+        for (root, side, item) in open_auto_hide {
             if let Some(surface) = match &root {
                 RootKind::Main => Some(&mut self.main_surface),
                 RootKind::Floating(index) => {
                     floating.get_mut(*index).map(|runtime| &mut runtime.surface)
                 }
             } {
-                surface.auto_hide.open(item.clone());
+                surface.auto_hide.open(item.clone(), side);
                 surface
                     .auto_hide
                     .present_open_item(self.registry.wrapper(&item));
@@ -718,6 +842,56 @@ impl RuntimeRealization {
             source_root,
             source_geometry,
         )?);
+        self.group_drag = None;
+        self.clear_previews();
+        Ok(())
+    }
+
+    pub(crate) fn begin_group_drag(
+        &mut self,
+        model: &DockLayoutModel,
+        group: SnapshotGroupKey,
+        host_root_position: Point,
+    ) -> Result<(), DockLayoutError> {
+        let source_root = self.group_roots.get(&group).cloned().ok_or_else(|| {
+            DockLayoutError::InvalidSnapshot {
+                reason: "group has no current runtime surface".to_owned(),
+            }
+        })?;
+        let group_view =
+            self.groups
+                .get(&group)
+                .cloned()
+                .ok_or_else(|| DockLayoutError::InvalidSnapshot {
+                    reason: "group runtime view is unavailable".to_owned(),
+                })?;
+        let group_node: Rc<dyn UIElementExt> = group_view;
+        let source_bounds_host =
+            SurfaceRegistry::bounds_in_host_root(&group_node).ok_or_else(|| {
+                DockLayoutError::InvalidSnapshot {
+                    reason: "group has no arranged geometry".to_owned(),
+                }
+            })?;
+        let pointer_offset = Point {
+            x: host_root_position.x - source_bounds_host.x,
+            y: host_root_position.y - source_bounds_host.y,
+        };
+        if !pointer_offset.x.is_finite() || !pointer_offset.y.is_finite() {
+            return Err(DockLayoutError::InvalidSnapshot {
+                reason: "group drag pointer offset is not finite".to_owned(),
+            });
+        }
+        self.group_drag = Some(GroupDragSession::begin(
+            model,
+            group,
+            source_root.clone(),
+            DragSourceGeometry {
+                source_root,
+                source_bounds_host,
+                pointer_offset,
+            },
+        )?);
+        self.drag = None;
         self.clear_previews();
         Ok(())
     }
@@ -764,12 +938,16 @@ impl RuntimeRealization {
         target: &ResolvedDockTarget,
         weight: f32,
     ) -> Result<(), DockLayoutError> {
-        let Some(drag) = self.drag.as_mut() else {
+        let insertion_marker = self.insertion_marker_rect(target);
+        if let Some(drag) = self.drag.as_mut() {
+            drag.preview(target, weight)?;
+        } else if let Some(drag) = self.group_drag.as_mut() {
+            drag.preview(target, weight)?;
+        } else {
             return Err(DockLayoutError::InvalidSnapshot {
                 reason: "dock preview requested without an active drag".to_owned(),
             });
-        };
-        drag.preview(target, weight)?;
+        }
         self.clear_previews();
         let Some(surface) = self.surface_runtime_mut(&target.root) else {
             return Err(DockLayoutError::InvalidFloatingRoot {
@@ -780,6 +958,8 @@ impl RuntimeRealization {
             });
         };
         surface.preview.show(target);
+        surface.targets.show(target.target);
+        surface.insertion_marker.show(insertion_marker);
         Ok(())
     }
 
@@ -791,6 +971,11 @@ impl RuntimeRealization {
         self.drag
             .as_ref()
             .map(|drag| drag.source_geometry().clone())
+            .or_else(|| {
+                self.group_drag
+                    .as_ref()
+                    .map(|drag| drag.source_geometry().clone())
+            })
     }
 
     pub(crate) fn floating_candidate(
@@ -800,6 +985,18 @@ impl RuntimeRealization {
         let Some(drag) = self.drag.as_mut() else {
             return Err(DockLayoutError::InvalidSnapshot {
                 reason: "floating candidate requested without an active drag".to_owned(),
+            });
+        };
+        drag.set_floating_candidate(bounds)
+    }
+
+    pub(crate) fn group_floating_candidate(
+        &mut self,
+        bounds: crate::Rect,
+    ) -> Result<DockLayoutModel, DockLayoutError> {
+        let Some(drag) = self.group_drag.as_mut() else {
+            return Err(DockLayoutError::InvalidSnapshot {
+                reason: "floating candidate requested without an active group drag".to_owned(),
             });
         };
         drag.set_floating_candidate(bounds)
@@ -816,6 +1013,14 @@ impl RuntimeRealization {
 
     pub(crate) fn floating_root_index(&self, id: FloatingHostId) -> Option<usize> {
         self.floating_hosts.root_index_for_host(id)
+    }
+
+    pub(crate) fn begin_native_floating_close(&mut self, id: FloatingHostId) -> bool {
+        self.floating_hosts.begin_native_close(id)
+    }
+
+    pub(crate) fn cancel_native_floating_close(&mut self, id: FloatingHostId) {
+        self.floating_hosts.cancel_native_close(id);
     }
 
     #[cfg(test)]
@@ -835,7 +1040,7 @@ impl RuntimeRealization {
 
     #[cfg(test)]
     pub(crate) fn active_drag_for_test(&self) -> bool {
-        self.drag.is_some()
+        self.drag.is_some() || self.group_drag.is_some()
     }
 
     #[cfg(test)]
@@ -852,6 +1057,13 @@ impl RuntimeRealization {
     #[cfg(test)]
     pub(crate) fn group_for_test(&self, group: &SnapshotGroupKey) -> Option<Rc<CustomTabView>> {
         self.groups.get(group).cloned()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn group_title_bar_for_test(&self, group: &SnapshotGroupKey) -> Option<Rc<Grid>> {
+        self.group_hosts
+            .get(group)
+            .map(|host| host.title_bar.clone())
     }
 
     #[cfg(test)]
@@ -874,16 +1086,35 @@ impl RuntimeRealization {
     }
 
     #[cfg(test)]
+    pub(crate) fn auto_hide_parts_for_test(&self, root: &RootKind) -> Option<(Rc<Grid>, Rc<Grid>)> {
+        self.surface_runtime(root).map(|runtime| {
+            (
+                runtime.auto_hide.pane_for_test(),
+                runtime.auto_hide.page_host_for_test(),
+            )
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn preview_for_test(&self, root: &RootKind) -> Option<(crate::DockTarget, Rect)> {
         self.surface_runtime(root)
             .and_then(|runtime| runtime.preview.target().zip(runtime.preview.preview_rect()))
     }
 
     #[cfg(test)]
+    pub(crate) fn insertion_marker_for_test(&self, root: &RootKind) -> Option<Rect> {
+        self.surface_runtime(root)
+            .and_then(|runtime| runtime.insertion_marker.marker_rect_for_test())
+    }
+
+    #[cfg(test)]
     pub(crate) fn show_preview_for_test(&mut self, target: ResolvedDockTarget) {
+        let insertion_marker = self.insertion_marker_rect(&target);
         self.clear_previews();
         if let Some(surface) = self.surface_runtime_mut(&target.root) {
             surface.preview.show(&target);
+            surface.targets.show(target.target);
+            surface.insertion_marker.show(insertion_marker);
         }
     }
 
@@ -902,7 +1133,11 @@ impl RuntimeRealization {
         screen_position: Option<Point>,
         host_root_position: Point,
     ) -> Option<ResolvedDockTarget> {
-        let source_root = self.drag.as_ref()?.source_root();
+        let source_root = self
+            .drag
+            .as_ref()
+            .map(DragSession::source_root)
+            .or_else(|| self.group_drag.as_ref().map(GroupDragSession::source_root))?;
         let (root, surface, surface_local_point) = if let Some(screen) = screen_position {
             self.surfaces
                 .entries()
@@ -932,25 +1167,94 @@ impl RuntimeRealization {
         let surface_bounds = SurfaceRegistry::surface_bounds(&surface)?;
 
         let selected_root = root.clone();
-        let groups = self.groups.iter().filter_map(|(key, group)| {
-            if self.group_roots.get(key) != Some(&selected_root) {
-                return None;
+        let groups: Vec<_> = self
+            .groups
+            .iter()
+            .filter_map(|(key, group)| {
+                if self.group_roots.get(key) != Some(&selected_root) {
+                    return None;
+                }
+                let group_node: Rc<dyn UIElementExt> = group.clone();
+                SurfaceRegistry::bounds_in_surface_local(&group_node, &surface)
+                    .map(|bounds| (key.clone(), bounds))
+            })
+            .collect();
+        let target = resolve_local_target(
+            root,
+            surface_bounds,
+            surface_local_point,
+            groups.iter().cloned(),
+        )?;
+        let Some(group) = target.group.as_ref() else {
+            return Some(target);
+        };
+        let Some((_, bounds)) = groups.iter().find(|(key, _)| key == group) else {
+            return Some(target);
+        };
+        let local = Point {
+            x: surface_local_point.x - bounds.x,
+            y: surface_local_point.y - bounds.y,
+        };
+        let Some(group_view) = self.groups.get(group) else {
+            return Some(target);
+        };
+        let in_tab_strip = group_view
+            .tab_insertion_boundary(0)
+            .is_some_and(|header| local.y >= header.y && local.y <= header.y + header.height);
+        if self.drag.is_some() && in_tab_strip {
+            if let Some(index) = group_view.tab_insertion_index_at(local) {
+                let mut resolved = target;
+                resolved.target = crate::DockTarget::Center;
+                resolved.preview_rect = group_preview(*bounds, crate::DockTarget::Center)?;
+                resolved.tab_insert_index = Some(index);
+                return Some(resolved);
             }
-            let group_node: Rc<dyn UIElementExt> = group.clone();
-            SurfaceRegistry::bounds_in_surface_local(&group_node, &surface)
-                .map(|bounds| (key.clone(), bounds))
-        });
-        resolve_local_target(root, surface_bounds, surface_local_point, groups)
+        }
+        if target.target != crate::DockTarget::Center || self.group_drag.is_some() {
+            return Some(target);
+        }
+        let index = group_view.tab_insertion_index_at(local);
+        let mut resolved = target;
+        resolved.tab_insert_index = index;
+        Some(resolved)
+    }
+
+    fn insertion_marker_rect(&self, target: &ResolvedDockTarget) -> Option<Rect> {
+        if target.target != crate::DockTarget::Center {
+            return None;
+        }
+        let group = target.group.as_ref()?;
+        let index = target.tab_insert_index?;
+        let group_view = self.groups.get(group)?;
+        let surface_runtime = self.surface_runtime(&target.root)?;
+        let surface: Rc<dyn UIElementExt> = surface_runtime.surface.clone();
+        let group_node: Rc<dyn UIElementExt> = group_view.clone();
+        let group_bounds = SurfaceRegistry::bounds_in_surface_local(&group_node, &surface)?;
+        let boundary = group_view.tab_insertion_boundary(index)?;
+        Some(Rect {
+            x: group_bounds.x + boundary.x,
+            y: group_bounds.y + boundary.y,
+            width: TAB_INSERTION_MARKER_WIDTH,
+            height: boundary.height,
+        })
     }
 
     pub(crate) fn finish_drag(&mut self, commit: bool) -> Option<DockLayoutModel> {
-        let result = self.drag.take().and_then(|mut drag| {
+        let result = if let Some(mut drag) = self.drag.take() {
             if commit {
                 drag.commit()
             } else {
                 Some(drag.cancel())
             }
-        });
+        } else {
+            self.group_drag.take().and_then(|mut drag| {
+                if commit {
+                    drag.commit()
+                } else {
+                    Some(drag.cancel())
+                }
+            })
+        };
         self.clear_previews();
         result
     }
@@ -986,12 +1290,12 @@ impl RuntimeRealization {
 
     #[allow(dead_code)]
     pub(crate) fn open_auto_hide(&mut self, item: DockItemId) -> Option<DockItemId> {
-        let root = self.auto_hide_roots.get(&item)?.clone();
+        let root = self.auto_hide_roots.get(&item)?.0.clone();
         self.open_auto_hide_on(root, item)
     }
 
     pub(crate) fn present_auto_hide(&self, item: &DockItemId) {
-        let Some(root) = self.auto_hide_roots.get(item) else {
+        let Some((root, _side)) = self.auto_hide_roots.get(item) else {
             return;
         };
         if let Some(surface) = self.surface_runtime(root) {
@@ -1008,8 +1312,9 @@ impl RuntimeRealization {
     ) -> Option<DockItemId> {
         self.clear_auto_hide_presentations();
         let wrapper = self.registry.wrapper(&item);
+        let side = self.auto_hide_roots.get(&item)?.1;
         self.surface_runtime_mut(&root).map(|surface| {
-            let previous = surface.auto_hide.open(item.clone());
+            let previous = surface.auto_hide.open(item.clone(), side);
             surface.auto_hide.present_open_item(wrapper);
             previous
         })?
@@ -1090,10 +1395,30 @@ impl RuntimeRealization {
             .is_some_and(|item| item.can_float_value())
     }
 
+    pub(crate) fn can_dock(&self, item: &DockItemId) -> bool {
+        self.registry
+            .items
+            .get(item)
+            .is_some_and(|item| item.can_dock_value())
+    }
+
+    pub(crate) fn can_float_group(&self, group: &SnapshotGroupKey) -> bool {
+        self.group_items
+            .get(group)
+            .is_some_and(|items| !items.is_empty() && items.iter().all(|item| self.can_float(item)))
+    }
+
+    pub(crate) fn can_dock_group(&self, group: &SnapshotGroupKey) -> bool {
+        self.group_items
+            .get(group)
+            .is_some_and(|items| !items.is_empty() && items.iter().all(|item| self.can_dock(item)))
+    }
+
     pub(crate) fn dispose(&mut self) {
         self.detach_existing_tree();
         self.surface_root.children().clear();
         self.drag = None;
+        self.group_drag = None;
         self.splitter = None;
         self.clear_previews();
         self.main_surface.auto_hide.close();
@@ -1114,6 +1439,10 @@ impl RuntimeRealization {
 
     pub(crate) fn drag_item(&self) -> Option<DockItemId> {
         self.drag.as_ref().map(|drag| drag.item().clone())
+    }
+
+    pub(crate) fn drag_group(&self) -> Option<SnapshotGroupKey> {
+        self.group_drag.as_ref().map(|drag| drag.group().clone())
     }
 
     fn plan_node(
@@ -1161,17 +1490,44 @@ impl RuntimeRealization {
                     SnapshotGroupKey::Authored(id) => self.registry.group_position(id),
                     SnapshotGroupKey::Generated(_) => TabStripPosition::Top,
                 };
+                let compact_tabs = match &group {
+                    SnapshotGroupKey::Authored(id) => self.registry.group_compact_tabs(id),
+                    SnapshotGroupKey::Generated(_) => false,
+                };
+                let show_when_empty = match &group {
+                    SnapshotGroupKey::Authored(id) => self.registry.group_show_when_empty(id),
+                    SnapshotGroupKey::Generated(_) => false,
+                };
+                let visibility = if items.is_empty() && !show_when_empty {
+                    Visibility::Collapsed
+                } else {
+                    Visibility::Visible
+                };
                 let selected_item = selected
                     .as_ref()
                     .and_then(|selected| self.registry.items.get(selected));
                 let has_pin = selected_item.is_some_and(|item| item.can_pin_value());
-                let show_title_bar = tab_position == TabStripPosition::Bottom || has_pin;
+                // Every group keeps a small title band so the complete group has an explicit
+                // drag source even when its tab strip is at the top. Pin/close remain conditional
+                // affordances inside that shared band.
+                let show_title_bar = true;
                 let title_visibility = if show_title_bar {
                     Visibility::Visible
                 } else {
                     Visibility::Collapsed
                 };
                 let pin_visibility = if has_pin {
+                    Visibility::Visible
+                } else {
+                    Visibility::Collapsed
+                };
+                let float_visibility = if !items.is_empty()
+                    && items.iter().all(|item| {
+                        self.registry
+                            .items
+                            .get(item)
+                            .is_some_and(|item| item.can_float_value())
+                    }) {
                     Visibility::Visible
                 } else {
                     Visibility::Collapsed
@@ -1194,11 +1550,14 @@ impl RuntimeRealization {
                         items: items.clone(),
                         selected: selected.clone(),
                         tab_position,
+                        compact_tabs,
                         title: selected_item
                             .map(|item| item.title_value())
                             .unwrap_or_default(),
+                        visibility,
                         title_visibility,
                         pin_visibility,
+                        float_visibility,
                         close_visibility,
                     },
                 );
@@ -1282,89 +1641,223 @@ impl RuntimeRealization {
         title_bar.set_rows(vec![GridLength::Star(1.0)]);
         title_bar.set_columns(vec![
             GridLength::Star(1.0),
-            GridLength::Fixed(28.0),
-            GridLength::Fixed(28.0),
+            GridLength::Fixed(TITLE_BUTTON_COLUMN_WIDTH),
+            GridLength::Fixed(TITLE_BUTTON_COLUMN_WIDTH),
+            GridLength::Fixed(TITLE_BUTTON_COLUMN_WIDTH),
         ]);
-        title_bar.set_height(30.0);
+        title_bar.set_height(TITLE_BAR_HEIGHT);
         title_bar.set_background(themed_brush(BrushStyle::Secondary));
 
         let title = TextBlock::new();
         title.set_foreground(themed_brush(BrushStyle::Foreground));
-        title.set_margin(8.0);
+        title.set_margin(TITLE_TEXT_MARGIN);
         title.set_attached("Grid", "row", 0i32);
         title.set_attached("Grid", "column", 0i32);
         title_bar.children().add(title.clone());
 
+        let empty_hint = TextBlock::new();
+        empty_hint.set_text("Drop here");
+        empty_hint.set_foreground(themed_brush(BrushStyle::Tertiary));
+        empty_hint.set_horizontal_alignment(HorizontalAlignment::Center);
+        empty_hint.set_vertical_alignment(VerticalAlignment::Center);
+        empty_hint.set_hit_test_visible(false);
+        empty_hint.set_visibility(Visibility::Collapsed);
+        empty_hint.set_attached("Grid", "row", 1i32);
+        empty_hint.set_attached("Grid", "column", 0i32);
+
         let pin_button = Grid::new();
-        pin_button.set_background(themed_brush(BrushStyle::Tertiary));
-        pin_button.set_width(22.0);
-        pin_button.set_height(22.0);
+        // Keep the full button hit-testable without painting a surface over the title bar.
+        pin_button.set_background(Some(Color::TRANSPARENT.into()));
+        pin_button.set_width(TITLE_BUTTON_SIZE);
+        pin_button.set_height(TITLE_BUTTON_SIZE);
         pin_button.set_attached("Grid", "row", 0i32);
         pin_button.set_attached("Grid", "column", 1i32);
-        let pin_glyph = TextBlock::new();
-        pin_glyph.set_text("⌖");
-        pin_glyph.set_foreground(themed_brush(BrushStyle::Foreground));
-        pin_glyph.set_text_alignment(crate::core::ui::TextAlignment::Center);
-        pin_button.children().add(pin_glyph);
+        pin_button.children().add(Self::private_icon(true));
         let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let pin_group = group.clone();
         pin_button.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
-            Box::new(move |_, _| {
+            Box::new(move |_, args| {
+                args.handled.set(true);
                 let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
                 if let Some(owner) = owner {
                     owner.handle_group_pin(pin_group.clone());
                 }
             }),
         );
+        pin_button.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_pressed",
+            Box::new(|event, args| {
+                if event.button == Some(crate::core::input::MouseButton::Left) {
+                    args.handled.set(true);
+                }
+            }),
+        );
         title_bar.children().add(pin_button.clone());
 
+        let float_button = Grid::new();
+        // Keep the full button hit-testable without painting a surface over the title bar.
+        float_button.set_background(Some(Color::TRANSPARENT.into()));
+        float_button.set_width(TITLE_BUTTON_SIZE);
+        float_button.set_height(TITLE_BUTTON_SIZE);
+        float_button.set_attached("Grid", "row", 0i32);
+        float_button.set_attached("Grid", "column", 2i32);
+        float_button.children().add(Self::float_icon());
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
+        let float_group = group.clone();
+        float_button.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_released",
+            Box::new(move |_, args| {
+                args.handled.set(true);
+                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                if let Some(owner) = owner {
+                    owner.handle_group_float(float_group.clone());
+                }
+            }),
+        );
+        float_button.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_pressed",
+            Box::new(|event, args| {
+                if event.button == Some(crate::core::input::MouseButton::Left) {
+                    args.handled.set(true);
+                }
+            }),
+        );
+        title_bar.children().add(float_button.clone());
+
         let close_button = Grid::new();
-        close_button.set_background(themed_brush(BrushStyle::Tertiary));
-        close_button.set_width(22.0);
-        close_button.set_height(22.0);
+        // Keep the full button hit-testable without painting a surface over the title bar.
+        close_button.set_background(Some(Color::TRANSPARENT.into()));
+        close_button.set_width(TITLE_BUTTON_SIZE);
+        close_button.set_height(TITLE_BUTTON_SIZE);
         close_button.set_attached("Grid", "row", 0i32);
-        close_button.set_attached("Grid", "column", 2i32);
-        let close_glyph = TextBlock::new();
-        close_glyph.set_text("×");
-        close_glyph.set_foreground(themed_brush(BrushStyle::Foreground));
-        close_glyph.set_text_alignment(crate::core::ui::TextAlignment::Center);
-        close_button.children().add(close_glyph);
+        close_button.set_attached("Grid", "column", 3i32);
+        close_button.children().add(Self::private_icon(false));
         let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let close_group = group.clone();
         close_button.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
-            Box::new(move |_, _| {
+            Box::new(move |_, args| {
+                args.handled.set(true);
                 let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
                 if let Some(owner) = owner {
                     owner.handle_group_title_close(close_group.clone());
                 }
             }),
         );
+        close_button.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_pressed",
+            Box::new(|event, args| {
+                if event.button == Some(crate::core::input::MouseButton::Left) {
+                    args.handled.set(true);
+                }
+            }),
+        );
         title_bar.children().add(close_button.clone());
-        title_bar.set_visibility(Visibility::Collapsed);
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
+        let drag_group = group.clone();
+        title_bar.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_pressed",
+            Box::new(move |event, args| {
+                if !args.handled.get()
+                    && event.button == Some(crate::core::input::MouseButton::Left)
+                {
+                    args.handled.set(true);
+                    let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                    if let Some(owner) = owner {
+                        owner.handle_group_drag_started(drag_group.clone(), *event);
+                    }
+                }
+            }),
+        );
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
+        let drag_group = group.clone();
+        title_bar.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_moved",
+            Box::new(move |event, args| {
+                if args.handled.get() {
+                    return;
+                }
+                args.handled.set(true);
+                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                if let Some(owner) = owner {
+                    owner.handle_group_drag_moved(drag_group.clone(), *event);
+                }
+            }),
+        );
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
+        let drag_group = group.clone();
+        title_bar.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_released",
+            Box::new(move |event, args| {
+                if args.handled.get() {
+                    return;
+                }
+                args.handled.set(true);
+                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                if let Some(owner) = owner {
+                    owner.handle_group_drag_completed(drag_group.clone(), *event, false);
+                }
+            }),
+        );
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
+        let drag_group = group.clone();
+        title_bar.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_canceled",
+            Box::new(move |event, args| {
+                if args.handled.get() {
+                    return;
+                }
+                args.handled.set(true);
+                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                if let Some(owner) = owner {
+                    owner.handle_group_drag_completed(drag_group.clone(), *event, true);
+                }
+            }),
+        );
+        title_bar.set_visibility(Visibility::Visible);
         title_bar.set_attached("Grid", "row", 0i32);
         title_bar.set_attached("Grid", "column", 0i32);
         container.children().add(title_bar.clone());
+        container.children().add(empty_hint.clone());
 
         GroupRuntimeHost {
             container,
             title_bar,
             title,
+            empty_hint,
             pin_button,
+            float_button,
             close_button,
         }
+    }
+
+    fn private_icon(pin: bool) -> Rc<dyn UIElementExt> {
+        chrome_icon(
+            if pin {
+                ChromeIcon::Pin
+            } else {
+                ChromeIcon::Close
+            },
+            themed_brush(BrushStyle::Foreground),
+        )
+    }
+
+    fn float_icon() -> Rc<dyn UIElementExt> {
+        chrome_icon(ChromeIcon::Float, themed_brush(BrushStyle::Foreground))
     }
 
     fn apply_planned_group(&self, planned: &PlannedGroup) {
         replace_group_items(&planned.view, planned.tabs.clone());
         planned.view.set_tab_strip_position(planned.tab_position);
+        planned.view.set_compact(planned.compact_tabs);
         if let Some(selected) = planned.selected.as_ref() {
             if let Some(index) = planned.items.iter().position(|item| item == selected) {
                 planned.view.select_index(index);
             }
         }
         planned.host.container.children().clear();
+        planned.host.container.set_visibility(planned.visibility);
         planned
             .host
             .container
@@ -1381,11 +1874,69 @@ impl RuntimeRealization {
             .set_visibility(planned.pin_visibility);
         planned
             .host
+            .float_button
+            .set_visibility(planned.float_visibility);
+        planned
+            .host
             .close_button
             .set_visibility(planned.close_visibility);
+        planned
+            .host
+            .empty_hint
+            .set_visibility(if planned.items.is_empty() {
+                Visibility::Visible
+            } else {
+                Visibility::Collapsed
+            });
         planned.view.set_attached("Grid", "row", 1i32);
         planned.view.set_attached("Grid", "column", 0i32);
         planned.host.container.children().add(planned.view.clone());
+        planned
+            .host
+            .container
+            .children()
+            .add(planned.host.empty_hint.clone());
+        #[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
+        self.install_tab_context_menus(&planned.items);
+    }
+
+    #[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
+    fn install_tab_context_menus(&self, items: &[DockItemId]) {
+        let closeable = items
+            .iter()
+            .map(|item| {
+                self.registry
+                    .items
+                    .get(item)
+                    .is_some_and(|item| item.can_close_value())
+            })
+            .collect::<Vec<_>>();
+        for item in items {
+            let Some(wrapper) = self.registry.wrapper(item) else {
+                continue;
+            };
+            let Some(menu) = build_tab_context_menu(
+                self.owner.clone(),
+                item.clone(),
+                self.registry
+                    .items
+                    .get(item)
+                    .is_some_and(|item| item.can_close_value()),
+                self.registry
+                    .items
+                    .get(item)
+                    .is_some_and(|item| item.can_pin_value()),
+                self.registry
+                    .items
+                    .get(item)
+                    .is_some_and(|item| item.can_float_value()),
+                items,
+                &closeable,
+            ) else {
+                continue;
+            };
+            wrapper.set_context_menu(Some(menu));
+        }
     }
 
     fn apply_planned_node(
@@ -1429,7 +1980,7 @@ impl RuntimeRealization {
                             );
                             grid.children().add(element);
                             if index + 1 < children.len() {
-                                columns.push(GridLength::Fixed(6.0));
+                                columns.push(GridLength::Fixed(SPLITTER_HIT_SIZE));
                                 let splitter = planned.splitters[index].clone();
                                 splitter.set_orientation(crate::Orientation::Horizontal);
                                 splitter.set_attached("Grid", "column", (index * 2 + 1) as i32);
@@ -1465,7 +2016,7 @@ impl RuntimeRealization {
                                 .set_attached("Grid", "row", (index * 2) as i32);
                             grid.children().add(element);
                             if index + 1 < children.len() {
-                                rows.push(GridLength::Fixed(6.0));
+                                rows.push(GridLength::Fixed(SPLITTER_HIT_SIZE));
                                 let splitter = planned.splitters[index].clone();
                                 splitter.set_orientation(crate::Orientation::Vertical);
                                 splitter.set_attached("Grid", "row", (index * 2 + 1) as i32);
@@ -1613,12 +2164,52 @@ impl RuntimeRealization {
             .cloned()
     }
 
+    pub(crate) fn group_for_item(&self, item: &DockItemId) -> Option<(SnapshotGroupKey, usize)> {
+        self.group_items.iter().find_map(|(group, items)| {
+            items
+                .iter()
+                .position(|candidate| candidate == item)
+                .map(|index| (group.clone(), index))
+        })
+    }
+
+    pub(crate) fn group_items_for(&self, group: &SnapshotGroupKey) -> Option<Vec<DockItemId>> {
+        self.group_items.get(group).cloned()
+    }
+
+    pub(crate) fn can_close(&self, item: &DockItemId) -> bool {
+        self.registry
+            .items
+            .get(item)
+            .is_some_and(|item| item.can_close_value())
+    }
+
     pub(crate) fn all_closeable(&self, items: &[DockItemId]) -> bool {
         items.iter().all(|item| {
             self.registry
                 .items
                 .get(item)
                 .is_some_and(|item| item.can_close_value())
+        })
+    }
+
+    pub(crate) fn context_floating_bounds(&self, item: &DockItemId) -> Option<crate::Rect> {
+        let (group, _) = self.group_for_item(item)?;
+        self.context_group_floating_bounds(&group)
+    }
+
+    pub(crate) fn context_group_floating_bounds(
+        &self,
+        group: &SnapshotGroupKey,
+    ) -> Option<crate::Rect> {
+        let group = self.groups.get(group).cloned()?;
+        let group_node: Rc<dyn UIElementExt> = group;
+        let arranged = SurfaceRegistry::bounds_in_host_root(&group_node)?;
+        Some(crate::Rect {
+            x: 120.0,
+            y: 120.0,
+            width: arranged.width.max(super::metrics::FLOATING_MIN_WIDTH),
+            height: arranged.height.max(super::metrics::FLOATING_MIN_HEIGHT),
         })
     }
 
@@ -1686,8 +2277,12 @@ impl RuntimeRealization {
 
     fn clear_previews(&mut self) {
         self.main_surface.preview.clear();
+        self.main_surface.targets.clear();
+        self.main_surface.insertion_marker.clear();
         for runtime in &mut self.floating {
             runtime.surface.preview.clear();
+            runtime.surface.targets.clear();
+            runtime.surface.insertion_marker.clear();
         }
     }
 
@@ -1709,9 +2304,13 @@ impl RuntimeRealization {
         }
         self.main_surface.auto_hide.close();
         self.main_surface.preview.clear();
+        self.main_surface.targets.clear();
+        self.main_surface.insertion_marker.clear();
         for runtime in &mut self.floating {
             runtime.surface.auto_hide.close();
             runtime.surface.preview.clear();
+            runtime.surface.targets.clear();
+            runtime.surface.insertion_marker.clear();
             runtime.surface.surface.content_root().children().clear();
             detach_runtime_node(&runtime.node);
         }
@@ -1736,6 +2335,118 @@ impl RuntimeRealization {
             }
         }
     }
+}
+
+#[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
+fn build_tab_context_menu(
+    owner: Weak<crate::DockingControl>,
+    item: DockItemId,
+    can_close: bool,
+    can_pin: bool,
+    can_float: bool,
+    group_items: &[DockItemId],
+    closeable: &[bool],
+) -> Option<Rc<dyn MenuExt>> {
+    let menu = new_docking_menu()?;
+    let index = group_items
+        .iter()
+        .position(|candidate| candidate == &item)?;
+    add_tab_context_item(
+        &menu,
+        "Close",
+        can_close,
+        owner.clone(),
+        item.clone(),
+        crate::docking_control::DockTabContextAction::Close,
+    );
+    add_tab_context_item(
+        &menu,
+        "Close Others",
+        closeable
+            .iter()
+            .enumerate()
+            .any(|(candidate, closeable)| candidate != index && *closeable),
+        owner.clone(),
+        item.clone(),
+        crate::docking_control::DockTabContextAction::CloseOthers,
+    );
+    add_tab_context_item(
+        &menu,
+        "Close Tabs to Left",
+        closeable[..index].iter().any(|closeable| *closeable),
+        owner.clone(),
+        item.clone(),
+        crate::docking_control::DockTabContextAction::CloseTabsToLeft,
+    );
+    add_tab_context_item(
+        &menu,
+        "Close Tabs to Right",
+        closeable[index + 1..].iter().any(|closeable| *closeable),
+        owner.clone(),
+        item.clone(),
+        crate::docking_control::DockTabContextAction::CloseTabsToRight,
+    );
+    add_tab_context_item(
+        &menu,
+        "Float",
+        can_float,
+        owner.clone(),
+        item.clone(),
+        crate::docking_control::DockTabContextAction::Float,
+    );
+    add_tab_context_item(
+        &menu,
+        "Auto Hide / Pin",
+        can_pin,
+        owner,
+        item,
+        crate::docking_control::DockTabContextAction::Pin,
+    );
+    Some(menu)
+}
+
+#[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
+fn add_tab_context_item(
+    menu: &Rc<dyn MenuExt>,
+    text: &str,
+    enabled: bool,
+    owner: Weak<crate::DockingControl>,
+    item: DockItemId,
+    action: crate::docking_control::DockTabContextAction,
+) {
+    let menu_item = new_docking_menu_item();
+    menu_item.set_text(text);
+    menu_item.set_enabled(enabled);
+    menu_item.set_on_select(Box::new(move || {
+        if let Some(owner) = owner.upgrade() {
+            owner.handle_tab_context_action(item.clone(), action);
+        }
+    }));
+    // Keep the Rust menu-item wrapper alive for as long as the native NSMenu retains the
+    // NSMenuItem. AppKit does not retain an NSMenuItem target, so using the backend-only
+    // `add_item` helper here drops `MenuItemTarget` immediately after construction; the menu
+    // remains visible, but Close/Float actions become inert when selected.
+    menu.items().add(menu_item);
+}
+
+#[cfg(all(not(test), target_os = "macos"))]
+fn new_docking_menu() -> Option<Rc<dyn MenuExt>> {
+    Some(elwindui_backend_appkit::Menu::new() as Rc<dyn MenuExt>)
+}
+
+#[cfg(all(not(test), target_os = "windows"))]
+fn new_docking_menu() -> Option<Rc<dyn MenuExt>> {
+    Some(elwindui_backend_winui3::Menu::new() as Rc<dyn MenuExt>)
+}
+
+#[cfg(all(not(test), target_os = "macos"))]
+fn new_docking_menu_item() -> Rc<dyn MenuItemExt> {
+    elwindui_backend_appkit::MenuItem::new() as Rc<dyn MenuItemExt>
+}
+
+#[cfg(all(not(test), target_os = "windows"))]
+fn new_docking_menu_item() -> Rc<dyn MenuItemExt> {
+    elwindui_backend_winui3::MenuItem::new() as Rc<dyn MenuItemExt>
 }
 
 fn detach_runtime_node(node: &RuntimeNode) {
@@ -1783,7 +2494,7 @@ fn resolve_local_target(
     {
         return None;
     }
-    let outer_band = (surface_bounds.width.min(surface_bounds.height) * 0.10).clamp(24.0, 64.0);
+    let outer_band = ROOT_TARGET_SIZE;
     let outer = [
         (
             surface_local_point.x <= outer_band,
@@ -1808,6 +2519,7 @@ fn resolve_local_target(
             target,
             group: None,
             preview_rect: outer_preview(surface_bounds, target)?,
+            tab_insert_index: None,
         });
     }
 
@@ -1824,7 +2536,8 @@ fn resolve_local_target(
         }
     }
     let (group, bounds) = deepest?;
-    let group_band = (bounds.width.min(bounds.height) * 0.25).clamp(24.0, 64.0);
+    let group_band = (bounds.width.min(bounds.height) * GROUP_DOCK_BAND_FRACTION)
+        .clamp(GROUP_DOCK_BAND_MIN, GROUP_DOCK_BAND_MAX);
     let local = Point {
         x: surface_local_point.x - bounds.x,
         y: surface_local_point.y - bounds.y,
@@ -1850,6 +2563,7 @@ fn resolve_local_target(
         target,
         group: Some(group),
         preview_rect: group_preview(bounds, target)?,
+        tab_insert_index: None,
     })
 }
 

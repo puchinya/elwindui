@@ -18,6 +18,7 @@ pub mod ui {
     pub use elwindui_core::ui::*;
 }
 
+mod chrome_icon;
 mod custom_splitter;
 mod custom_tab_close_button;
 mod custom_tab_content_presenter;
@@ -27,6 +28,7 @@ mod custom_tab_view_item;
 mod support;
 mod types;
 
+pub use chrome_icon::{ChromeIcon, chrome_icon};
 pub use custom_splitter::{CustomSplitter, CustomSplitterExt};
 pub(crate) use custom_tab_close_button::{CustomTabCloseButton, CustomTabCloseButtonExt};
 pub(crate) use custom_tab_content_presenter::{

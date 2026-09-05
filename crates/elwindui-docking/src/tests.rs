@@ -8,19 +8,20 @@ use super::core::input::{
 };
 use super::core::layout::{GridLength, Visibility};
 use super::core::ui::{
-    ContentControlExt, Grid, GridExt, LayoutExt, Rectangle, TextBlockExt, UIElementExt,
-    layout_root, unmount_subtree,
+    ContentControlExt, Grid, GridExt, InvalidationKind, LayoutExt, Rectangle, RelayoutHost,
+    TextBlock, TextBlockExt, UIElementExt, layout_root, unmount_subtree,
 };
 use super::core::visual_tree::find_all;
+use super::docking_control::DockTabContextAction;
 use super::id::{DockGroupId, DockItemId};
 use super::model::{
-    DefaultDockDefinition, DockLayoutModel, InternalDockGroupKey, InternalDockPlacement, Node,
-    RootKind, SplitAddress, WeightedNode,
+    DefaultDockDefinition, DockLayoutModel, InternalDockGroupKey, InternalDockGroupPlacement,
+    InternalDockPlacement, Node, RootKind, SplitAddress, WeightedNode,
 };
 use super::placement::{DockLayoutError, DockPlacement, DockSide};
 use super::runtime::{
-    AutoHideOverlay, DockSurfaceView, DragSession, DragSourceGeometry, DropPreview,
-    FloatingHostFactory, FloatingHostRegistry, FloatingWindowHost, LatestOnlyQueue,
+    AutoHideOverlay, DockSurfaceView, DockTargetOverlay, DragSession, DragSourceGeometry,
+    DropPreview, FloatingHostFactory, FloatingHostRegistry, FloatingWindowHost, LatestOnlyQueue,
     ResolvedDockTarget, SurfaceRegistry, resolve_local_target_for_test,
 };
 use super::snapshot::{
@@ -77,6 +78,8 @@ struct FakeHostLog {
     bounds: Cell<Option<Rect>>,
     content: RefCell<Option<Rc<dyn UIElementExt>>>,
     close_handler: RefCell<Option<Rc<dyn Fn() -> bool>>>,
+    bounds_changed_handler: RefCell<Option<Rc<dyn Fn(Rect)>>>,
+    invoke_bounds_changed_on_set: Cell<bool>,
 }
 
 impl FakeHostLog {
@@ -87,12 +90,21 @@ impl FakeHostLog {
             bounds: Cell::new(None),
             content: RefCell::new(None),
             close_handler: RefCell::new(None),
+            bounds_changed_handler: RefCell::new(None),
+            invoke_bounds_changed_on_set: Cell::new(false),
         })
     }
 
     fn invoke_close(&self) -> bool {
         let handler = self.close_handler.borrow().clone();
         handler.map_or(false, |handler| handler())
+    }
+
+    fn invoke_bounds_changed(&self, bounds: Rect) {
+        let handler = self.bounds_changed_handler.borrow().clone();
+        if let Some(handler) = handler {
+            handler(bounds);
+        }
     }
 }
 
@@ -115,11 +127,18 @@ impl FloatingWindowHost for FakeHost {
     fn set_bounds(&self, bounds: Rect) {
         self.log.events.borrow_mut().push("set_bounds");
         self.log.bounds.set(Some(bounds));
+        if self.log.invoke_bounds_changed_on_set.get() {
+            self.log.invoke_bounds_changed(bounds);
+        }
     }
+
+    fn set_title(&self, _title: &str) {}
 
     fn show(&self) {
         self.log.events.borrow_mut().push("show");
     }
+
+    fn activate(&self) {}
 
     fn close(&self) {
         self.log.events.borrow_mut().push("close");
@@ -133,6 +152,34 @@ impl FloatingWindowHost for FakeHost {
             "clear_close_handler"
         });
         *self.log.close_handler.borrow_mut() = handler;
+    }
+
+    fn set_bounds_changed_handler(&self, handler: Option<Rc<dyn Fn(Rect)>>) {
+        *self.log.bounds_changed_handler.borrow_mut() = handler;
+    }
+}
+
+struct RecordingRelayoutHost {
+    requests: RefCell<Vec<InvalidationKind>>,
+    flushes: Cell<usize>,
+}
+
+impl RecordingRelayoutHost {
+    fn new() -> Rc<Self> {
+        Rc::new(Self {
+            requests: RefCell::new(Vec::new()),
+            flushes: Cell::new(0),
+        })
+    }
+}
+
+impl RelayoutHost for RecordingRelayoutHost {
+    fn request_relayout(&self, _dirty_group_id: u64, kind: InvalidationKind) {
+        self.requests.borrow_mut().push(kind);
+    }
+
+    fn flush_interactive_relayout(&self) {
+        self.flushes.set(self.flushes.get() + 1);
     }
 }
 
@@ -227,6 +274,7 @@ fn resolved_target(target: DockTarget, group: Option<SnapshotGroupKey>) -> Resol
             width: 100.0,
             height: 80.0,
         },
+        tab_insert_index: None,
     }
 }
 
@@ -258,6 +306,25 @@ fn default_model() -> DockLayoutModel {
     DockLayoutModel::from_default(DefaultDockDefinition::new(Some(root)))
 }
 
+fn snapshot_group_items(
+    snapshot: &DockLayoutSnapshot,
+    target: &SnapshotGroupKey,
+) -> Option<Vec<DockItemId>> {
+    fn find(node: &SnapshotNode, target: &SnapshotGroupKey) -> Option<Vec<DockItemId>> {
+        match node {
+            SnapshotNode::Group { group, items, .. } if group == target => Some(items.clone()),
+            SnapshotNode::Group { .. } => None,
+            SnapshotNode::Split { children, .. } => {
+                children.iter().find_map(|child| find(&child.node, target))
+            }
+        }
+    }
+    snapshot
+        .main_root
+        .as_ref()
+        .and_then(|root| find(root, target))
+}
+
 fn authored_item(
     id: &str,
     title: &str,
@@ -282,6 +349,122 @@ fn mounted_default_docking() -> Rc<DockingControl> {
     documents.set_children(vec![first, second]);
     let tools = DockGroup::new_group();
     tools.set_id(group("tools"));
+    tools.set_children(vec![third]);
+    let split = DockSplitPanel::new_panel();
+    split.set_children(vec![
+        documents as Rc<dyn UIElementExt>,
+        tools as Rc<dyn UIElementExt>,
+    ]);
+    let docking = DockingControl::__new_unmounted();
+    docking.set_content(split);
+    docking.mount(application_environment());
+    assert!(docking.apply_template());
+    docking
+}
+
+fn mounted_capability_docking(
+    first_can_float: bool,
+    second_can_float: bool,
+    first_can_dock: bool,
+    second_can_dock: bool,
+) -> Rc<DockingControl> {
+    let (first, _) = authored_item("first", "First", true);
+    first.set_can_float(first_can_float);
+    first.set_can_dock(first_can_dock);
+    let (second, _) = authored_item("second", "Second", true);
+    second.set_can_float(second_can_float);
+    second.set_can_dock(second_can_dock);
+    let (third, _) = authored_item("third", "Third", true);
+    let documents = DockGroup::new_group();
+    documents.set_id(group("documents"));
+    documents.set_children(vec![first, second]);
+    let tools = DockGroup::new_group();
+    tools.set_id(group("tools"));
+    tools.set_children(vec![third]);
+    let split = DockSplitPanel::new_panel();
+    split.set_children(vec![
+        documents as Rc<dyn UIElementExt>,
+        tools as Rc<dyn UIElementExt>,
+    ]);
+    let docking = DockingControl::__new_unmounted();
+    docking.set_content(split);
+    docking.mount(application_environment());
+    assert!(docking.apply_template());
+    docking
+}
+
+fn mounted_unequal_docking() -> Rc<DockingControl> {
+    let (source, _) = authored_item("source", "Source", true);
+    let (short, _) = authored_item("short", "A medium target header", true);
+    let (long, _) = authored_item("long", "A very long target header", true);
+    let (tail, _) = authored_item("tail", "C", true);
+    let documents = DockGroup::new_group();
+    documents.set_id(group("documents"));
+    documents.set_children(vec![source]);
+    let tools = DockGroup::new_group();
+    tools.set_id(group("tools"));
+    tools.set_children(vec![short, long, tail]);
+    let split = DockSplitPanel::new_panel();
+    split.set_children(vec![
+        documents as Rc<dyn UIElementExt>,
+        tools as Rc<dyn UIElementExt>,
+    ]);
+    let docking = DockingControl::__new_unmounted();
+    docking.set_content(split);
+    docking.mount(application_environment());
+    assert!(docking.apply_template());
+    docking
+}
+
+fn arranged_group_point(docking: &Rc<DockingControl>, group_id: &str) -> (Rc<CustomTabView>, Rect) {
+    let view = docking
+        .realization_for_test()
+        .and_then(|realization| {
+            realization
+                .borrow()
+                .group_for_test(&SnapshotGroupKey::Authored(group(group_id)))
+        })
+        .expect("authored group should have a retained view");
+    let node: Rc<dyn UIElementExt> = view.clone();
+    let bounds = SurfaceRegistry::bounds_in_host_root(&node).expect("group should be arranged");
+    (view, bounds)
+}
+
+fn group_title_start(docking: &Rc<DockingControl>, group_id: &str) -> Point {
+    let title_bar = docking
+        .realization_for_test()
+        .and_then(|realization| {
+            realization
+                .borrow()
+                .group_title_bar_for_test(&SnapshotGroupKey::Authored(group(group_id)))
+        })
+        .expect("group title bar should be retained");
+    let node: Rc<dyn UIElementExt> = title_bar.clone();
+    let bounds = SurfaceRegistry::bounds_in_host_root(&node).expect("title bar should be arranged");
+    Point {
+        x: bounds.x + bounds.width * 0.25,
+        y: bounds.y + bounds.height * 0.5,
+    }
+}
+
+fn first_tab_in_group(docking: &Rc<DockingControl>, group_id: &str) -> Rc<dyn UIElementExt> {
+    let (view, _) = arranged_group_point(docking, group_id);
+    find_all::<CustomTabViewItem>(view.as_ref())
+        .into_iter()
+        .next()
+        .expect("group should contain a retained tab item")
+}
+
+fn mounted_default_docking_with_keep_empty_tools() -> Rc<DockingControl> {
+    let (first, _) = authored_item("first", "First", true);
+    let (second, _) = authored_item("second", "Second", true);
+    let (third, _) = authored_item("third", "Third", true);
+    let documents = DockGroup::new_group();
+    documents.set_id(group("documents"));
+    documents.set_children(vec![first, second]);
+    let tools = DockGroup::new_group();
+    tools.set_id(group("tools"));
+    tools.set_show_when_empty(true);
     tools.set_children(vec![third]);
     let split = DockSplitPanel::new_panel();
     split.set_children(vec![
@@ -329,6 +512,7 @@ fn floating_auto_hide_snapshot_model() -> DockLayoutModel {
         auto_hide,
         closed: Vec::new(),
         next_generated_group_id: 101,
+        active_item: None,
     })
     .expect("valid floating auto-hide snapshot")
 }
@@ -453,6 +637,177 @@ fn close_reopen_keeps_return_group_and_index() {
 }
 
 #[test]
+fn activation_is_global_and_close_repairs_to_the_same_group() {
+    let model = default_model();
+    let active = model.with_item_activated(&item("second")).unwrap();
+    assert_eq!(active.active_item(), Some(item("second")));
+    assert!(!active.is_item_active(&item("first")));
+    assert!(active.is_item_active(&item("second")));
+
+    let closed = active.with_item_closed(&item("second")).unwrap();
+    assert_eq!(closed.active_item(), Some(item("first")));
+    assert!(!closed.is_item_active(&item("second")));
+    assert!(closed.is_item_active(&item("first")));
+}
+
+#[test]
+fn same_group_indexed_moves_insert_before_or_after_without_reversing_order() {
+    let model = default_model();
+    let moved_to_end = model
+        .with_item_moved_internal(
+            &item("first"),
+            InternalDockPlacement::Group {
+                group: InternalDockGroupKey::Authored(group("documents")),
+                index: Some(2),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        snapshot_group_items(
+            &moved_to_end.snapshot(),
+            &SnapshotGroupKey::Authored(group("documents")),
+        ),
+        Some(vec![item("second"), item("first")])
+    );
+
+    let moved_to_front = model
+        .with_item_moved_internal(
+            &item("second"),
+            InternalDockPlacement::Group {
+                group: InternalDockGroupKey::Authored(group("documents")),
+                index: Some(0),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        snapshot_group_items(
+            &moved_to_front.snapshot(),
+            &SnapshotGroupKey::Authored(group("documents")),
+        ),
+        Some(vec![item("second"), item("first")])
+    );
+}
+
+#[test]
+fn group_moves_keep_the_group_node_and_all_pages_together() {
+    let model = default_model();
+    let split = model
+        .with_group_moved_internal(
+            &InternalDockGroupKey::Authored(group("documents")),
+            InternalDockGroupPlacement::SplitGroup {
+                group: InternalDockGroupKey::Authored(group("tools")),
+                side: DockSide::Right,
+                weight: 1.0,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        split.snapshot().main_root,
+        Some(SnapshotNode::Split { ref children, .. })
+            if children.iter().any(|child| matches!(
+                child.node,
+                SnapshotNode::Group { group: SnapshotGroupKey::Authored(ref id), ref items, .. }
+                    if id == &group("documents") && items == &vec![item("first"), item("second")]
+            ))
+    ));
+
+    let merged = model
+        .with_group_moved_internal(
+            &InternalDockGroupKey::Authored(group("documents")),
+            InternalDockGroupPlacement::Center {
+                group: InternalDockGroupKey::Authored(group("tools")),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        snapshot_group_items(
+            &merged.snapshot(),
+            &SnapshotGroupKey::Authored(group("tools")),
+        ),
+        Some(vec![item("third"), item("first"), item("second")])
+    );
+}
+
+#[test]
+fn snapshot_v2_round_trips_active_item_and_rejects_v1() {
+    let model = default_model()
+        .with_item_activated(&item("second"))
+        .unwrap();
+    let snapshot = model.snapshot();
+    assert_eq!(snapshot.version(), DockLayoutSnapshot::VERSION);
+    assert_eq!(snapshot.active_item, Some(item("second")));
+    assert_eq!(
+        DockLayoutModel::from_snapshot(snapshot.clone())
+            .unwrap()
+            .snapshot(),
+        snapshot
+    );
+
+    let mut v1 = snapshot;
+    v1.version = 1;
+    assert!(matches!(
+        DockLayoutModel::from_snapshot(v1),
+        Err(DockLayoutError::UnknownSnapshotVersion { version: 1 })
+    ));
+}
+
+#[test]
+fn clear_layout_closes_everything_and_reset_restores_authored_default() {
+    let model = default_model()
+        .with_item_activated(&item("third"))
+        .unwrap()
+        .with_item_moved(
+            &item("first"),
+            DockPlacement::Floating {
+                bounds: Rect {
+                    x: 20.0,
+                    y: 30.0,
+                    width: 400.0,
+                    height: 300.0,
+                },
+            },
+        )
+        .unwrap();
+    let cleared = model.with_cleared_layout().unwrap();
+    assert_eq!(cleared.active_item(), None);
+    assert!(cleared.snapshot().main_root.is_none());
+    assert!(cleared.snapshot().floating_roots.is_empty());
+    assert!(cleared.snapshot().auto_hide.iter().all(Vec::is_empty));
+    assert!(cleared.is_item_closed(&item("first")));
+    assert!(cleared.is_item_closed(&item("second")));
+    assert!(cleared.is_item_closed(&item("third")));
+
+    let reopened = default_model()
+        .with_cleared_layout()
+        .unwrap()
+        .with_item_reopened(&item("first"))
+        .unwrap()
+        .with_item_reopened(&item("second"))
+        .unwrap()
+        .with_item_reopened(&item("third"))
+        .unwrap();
+    assert_eq!(
+        snapshot_group_items(
+            &reopened.snapshot(),
+            &SnapshotGroupKey::Authored(group("documents"))
+        ),
+        Some(vec![item("first"), item("second")])
+    );
+    assert_eq!(
+        snapshot_group_items(
+            &reopened.snapshot(),
+            &SnapshotGroupKey::Authored(group("tools"))
+        ),
+        Some(vec![item("third")])
+    );
+
+    let reset = cleared.with_reset().unwrap();
+    assert!(reset.snapshot().main_root.is_some());
+    assert!(reset.snapshot().closed.is_empty());
+    assert_eq!(reset.active_item(), None);
+}
+
+#[test]
 fn group_split_and_outer_edge_cover_all_four_sides() {
     let model = default_model();
     for side in DockSide::ALL {
@@ -475,7 +830,7 @@ fn group_split_and_outer_edge_cover_all_four_sides() {
             )
             .unwrap();
         assert!(edge.contains_item(&item("first")));
-        assert_eq!(edge.snapshot().version(), 1);
+        assert_eq!(edge.snapshot().version(), DockLayoutSnapshot::VERSION);
     }
 }
 
@@ -731,14 +1086,23 @@ fn private_root_edge_can_target_a_floating_root() {
     // Moving the source item out of the main root legitimately removes it from that root. The
     // assertion is about the private edge target: it must not add the item to a new main edge.
     assert_ne!(next.snapshot().main_root, main_before);
-    assert!(matches!(
-        next.snapshot().main_root,
-        Some(SnapshotNode::Split { ref children, .. })
-            if children.iter().all(|child| !matches!(
-                child.node,
-                SnapshotNode::Group { group: SnapshotGroupKey::Generated(_), .. }
-            ))
-    ));
+    fn has_generated(node: &SnapshotNode) -> bool {
+        match node {
+            SnapshotNode::Group { group, .. } => {
+                matches!(group, SnapshotGroupKey::Generated(_))
+            }
+            SnapshotNode::Split { children, .. } => {
+                children.iter().any(|child| has_generated(&child.node))
+            }
+        }
+    }
+    assert!(
+        !next
+            .snapshot()
+            .main_root
+            .as_ref()
+            .is_some_and(has_generated)
+    );
     assert!(matches!(
         next.snapshot().floating_roots[0].root,
         SnapshotNode::Split { .. }
@@ -1093,7 +1457,43 @@ fn preview_geometry_matches_all_nine_resolved_targets() {
         .expect("target should resolve");
         assert_eq!(target.target, target_kind);
         assert_eq!(target.preview_rect, expected_rect);
+        assert_eq!(target.tab_insert_index, None);
     }
+}
+
+#[test]
+fn root_and_group_target_visuals_are_retained_and_never_alias_highlights() {
+    let overlay = DockTargetOverlay::new();
+    assert_eq!(overlay.button_counts(), (5, 4));
+    overlay.show(DockTarget::DockLeft);
+    assert_eq!(overlay.selected_target(), Some(DockTarget::DockLeft));
+    let visual = overlay.visual();
+    super::core::ui::layout_root(
+        &visual,
+        Size {
+            width: 400.0,
+            height: 240.0,
+        },
+    );
+    let rects = overlay.button_rects();
+    let left = rects
+        .iter()
+        .find(|(target, _)| *target == DockTarget::DockLeft)
+        .and_then(|(_, rect)| *rect)
+        .expect("root left target should be arranged");
+    assert_eq!(
+        left,
+        Rect {
+            x: 16.0,
+            y: 100.0,
+            width: 40.0,
+            height: 40.0
+        }
+    );
+    overlay.show(DockTarget::SplitLeft);
+    assert_eq!(overlay.selected_target(), Some(DockTarget::SplitLeft));
+    overlay.clear();
+    assert_eq!(overlay.selected_target(), None);
 }
 
 #[test]
@@ -1108,6 +1508,7 @@ fn drop_preview_layer_arranges_the_rectangle_at_the_resolved_surface_rect() {
             width: 163.0,
             height: 119.0,
         },
+        tab_insert_index: None,
     };
     let mut preview = DropPreview::new();
     preview.show(&target);
@@ -1634,6 +2035,7 @@ fn floating_surface_runtime_keeps_its_chrome_across_reconciliation() {
             width: 105.0,
             height: 260.0,
         },
+        tab_insert_index: None,
     };
     realization.borrow_mut().show_preview_for_test(target);
     assert_eq!(realization.borrow().preview_for_test(&RootKind::Main), None);
@@ -1692,10 +2094,55 @@ fn floating_surface_renders_and_presents_its_own_auto_hide_entries() {
         realization.borrow().open_auto_hide_item_on(&RootKind::Main),
         None
     );
+    let (_, page_host) = realization
+        .borrow()
+        .auto_hide_parts_for_test(&RootKind::Floating(0))
+        .expect("floating auto-hide keeps its popup parts");
+    let page_host_node: Rc<dyn UIElementExt> = page_host;
+    let page_parent = hidden_page
+        .visual_parent()
+        .expect("auto-hide popup should own the page content");
+    assert!(Rc::ptr_eq(&page_parent, &page_host_node));
     assert!(
         hidden_page
             .visual_parent()
             .is_some_and(|parent| parent.visual_parent().is_some())
+    );
+}
+
+#[test]
+fn auto_hide_popup_uses_side_aware_opaque_panel_geometry() {
+    let wrapper = CustomTabViewItem::new_item();
+    let page = TextBlock::new();
+    page.set_text("Popup body");
+    wrapper.set_content(page.clone());
+    let mut overlay = AutoHideOverlay::new();
+    overlay.open(item("right"), DockSide::Right);
+    overlay.present_open_item(Some(wrapper.clone()));
+
+    let page_host: Rc<dyn UIElementExt> = overlay.page_host_for_test();
+    let page_parent = page
+        .visual_parent()
+        .expect("popup should present the inherited page content");
+    assert!(Rc::ptr_eq(&page_parent, &page_host));
+    assert!(wrapper.visual_children().is_empty());
+
+    let visual = overlay.visual();
+    layout_root(
+        &visual,
+        Size {
+            width: 900.0,
+            height: 600.0,
+        },
+    );
+    let pane = overlay.pane_for_test();
+    assert_eq!(pane.arranged_width(), Some(320.0));
+    assert_eq!(pane.arranged_height(), Some(240.0));
+    assert_eq!(pane.arranged_offset(), Some(Point { x: 552.0, y: 180.0 }));
+    let pin_button = overlay.pin_button_for_test();
+    assert_eq!(
+        pin_button.arranged_offset(),
+        Some(Point { x: 302.0, y: 0.0 })
     );
 }
 
@@ -1750,6 +2197,201 @@ fn floating_host_ids_follow_their_surfaces_when_an_earlier_root_is_removed() {
     assert_eq!(registry.root_index_for_host(ids[1]), Some(0));
     assert_eq!(hosts.borrow()[0].log.close_count.get(), 1);
     assert_eq!(hosts.borrow()[1].log.close_count.get(), 0);
+}
+
+#[test]
+fn floating_bounds_move_callback_updates_the_current_root_once() {
+    let docking = mounted_default_docking();
+    let hosts = Rc::new(RefCell::new(Vec::new()));
+    docking.install_floating_host_factory_for_test(individual_fake_factory(hosts.clone()));
+    docking.set_layout(floating_model_with_items(
+        &docking.layout(),
+        &["first"],
+        Rect {
+            x: 900.0,
+            y: 100.0,
+            width: 420.0,
+            height: 260.0,
+        },
+    ));
+    let host = hosts.borrow()[0].clone();
+    let changes = Rc::new(Cell::new(0));
+    let changes_for_callback = changes.clone();
+    docking.set_on_layout_change(Box::new(move |_| {
+        changes_for_callback.set(changes_for_callback.get() + 1);
+    }));
+    host.log.invoke_bounds_changed(Rect {
+        x: 940.0,
+        y: 130.0,
+        width: 420.0,
+        height: 260.0,
+    });
+
+    let bounds = docking.layout().snapshot().floating_roots[0].bounds;
+    assert_eq!(
+        (bounds.x, bounds.y, bounds.width, bounds.height),
+        (940.0, 130.0, 420.0, 260.0)
+    );
+    assert_eq!(changes.get(), 1);
+}
+
+#[test]
+fn floating_bounds_resize_callback_updates_the_current_root_once() {
+    let docking = mounted_default_docking();
+    let hosts = Rc::new(RefCell::new(Vec::new()));
+    docking.install_floating_host_factory_for_test(individual_fake_factory(hosts.clone()));
+    docking.set_layout(floating_model_with_items(
+        &docking.layout(),
+        &["first"],
+        Rect {
+            x: 900.0,
+            y: 100.0,
+            width: 420.0,
+            height: 260.0,
+        },
+    ));
+    let host = hosts.borrow()[0].clone();
+    let changes = Rc::new(Cell::new(0));
+    let changes_for_callback = changes.clone();
+    docking.set_on_layout_change(Box::new(move |_| {
+        changes_for_callback.set(changes_for_callback.get() + 1);
+    }));
+    host.log.invoke_bounds_changed(Rect {
+        x: 900.0,
+        y: 100.0,
+        width: 560.0,
+        height: 340.0,
+    });
+
+    let bounds = docking.layout().snapshot().floating_roots[0].bounds;
+    assert_eq!(
+        (bounds.x, bounds.y, bounds.width, bounds.height),
+        (900.0, 100.0, 560.0, 340.0)
+    );
+    assert_eq!(changes.get(), 1);
+}
+
+#[test]
+fn floating_bounds_callback_survives_earlier_root_reindex() {
+    let docking = mounted_default_docking();
+    let hosts = Rc::new(RefCell::new(Vec::new()));
+    docking.install_floating_host_factory_for_test(individual_fake_factory(hosts.clone()));
+    let first = docking
+        .layout()
+        .with_item_moved(
+            &item("first"),
+            DockPlacement::Floating {
+                bounds: Rect {
+                    x: 900.0,
+                    y: 100.0,
+                    width: 420.0,
+                    height: 260.0,
+                },
+            },
+        )
+        .unwrap();
+    let two_floating = first
+        .with_item_moved(
+            &item("second"),
+            DockPlacement::Floating {
+                bounds: Rect {
+                    x: 1400.0,
+                    y: 100.0,
+                    width: 420.0,
+                    height: 260.0,
+                },
+            },
+        )
+        .unwrap();
+    docking.set_layout(two_floating);
+    let surviving = hosts.borrow()[1].clone();
+    let remaining = docking.layout().with_item_closed(&item("first")).unwrap();
+    docking.set_layout(remaining);
+    let changes = Rc::new(Cell::new(0));
+    let changes_for_callback = changes.clone();
+    docking.set_on_layout_change(Box::new(move |_| {
+        changes_for_callback.set(changes_for_callback.get() + 1);
+    }));
+    surviving.log.invoke_bounds_changed(Rect {
+        x: 1510.0,
+        y: 180.0,
+        width: 500.0,
+        height: 300.0,
+    });
+
+    let bounds = docking.layout().snapshot().floating_roots[0].bounds;
+    assert_eq!(
+        (bounds.x, bounds.y, bounds.width, bounds.height),
+        (1510.0, 180.0, 500.0, 300.0)
+    );
+    assert_eq!(changes.get(), 1);
+}
+
+#[test]
+fn floating_bounds_equal_native_echo_does_not_publish_again() {
+    let docking = mounted_default_docking();
+    let hosts = Rc::new(RefCell::new(Vec::new()));
+    docking.install_floating_host_factory_for_test(individual_fake_factory(hosts.clone()));
+    docking.set_layout(floating_model_with_items(
+        &docking.layout(),
+        &["first"],
+        Rect {
+            x: 900.0,
+            y: 100.0,
+            width: 420.0,
+            height: 260.0,
+        },
+    ));
+    let host = hosts.borrow()[0].clone();
+    let changes = Rc::new(Cell::new(0));
+    let changes_for_callback = changes.clone();
+    docking.set_on_layout_change(Box::new(move |_| {
+        changes_for_callback.set(changes_for_callback.get() + 1);
+    }));
+    host.log.invoke_bounds_changed(Rect {
+        x: 900.0,
+        y: 100.0,
+        width: 420.0,
+        height: 260.0,
+    });
+
+    assert_eq!(changes.get(), 0);
+}
+
+#[test]
+fn floating_bounds_callback_reentrant_during_native_sync_does_not_panic() {
+    let docking = mounted_default_docking();
+    let hosts = Rc::new(RefCell::new(Vec::new()));
+    docking.install_floating_host_factory_for_test(individual_fake_factory(hosts.clone()));
+    docking.set_layout(floating_model_with_items(
+        &docking.layout(),
+        &["first"],
+        Rect {
+            x: 900.0,
+            y: 100.0,
+            width: 420.0,
+            height: 260.0,
+        },
+    ));
+    let host = hosts.borrow()[0].clone();
+    host.log.invoke_bounds_changed_on_set.set(true);
+
+    docking.set_layout(floating_model_with_items(
+        &docking.layout(),
+        &["first"],
+        Rect {
+            x: 940.0,
+            y: 130.0,
+            width: 560.0,
+            height: 340.0,
+        },
+    ));
+
+    let bounds = docking.layout().snapshot().floating_roots[0].bounds;
+    assert_eq!(
+        (bounds.x, bounds.y, bounds.width, bounds.height),
+        (940.0, 130.0, 560.0, 340.0)
+    );
 }
 
 #[test]
@@ -1892,10 +2534,10 @@ fn floating_native_close_uses_stable_host_identity_after_root_reindex() {
     docking.set_layout(remaining_after_first_close);
     assert_eq!(hosts.borrow()[0].log.close_count.get(), 1);
 
-    assert!(hosts.borrow()[1].log.invoke_close());
+    assert!(!hosts.borrow()[1].log.invoke_close());
     assert!(docking.layout().is_item_closed(&item("second")));
     assert_eq!(changes.get(), 1);
-    assert_eq!(hosts.borrow()[1].log.close_count.get(), 1);
+    assert_eq!(hosts.borrow()[1].log.close_count.get(), 0);
 }
 
 #[test]
@@ -1962,11 +2604,47 @@ fn floating_native_close_commits_all_items_once_and_closes_one_host() {
     }));
     let host = hosts.borrow()[0].clone();
 
-    assert!(host.log.invoke_close());
+    assert!(!host.log.invoke_close());
     assert!(docking.layout().is_item_closed(&item("first")));
     assert!(docking.layout().is_item_closed(&item("second")));
     assert_eq!(changes.get(), 1);
-    assert_eq!(host.log.close_count.get(), 1);
+    assert_eq!(host.log.close_count.get(), 0);
+    assert!(host.log.close_handler.borrow().is_none());
+    assert_eq!(
+        docking
+            .realization_for_test()
+            .unwrap()
+            .borrow()
+            .floating_host_count_for_test(),
+        0
+    );
+}
+
+#[test]
+fn floating_native_close_removes_empty_authored_root_and_closes_one_host() {
+    let docking = mounted_default_docking_with_keep_empty_tools();
+    let hosts = Rc::new(RefCell::new(Vec::new()));
+    docking.install_floating_host_factory_for_test(individual_fake_factory(hosts.clone()));
+    let floating = docking
+        .layout()
+        .with_item_moved(
+            &item("third"),
+            DockPlacement::Floating {
+                bounds: Rect {
+                    x: 900.0,
+                    y: 100.0,
+                    width: 420.0,
+                    height: 260.0,
+                },
+            },
+        )
+        .expect("item should float");
+    docking.set_layout(floating);
+    let host = hosts.borrow()[0].clone();
+
+    assert!(!host.log.invoke_close());
+    assert!(docking.layout().is_item_closed(&item("third")));
+    assert!(docking.layout().snapshot().floating_roots.is_empty());
     assert!(host.log.close_handler.borrow().is_none());
     assert_eq!(
         docking
@@ -2055,6 +2733,26 @@ fn drag_preview_commit_and_capture_loss_are_transactional() {
 }
 
 #[test]
+fn drag_commit_uses_the_resolved_center_insertion_index() {
+    let model = default_model();
+    let mut drag = test_drag(&model, item("first"));
+    let mut target = resolved_target(
+        DockTarget::Center,
+        Some(SnapshotGroupKey::Authored(group("tools"))),
+    );
+    target.tab_insert_index = Some(0);
+    drag.preview(&target, 1.0).unwrap();
+    let committed = drag.commit().expect("preview should commit once");
+    assert_eq!(
+        snapshot_group_items(
+            &committed.snapshot(),
+            &SnapshotGroupKey::Authored(group("tools")),
+        ),
+        Some(vec![item("first"), item("third")])
+    );
+}
+
+#[test]
 fn drag_target_conversion_covers_center_split_and_outer_edges() {
     let model = default_model();
     let group = Some(SnapshotGroupKey::Authored(group("tools")));
@@ -2134,9 +2832,9 @@ fn drag_preview_can_target_a_generated_runtime_group() {
 #[test]
 fn auto_hide_overlay_keeps_one_open_item_and_preview_clears() {
     let mut overlay = AutoHideOverlay::default();
-    assert_eq!(overlay.open(item("a")), None);
+    assert_eq!(overlay.open(item("a"), DockSide::Left), None);
     assert_eq!(overlay.current(), Some(&item("a")));
-    assert_eq!(overlay.open(item("b")), Some(item("a")));
+    assert_eq!(overlay.open(item("b"), DockSide::Right), Some(item("a")));
     assert_eq!(overlay.close(), Some(item("b")));
     assert_eq!(overlay.current(), None);
 
@@ -2193,6 +2891,7 @@ fn restored_generated_group_allocator_advances_past_restored_ids() {
         auto_hide: std::array::from_fn(|_| Vec::new()),
         closed: Vec::new(),
         next_generated_group_id: 1,
+        active_item: None,
     };
     let model = DockLayoutModel::from_snapshot(snapshot).unwrap();
     let moved = model
@@ -2328,6 +3027,74 @@ fn authored_docking_declaration_is_collapsed_and_runtime_wrapper_is_visible() {
             .and_then(std::rc::Weak::upgrade)
             .is_some_and(|parent| parent.as_any().is::<CustomTabViewItem>())
     );
+}
+
+#[test]
+fn authored_show_when_empty_group_keeps_chrome_and_non_interactive_drop_hint() {
+    let (dock_item, _) = authored_item("empty-item", "Empty item", true);
+    let dock_group = DockGroup::new_group();
+    dock_group.set_id(group("empty-group"));
+    dock_group.set_show_when_empty(true);
+    dock_group.set_children(vec![dock_item]);
+
+    let docking = DockingControl::__new_unmounted();
+    docking.set_content(dock_group);
+    docking.mount(application_environment());
+    assert!(docking.apply_template());
+
+    let cleared = docking
+        .layout()
+        .with_cleared_layout()
+        .expect("clear should preserve the authored default metadata");
+    docking.set_layout(cleared);
+
+    let hints = find_all::<TextBlock>(docking.as_ref())
+        .into_iter()
+        .filter(|hint| {
+            hint.as_any()
+                .downcast_ref::<TextBlock>()
+                .is_some_and(|hint| hint.text.borrow().as_str() == "Drop here")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(hints.len(), 1);
+    assert_eq!(hints[0].visibility(), Visibility::Visible);
+    assert!(!hints[0].hit_test_visible());
+    assert!(
+        find_all::<CustomTabView>(docking.as_ref())
+            .into_iter()
+            .any(|view| view.visibility() == Visibility::Visible)
+    );
+}
+
+#[test]
+fn tab_context_indexed_close_actions_commit_once_and_preserve_protected_items() {
+    let docking = mounted_default_docking();
+    let callback_count = Rc::new(Cell::new(0));
+    let callback_count_for_handler = callback_count.clone();
+    docking.set_on_layout_change(Box::new(move |_| {
+        callback_count_for_handler.set(callback_count_for_handler.get() + 1);
+    }));
+
+    docking.handle_tab_context_action(item("second"), DockTabContextAction::CloseOthers);
+    let after_others = docking.layout();
+    assert!(after_others.is_item_closed(&item("first")));
+    assert!(!after_others.is_item_closed(&item("third")));
+    assert!(!after_others.is_item_closed(&item("second")));
+    assert_eq!(callback_count.get(), 1);
+
+    let docking = mounted_default_docking();
+    docking.handle_tab_context_action(item("second"), DockTabContextAction::CloseTabsToLeft);
+    let after_left = docking.layout();
+    assert!(after_left.is_item_closed(&item("first")));
+    assert!(!after_left.is_item_closed(&item("second")));
+    assert!(!after_left.is_item_closed(&item("third")));
+
+    let docking = mounted_default_docking();
+    docking.handle_tab_context_action(item("first"), DockTabContextAction::CloseTabsToRight);
+    let after_right = docking.layout();
+    assert!(!after_right.is_item_closed(&item("first")));
+    assert!(after_right.is_item_closed(&item("second")));
+    assert!(!after_right.is_item_closed(&item("third")));
 }
 
 #[test]
@@ -2610,6 +3377,590 @@ fn actual_tab_pointer_path_commits_a_root_edge_drop_once() {
         docking.layout().snapshot().main_root,
         Some(SnapshotNode::Split { .. })
     ));
+}
+
+#[test]
+fn actual_group_pointer_path_commits_center_merge_once() {
+    let docking = mounted_default_docking();
+    let original = docking.layout();
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
+    let start = group_title_start(&docking, "documents");
+    let (_, target_bounds) = arranged_group_point(&docking, "tools");
+    let target = Point {
+        x: target_bounds.x + target_bounds.width * 0.5,
+        y: target_bounds.y + target_bounds.height * 0.5,
+    };
+    let changes = Rc::new(Cell::new(0));
+    let changes_for_callback = changes.clone();
+    docking.set_on_layout_change(Box::new(move |_| {
+        changes_for_callback.set(changes_for_callback.get() + 1);
+    }));
+    let full_reconciles = docking
+        .realization_for_test()
+        .unwrap()
+        .borrow()
+        .full_reconcile_count_for_test();
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Moved, target),
+    );
+    assert_eq!(docking.layout(), original);
+    assert_eq!(
+        docking
+            .realization_for_test()
+            .unwrap()
+            .borrow()
+            .preview_for_test(&RootKind::Main)
+            .map(|(kind, _)| kind),
+        Some(DockTarget::Center)
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Released(MouseButton::Left), target),
+    );
+
+    assert_eq!(changes.get(), 1);
+    assert_eq!(
+        docking
+            .realization_for_test()
+            .unwrap()
+            .borrow()
+            .full_reconcile_count_for_test(),
+        full_reconciles + 1
+    );
+    assert_eq!(
+        snapshot_group_items(
+            &docking.layout().snapshot(),
+            &SnapshotGroupKey::Authored(group("tools"))
+        ),
+        Some(vec![item("third"), item("first"), item("second")])
+    );
+    assert_eq!(
+        snapshot_group_items(
+            &docking.layout().snapshot(),
+            &SnapshotGroupKey::Authored(group("documents"))
+        ),
+        None
+    );
+}
+
+#[test]
+fn actual_group_pointer_path_commits_split_once() {
+    let docking = mounted_default_docking();
+    let original = docking.layout();
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
+    let start = group_title_start(&docking, "documents");
+    let (_, target_bounds) = arranged_group_point(&docking, "tools");
+    let target = Point {
+        x: target_bounds.x + target_bounds.width * 0.83,
+        y: target_bounds.y + target_bounds.height * 0.5,
+    };
+    let changes = Rc::new(Cell::new(0));
+    let changes_for_callback = changes.clone();
+    docking.set_on_layout_change(Box::new(move |_| {
+        changes_for_callback.set(changes_for_callback.get() + 1);
+    }));
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Moved, target),
+    );
+    let preview = docking
+        .realization_for_test()
+        .unwrap()
+        .borrow()
+        .preview_for_test(&RootKind::Main)
+        .map(|(kind, _)| kind);
+    assert_eq!(preview, Some(DockTarget::SplitRight));
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Released(MouseButton::Left), target),
+    );
+
+    assert_ne!(docking.layout(), original);
+    assert_eq!(changes.get(), 1);
+    assert!(matches!(
+        docking.layout().snapshot().main_root,
+        Some(SnapshotNode::Split { .. })
+    ));
+    assert_eq!(
+        snapshot_group_items(
+            &docking.layout().snapshot(),
+            &SnapshotGroupKey::Authored(group("documents"))
+        ),
+        Some(vec![item("first"), item("second")])
+    );
+}
+
+#[test]
+fn actual_group_pointer_path_commits_root_dock_once() {
+    let docking = mounted_default_docking();
+    let original = docking.layout();
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
+    let start = group_title_start(&docking, "tools");
+    let surface = docking
+        .realization_for_test()
+        .unwrap()
+        .borrow()
+        .surface_for_test(&RootKind::Main)
+        .unwrap();
+    let surface_node: Rc<dyn UIElementExt> = surface;
+    let surface_bounds = SurfaceRegistry::bounds_in_host_root(&surface_node).unwrap();
+    let target = Point {
+        x: surface_bounds.x + 2.0,
+        y: surface_bounds.y + surface_bounds.height * 0.5,
+    };
+    let changes = Rc::new(Cell::new(0));
+    let changes_for_callback = changes.clone();
+    docking.set_on_layout_change(Box::new(move |_| {
+        changes_for_callback.set(changes_for_callback.get() + 1);
+    }));
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Moved, target),
+    );
+    assert_eq!(
+        docking
+            .realization_for_test()
+            .unwrap()
+            .borrow()
+            .preview_for_test(&RootKind::Main)
+            .map(|(kind, _)| kind),
+        Some(DockTarget::DockLeft)
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Released(MouseButton::Left), target),
+    );
+
+    assert_ne!(docking.layout(), original);
+    assert_eq!(changes.get(), 1);
+    assert!(matches!(
+        docking.layout().snapshot().main_root,
+        Some(SnapshotNode::Split { .. })
+    ));
+}
+
+#[test]
+fn actual_group_pointer_path_floats_once() {
+    let docking = mounted_default_docking();
+    let hosts = Rc::new(RefCell::new(Vec::new()));
+    docking.install_floating_host_factory_for_test(individual_fake_factory(hosts.clone()));
+    let original = docking.layout();
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    root.set_coordinate_host(Some(Rc::new(OffsetCoordinateHost {
+        screen_origin: Point { x: 0.0, y: 0.0 },
+    })));
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
+    let start = group_title_start(&docking, "documents");
+    let release = Point {
+        x: 1000.0,
+        y: 700.0,
+    };
+    let changes = Rc::new(Cell::new(0));
+    let changes_for_callback = changes.clone();
+    docking.set_on_layout_change(Box::new(move |_| {
+        changes_for_callback.set(changes_for_callback.get() + 1);
+    }));
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Moved, release),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event_with_screen(
+            RawPointerEventKind::Released(MouseButton::Left),
+            release,
+            release,
+        ),
+    );
+
+    assert_ne!(docking.layout(), original);
+    assert_eq!(docking.layout().snapshot().floating_roots.len(), 1);
+    assert_eq!(changes.get(), 1);
+    assert_eq!(hosts.borrow().len(), 1);
+    let snapshot = docking.layout().snapshot();
+    let floating = snapshot
+        .floating_roots
+        .first()
+        .expect("the group should become one floating root");
+    assert!(matches!(
+        &floating.root,
+        SnapshotNode::Group {
+            group: group_key,
+            items,
+            ..
+        } if group_key == &SnapshotGroupKey::Authored(group("documents"))
+                && items == &vec![item("first"), item("second")]
+    ));
+}
+
+#[test]
+fn actual_group_pointer_path_respects_float_capability_and_rule() {
+    let docking = mounted_capability_docking(false, true, true, true);
+    let original = docking.layout();
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
+    let start = group_title_start(&docking, "documents");
+    let release = Point {
+        x: 1000.0,
+        y: 700.0,
+    };
+    let changes = Rc::new(Cell::new(0));
+    let changes_for_callback = changes.clone();
+    docking.set_on_layout_change(Box::new(move |_| {
+        changes_for_callback.set(changes_for_callback.get() + 1);
+    }));
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Moved, release),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event_with_screen(
+            RawPointerEventKind::Released(MouseButton::Left),
+            release,
+            release,
+        ),
+    );
+
+    assert_eq!(docking.layout(), original);
+    assert_eq!(changes.get(), 0);
+    assert_eq!(
+        docking
+            .realization_for_test()
+            .unwrap()
+            .borrow()
+            .floating_host_count_for_test(),
+        0
+    );
+}
+
+#[test]
+fn actual_group_pointer_path_respects_dock_capability_and_rule() {
+    let docking = mounted_capability_docking(true, true, false, true);
+    let original = docking.layout();
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
+    let start = group_title_start(&docking, "documents");
+    let (_, target_bounds) = arranged_group_point(&docking, "tools");
+    let target = Point {
+        x: target_bounds.x + target_bounds.width * 0.5,
+        y: target_bounds.y + target_bounds.height * 0.5,
+    };
+    let changes = Rc::new(Cell::new(0));
+    let changes_for_callback = changes.clone();
+    docking.set_on_layout_change(Box::new(move |_| {
+        changes_for_callback.set(changes_for_callback.get() + 1);
+    }));
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Moved, target),
+    );
+    assert_eq!(
+        docking
+            .realization_for_test()
+            .unwrap()
+            .borrow()
+            .preview_for_test(&RootKind::Main),
+        None
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Released(MouseButton::Left), target),
+    );
+
+    assert_eq!(docking.layout(), original);
+    assert_eq!(changes.get(), 0);
+}
+
+#[test]
+fn actual_marker_boundary_matches_resolved_index_and_committed_order() {
+    let docking = mounted_unequal_docking();
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
+    let (target_view, target_bounds) = arranged_group_point(&docking, "tools");
+    let first_boundary = target_view
+        .tab_insertion_boundary(0)
+        .expect("first insertion boundary should be retained");
+    let midpoint_boundary = target_view
+        .tab_insertion_boundary(1)
+        .expect("midpoint insertion boundary should be retained");
+    let second_boundary = target_view
+        .tab_insertion_boundary(2)
+        .expect("second insertion boundary should be retained");
+    assert_ne!(
+        midpoint_boundary.x - first_boundary.x,
+        second_boundary.x - midpoint_boundary.x,
+        "the marker proof must use unequal arranged header widths"
+    );
+    let target = Point {
+        x: target_bounds.x + midpoint_boundary.x + 1.0,
+        y: target_bounds.y + midpoint_boundary.y + midpoint_boundary.height * 0.5,
+    };
+    let source = first_tab_in_group(&docking, "documents");
+    let source_node: Rc<dyn UIElementExt> = source;
+    let source_bounds = SurfaceRegistry::bounds_in_host_root(&source_node).unwrap();
+    let start = Point {
+        x: source_bounds.x + source_bounds.width * 0.5,
+        y: source_bounds.y + source_bounds.height * 0.5,
+    };
+    let original = docking.layout();
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Moved, target),
+    );
+
+    let realization = docking.realization_for_test().unwrap();
+    let resolved = realization
+        .borrow()
+        .target_for_drop(None, target)
+        .expect("center target should resolve from the actual pointer path");
+    assert_eq!(resolved.target, DockTarget::Center);
+    assert_eq!(resolved.tab_insert_index, Some(1));
+    let marker = realization
+        .borrow()
+        .insertion_marker_for_test(&RootKind::Main)
+        .expect("the retained insertion marker should be visible");
+    assert_eq!(
+        marker,
+        Rect {
+            x: target_bounds.x + midpoint_boundary.x,
+            y: target_bounds.y + midpoint_boundary.y,
+            width: 2.0,
+            height: midpoint_boundary.height,
+        }
+    );
+
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Released(MouseButton::Left), target),
+    );
+    assert_ne!(docking.layout(), original);
+    assert_eq!(
+        snapshot_group_items(
+            &docking.layout().snapshot(),
+            &SnapshotGroupKey::Authored(group("tools"))
+        ),
+        Some(vec![
+            item("short"),
+            item("source"),
+            item("long"),
+            item("tail")
+        ])
+    );
+}
+
+#[test]
+fn actual_item_pointer_path_respects_float_capability() {
+    let docking = mounted_capability_docking(false, true, true, true);
+    let original = docking.layout();
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    root.set_coordinate_host(Some(Rc::new(OffsetCoordinateHost {
+        screen_origin: Point { x: 0.0, y: 0.0 },
+    })));
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
+    let source = first_tab_in_group(&docking, "documents");
+    let source_node: Rc<dyn UIElementExt> = source;
+    let bounds = SurfaceRegistry::bounds_in_host_root(&source_node).unwrap();
+    let start = Point {
+        x: bounds.x + bounds.width * 0.5,
+        y: bounds.y + bounds.height * 0.5,
+    };
+    let release = Point {
+        x: 1000.0,
+        y: 700.0,
+    };
+    let changes = Rc::new(Cell::new(0));
+    let changes_for_callback = changes.clone();
+    docking.set_on_layout_change(Box::new(move |_| {
+        changes_for_callback.set(changes_for_callback.get() + 1);
+    }));
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Moved, release),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event_with_screen(
+            RawPointerEventKind::Released(MouseButton::Left),
+            release,
+            release,
+        ),
+    );
+
+    assert_eq!(docking.layout(), original);
+    assert_eq!(changes.get(), 0);
+    assert_eq!(docking.layout().snapshot().floating_roots.len(), 0);
+}
+
+#[test]
+fn actual_item_pointer_path_respects_dock_capability() {
+    let docking = mounted_capability_docking(true, true, false, true);
+    let original = docking.layout();
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
+    let source = first_tab_in_group(&docking, "documents");
+    let source_node: Rc<dyn UIElementExt> = source;
+    let bounds = SurfaceRegistry::bounds_in_host_root(&source_node).unwrap();
+    let start = Point {
+        x: bounds.x + bounds.width * 0.5,
+        y: bounds.y + bounds.height * 0.5,
+    };
+    let release = Point { x: 2.0, y: 210.0 };
+    let changes = Rc::new(Cell::new(0));
+    let changes_for_callback = changes.clone();
+    docking.set_on_layout_change(Box::new(move |_| {
+        changes_for_callback.set(changes_for_callback.get() + 1);
+    }));
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Moved, release),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Released(MouseButton::Left), release),
+    );
+
+    assert_eq!(docking.layout(), original);
+    assert_eq!(changes.get(), 0);
 }
 
 #[test]
@@ -3123,7 +4474,7 @@ fn screen_drop_on_floating_surface_uses_only_that_surface_group_for_center() {
 
 #[test]
 fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_cancel() {
-    let docking = mounted_three_pane_docking();
+    let (docking, probes) = mounted_three_pane_probed_docking();
     let original = docking.layout();
     let root: Rc<dyn UIElementExt> = docking.clone();
     layout_root(
@@ -3161,6 +4512,16 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
         .realization_for_test()
         .expect("mounted docking has a realization");
     let full_reconciles_before_drag = realization.borrow().full_reconcile_count_for_test();
+    let relayout = RecordingRelayoutHost::new();
+    root.as_ui_element()
+        .set_invalidate_host(Some(relayout.clone() as Rc<dyn RelayoutHost>));
+    for probe in &probes {
+        probe.reset_measure_count();
+    }
+    let measure_counts_before_drag = probes
+        .iter()
+        .map(|probe| probe.measure_count())
+        .collect::<Vec<_>>();
     let dispatcher = PointerDispatcher::new();
     let focus = FocusTracker::new();
     dispatcher.handle(
@@ -3168,14 +4529,14 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
         &focus,
         pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
     );
-    for step in 1..=20 {
+    for step in 1..=30 {
         dispatcher.handle(
             &root,
             &focus,
             pointer_event(
                 RawPointerEventKind::Moved,
                 Point {
-                    x: start.x + 36.0 * step as f32 / 20.0,
+                    x: start.x + 36.0 * step as f32 / 30.0,
                     y: start.y,
                 },
             ),
@@ -3184,11 +4545,27 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
     assert!(realization.borrow().active_splitter_for_test());
     assert_eq!(docking.layout(), original);
     assert_ne!(*grid.columns.borrow(), original_tracks);
+    assert_eq!(relayout.flushes.get(), 30);
+    assert_eq!(relayout.requests.borrow().len(), 30);
+    assert!(
+        relayout
+            .requests
+            .borrow()
+            .iter()
+            .all(|kind| *kind == InvalidationKind::Arrange)
+    );
+    assert!(
+        probes
+            .iter()
+            .zip(measure_counts_before_drag.iter())
+            .all(|(probe, before)| probe.measure_count() == *before)
+    );
     assert_eq!(
         realization.borrow().full_reconcile_count_for_test(),
         full_reconciles_before_drag,
         "splitter preview must not reconcile the Dock runtime"
     );
+    let preview_tracks = grid.columns.borrow().clone();
     dispatcher.handle(
         &root,
         &focus,
@@ -3202,6 +4579,11 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
     );
     assert!(!realization.borrow().active_splitter_for_test());
     assert_ne!(docking.layout(), original);
+    assert_eq!(
+        *grid.columns.borrow(),
+        preview_tracks,
+        "splitter release must not jump away from the previewed tracks"
+    );
     assert_eq!(changes.get(), 1);
     assert_eq!(
         realization.borrow().full_reconcile_count_for_test(),

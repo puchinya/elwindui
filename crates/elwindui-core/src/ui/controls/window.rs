@@ -96,5 +96,13 @@ pub trait Window {
 /// never `Rc<GeneratedWindow>`, which would keep the native window alive from the inside out.
 #[doc(hidden)]
 pub trait WindowLifecycleHost {
+    /// Installs or clears the generated Window's native close-request bridge.
     fn set_close_request_handler(&self, handler: Option<Rc<dyn Fn() -> bool>>);
+
+    /// Installs a private bridge for native move/resize updates. Backends that do not expose
+    /// native bounds notifications may retain the default no-op implementation.
+    fn set_bounds_changed_handler(&self, _handler: Option<Rc<dyn Fn(crate::base::Rect)>>) {}
+
+    /// Activates the native window without changing its bounds.
+    fn activate(&self) {}
 }

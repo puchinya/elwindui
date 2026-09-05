@@ -1,19 +1,46 @@
 use crate::core::base::Point;
+use crate::core::input::PointerEventArgs;
 use crate::core::ui::Grid;
 use crate::core::ui::{ContentControlExt, UIElementExt};
-use crate::model::{DefaultDockDefinition, DockLayoutModel, Node};
+use crate::model::{DefaultDockDefinition, DockLayoutModel, InternalDockGroupPlacement, Node};
 use crate::model::{RootKind, SplitAddress};
 use crate::runtime::DragSourceGeometry;
 use crate::runtime::FloatingHostId;
+use crate::runtime::metrics::{FLOATING_MIN_HEIGHT, FLOATING_MIN_WIDTH};
 use crate::snapshot::SnapshotGroupKey;
-use crate::{DockItemId, DockLayoutError};
+use crate::{DockItemId, DockLayoutError, DockPlacement};
 use elwindui_custom_controls::{
     SplitterDragCompletedEventArgs, SplitterDragDeltaEventArgs, SplitterDragStartedEventArgs,
     TabDragCompletedEventArgs, TabDragMovedEventArgs, TabDragStartedEventArgs,
 };
+#[cfg(all(target_os = "macos", not(test)))]
+use std::cell::Cell;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
+#[cfg(all(target_os = "macos", not(test)))]
+use std::future::poll_fn;
 use std::rc::{Rc, Weak};
+#[cfg(all(target_os = "macos", not(test)))]
+use std::task::Poll;
+
+#[cfg(all(target_os = "macos", not(test)))]
+async fn wait_for_next_ui_turn() {
+    let started = Rc::new(Cell::new(false));
+    let started_on_poll = Rc::clone(&started);
+    poll_fn(move |context| {
+        if started_on_poll.replace(true) {
+            Poll::Ready(())
+        } else {
+            let waker = context.waker().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                waker.wake();
+            });
+            Poll::Pending
+        }
+    })
+    .await;
+}
 
 /// Private marker used to distinguish the visible retained runtime host from the collapsed
 /// authored declaration presenter. It is exported only as a hidden macro support type.
@@ -32,6 +59,28 @@ pub struct DockingControl {
     #[prop(default = crate::dock_layout_model::empty())]
     #[two_way]
     layout: crate::dock_layout_model,
+    #[environment(primary)]
+    primary_brush: crate::core::theme::BrushStyle,
+    #[environment(secondary)]
+    secondary_brush: crate::core::theme::BrushStyle,
+    #[environment(tertiary)]
+    tertiary_brush: crate::core::theme::BrushStyle,
+    #[environment(foreground)]
+    foreground_brush: crate::core::theme::BrushStyle,
+    #[environment(background)]
+    background_brush: crate::core::theme::BrushStyle,
+    #[environment(window_background)]
+    window_background_brush: crate::core::theme::BrushStyle,
+    #[environment(tint)]
+    tint_brush: crate::core::theme::BrushStyle,
+    #[environment(selection)]
+    selection_brush: crate::core::theme::BrushStyle,
+    #[environment(separator)]
+    separator_brush: crate::core::theme::BrushStyle,
+    #[environment(placeholder)]
+    placeholder_brush: crate::core::theme::BrushStyle,
+    #[environment(link)]
+    link_brush: crate::core::theme::BrushStyle,
     #[state(default = None)]
     layout_change_callback: Option<Rc<dyn Fn(DockLayoutModel)>>,
     #[state(default = None)]
@@ -55,8 +104,22 @@ pub struct DockingControl {
         on_unmount {
             this.dispose_runtime();
         }
-        on_update(layout) {
+        on_update(
+            layout,
+            primary_brush,
+            secondary_brush,
+            tertiary_brush,
+            foreground_brush,
+            background_brush,
+            window_background_brush,
+            tint_brush,
+            selection_brush,
+            separator_brush,
+            placeholder_brush,
+            link_brush
+        ) {
             this.handle_layout_update(layout);
+            this.refresh_runtime_theme();
         }
         Grid {
             rows: [crate::core::layout::GridLength::Star(1.0)]
@@ -71,6 +134,32 @@ pub struct DockingControl {
     }),
 }
 
+fn invalidate_visual_subtree(node: &Rc<dyn UIElementExt>) {
+    node.invalidate_measure();
+    for child in node.visual_children() {
+        invalidate_visual_subtree(&child);
+    }
+}
+
+fn visual_tree_root(node: &Rc<dyn UIElementExt>) -> Rc<dyn UIElementExt> {
+    let mut root = Rc::clone(node);
+    while let Some(parent) = root.visual_parent() {
+        root = parent;
+    }
+    root
+}
+
+#[cfg_attr(test, allow(dead_code))]
+#[derive(Clone, Copy)]
+pub(crate) enum DockTabContextAction {
+    Close,
+    CloseOthers,
+    CloseTabsToLeft,
+    CloseTabsToRight,
+    Float,
+    Pin,
+}
+
 #[elwindui::component]
 impl DockingControl {}
 
@@ -83,6 +172,18 @@ impl DockingControl {
     /// Installs the callback raised once for each committed user layout change.
     pub fn set_on_layout_change(&self, callback: Box<dyn Fn(DockLayoutModel)>) {
         self.set_layout_change_callback(Some(Rc::from(callback)));
+    }
+
+    /// Publishes the current realized layout after a containing view has finished wiring its
+    /// two-way binding. The authored default can be realized while the parent is still being
+    /// constructed, before that binding callback exists.
+    #[doc(hidden)]
+    pub fn synchronize_layout_source(&self) {
+        let model = self.attach_current_default(self.layout());
+        self.set_layout(model.clone());
+        if let Some(callback) = self.layout_change_callback() {
+            callback(model);
+        }
     }
 
     /// Removes the user layout-change callback.
@@ -121,9 +222,10 @@ impl DockingControl {
             .unwrap_or_else(|| {
                 panic!("DockingControl content must be DockGroup or DockSplitPanel")
             });
-        let model = self
-            .layout()
-            .attach_default(DefaultDockDefinition::new(Some(root)));
+        let model = self.layout().attach_default(
+            DefaultDockDefinition::new(Some(root))
+                .with_keep_empty_groups(authored_keep_empty_groups(content.as_ref())),
+        );
         let realization = Rc::new(RefCell::new(
             crate::runtime::RuntimeRealization::from_authored(
                 content.as_ref(),
@@ -161,6 +263,12 @@ impl DockingControl {
 
     pub(crate) fn authored_content(&self) -> Option<Rc<dyn UIElementExt>> {
         self.__content_opt()
+    }
+
+    fn refresh_runtime_theme(&self) {
+        if let Some(realization) = self.runtime_realization() {
+            realization.borrow().refresh_theme();
+        }
     }
 
     fn apply_model(
@@ -223,6 +331,7 @@ impl DockingControl {
         if let Some(callback) = self.layout_change_callback() {
             callback(model);
         }
+        self.invalidate_containing_visual_subtree();
     }
 
     fn commit_source_model(&self, model: DockLayoutModel) -> Result<(), DockLayoutError> {
@@ -253,7 +362,10 @@ impl DockingControl {
                 panic!("DockingControl content must be DockGroup or DockSplitPanel")
             });
         let current = self.layout();
-        let model = current.attach_default(DefaultDockDefinition::new(Some(root)));
+        let model = current.attach_default(
+            DefaultDockDefinition::new(Some(root))
+                .with_keep_empty_groups(authored_keep_empty_groups(content.as_ref())),
+        );
         let runtime_before = realization.clone();
         let host_sync = {
             let mut realization = runtime_before.borrow_mut();
@@ -303,6 +415,21 @@ impl DockingControl {
             }
         }
         self.set_applying_source(false);
+        // A DockingControl layout update can replace several native descendants while its
+        // containing view remains otherwise unchanged. In AppKit the containing layout group is
+        // also responsible for repainting sibling native controls (for example, a toolbar above
+        // the docking surface). Invalidate that containing subtree so those siblings get their
+        // native presentation refreshed even when their measured sizes did not change.
+        self.invalidate_containing_visual_subtree();
+    }
+
+    fn invalidate_containing_visual_subtree(&self) {
+        if let Some(parent) = self.visual_parent() {
+            let root = visual_tree_root(&parent);
+            invalidate_visual_subtree(&root);
+        } else {
+            self.invalidate_measure();
+        }
     }
 
     fn attach_current_default(&self, model: DockLayoutModel) -> DockLayoutModel {
@@ -315,7 +442,10 @@ impl DockingControl {
             .unwrap_or_else(|| {
                 panic!("DockingControl content must be DockGroup or DockSplitPanel")
             });
-        model.attach_default(DefaultDockDefinition::new(Some(root)))
+        model.attach_default(
+            DefaultDockDefinition::new(Some(root))
+                .with_keep_empty_groups(authored_keep_empty_groups(content.as_ref())),
+        )
     }
 
     fn on_registration_changed(&self) {
@@ -417,6 +547,103 @@ impl DockingControl {
         self.handle_group_close(group, index);
     }
 
+    pub(crate) fn handle_group_float(&self, group: SnapshotGroupKey) {
+        let Some(realization) = self.runtime_realization() else {
+            return;
+        };
+        if !realization.borrow().can_float_group(&group) {
+            return;
+        }
+        let Some(bounds) = realization.borrow().context_group_floating_bounds(&group) else {
+            return;
+        };
+        let model = self.layout();
+        let Ok(next) = model.with_group_moved_internal(
+            &group.clone().into(),
+            InternalDockGroupPlacement::Floating { bounds },
+        ) else {
+            return;
+        };
+        if next != model {
+            let _ = self.commit_user_model(next);
+        }
+    }
+
+    pub(crate) fn handle_tab_context_action(&self, item: DockItemId, action: DockTabContextAction) {
+        let Some(realization) = self.runtime_realization() else {
+            return;
+        };
+        let Some((group, index)) = realization.borrow().group_for_item(&item) else {
+            return;
+        };
+        let items = realization
+            .borrow()
+            .group_items_for(&group)
+            .unwrap_or_default();
+        match action {
+            DockTabContextAction::Close => {
+                if realization.borrow().can_close(&item) {
+                    self.close_context_items(vec![item]);
+                }
+            }
+            DockTabContextAction::CloseOthers => {
+                let targets = items
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(candidate, _)| *candidate != index)
+                    .map(|(_, item)| item)
+                    .collect();
+                self.close_context_items(targets);
+            }
+            DockTabContextAction::CloseTabsToLeft => {
+                self.close_context_items(items.into_iter().take(index).collect());
+            }
+            DockTabContextAction::CloseTabsToRight => {
+                self.close_context_items(items.into_iter().skip(index + 1).collect());
+            }
+            DockTabContextAction::Float => {
+                if !realization.borrow().can_float(&item) {
+                    return;
+                }
+                let Some(bounds) = realization.borrow().context_floating_bounds(&item) else {
+                    return;
+                };
+                let model = self.layout();
+                let Ok(next) = model.with_item_moved(&item, DockPlacement::Floating { bounds })
+                else {
+                    return;
+                };
+                if next != model {
+                    let _ = self.commit_user_model(next);
+                }
+            }
+            DockTabContextAction::Pin => self.commit_pin_gesture(item),
+        }
+    }
+
+    fn close_context_items(&self, items: Vec<DockItemId>) {
+        let Some(realization) = self.runtime_realization() else {
+            return;
+        };
+        let closeable = items
+            .into_iter()
+            .filter(|item| realization.borrow().can_close(item))
+            .collect::<Vec<_>>();
+        if closeable.is_empty() {
+            return;
+        }
+        let mut next = self.layout();
+        for item in closeable {
+            let Ok(updated) = next.with_item_closed(&item) else {
+                return;
+            };
+            next = updated;
+        }
+        if next != self.layout() {
+            let _ = self.commit_user_model(next);
+        }
+    }
+
     pub(crate) fn handle_auto_hide_open(&self, root: RootKind, item: DockItemId) {
         let current = self.layout();
         let Ok(next) = current.with_item_activated(&item) else {
@@ -441,6 +668,100 @@ impl DockingControl {
             return;
         };
         self.commit_pin_gesture(item);
+    }
+
+    pub(crate) fn handle_group_drag_started(
+        &self,
+        group: SnapshotGroupKey,
+        event: PointerEventArgs,
+    ) {
+        if let Some(realization) = self.runtime_realization() {
+            let _ =
+                realization
+                    .borrow_mut()
+                    .begin_group_drag(&self.layout(), group, event.position);
+        }
+    }
+
+    pub(crate) fn handle_group_drag_moved(&self, group: SnapshotGroupKey, event: PointerEventArgs) {
+        if let Some(realization) = self.runtime_realization() {
+            let mut realization = realization.borrow_mut();
+            if !realization.can_dock_group(&group) {
+                realization.clear_drag_target();
+                return;
+            }
+            let Some(target) = realization.target_for_drop(event.screen_position, event.position)
+            else {
+                realization.clear_drag_target();
+                return;
+            };
+            let _ = realization.preview_drag(&target, 1.0);
+        }
+    }
+
+    pub(crate) fn handle_group_drag_completed(
+        &self,
+        group: SnapshotGroupKey,
+        event: PointerEventArgs,
+        canceled: bool,
+    ) {
+        let Some(realization) = self.runtime_realization() else {
+            return;
+        };
+        if canceled {
+            realization.borrow_mut().finish_drag(false);
+            return;
+        }
+
+        let target = realization
+            .borrow()
+            .target_for_drop(event.screen_position, event.position);
+        if let Some(target) = target {
+            if !realization.borrow().can_dock_group(&group) {
+                realization.borrow_mut().finish_drag(false);
+                return;
+            }
+            let next = {
+                let mut current = realization.borrow_mut();
+                let _ = current.preview_drag(&target, 1.0);
+                current.finish_drag(true)
+            };
+            if let Some(next) = next
+                && next != self.layout()
+            {
+                let _ = self.commit_user_model(next);
+            }
+            return;
+        }
+
+        let Some(screen) = event.screen_position else {
+            realization.borrow_mut().finish_drag(false);
+            return;
+        };
+        let group = realization.borrow().drag_group();
+        let geometry = realization.borrow().drag_source_geometry();
+        let (Some(group), Some(geometry)) = (group, geometry) else {
+            realization.borrow_mut().finish_drag(false);
+            return;
+        };
+        if !realization.borrow().can_float_group(&group) {
+            realization.borrow_mut().finish_drag(false);
+            return;
+        }
+        let Some(bounds) = floating_bounds(&geometry, screen) else {
+            realization.borrow_mut().finish_drag(false);
+            return;
+        };
+        let next = {
+            let mut current = realization.borrow_mut();
+            let Ok(next) = current.group_floating_candidate(bounds) else {
+                current.finish_drag(false);
+                return;
+            };
+            next
+        };
+        let result = self.commit_user_model(next);
+        realization.borrow_mut().finish_drag(result.is_ok());
     }
 
     pub(crate) fn handle_tab_drag_started(
@@ -585,35 +906,125 @@ impl DockingControl {
         }
     }
 
-    pub(crate) fn handle_floating_close(&self, floating_index: usize) -> bool {
-        let items = self.layout().floating_item_ids(floating_index);
+    pub(crate) fn handle_floating_close_host(&self, host_id: FloatingHostId) -> bool {
         let Some(realization) = self.runtime_realization() else {
             return false;
         };
-        if !realization.borrow().all_closeable(&items) {
+        let Some(index) = realization.borrow().floating_root_index(host_id) else {
+            return false;
+        };
+        let current = self.layout();
+        let items = current.floating_item_ids(index);
+        if items.is_empty() || !realization.borrow().all_closeable(&items) {
             return true;
         }
-        let mut next = self.layout();
+        if !realization
+            .borrow_mut()
+            .begin_native_floating_close(host_id)
+        {
+            return true;
+        }
+
+        let mut next = current.clone();
         for item in &items {
             let Ok(updated) = next.with_item_closed(item) else {
-                return false;
+                realization
+                    .borrow_mut()
+                    .cancel_native_floating_close(host_id);
+                return true;
             };
             next = updated;
         }
-        if next != self.layout() {
-            let _ = self.commit_user_model(next);
+        let Ok(next_without_empty_host) = next.without_empty_floating_root(index) else {
+            realization
+                .borrow_mut()
+                .cancel_native_floating_close(host_id);
+            return true;
+        };
+        next = next_without_empty_host;
+        if next == current {
+            realization
+                .borrow_mut()
+                .cancel_native_floating_close(host_id);
+            return false;
         }
-        true
+
+        #[cfg(all(target_os = "macos", not(test)))]
+        {
+            let weak_owner = crate::runtime::weak_self_from_visual_owner(self);
+            elwindui::core::task::spawn_local(async move {
+                // AppKit's close delegate calls this handler before the native window starts its
+                // close transaction. Let that callback return first; otherwise the main host can
+                // reconcile its sibling native islands while AppKit still owns the closing host.
+                wait_for_next_ui_turn().await;
+                let Some(owner) = weak_owner.upgrade() else {
+                    return;
+                };
+                if owner.layout() != current {
+                    owner.runtime_realization().map(|realization| {
+                        realization
+                            .borrow_mut()
+                            .cancel_native_floating_close(host_id)
+                    });
+                    return;
+                }
+                match owner.commit_user_model(next) {
+                    Ok(())
+                        if owner.runtime_realization().is_some_and(|realization| {
+                            realization.borrow().floating_root_index(host_id).is_none()
+                        }) => {}
+                    Ok(()) | Err(_) => {
+                        if let Some(realization) = owner.runtime_realization() {
+                            realization
+                                .borrow_mut()
+                                .cancel_native_floating_close(host_id);
+                        }
+                    }
+                }
+            });
+            false
+        }
+
+        #[cfg(any(not(target_os = "macos"), test))]
+        match self.commit_user_model(next) {
+            Ok(()) if realization.borrow().floating_root_index(host_id).is_none() => false,
+            Ok(()) | Err(_) => {
+                realization
+                    .borrow_mut()
+                    .cancel_native_floating_close(host_id);
+                true
+            }
+        }
     }
 
-    pub(crate) fn handle_floating_close_host(&self, host_id: FloatingHostId) -> bool {
-        let Some(index) = self
-            .runtime_realization()
-            .and_then(|realization| realization.borrow().floating_root_index(host_id))
-        else {
-            return false;
+    pub(crate) fn handle_floating_bounds_changed(
+        &self,
+        host_id: FloatingHostId,
+        bounds: crate::Rect,
+    ) {
+        let Some(realization) = self.runtime_realization() else {
+            return;
         };
-        self.handle_floating_close(index)
+        let index = {
+            // AppKit may synchronously report the bounds while a native host sync still holds
+            // the realization mutably. That callback is part of the sync transaction and must not
+            // recursively borrow the same RefCell.
+            let Ok(realization) = realization.try_borrow() else {
+                return;
+            };
+            if realization.native_bounds_syncing() {
+                return;
+            }
+            realization.floating_root_index(host_id)
+        };
+        let Some(index) = index else { return };
+        let model = self.layout();
+        let Ok(next) = model.with_floating_bounds(index, bounds) else {
+            return;
+        };
+        if next != model {
+            let _ = self.commit_user_model(next);
+        }
     }
 
     pub(crate) fn handle_pin_gesture(&self, root: RootKind) {
@@ -666,8 +1077,8 @@ fn floating_bounds(source: &DragSourceGeometry, screen_position: Point) -> Optio
     {
         return None;
     }
-    let width = source.source_bounds_host.width.max(160.0);
-    let height = source.source_bounds_host.height.max(120.0);
+    let width = source.source_bounds_host.width.max(FLOATING_MIN_WIDTH);
+    let height = source.source_bounds_host.height.max(FLOATING_MIN_HEIGHT);
     let bounds = crate::Rect {
         x: screen_position.x - source.pointer_offset.x,
         y: screen_position.y - source.pointer_offset.y,
@@ -678,8 +1089,8 @@ fn floating_bounds(source: &DragSourceGeometry, screen_position: Point) -> Optio
         && bounds.y.is_finite()
         && bounds.width.is_finite()
         && bounds.height.is_finite()
-        && bounds.width >= 160.0
-        && bounds.height >= 120.0)
+        && bounds.width >= FLOATING_MIN_WIDTH
+        && bounds.height >= FLOATING_MIN_HEIGHT)
         .then_some(bounds)
 }
 
@@ -748,6 +1159,23 @@ fn authored_node(
         });
     }
     None
+}
+
+fn authored_keep_empty_groups(element: &dyn UIElementExt) -> BTreeSet<crate::DockGroupId> {
+    fn collect(element: &dyn UIElementExt, groups: &mut BTreeSet<crate::DockGroupId>) {
+        if let Some(group) = element.as_any().downcast_ref::<crate::DockGroup>() {
+            if group.show_when_empty_value() {
+                groups.insert(group.id_value());
+            }
+        } else if let Some(split) = element.as_any().downcast_ref::<crate::DockSplitPanel>() {
+            for child in split.authored_children() {
+                collect(child.as_ref(), groups);
+            }
+        }
+    }
+    let mut groups = BTreeSet::new();
+    collect(element, &mut groups);
+    groups
 }
 
 fn apply_authored_templates(element: &dyn UIElementExt) {

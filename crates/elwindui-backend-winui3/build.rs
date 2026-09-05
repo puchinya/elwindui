@@ -196,6 +196,7 @@ fn main() {
         "Microsoft.UI.Content.ContentIslandEnvironment".to_owned(),
         "Microsoft.UI.WindowId".to_owned(),
         "Microsoft.UI.Windowing.AppWindow".to_owned(),
+        "Microsoft.UI.Windowing.AppWindowChangedEventArgs".to_owned(),
         "Microsoft.UI.Windowing.AppWindowPresenter".to_owned(),
         "Microsoft.UI.Windowing.AppWindowClosingEventArgs".to_owned(),
         "Microsoft.UI.Windowing.DisplayArea".to_owned(),

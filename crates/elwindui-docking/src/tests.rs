@@ -4479,6 +4479,7 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
         full_reconciles_before_drag,
         "splitter preview must not reconcile the Dock runtime"
     );
+    let preview_tracks = grid.columns.borrow().clone();
     dispatcher.handle(
         &root,
         &focus,
@@ -4492,6 +4493,11 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
     );
     assert!(!realization.borrow().active_splitter_for_test());
     assert_ne!(docking.layout(), original);
+    assert_eq!(
+        *grid.columns.borrow(),
+        preview_tracks,
+        "splitter release must not jump away from the previewed tracks"
+    );
     assert_eq!(changes.get(), 1);
     assert_eq!(
         realization.borrow().full_reconcile_count_for_test(),

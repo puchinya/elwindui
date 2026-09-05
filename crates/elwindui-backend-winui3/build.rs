@@ -78,10 +78,20 @@ fn main() {
             args.push(path.to_string_lossy().into_owned());
         }
     }
-    if let Some(resources) = find_package_winmd(
-        "microsoft.windowsappsdk",
+    // Windows App SDK 1.8 ships this contract in the separate Foundation package. Keep the
+    // legacy runtime-package lookup as a fallback for older package layouts, but prefer the
+    // metadata directory used by the current package so the exact IResourceManager filter below
+    // is available to the no-deps projection.
+    if let Some(resources) = find_package_metadata_winmd(
+        "microsoft.windowsappsdk.foundation",
         "Microsoft.Windows.ApplicationModel.Resources.winmd",
-    ) {
+    )
+    .or_else(|| {
+        find_package_winmd(
+            "microsoft.windowsappsdk",
+            "Microsoft.Windows.ApplicationModel.Resources.winmd",
+        )
+    }) {
         args.push("--in".to_owned());
         args.push(resources.to_string_lossy().into_owned());
     }
@@ -150,6 +160,8 @@ fn main() {
         "--reference".to_owned(),
         "windows,skip-root,Windows.Foundation.Collections.CollectionChange".to_owned(),
         "--reference".to_owned(),
+        "windows,skip-root,Windows.Foundation.Collections.IPropertySet".to_owned(),
+        "--reference".to_owned(),
         "windows_collections,flat,Windows.Foundation.Collections".to_owned(),
         "--reference".to_owned(),
         "windows,skip-root,Windows.Foundation.Numerics.Quaternion".to_owned(),
@@ -176,14 +188,23 @@ fn main() {
         "Microsoft.Windows.ApplicationModel.Resources.IResourceManager".to_owned(),
         "Microsoft.UI.Input.InputKeyboardSource".to_owned(),
         "Microsoft.UI.Input.InputObject".to_owned(),
+        "Microsoft.UI.Input.PointerPoint".to_owned(),
+        "Microsoft.UI.Input.PointerPointProperties".to_owned(),
+        "Microsoft.UI.Input.PointerUpdateKind".to_owned(),
         "Microsoft.UI.Content.ContentCoordinateConverter".to_owned(),
         "Microsoft.UI.Content.ContentIsland".to_owned(),
+        "Microsoft.UI.Content.ContentIslandEnvironment".to_owned(),
+        "Microsoft.UI.WindowId".to_owned(),
         "Microsoft.UI.Windowing.AppWindow".to_owned(),
+        "Microsoft.UI.Windowing.AppWindowPresenter".to_owned(),
+        "Microsoft.UI.Windowing.AppWindowClosingEventArgs".to_owned(),
         "Microsoft.UI.Windowing.DisplayArea".to_owned(),
         "Microsoft.UI.Windowing.DisplayAreaFallback".to_owned(),
         "Microsoft.UI.Windowing.OverlappedPresenter".to_owned(),
         "Microsoft.UI.Xaml.DependencyObject".to_owned(),
+        "Microsoft.UI.Xaml.DependencyProperty".to_owned(),
         "Microsoft.UI.Xaml.ElementTheme".to_owned(),
+        "Microsoft.UI.Xaml.FocusState".to_owned(),
         "Microsoft.UI.Xaml.FrameworkElement".to_owned(),
         "Microsoft.UI.Xaml.RoutedEventHandler".to_owned(),
         "Microsoft.UI.Xaml.SizeChangedEventHandler".to_owned(),
@@ -192,6 +213,7 @@ fn main() {
         "Microsoft.UI.Xaml.HorizontalAlignment".to_owned(),
         "Microsoft.UI.Xaml.VerticalAlignment".to_owned(),
         "Microsoft.UI.Xaml.UIElement".to_owned(),
+        "Microsoft.UI.Xaml.XamlRoot".to_owned(),
         "Microsoft.UI.Xaml.Window".to_owned(),
         "Microsoft.UI.Xaml.WindowEventArgs".to_owned(),
         "Microsoft.UI.Xaml.Controls.UserControl".to_owned(),
@@ -216,7 +238,10 @@ fn main() {
         "Microsoft.UI.Xaml.Controls.ImageIcon".to_owned(),
         "Microsoft.UI.Xaml.Media.ImageSource".to_owned(),
         "Microsoft.UI.Xaml.Media.Imaging.BitmapImage".to_owned(),
+        "Microsoft.UI.Xaml.Media.Imaging.BitmapSource".to_owned(),
+        "Microsoft.UI.Xaml.Media.GeneralTransform".to_owned(),
         "Microsoft.UI.Xaml.Controls.Primitives.Popup".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Primitives.FlyoutBase".to_owned(),
         "Microsoft.UI.Xaml.Input.ContextRequestedEventArgs".to_owned(),
         "Microsoft.UI.Xaml.Input.RightTappedEventHandler".to_owned(),
         "Microsoft.UI.Xaml.Input.RightTappedRoutedEventArgs".to_owned(),
@@ -265,6 +290,7 @@ fn main() {
         "Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventHandler".to_owned(),
         "Microsoft.UI.Xaml.Controls.ListViewItem".to_owned(),
         "Microsoft.UI.Xaml.Controls.Panel".to_owned(),
+        "Microsoft.UI.Xaml.Controls.IPanelStatics".to_owned(),
         "Microsoft.UI.Xaml.Controls.UIElementCollection".to_owned(),
         "Microsoft.UI.Xaml.Controls.SelectionChangedEventArgs".to_owned(),
         "Microsoft.UI.Xaml.Controls.SelectionChangedEventHandler".to_owned(),
@@ -285,6 +311,7 @@ fn main() {
         "Microsoft.UI.Xaml.Input.KeyEventHandler".to_owned(),
         "Microsoft.UI.Xaml.Input.KeyboardAccelerator".to_owned(),
         "Microsoft.UI.Xaml.Input.PointerEventHandler".to_owned(),
+        "Microsoft.UI.Xaml.Input.Pointer".to_owned(),
         "Microsoft.UI.Xaml.Input.PointerRoutedEventArgs".to_owned(),
         "Microsoft.UI.Xaml.Media.Brush".to_owned(),
         "Microsoft.UI.Xaml.Media.LoadedImageSurface".to_owned(),
@@ -517,19 +544,27 @@ fn copy_win2d_runtime(out_dir: &str) {
     println!("cargo:rerun-if-changed={}", source.display());
 
     let mut bootstrap_candidates = Vec::new();
-    let package = root.join("microsoft.windowsappsdk");
-    for version in std::fs::read_dir(package)
-        .expect("read Windows App SDK NuGet package")
-        .flatten()
-    {
-        let dll = version
-            .path()
-            .join("runtimes")
-            .join(arch)
-            .join("native")
-            .join("Microsoft.WindowsAppRuntime.Bootstrap.dll");
-        if dll.is_file() {
-            bootstrap_candidates.push(dll);
+    // Current Windows App SDK packages place the native bootstrap DLL in the Foundation package;
+    // older layouts placed it directly in Microsoft.WindowsAppSDK. Search both package owners so
+    // the local runtime copy follows the metadata package pair actually restored above.
+    for package_name in [
+        "microsoft.windowsappsdk",
+        "microsoft.windowsappsdk.foundation",
+    ] {
+        let package = root.join(package_name);
+        let Ok(versions) = std::fs::read_dir(&package) else {
+            continue;
+        };
+        for version in versions.flatten() {
+            let dll = version
+                .path()
+                .join("runtimes")
+                .join(arch)
+                .join("native")
+                .join("Microsoft.WindowsAppRuntime.Bootstrap.dll");
+            if dll.is_file() {
+                bootstrap_candidates.push(dll);
+            }
         }
     }
     bootstrap_candidates.sort();

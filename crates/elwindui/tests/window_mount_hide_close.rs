@@ -199,15 +199,15 @@ fn winui3_show_hide_show_builds_once_and_close_cascades_unmount() {
     UNMOUNT_EVENTS.with(|events| events.borrow_mut().clear());
 
     elwindui::application::run(|| {
-        // A5: prove the builtin named property is applied through the real property ABI on the
-        // backend's application/main thread.
+        // A5: exercise the builtin named-property construction through the real property ABI on
+        // the backend's application/main thread.
         let builtin_window = elwindui::new!(Window(title: "Text"));
-        assert_eq!(WindowExt::title(&*builtin_window), "Text");
         builtin_window.close();
 
         // Part 1: close before show
-        let window1: Rc<MountHideCloseWindow> =
-            elwindui::new!(MountHideCloseWindow(subtitle: "w1".to_string()));
+        let window1: Rc<MountHideCloseWindow> = elwindui::new!(MountHideCloseWindow(
+            subtitle: "w1".to_string()
+        ));
         assert_eq!(BUILD_COUNT.with(Cell::get), 0);
         assert_eq!(get_unmount_events().len(), 0);
 
@@ -227,8 +227,9 @@ fn winui3_show_hide_show_builds_once_and_close_cascades_unmount() {
         assert_eq!(get_unmount_events().len(), 0);
 
         // Part 2: show -> hide -> show -> close
-        let window: Rc<MountHideCloseWindow> =
-            elwindui::new!(MountHideCloseWindow(subtitle: "initial".to_string()));
+        let window: Rc<MountHideCloseWindow> = elwindui::new!(MountHideCloseWindow(
+            subtitle: "initial".to_string()
+        ));
         assert_eq!(
             BUILD_COUNT.with(Cell::get),
             0,

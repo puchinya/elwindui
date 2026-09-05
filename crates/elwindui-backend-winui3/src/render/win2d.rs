@@ -643,6 +643,7 @@ pub(crate) fn xaml_text_alignment(
 #[cfg(test)]
 mod win2d_bitmap_tests {
     use super::*;
+    use crate::bindings::Microsoft::Graphics::Canvas::CanvasDevice;
     use elwindui_core::graphics::{AlphaMode, BackendImageHandle, BitmapImage};
     use std::sync::Arc;
 

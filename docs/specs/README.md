@@ -10,6 +10,8 @@
 | Color、Brush、Path、Image、VectorImage | [`graphics_spec.md`](graphics_spec.md) |
 | Theme、Environment、token、appearance | [`theme_environment_spec.md`](theme_environment_spec.md) |
 | ControlTemplate selection、authoring、content presentation | [`control_template_spec.md`](control_template_spec.md) |
+| Reusable custom controls used by Docking | [`custom_controls_spec.md`](custom_controls_spec.md) |
+| DockingControl, layout model, placement, and snapshots | [`docking_spec.md`](docking_spec.md) |
 | File dialog等のOS service | [`platform_spec.md`](platform_spec.md) |
 | `#[class]` の公開contract | [`macro_class_spec.md`](macro_class_spec.md) |
 

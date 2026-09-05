@@ -13,6 +13,8 @@
 | IconSource value、IconElement realization、native/custom icon paths | [`runtime/icon_source_design.md`](runtime/icon_source_design.md) |
 | Theme / Environment runtime | [`runtime/theme_environment_design.md`](runtime/theme_environment_design.md) |
 | ControlTemplate selection、ownership、ContentPresenter | [`runtime/control_template_design.md`](runtime/control_template_design.md) |
+| CustomTabView / CustomSplitter runtime | [`runtime/custom_controls_design.md`](runtime/custom_controls_design.md) |
+| Docking realization, ownership, and transactions | [`runtime/docking_design.md`](runtime/docking_design.md) |
 | Context Menu、PopupSurface、ContextRequest | [`runtime/popup_context_menu_design.md`](runtime/popup_context_menu_design.md) |
 | ViewFactory（汎用 deferred View factory） | [`runtime/view_factory_design.md`](runtime/view_factory_design.md) |
 | Component state、ViewModel、async | [`runtime/state_management_design.md`](runtime/state_management_design.md) |

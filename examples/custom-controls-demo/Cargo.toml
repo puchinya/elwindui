@@ -1,0 +1,12 @@
+[package]
+name = "custom-controls-demo"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+elwindui = { path = "../../crates/elwindui", features = ["backend-appkit", "backend-winui3"] }
+elwindui-custom-controls = { path = "../../crates/elwindui-custom-controls" }
+
+[lints]
+workspace = true

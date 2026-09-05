@@ -325,6 +325,47 @@ templated parentのlogical contentを自身の単一Visual childとして表示�
 logical parentは書き換えず、`set_content`による置換へ追従する。通常のapplication treeで独立した
 content containerとして使うためのControlではない。
 
+### `elwindui_custom_controls::CustomTabView`
+
+Docking が共有する backend-neutral な templated tab control。通常の
+application control と同じ `#[component]` authoring で提供され、標準の
+`Grid`/`HorizontalLayout`/`TextBlock`/`IconSourceElement`/`Rectangle` を
+使う authored `template: template_view! { ... }` が既定の visual subtree になる。native
+`TabView` の wrapper でも、`RenderContext` で chrome を直接描く control
+でもない。
+
+| Name | Type | Binding | Description |
+|---|---|---|---|
+| `children` | ordered `CustomTabViewItem` list | OneWay/content | tab item の順序付き collection |
+| `selected_index` | `usize` | TwoWay | 選択中の index。source setter は echo せず、範囲外値は保持する |
+| `tab_strip_position` | `TabStripPosition` | OneWay | `Top` / `Bottom`、既定値 `Top` |
+| `close_button_presentation` | `CloseButtonPresentation` | OneWay | `Always` / `OnPointerOver` / `Never`、既定値 `Always` |
+
+`CustomTabViewItem` は `ContentControl` を継承し、`header: String`、
+`icon: Option<IconSource>`、`closable: bool`（既定値 `true`）を持つ。
+`content` は inherited single-content slot のままである。icon は
+`IconSourceElement` で realization し、user image を recolor しない。
+item の authored visual subtree は tab header（header `TextBlock`、optional
+icon、fixed close slot、selected indicator）であり、logical `content` は
+private `CustomTabContentPresenter` が安定した visual owner として表示する。
+
+`CustomTabView` の close request は通知だけであり、item を自動削除しない。
+`closable == false` または `Never` の close target は request を発生させない。
+tab drag は左ボタンの移動が 4 logical px に達してから開始し、開始・移動・
+完了 payload は root-relative position と optional `screen_position` を保持する。
+Core cancellation は active drag を `canceled = true` で一度だけ完了させる。
+
+### `elwindui_custom_controls::CustomSplitter`
+
+`Control` を継承する templated splitter。`template: template_view! { ... }` の
+orientation-dependent `Rectangle` が hit-test surface と six-pixel natural
+thickness を提供する。`orientation` は既定値 `Horizontal` で、水平時は
+X 軸/幅 6、垂直時は Y 軸/高さ 6 を使う。
+drag delta は incremental/cumulative logical pixels を持ち、press 中に
+orientation を変更しても axis は変わらない。release と cancellation は
+`SplitterDragCompletedEventArgs` を一度だけ発行し、後者は `canceled = true`
+となる。
+
 ---
 
 ## 4. Window

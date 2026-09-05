@@ -4,6 +4,7 @@
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::Primitives::Popup;
 use crate::bindings::Microsoft::UI::Xaml::FrameworkElement;
+use crate::ffi::{UiCallbackRegistryOwner, invoke_ui_event_callback};
 use crate::host::TreeHostPanel;
 use elwindui_core::ui::popup::{
     PopupDismissPolicy, PopupFocusPolicy, PopupHost, PopupRequest, PopupSurfaceHandle,
@@ -23,6 +24,7 @@ pub(crate) struct InnerPopupSurface {
     // `InnerPopupSurface::content` (same shape) for the full rationale.
     content: RefCell<Option<Rc<dyn UIElementExt>>>,
     is_open: RefCell<bool>,
+    callback_owner: UiCallbackRegistryOwner,
 }
 
 impl InnerPopupSurface {
@@ -72,6 +74,7 @@ impl InnerPopupSurface {
             content_host,
             content: RefCell::new(None),
             is_open: RefCell::new(true),
+            callback_owner: UiCallbackRegistryOwner::default(),
         });
 
         // 7. Register the native `Closed` handler. On registration failure, `surface` is dropped
@@ -81,12 +84,16 @@ impl InnerPopupSurface {
         // this fires (native light-dismiss included), so this path must not call `SetIsOpen(false)`
         // again — see `on_native_closed`'s own doc comment.
         let weak_surface = Rc::downgrade(&surface);
+        let callback_id = surface.callback_owner.register_event(Rc::new(move || {
+            let surface: Option<Rc<Self>> = weak_surface.upgrade();
+            if let Some(s) = surface {
+                s.on_native_closed();
+            }
+        }));
         surface
             .popup
             .Closed(&windows::Foundation::EventHandler::new(move |_, _| {
-                if let Some(s) = weak_surface.upgrade() {
-                    s.on_native_closed();
-                }
+                invoke_ui_event_callback(callback_id);
                 Ok(())
             }))
             .ok()?;
@@ -208,6 +215,7 @@ impl InnerPopupSurface {
 impl Drop for InnerPopupSurface {
     fn drop(&mut self) {
         self.close();
+        self.callback_owner.clear();
     }
 }
 

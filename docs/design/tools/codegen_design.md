@@ -338,3 +338,7 @@ Language Serverはparserとvalidationを再利用できるが、document lifecyc
 - validationをruntime panicへ遅延させない。
 - subscriptionのownerとdrop境界を生成時に明示する。
 - LSP、preview、hot reloadの状態をcompiler内部へ持ち込まない。
+- Real `#[component]` generation must not emit statically unreachable statements.
+  Generated control flow must satisfy normal rustc warning-free compilation
+  without lint suppression; rust-analyzer-only shadow bodies remain analysis-only
+  and may use diverging placeholders.

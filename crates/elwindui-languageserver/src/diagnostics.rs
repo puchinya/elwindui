@@ -64,11 +64,9 @@ pub fn diagnostics_for_source(src: &str) -> Vec<Diagnostic> {
 }
 
 fn syn_error_diagnostic(e: &syn::Error) -> Diagnostic {
-    let start = e.span().start();
+    let (line, character) = syn_error_start(e);
     // `proc_macro2::LineColumn` is 1-indexed for `line`, 0-indexed for `column` already — LSP
     // wants both 0-indexed.
-    let line = (start.line as u32).saturating_sub(1);
-    let character = start.column as u32;
     Diagnostic {
         range: Range {
             start: Position { line, character },
@@ -79,6 +77,20 @@ fn syn_error_diagnostic(e: &syn::Error) -> Diagnostic {
         message: e.to_string(),
         ..Default::default()
     }
+}
+
+#[cfg(not(rust_analyzer))]
+fn syn_error_start(e: &syn::Error) -> (u32, u32) {
+    let start = e.span().start();
+    ((start.line as u32).saturating_sub(1), start.column as u32)
+}
+
+// rust-analyzer's proc-macro shadow for proc_macro2::Span intentionally exposes only the
+// token/name-resolution surface, not source locations.  Keep the analysis-only path compiling;
+// real rustc retains the precise span location above.
+#[cfg(rust_analyzer)]
+fn syn_error_start(_e: &syn::Error) -> (u32, u32) {
+    (0, 0)
 }
 
 fn point_diagnostic(message: &str) -> Diagnostic {

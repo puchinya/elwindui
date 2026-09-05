@@ -59,10 +59,20 @@ impl RadioButton {
             .owner_rc()
             .expect("RadioButton::set_group: object must already be Rc-constructed");
         GROUPS.with(|groups| {
-            let mut groups = groups.borrow_mut();
-            let members = groups.entry(group.to_string()).or_default();
-            members.retain(|member| member.strong_count() > 0);
-            members.push(Rc::downgrade(&owner));
+            let mut groups: std::cell::RefMut<'_, HashMap<String, Vec<Weak<dyn UIElementExt>>>> =
+                groups.borrow_mut();
+            let key = group.to_string();
+            if !groups.contains_key(&key) {
+                groups.insert(key.clone(), Vec::new());
+            }
+            let members: &mut Vec<Weak<dyn UIElementExt>> = groups
+                .get_mut(&key)
+                .expect("RadioButton group entry was just inserted or already present");
+            members.retain(|member: &Weak<dyn UIElementExt>| {
+                std::rc::Weak::<dyn UIElementExt>::strong_count(member) > 0
+            });
+            let member: Weak<dyn UIElementExt> = Rc::downgrade(&owner);
+            members.push(member);
         });
     }
     fn set_enabled(&self, enabled: bool) {
@@ -88,8 +98,7 @@ impl RadioButton {
             .owner_rc()
             .expect("RadioButton::on_constructed: object must already be Rc-constructed");
         self.inner.set_on_click(Box::new(move || {
-            let this = node
-                .as_any()
+            let this = elwindui_core::base::AsAny::as_any(node.as_ref())
                 .downcast_ref::<RadioButton>()
                 .expect("owner_rc of a RadioButton must downcast to RadioButton");
             this.inner.set_checked(true);
@@ -112,10 +121,13 @@ impl RadioButton {
                 return;
             };
             for member in members {
-                let Some(member) = member.upgrade() else {
+                let member: Option<Rc<dyn UIElementExt>> = member.upgrade();
+                let Some(member) = member else {
                     continue;
                 };
-                let Some(member) = member.as_any().downcast_ref::<RadioButton>() else {
+                let Some(member) = elwindui_core::base::AsAny::as_any(member.as_ref())
+                    .downcast_ref::<RadioButton>()
+                else {
                     continue;
                 };
                 if std::ptr::eq(member, self) {

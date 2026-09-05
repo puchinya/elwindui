@@ -83,7 +83,7 @@ impl ViewFactory {
     /// itself if it needs the concrete `Rc` — this only re-checks liveness, it doesn't consume or
     /// strengthen `context.owner`.
     pub fn build(&self, context: ViewBuildContext) -> Option<Rc<dyn UIElementExt>> {
-        context.owner.upgrade()?;
+        let _owner: Rc<dyn UIElementExt> = context.owner.upgrade()?;
         self.factory.build(context)
     }
 }

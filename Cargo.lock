@@ -141,6 +141,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
+name = "custom-controls-demo"
+version = "0.1.0"
+dependencies = [
+ "elwindui",
+ "elwindui-custom-controls",
+]
+
+[[package]]
 name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -167,6 +175,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "docking-demo"
+version = "0.1.0"
+dependencies = [
+ "elwindui",
+ "elwindui-custom-controls",
+ "elwindui-docking",
+ "serde_json",
 ]
 
 [[package]]
@@ -268,6 +286,28 @@ dependencies = [
  "elwindui-macros",
  "flo_curves",
  "tokio",
+]
+
+[[package]]
+name = "elwindui-custom-controls"
+version = "0.1.0"
+dependencies = [
+ "elwindui",
+ "elwindui-core",
+ "elwindui-macros",
+]
+
+[[package]]
+name = "elwindui-docking"
+version = "0.1.0"
+dependencies = [
+ "elwindui-backend-appkit",
+ "elwindui-backend-winui3",
+ "elwindui-core",
+ "elwindui-custom-controls",
+ "elwindui-macros",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

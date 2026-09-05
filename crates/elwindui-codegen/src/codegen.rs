@@ -614,7 +614,10 @@ fn new_local_expression(
             let value_tokens = generated_prop_initial_value(&ty, quote! { #expr });
             Some(quote! { #value.#setter(#value_tokens); })
         });
-    let mount = info.has_view.then(|| {
+    // Host-composition components (`inherits Window`) are mounted by their first `show()` call,
+    // not by `new!`.  Keep the constructor's pre-mount property-setting path, but leave the
+    // lifecycle transition to the generated Window override so `new!` preserves Created state.
+    let mount = (info.has_view && info.host_composition_base.is_none()).then(|| {
         quote! {
             #concrete::__mount(
             &#value,
@@ -3635,6 +3638,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
 
     let mut struct_fields = TokenStream::new();
     let mut ctor_fields = TokenStream::new();
+    let mut ctor_bindings = TokenStream::new();
     let mut accessors = TokenStream::new();
     let mut recompute_calls_after_new = TokenStream::new();
     // Unlike `recompute_calls_after_new` (run synchronously inside `Rc::new_cyclic`, before
@@ -3654,7 +3658,15 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 struct_fields.extend(quote! {
                     #field_ident: std::cell::RefCell<Vec<std::rc::Rc<#item_ty>>>,
                 });
-                ctor_fields.extend(quote! { #field_ident: std::cell::RefCell::new(Vec::new()), });
+                let field_ty = quote! {
+                    std::cell::RefCell<Vec<std::rc::Rc<#item_ty>>>
+                };
+                ctor_bindings.extend(quote! {
+                    let #field_ident: #field_ty = std::cell::RefCell::<Vec<std::rc::Rc<#item_ty>>>::new(
+                        Vec::<std::rc::Rc<#item_ty>>::new(),
+                    );
+                });
+                ctor_fields.extend(quote! { #field_ident: #field_ident, });
 
                 let getter = format_ident!("{}", f.name);
                 let pusher = format_ident!("{}_push", f.name);
@@ -3714,11 +3726,14 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
 
                 struct_fields.extend(quote! { #field_ident: #cell_ty, });
                 let cell_ctor = if is_copy_type(&f.ty) {
-                    quote! { std::cell::Cell::new(#init_expr) }
+                    quote! { std::cell::Cell::<#ty>::new(#init_expr) }
                 } else {
-                    quote! { std::cell::RefCell::new(#init_expr) }
+                    quote! { std::cell::RefCell::<#ty>::new(#init_expr) }
                 };
-                ctor_fields.extend(quote! { #field_ident: #cell_ctor, });
+                ctor_bindings.extend(quote! {
+                    let #field_ident: #cell_ty = #cell_ctor;
+                });
+                ctor_fields.extend(quote! { #field_ident: #field_ident, });
 
                 let getter = format_ident!("{}", f.name);
                 let setter = format_ident!("set_{}", f.name);
@@ -3766,13 +3781,20 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                         )
                     };
                 let default_ctor = if is_copy_type(&f.ty) {
-                    quote! { std::cell::Cell::new(Default::default()) }
+                    quote! {
+                        std::cell::Cell::<#ty>::new(<#ty as ::std::default::Default>::default())
+                    }
                 } else {
-                    quote! { std::cell::RefCell::new(Default::default()) }
+                    quote! {
+                        std::cell::RefCell::<#ty>::new(<#ty as ::std::default::Default>::default())
+                    }
                 };
 
                 struct_fields.extend(quote! { #cache_ident: #cell_ty, });
-                ctor_fields.extend(quote! { #cache_ident: #default_ctor, });
+                ctor_bindings.extend(quote! {
+                    let #cache_ident: #cell_ty = #default_ctor;
+                });
+                ctor_fields.extend(quote! { #cache_ident: #cache_ident, });
 
                 let recompute = format_ident!("recompute_{}", f.name);
                 accessors.extend(quote! {
@@ -3782,7 +3804,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                         #set_cache
                     }
                 });
-                recompute_calls_after_new.extend(quote! { instance.#recompute(); });
+                recompute_calls_after_new.extend(quote! { __instance.#recompute(); });
             }
             FieldKind::AsyncComputed => {
                 let field_ident = format_ident!("{}", f.name);
@@ -3812,9 +3834,20 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     #cache_ident: std::cell::RefCell<elwindui::core::reactive::AsyncComputed<#ty>>,
                     #generation_ident: std::cell::Cell<u64>,
                 });
+                let cache_ty = quote! {
+                    std::cell::RefCell<elwindui::core::reactive::AsyncComputed<#ty>>
+                };
+                ctor_bindings.extend(quote! {
+                    let #cache_ident: #cache_ty = std::cell::RefCell::<
+                        elwindui::core::reactive::AsyncComputed<#ty>
+                    >::new(
+                        elwindui::core::reactive::AsyncComputed::<#ty>::Loading,
+                    );
+                    let #generation_ident: std::cell::Cell<u64> = std::cell::Cell::new(0);
+                });
                 ctor_fields.extend(quote! {
-                    #cache_ident: std::cell::RefCell::new(elwindui::core::reactive::AsyncComputed::Loading),
-                    #generation_ident: std::cell::Cell::new(0),
+                    #cache_ident: #cache_ident,
+                    #generation_ident: #generation_ident,
                 });
 
                 let spawn_recompute = format_ident!("__spawn_recompute_{}", f.name);
@@ -3829,9 +3862,9 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     // in the meantime — is discarded without notifying observers: "supersede, not
                     // cancel" (see docs/design/runtime/state_management_design.md "Async work").
                     fn #spawn_recompute(&self) {
-                        let __gen = self.#generation_ident.get().wrapping_add(1);
+                        let __gen: u64 = self.#generation_ident.get().wrapping_add(1);
                         self.#generation_ident.set(__gen);
-                        let __self = self.__self_weak.upgrade().expect(
+                        let __self: std::rc::Rc<Self> = self.__self_weak.upgrade().expect(
                             "elwindui: viewmodel/store was dropped while an #[async_computed] recompute was still pending"
                         );
                         elwindui::core::task::spawn_local(async move {
@@ -3875,7 +3908,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                         rewrite_action_body(block.clone(), &field_names, &self_ident);
                     accessors.extend(quote! {
                         pub fn #action_ident(&self, #(#param_decls),*) {
-                            let __self = self.__self_weak.upgrade().expect(
+                            let __self: std::rc::Rc<Self> = self.__self_weak.upgrade().expect(
                                 "elwindui: viewmodel was dropped while an async action was still pending"
                             );
                             elwindui::core::task::spawn_local(async move #rewritten_block);
@@ -3938,14 +3971,33 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
             /// `documents_push(item: Rc<NestedViewModel>)` never needs a redundant caller-side
             /// `Rc::new(..)` around `NestedViewModel::new()`'s result.
             pub fn new() -> std::rc::Rc<Self> {
-                let instance = std::rc::Rc::new_cyclic(|__self_weak| {
-                    let instance = Self {
+                // Keep the generic boundaries explicit in the generated source.  rustc infers
+                // these from the `Self { .. }` literal and the typed handler field, but current
+                // rust-analyzer versions can leave the `Rc`/`Weak` and `retain` closure element
+                // types unknown when this code arrives through an attribute macro expansion.
+                let instance: std::rc::Rc<Self> =
+                    std::rc::Rc::<Self>::new_cyclic(|__self_weak: &std::rc::Weak<Self>| -> Self {
+                    let __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(
+                        std::rc::Rc<std::cell::Cell<bool>>,
+                        std::rc::Rc<dyn Fn(#property_enum)>,
+                    )>>> = std::rc::Rc::<std::cell::RefCell<Vec<(
+                        std::rc::Rc<std::cell::Cell<bool>>,
+                        std::rc::Rc<dyn Fn(#property_enum)>,
+                    )>>>::new(std::cell::RefCell::<Vec<(
+                        std::rc::Rc<std::cell::Cell<bool>>,
+                        std::rc::Rc<dyn Fn(#property_enum)>,
+                    )>>::new(Vec::<(
+                        std::rc::Rc<std::cell::Cell<bool>>,
+                        std::rc::Rc<dyn Fn(#property_enum)>,
+                    )>::new()));
+                    #ctor_bindings
+                    let __instance: Self = Self {
                         #ctor_fields
-                        __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                        __property_changed_handlers,
                         __self_weak: __self_weak.clone(),
                     };
                     #recompute_calls_after_new
-                    instance
+                    __instance
                 });
                 // Must run after `Rc::new_cyclic` returns, not inside its closure: `spawn_local`
                 // polls its future once immediately, and that first poll upgrades `__self_weak` —
@@ -3960,16 +4012,27 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 &self,
                 f: impl Fn(#property_enum) + 'static,
             ) -> elwindui::core::reactive::Subscription {
-                let active = std::rc::Rc::new(std::cell::Cell::new(true));
+                let active: std::rc::Rc<std::cell::Cell<bool>> =
+                    std::rc::Rc::new(std::cell::Cell::<bool>::new(true));
                 let handler: std::rc::Rc<dyn Fn(#property_enum)> = std::rc::Rc::new(f);
                 self.__property_changed_handlers.borrow_mut().push((active.clone(), handler));
-                let handlers = std::rc::Rc::downgrade(&self.__property_changed_handlers);
+                let handlers: std::rc::Weak<std::cell::RefCell<Vec<(
+                    std::rc::Rc<std::cell::Cell<bool>>,
+                    std::rc::Rc<dyn Fn(#property_enum)>,
+                )>>> = std::rc::Rc::downgrade(&self.__property_changed_handlers);
                 elwindui::core::reactive::Subscription::new(move || {
                     active.set(false);
-                    if let Some(handlers) = handlers.upgrade() {
+                    let upgraded_handlers: Option<std::rc::Rc<std::cell::RefCell<Vec<(
+                        std::rc::Rc<std::cell::Cell<bool>>,
+                        std::rc::Rc<dyn Fn(#property_enum)>,
+                    )>>>> = handlers.upgrade();
+                    if let Some(handlers) = upgraded_handlers {
                         handlers
                             .borrow_mut()
-                            .retain(|(registered, _)| !std::rc::Rc::ptr_eq(registered, &active));
+                            .retain(|entry: &(
+                                std::rc::Rc<std::cell::Cell<bool>>,
+                                std::rc::Rc<dyn Fn(#property_enum)>,
+                            )| !std::rc::Rc::ptr_eq(&entry.0, &active));
                     }
                 })
             }
@@ -4006,7 +4069,10 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 &self,
                 f: impl Fn(&'static str) + 'static,
             ) -> elwindui::core::reactive::Subscription {
-                self.subscribe_property_changed(move |property| f(property.name()))
+                #struct_name::subscribe_property_changed(
+                    self,
+                    move |property: #property_enum| f(property.name()),
+                )
             }
         }
     }
@@ -4646,7 +4712,8 @@ fn generate_component(
                     quote! { std::cell::RefCell }
                 };
                 struct_fields.extend(quote! { #field_ident: #cell_ty<#ty>, });
-                ctor_field_inits.extend(quote! { #field_ident: <#cell_ty<_>>::new(#field_ident), });
+                ctor_field_inits
+                    .extend(quote! { #field_ident: <#cell_ty<#ty>>::new(#field_ident), });
                 let get_body = if is_copy_type(&f.ty) {
                     quote! { self.#field_ident.get() }
                 } else {
@@ -4759,7 +4826,8 @@ fn generate_component(
                     quote! { std::cell::RefCell }
                 };
                 struct_fields.extend(quote! { #field_ident: #cell_ty<#ty>, });
-                ctor_field_inits.extend(quote! { #field_ident: <#cell_ty<_>>::new(#field_ident), });
+                ctor_field_inits
+                    .extend(quote! { #field_ident: <#cell_ty<#ty>>::new(#field_ident), });
                 let get_body = if is_copy_type(&f.ty) {
                     quote! { self.#field_ident.get() }
                 } else {
@@ -4875,9 +4943,16 @@ fn generate_component(
         impl #struct_name {
             pub fn new(#ctor_params) -> Self {
                 #default_let_stmts
+                let __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(
+                    std::rc::Rc<std::cell::Cell<bool>>,
+                    std::rc::Rc<dyn Fn(#component_property_enum)>,
+                )>>> = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(
+                    std::rc::Rc<std::cell::Cell<bool>>,
+                    std::rc::Rc<dyn Fn(#component_property_enum)>,
+                )>::new()));
                 Self {
                     #ctor_field_inits
-                    __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                    __property_changed_handlers,
                 }
             }
 
@@ -4885,18 +4960,25 @@ fn generate_component(
                 &self,
                 f: impl Fn(#component_property_enum) + 'static,
             ) -> elwindui::core::reactive::Subscription {
-                let active = std::rc::Rc::new(std::cell::Cell::new(true));
+                let active: std::rc::Rc<std::cell::Cell<bool>> =
+                    std::rc::Rc::new(std::cell::Cell::new(true));
                 let handler: std::rc::Rc<dyn Fn(#component_property_enum)> = std::rc::Rc::new(f);
                 self.__property_changed_handlers
                     .borrow_mut()
                     .push((active.clone(), handler));
-                let handlers = std::rc::Rc::downgrade(&self.__property_changed_handlers);
+                let handlers: std::rc::Weak<std::cell::RefCell<Vec<(
+                    std::rc::Rc<std::cell::Cell<bool>>,
+                    std::rc::Rc<dyn Fn(#component_property_enum)>,
+                )>>> = std::rc::Rc::downgrade(&self.__property_changed_handlers);
                 elwindui::core::reactive::Subscription::new(move || {
                     active.set(false);
                     if let Some(handlers) = handlers.upgrade() {
                         handlers
                             .borrow_mut()
-                            .retain(|(registered, _)| !std::rc::Rc::ptr_eq(registered, &active));
+                            .retain(|entry: &(
+                                std::rc::Rc<std::cell::Cell<bool>>,
+                                std::rc::Rc<dyn Fn(#component_property_enum)>,
+                            )| !std::rc::Rc::ptr_eq(&entry.0, &active));
                     }
                 })
             }
@@ -5858,7 +5940,7 @@ fn generate_view(
     // just above — the only difference is what seeds the initial value: a `mutable_required_names`
     // field is seeded from a `new(..)` ctor argument, these are seeded from the `let <name> = ..;`
     // statements already sitting at the front of `construct_stmts` (`own_default_construct_stmts`,
-    // above) — `#name: <#cell_ty<_>>::new(#name)` is agnostic to which kind of in-scope local
+    // above) — `#name: <#cell_ty<#ty>>::new(#name)` is agnostic to which kind of in-scope local
     // `#name` actually is.
     let own_default_names: Vec<syn::Ident> = own_stored_fields
         .iter()
@@ -5886,8 +5968,9 @@ fn generate_view(
         .collect();
     let own_default_field_inits: TokenStream = own_default_names
         .iter()
+        .zip(own_default_types.iter())
         .zip(own_default_cell_types.iter())
-        .map(|(name, cell_ty)| quote! { #name: <#cell_ty<_>>::new(#name), })
+        .map(|((name, ty), cell_ty)| quote! { #name: <#cell_ty<#ty>>::new(#name), })
         .collect();
     let own_mutable_names: Vec<syn::Ident> = own_mutable_stored_fields
         .iter()
@@ -5924,8 +6007,9 @@ fn generate_view(
         .collect();
     let own_computed_field_inits: TokenStream = own_computed_names
         .iter()
+        .zip(own_computed_types.iter())
         .zip(own_computed_cell_types.iter())
-        .map(|(name, cell_ty)| quote! { #name: <#cell_ty<_>>::new(#name), })
+        .map(|((name, ty), cell_ty)| quote! { #name: <#cell_ty<#ty>>::new(#name), })
         .collect();
 
     // `#[environment(name)]` fields — same Cell/RefCell storage shape as `own_computed_*` just
@@ -5957,8 +6041,9 @@ fn generate_view(
         .collect();
     let own_environment_field_inits: TokenStream = own_environment_names
         .iter()
+        .zip(own_environment_types.iter())
         .zip(own_environment_cell_types.iter())
-        .map(|(name, cell_ty)| quote! { #name: <#cell_ty<_>>::new(#name), })
+        .map(|((name, ty), cell_ty)| quote! { #name: <#cell_ty<#ty>>::new(#name), })
         .collect();
     // The legacy, ambient-captured `__environment: EnvironmentContext` field (and its
     // `has_own_environment_fields`-gated memory policy) is gone (CI-5 of #80,
@@ -6001,9 +6086,7 @@ fn generate_view(
         // same metadata object consumed by the rust-analyzer shadow. A full `Option<T>` Prop keeps
         // that same `Option<T>` type in both surfaces; private state and fixed Params remain
         // read-only or absent exactly as `component_public_shape` says.
-        let template_capabilities =
-            crate::component_frontend::template_capability_shapes(source_component, component);
-        let notified_property_names: HashSet<String> = component_property_variants
+        let _notified_property_names: HashSet<String> = component_property_variants
             .iter()
             .map(ToString::to_string)
             .collect();
@@ -6025,7 +6108,7 @@ fn generate_view(
         } else {
             None
         };
-        template_capabilities
+        crate::component_frontend::template_capability_shapes(source_component, component)
             .into_iter()
             .map(|capability| {
                 let name = capability.name;
@@ -6057,8 +6140,7 @@ fn generate_view(
                 } else {
                     quote! { self.#getter() }
                 };
-                let setter_available = capability.writable;
-                let setter_body = if setter_available {
+                let _setter_body = if capability.writable {
                     let setter = format_ident!("set_{name}");
                     if inherited_owner.is_some() {
                         if let Some(base_ext_path) = &template_base_ext_path {
@@ -6110,7 +6192,7 @@ fn generate_view(
                     // base.  The base's typed stream is sufficient here; the property bridge is
                     // intentionally static and does not introduce a second runtime lookup table.
                     quote! { self.base.subscribe_property_changed(move |_| listener()) }
-                } else if notified_property_names.contains(&name) {
+                } else if _notified_property_names.contains(&name) {
                     quote! {
                         self.subscribe_property_changed(move |property| {
                             if matches!(property, #component_property_enum::#ident) {
@@ -6137,11 +6219,11 @@ fn generate_view(
                         }
                     }
                 };
-                let writable_impl = setter_available.then(|| {
+                let writable_impl = capability.writable.then(|| {
                     quote! {
                         impl elwindui::core::ui::WritableTemplateProperty<#key> for #target {
                             fn __template_set(&self, value: Self::Value) {
-                                #setter_body
+                                #_setter_body
                             }
                         }
                     }
@@ -6186,8 +6268,9 @@ fn generate_view(
         .collect();
     let cell_required_field_inits: TokenStream = cell_required_names
         .iter()
+        .zip(cell_required_types.iter())
         .zip(cell_required_cell_types.iter())
-        .map(|(name, cell_ty)| quote! { #name: <#cell_ty<_>>::new(#name), })
+        .map(|((name, ty), cell_ty)| quote! { #name: <#cell_ty<#ty>>::new(#name), })
         .collect();
     // The plain (bare-storage, `Self { #name, .. }`-shorthand-eligible) subset of `required_own_names`
     // — everything not promoted to Cell/RefCell storage above.
@@ -6318,18 +6401,25 @@ fn generate_view(
             &self,
             f: impl Fn(#component_property_enum) + 'static,
         ) -> elwindui::core::reactive::Subscription {
-            let active = std::rc::Rc::new(std::cell::Cell::new(true));
+            let active: std::rc::Rc<std::cell::Cell<bool>> =
+                std::rc::Rc::new(std::cell::Cell::new(true));
             let handler: std::rc::Rc<dyn Fn(#component_property_enum)> = std::rc::Rc::new(f);
             self.__property_changed_handlers
                 .borrow_mut()
                 .push((active.clone(), handler));
-            let handlers = std::rc::Rc::downgrade(&self.__property_changed_handlers);
+            let handlers: std::rc::Weak<std::cell::RefCell<Vec<(
+                std::rc::Rc<std::cell::Cell<bool>>,
+                std::rc::Rc<dyn Fn(#component_property_enum)>,
+            )>>> = std::rc::Rc::downgrade(&self.__property_changed_handlers);
             elwindui::core::reactive::Subscription::new(move || {
                 active.set(false);
                 if let Some(handlers) = handlers.upgrade() {
                     handlers
                         .borrow_mut()
-                        .retain(|(registered, _)| !std::rc::Rc::ptr_eq(registered, &active));
+                        .retain(|entry: &(
+                            std::rc::Rc<std::cell::Cell<bool>>,
+                            std::rc::Rc<dyn Fn(#component_property_enum)>,
+                        )| !std::rc::Rc::ptr_eq(&entry.0, &active));
                 }
             })
         }
@@ -6705,7 +6795,7 @@ fn generate_view(
             quote! {
                 {
                     #key_type_preamble
-                    let weak = std::rc::Rc::downgrade(&this);
+                    let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
                     let subscription = this
                         .__mount_environment
                         .get()
@@ -6749,7 +6839,7 @@ fn generate_view(
     let semantic_brush_subscribe_stmts = quote! {
         if false #(|| #semantic_brush_queries)* {
             {
-                let weak = std::rc::Rc::downgrade(&this);
+                let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
                 let listener: std::rc::Rc<dyn Fn()> = std::rc::Rc::new(move || {
                     if let Some(this) = weak.upgrade() {
                         this.resync();
@@ -6849,7 +6939,7 @@ fn generate_view(
             #slot: #slot_type,
         });
         field_inits.extend(quote! {
-            #slot: ::std::default::Default::default(),
+            #slot: <#slot_type as ::std::default::Default>::default(),
         });
     }
     // `RefCell<Option<Rc<..>>>` per lazily-materialized `if`/`match` branch leaf
@@ -7163,7 +7253,7 @@ fn generate_view(
             };
             quote! {
                 {
-                    let weak = std::rc::Rc::downgrade(&this);
+                    let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
                     #owner
                     let subscription = elwindui::core::reactive::ObservableExt::subscribe_property_changed(&*owner, move |property: &'static str| {
                         if let Some(this) = weak.upgrade() { this.#method(property); }
@@ -7197,7 +7287,7 @@ fn generate_view(
             );
             quote! {
                 {
-                    let weak = std::rc::Rc::downgrade(&this);
+                    let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
                     let __source_owner = this.#implicit_field.upgrade().expect(#upgrade_panic_message);
                     let owner = __source_owner.#owner_ident();
                     let subscription = elwindui::core::reactive::ObservableExt::subscribe_property_changed(&*owner, move |property: &'static str| {
@@ -7456,6 +7546,15 @@ fn generate_view(
             <Self as elwindui::core::ui::WindowExt>::unmount_override(self);
         }
     });
+    let _unmount_override_call = unmount_override_call
+        .map(|tokens| {
+            if tokens.is_empty() {
+                TokenStream::new()
+            } else {
+                tokens
+            }
+        })
+        .unwrap_or_default();
     let call_on_unmount = on_unmount_method
         .is_some()
         .then(|| quote! { self.__run_on_unmount(); });
@@ -7492,7 +7591,7 @@ fn generate_view(
                         return;
                     }
                 }
-                #unmount_override_call
+                #_unmount_override_call
                 if let Some(content) = <Self as elwindui::core::ui::WindowExt>::content_element(self) {
                     elwindui::core::ui::unmount_subtree(&content);
                 }
@@ -8049,7 +8148,7 @@ fn generate_view(
     } else {
         quote! {
             {
-                let weak = std::rc::Rc::downgrade(&this);
+                let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
                 let subscription = this.subscribe_property_changed(move |property| {
                     if let Some(this) = weak.upgrade() {
                         match property { #component_property_dispatch }
@@ -8106,7 +8205,7 @@ fn generate_view(
         };
         quote! {
             {
-                let weak = std::rc::Rc::downgrade(&this);
+                let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
                 let subscription = this.subscribe_property_changed(move |property| {
                     if let Some(this) = weak.upgrade() {
                         match property { #match_arms }
@@ -8127,7 +8226,7 @@ fn generate_view(
     // performs the generated component teardown and never invokes that body a second time.
     let template_unmount_hook_attach = (!is_host_composition).then(|| {
         quote! {
-            let weak_begin = std::rc::Rc::downgrade(&this);
+            let weak_begin: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
             <Self as elwindui::core::ui::UIElementExt>::add_begin_unmount_hook(
                 self,
                 Box::new(move || {
@@ -8145,7 +8244,7 @@ fn generate_view(
                     }
                 }),
             );
-            let weak = std::rc::Rc::downgrade(&this);
+            let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
             <Self as elwindui::core::ui::UIElementExt>::add_unmount_hook(
                 self,
                 Box::new(move || {
@@ -8156,6 +8255,7 @@ fn generate_view(
             );
         }
     });
+    let _template_unmount_hook_is_some = template_unmount_hook_attach.is_some();
     let custom_template_branch = view.is_template.then(|| {
         let default_template = shared_template_factory
             .as_ref()
@@ -8191,7 +8291,6 @@ fn generate_view(
             }
         }
     });
-
     let component_property_names: Vec<String> = component_property_variants
         .iter()
         .map(ToString::to_string)
@@ -8275,7 +8374,7 @@ fn generate_view(
     let generated = if is_composed {
         let unmount_hook_attach = (!is_host_composition).then(|| {
             quote! {
-                let weak_begin = std::rc::Rc::downgrade(&this);
+                let weak_begin: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
                 <Self as elwindui::core::ui::UIElementExt>::add_begin_unmount_hook(
                     self,
                     Box::new(move || {
@@ -8292,7 +8391,7 @@ fn generate_view(
                         }
                     }),
                 );
-                let weak = std::rc::Rc::downgrade(&this);
+                let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
                 <Self as elwindui::core::ui::UIElementExt>::add_unmount_hook(
                     self,
                     Box::new(move || {
@@ -8303,6 +8402,51 @@ fn generate_view(
                 );
             }
         });
+        // A component-level template takes the specialized path above and returns from
+        // `__build_view`; it has no ordinary authored-view construction to emit after that path.
+        // Keep the two generated statement sequences structurally separate so normal rustc never
+        // receives the ordinary sequence after an unconditional return. This preserves the
+        // existing template runtime behavior while avoiding an `unreachable_code` diagnostic.
+        let build_view_stmts = if view.is_template {
+            quote! {
+                #own_environment_resolve_stmts
+                #custom_template_branch
+            }
+        } else {
+            quote! {
+                #own_environment_resolve_stmts
+                #body_prepare_stmt
+                #child_construct_stmts
+                #content_attach_stmt
+                let __most_derived: Option<std::rc::Rc<#target>> = self
+                    .__self_weak
+                    .borrow()
+                    .upgrade()
+                    .expect("__build_view: object must already be Rc-constructed")
+                    .downcast::<#target>()
+                    .ok();
+                if let Some(this) = __most_derived.clone() {
+                    #wiring_stmts
+                    #unmount_hook_attach
+                }
+                <Self as #target_ext>::__refresh_dynamic_regions(self);
+                // Most widgets already read live model state at construction time, so this is a
+                // no-op for them. A widget whose own state only ever appears in `resync()` (e.g.
+                // a dynamic list, like `TabView`'s tabs) needs this call so state populated
+                // before construction (as `main.rs` does, calling `new_tab_execute()` first)
+                // appears immediately rather than waiting for the first unrelated user
+                // interaction.
+                self.resync();
+                if let Some(this) = __most_derived {
+                    #component_self_subscription
+                    #subscribe_stmts
+                    #own_environment_subscribe_stmts
+                    #semantic_brush_subscribe_stmts
+                    #own_on_update_subscription
+                    #on_mount_stmt
+                }
+            }
+        };
         // Every one of these is purely inherent (`resync`/`#[id(..)]` child accessors/user methods/
         // lifecycle shadow hooks) — none is part of `#target`'s own generated trait — so `mark_inherent`
         // tags each with `#[inherent]` and they all land in the single `#[elwindui::class] impl
@@ -8408,7 +8552,14 @@ fn generate_view(
                 fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
                     let __self_weak_erased: std::rc::Weak<dyn std::any::Any> = __self_weak.clone();
                     #construct_stmts
-                    Self { #(#plain_required_names,)* #cell_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created), __closed: std::cell::Cell::new(false) }
+                    let __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(
+                        std::rc::Rc<std::cell::Cell<bool>>,
+                        std::rc::Rc<dyn Fn(#component_property_enum)>,
+                    )>>> = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(
+                        std::rc::Rc<std::cell::Cell<bool>>,
+                        std::rc::Rc<dyn Fn(#component_property_enum)>,
+                    )>::new()));
+                    Self { #(#plain_required_names,)* #cell_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers, __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created), __closed: std::cell::Cell::new(false) }
                 }
 
                 // Runs automatically, exactly once, right after `#[class]`'s auto-generated `new()`
@@ -8478,38 +8629,7 @@ fn generate_view(
                 // `mount()`, once, per the build-idempotency guard there.
                 #[doc(hidden)]
                 fn __build_view(&self) {
-                    #own_environment_resolve_stmts
-                    #custom_template_branch
-                    #body_prepare_stmt
-                    #child_construct_stmts
-                    #content_attach_stmt
-                    let __most_derived: Option<std::rc::Rc<#target>> = self
-                        .__self_weak
-                        .borrow()
-                        .upgrade()
-                        .expect("__build_view: object must already be Rc-constructed")
-                        .downcast::<#target>()
-                        .ok();
-                    if let Some(this) = __most_derived.clone() {
-                        #wiring_stmts
-                        #unmount_hook_attach
-                    }
-                    <Self as #target_ext>::__refresh_dynamic_regions(self);
-                    // Most widgets already read live model state at construction time, so this is a
-                    // no-op for them. A widget whose own state only ever appears in `resync()` (e.g.
-                    // a dynamic list, like `TabView`'s tabs) needs this call so state populated
-                    // before construction (as `main.rs` does, calling `new_tab_execute()` first)
-                    // appears immediately rather than waiting for the first unrelated user
-                    // interaction.
-                    self.resync();
-                    if let Some(this) = __most_derived {
-                        #component_self_subscription
-                        #subscribe_stmts
-                        #own_environment_subscribe_stmts
-                        #semantic_brush_subscribe_stmts
-                        #own_on_update_subscription
-                        #on_mount_stmt
-                    }
+                    #build_view_stmts
                 }
 
                 #own_class_methods
@@ -8575,7 +8695,16 @@ fn generate_view(
                 pub fn __new_unmounted(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                     #content_capture_stmt
                     #construct_stmts
-                    std::rc::Rc::new(Self { #(#plain_required_names,)* #cell_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created) })
+                    {
+                        let __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(
+                            std::rc::Rc<std::cell::Cell<bool>>,
+                            std::rc::Rc<dyn Fn(#component_property_enum)>,
+                        )>>> = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(
+                            std::rc::Rc<std::cell::Cell<bool>>,
+                            std::rc::Rc<dyn Fn(#component_property_enum)>,
+                        )>::new()));
+                        std::rc::Rc::<Self>::new(Self { #(#plain_required_names,)* #cell_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers, __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created) })
+                    }
                 }
 
                 // Establishes this component's effective Environment and performs its initial view
@@ -8606,8 +8735,8 @@ fn generate_view(
                     #body_prepare_stmt
                     #child_construct_stmts
                     #content_attach_stmt
-                    let weak_begin = std::rc::Rc::downgrade(self);
-                    let weak = std::rc::Rc::downgrade(self);
+                    let weak_begin: std::rc::Weak<Self> = std::rc::Rc::downgrade(self);
+                    let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(self);
                     if let Some(root) = self.#root_binding.get() {
                         elwindui::core::ui::UIElementExt::add_begin_unmount_hook(
                             &**root,
@@ -9180,7 +9309,7 @@ pub(crate) fn lower_template_body(
             let slot = dynamic_slot_ident(&node.binding);
             statements.extend(quote! {
                 let #slot: #props_macro!(@content_slot_type #item_ext) =
-                    ::std::default::Default::default();
+                    <#props_macro!(@content_slot_type #item_ext) as ::std::default::Default>::default();
             });
             continue;
         };
@@ -9201,7 +9330,7 @@ pub(crate) fn lower_template_body(
             quote! { #props_macro!(@content_slot_type #item_ext) }
         };
         statements.extend(quote! {
-            let #slot: #slot_type = ::std::default::Default::default();
+            let #slot: #slot_type = <#slot_type as ::std::default::Default>::default();
         });
     }
 
@@ -10582,7 +10711,7 @@ fn emit_for_item_subscriptions(
                     #trait_use
                     let source = std::rc::Rc::clone(#parameter);
                     let subscription_source = std::rc::Rc::clone(&source);
-                    let weak_item = std::rc::Rc::downgrade(&#binding);
+                    let weak_item: std::rc::Weak<_> = std::rc::Rc::downgrade(&#binding);
                     __dynamic_item_subscriptions.push(source.subscribe_property_changed(move |_| {
                         if let Some(item) = weak_item.upgrade() {
                             let #parameter = &subscription_source;
@@ -17892,6 +18021,44 @@ mod tests {
     }
 
     #[test]
+    fn local_host_composition_new_expression_preserves_created_state() {
+        let struct_src = r#"
+            struct HostedComponent {
+                body: view! {
+                    Window { title: "host" }
+                }
+            }
+        "#;
+        let module = component_module(Some("Window"), struct_src);
+        let table = build_symbol_table_with_builtins(&[module]);
+        let info = table
+            .resolve_unqualified("HostedComponent")
+            .expect("host-composition metadata should resolve");
+        let item_struct: syn::ItemStruct =
+            syn::parse_str(struct_src).expect("host-composition struct should parse");
+        let (source_component, view) =
+            crate::component_frontend::component_and_view_from_item_struct(
+                Some("Window".to_string()),
+                &item_struct,
+            )
+            .expect("host-composition component should build");
+
+        let target: syn::Path = syn::parse_str("HostedComponent").expect("target should parse");
+        let generated = new_local_expression(&target, &source_component, view.as_ref(), info, &[])
+            .expect("host-composition constructor should generate")
+            .to_string();
+
+        assert!(
+            generated.contains("HostedComponent :: __new_unmounted"),
+            "host-composition new! must construct without mounting: {generated}"
+        );
+        assert!(
+            !generated.contains("HostedComponent :: __mount"),
+            "host-composition new! must leave mounting to show(): {generated}"
+        );
+    }
+
+    #[test]
     fn constructor_abi_has_only_named_property_protocol() {
         let shape = build_effective_constructor_shape(
             &[],
@@ -18490,6 +18657,141 @@ struct NotepadWindow {
         if let Err(e) = syn::parse2::<syn::File>(ts.clone()) {
             panic!("{label} did not generate valid Rust: {e}\n---\n{ts}");
         }
+    }
+
+    fn generated_local_type(method: &syn::ImplItemFn, name: &str) -> syn::Type {
+        struct Finder<'a> {
+            name: &'a str,
+            found: Option<syn::Type>,
+        }
+
+        impl<'ast> syn::visit::Visit<'ast> for Finder<'_> {
+            fn visit_local(&mut self, local: &'ast syn::Local) {
+                if let syn::Pat::Type(pattern) = &local.pat {
+                    let is_target = matches!(
+                        pattern.pat.as_ref(),
+                        syn::Pat::Ident(identifier) if identifier.ident == self.name
+                    );
+                    if is_target {
+                        self.found = Some((*pattern.ty).clone());
+                    }
+                }
+                syn::visit::visit_local(self, local);
+            }
+        }
+
+        let mut finder = Finder { name, found: None };
+        syn::visit::Visit::visit_block(&mut finder, &method.block);
+        finder
+            .found
+            .unwrap_or_else(|| panic!("generated method has no typed local `{name}`"))
+    }
+
+    #[test]
+    fn viewmodel_constructor_and_subscription_keep_analysis_types_explicit() {
+        let module = viewmodel_module_from_rust(
+            r#"
+            mod AnalysisViewModel {
+                struct AnalysisViewModel {
+                    #[observable(default = false)]
+                    active: bool,
+                }
+            }
+        "#,
+        );
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        let file = syn::parse2::<syn::File>(generated).expect("generated viewmodel should parse");
+
+        let implementation = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Impl(item_impl)
+                    if matches!(&*item_impl.self_ty, syn::Type::Path(path) if path
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|segment| segment.ident == "AnalysisViewModel")) =>
+                {
+                    Some(item_impl)
+                }
+                _ => None,
+            })
+            .expect("generated viewmodel inherent impl should exist");
+
+        let method = |name: &str| {
+            implementation
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    syn::ImplItem::Fn(method) if method.sig.ident == name => Some(method),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("generated viewmodel method `{name}` should exist"))
+        };
+        let constructor = method("new");
+        let subscribe = method("subscribe_property_changed");
+
+        let expected_rc_self: syn::Type = syn::parse_str("std::rc::Rc<Self>").unwrap();
+        assert!(matches!(
+            &constructor.sig.output,
+            syn::ReturnType::Type(_, ty) if **ty == expected_rc_self
+        ));
+        assert_eq!(
+            generated_local_type(constructor, "instance"),
+            expected_rc_self,
+            "Rc::new_cyclic's result should remain explicit for rust-analyzer"
+        );
+
+        struct ClosureParamFinder {
+            found: Option<syn::Type>,
+        }
+
+        impl<'ast> syn::visit::Visit<'ast> for ClosureParamFinder {
+            fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
+                if self.found.is_none() {
+                    if let Some(syn::Pat::Type(pattern)) = closure.inputs.first() {
+                        if let syn::Pat::Ident(identifier) = pattern.pat.as_ref() {
+                            if identifier.ident == "__self_weak" {
+                                self.found = Some((*pattern.ty).clone());
+                            }
+                        }
+                    }
+                }
+                syn::visit::visit_expr_closure(self, closure);
+            }
+        }
+
+        let mut closure_param = ClosureParamFinder { found: None };
+        syn::visit::Visit::visit_block(&mut closure_param, &constructor.block);
+        let expected_weak_self: syn::Type =
+            syn::parse_str("&std::rc::Weak<Self>").expect("expected type should parse");
+        assert_eq!(
+            closure_param
+                .found
+                .expect("Rc::new_cyclic closure parameter should be typed"),
+            expected_weak_self
+        );
+
+        assert_eq!(
+            generated_local_type(subscribe, "active"),
+            syn::parse_str("std::rc::Rc<std::cell::Cell<bool>>").unwrap()
+        );
+        let handlers = generated_local_type(subscribe, "handlers");
+        let expected_handlers: syn::Type = syn::parse_str(
+            "std::rc::Weak<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<dyn Fn(AnalysisViewModelProperty)>,)>>>"
+        )
+        .unwrap();
+        assert_eq!(handlers, expected_handlers);
+        assert_eq!(
+            generated_local_type(subscribe, "upgraded_handlers"),
+            syn::parse_str::<syn::Type>(
+                "Option<std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<dyn Fn(AnalysisViewModelProperty)>,)>>>>"
+            )
+            .unwrap(),
+            "subscription cleanup should type the Weak::upgrade result before re-entering the handler list"
+        );
     }
 
     // --- Font/text-style codegen tests (指示書 §32) ---------------------------------------------

@@ -40,9 +40,9 @@ the elevated execution path. A `doctor` result with either value false is a bloc
 not a native PASS.
 
 Codex must delegate the real AppKit E2E matrix to a bounded sub-agent before any driver action;
-the standard sub-agent is `gpt-5.6-luna` with standard reasoning effort (`medium`). Codex may
-also delegate a separate sidecar task for registering or refreshing the checked-out test artifact
-under `tools/macos-ui-driver/bin`. The main agent must review the file diff and evidence before
+the standard sub-agent is `gpt-5.6-luna` with standard reasoning effort (`medium`). The checked-in
+binary is the permission-stable E2E artifact; do not delegate a refresh or replacement sidecar for
+ordinary E2E. The main agent must review the file diff and evidence before
 recording results. This Codex-only routing gate and the fixed tester instruction example are
 documented in [`docs/agents/appkit-e2e.md`](../../docs/agents/appkit-e2e.md) and do not change the Claude Code
 workflow. If delegation is unavailable, report BLOCKED instead of performing the E2E in the main
@@ -52,6 +52,13 @@ For a fast run, perform `doctor` once, launch the prebuilt demo once, reuse its 
 compatible scenarios, batch window-state observations, and capture only the evidence required by
 the acceptance case. Rebuild or relaunch only when the binary changed or the process became
 unusable; save extra screenshots and verbose logs only for abnormal results.
+
+Swift source is the implementation authority. The checked-in `bin/macos-ui-driver` is the normal,
+permission-stable E2E executable. Ordinary E2E must not rebuild or replace it. A change under
+`Package.swift` or `Sources/**/*.swift`, a missing/corrupt binary, or an explicit driver-remediation
+request requires rebuilding, preserving mode `100755`, updating
+[`bin/PROVENANCE.md`](bin/PROVENANCE.md), running `verify-e2e-binary.sh`, and rechecking `doctor`
+in host context. Unrelated code or documentation changes must not refresh the binary.
 
 The assigned E2E sub-agent must complete its assigned scenarios itself and must not re-delegate
 them. It must return the required window values and separate stdout/stderr logs; an incomplete

@@ -54,7 +54,11 @@ capture-window to record the real mid-drag preview.
 The Codex-only routing rule, Luna tester role, fast execution path, fixed instruction-sheet
 format, foreground handling, evidence requirements, and a copy/pasteable concrete example are
 maintained in [`docs/agents/appkit-e2e.md`](appkit-e2e.md). Keep this file focused on backend
-visual/screenshot mechanics; do not duplicate the E2E operation sheet here.
+visual/screenshot mechanics; do not duplicate the E2E operation sheet here. The checked-in
+`tools/macos-ui-driver/bin/macos-ui-driver` is preferred for native E2E because its stable path
+may have host permissions provisioned. Build from Swift source only when developing or explicitly
+remediating the driver; a driver-source change requires replacing the checked-in binary, preserving
+`100755`, updating `bin/PROVENANCE.md`, and passing `verify-e2e-binary.sh`.
 
 ### Fallback Method
 

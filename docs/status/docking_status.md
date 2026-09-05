@@ -96,10 +96,11 @@ existing future-incompatibility warning; it is not a new test failure.
   restored to C equal to A and different from B; horizontal and vertical Splitter drags each ran
   for 12 seconds with 480 tracking steps; and the main-thread menu lifetime example retained the
   native item and fired its callback exactly once after the caller's `Rc` was dropped. The
-  floating-to-floating and Snapshot captures are under `/private/tmp/pr221-e2e-logs/`, with the
-  corresponding stdout/stderr under `.agent-state/issues/220/logs/`.
-- AppKit GUI evidence is stored under `/private/tmp/pr221-e2e-logs/`; copied command stdout/stderr
-  is retained under `.agent-state/issues/220/logs/`. Abnormal cases are reported with both streams,
+  reviewer-visible selected captures are committed under
+  `docs/issues/220-docking-ux-parity/evidence/`; the corresponding raw stdout/stderr remains in
+  `.agent-state/issues/220/e2e/` on the verification host.
+- AppKit GUI evidence is committed under `docs/issues/220-docking-ux-parity/evidence/`; raw command
+  stdout/stderr is retained under `.agent-state/issues/220/e2e/`. Abnormal cases are reported with both streams,
   including the pre-fix inert context action, selector/foreground diagnostics, intermittent
   direct-driver permission-denied shell invocations, and the pre-fix application panic reproduced
   during a native capability-control click. The panic was `RefCell already mutably borrowed` at

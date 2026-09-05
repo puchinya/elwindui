@@ -34,6 +34,7 @@ thread_local! {
     static UI_RIGHT_TAPPED_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::RightTappedRoutedEventArgs)>>> = RefCell::new(HashMap::new());
     static UI_INDEX_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(usize)>>> = RefCell::new(HashMap::new());
     static UI_F32_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(f32)>>> = RefCell::new(HashMap::new());
+    static UI_SIZE_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(f64, f64)>>> = RefCell::new(HashMap::new());
     static UI_KEY_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(RawKeyEvent)>>> = RefCell::new(HashMap::new());
     static UI_TEXT_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(String)>>> = RefCell::new(HashMap::new());
 }
@@ -339,6 +340,29 @@ pub(crate) fn invoke_ui_f32_event_callback(id: usize, value: f32) {
     let callback = UI_F32_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
     if let Some(callback) = callback {
         callback(value);
+    }
+}
+
+/// Issue #225: `Window.SizeChanged`'s handler is `TypedEventHandler<IInspectable,
+/// WindowSizeChangedEventArgs>` — a `Send`-bound WinRT delegate, same reason every other callback
+/// in this file goes through this numeric-key indirection instead of capturing `Rc` state
+/// directly. Registered once per `Window` for its whole life (`InnerWindow::new`), never removed
+/// early, so this uses the same no-removal-tracking shape as `register_ui_index_event_callback`/
+/// `register_ui_f32_event_callback` above rather than `UiCallbackRegistryOwner`'s per-element
+/// tracked-removal wrapper.
+pub(crate) fn register_ui_size_event_callback(callback: Rc<dyn Fn(f64, f64)>) -> usize {
+    let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
+    UI_SIZE_EVENT_CALLBACKS.with(|callbacks| {
+        callbacks.borrow_mut().insert(id, callback);
+    });
+    id
+}
+
+pub(crate) fn invoke_ui_size_event_callback(id: usize, width: f64, height: f64) {
+    // See `invoke_ui_event_callback`'s doc comment — same re-entrancy hazard, same fix.
+    let callback = UI_SIZE_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
+    if let Some(callback) = callback {
+        callback(width, height);
     }
 }
 

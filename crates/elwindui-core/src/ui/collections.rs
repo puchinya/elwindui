@@ -50,18 +50,27 @@ impl UIElementVisualCollection {
     }
     /// Removes the first entry pointer-equal to `child`, if any — returns whether one was found.
     pub fn remove(&self, child: &Rc<dyn UIElementExt>) -> bool {
-        let mut storage = self.storage.borrow_mut();
-        match storage.iter().position(|c| Rc::ptr_eq(c, child)) {
-            Some(index) => {
-                let removed = storage.remove(index);
-                *removed.as_ui_element().visual_parent.borrow_mut() = None;
-                if let Some(owner) = self.owner_rc() {
-                    owner.invalidate_measure();
-                }
-                true
-            }
-            None => false,
+        // `storage`'s `borrow_mut()` must end *before* `invalidate_measure()` runs, not stay held
+        // for the rest of the function — on a backend whose relayout is synchronous (WinUI3), that
+        // call can re-enter this same collection's `to_vec()`/`borrow()` (e.g. via
+        // `ControlTemplateProvider::prepare` re-measuring the owning `Control`), which panics with
+        // "already mutably borrowed". `add`/`insert`/`remove_at`/`clear` below already avoid this;
+        // this scoped block brings `remove` in line with them.
+        let removed = {
+            let mut storage = self.storage.borrow_mut();
+            storage
+                .iter()
+                .position(|c| Rc::ptr_eq(c, child))
+                .map(|index| storage.remove(index))
+        };
+        let Some(removed) = removed else {
+            return false;
+        };
+        *removed.as_ui_element().visual_parent.borrow_mut() = None;
+        if let Some(owner) = self.owner_rc() {
+            owner.invalidate_measure();
         }
+        true
     }
     pub fn remove_at(&self, index: usize) -> Rc<dyn UIElementExt> {
         let child = self.storage.borrow_mut().remove(index);
@@ -616,6 +625,58 @@ mod tests {
         assert!(
             child.visual_parent().is_none(),
             "remove should clear the child's visual parent"
+        );
+    }
+
+    /// Issue #229: on a backend whose relayout is synchronous (WinUI3), `remove`'s
+    /// `owner.invalidate_measure()` can re-enter the very collection `remove` is still mutating
+    /// (e.g. `ControlTemplateProvider::prepare` re-measuring the owning `Control`, which calls
+    /// `visual_children()` -> `to_vec()`). Reproduces that reentrancy directly with a
+    /// `RelayoutHost` that synchronously reads the collection back from inside
+    /// `request_relayout` — this panicked with "already mutably borrowed" before the fix, since
+    /// `remove` used to hold `storage`'s `borrow_mut()` across the `invalidate_measure()` call.
+    #[test]
+    fn remove_does_not_hold_its_borrow_across_a_synchronous_relayout_reentering_the_same_collection()
+     {
+        struct SynchronousRelayoutHost {
+            root: RefCell<Option<Rc<dyn UIElementExt>>>,
+            observed_len_during_relayout: Rc<RefCell<Option<usize>>>,
+        }
+        impl RelayoutHost for SynchronousRelayoutHost {
+            fn request_relayout(&self, _dirty_group_id: u64, _kind: InvalidationKind) {
+                let root = self
+                    .root
+                    .borrow()
+                    .clone()
+                    .expect("root must be set before any invalidate_measure() fires");
+                // The exact reentrant call the real crash took: reading the same collection's
+                // children back, synchronously, from within relayout.
+                let len = root.as_ui_element().visual_collection.to_vec().len();
+                *self.observed_len_during_relayout.borrow_mut() = Some(len);
+            }
+        }
+
+        let root = VerticalLayout::new();
+        let root_erased: Rc<dyn UIElementExt> = root.clone();
+        let child = native("a", size(10.0, 20.0));
+        root.as_ui_element().visual_collection.add(child.clone());
+
+        let observed_len_during_relayout = Rc::new(RefCell::new(None));
+        let host = Rc::new(SynchronousRelayoutHost {
+            root: RefCell::new(None),
+            observed_len_during_relayout: Rc::clone(&observed_len_during_relayout),
+        });
+        *host.root.borrow_mut() = Some(Rc::clone(&root_erased));
+        root.as_ui_element().set_invalidate_host(Some(host));
+
+        // Must not panic with "already mutably borrowed".
+        assert!(root.as_ui_element().visual_collection.remove(&child));
+
+        assert_eq!(
+            *observed_len_during_relayout.borrow(),
+            Some(0),
+            "the synchronous relayout must see the collection already updated (the removal must \
+             be visible), not deadlock/panic on a still-held borrow"
         );
     }
 

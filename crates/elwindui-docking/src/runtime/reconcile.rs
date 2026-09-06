@@ -2418,7 +2418,10 @@ fn add_tab_context_item(
     menu_item.set_text(text);
     menu_item.set_enabled(enabled);
     menu_item.set_on_select(Box::new(move || {
-        if let Some(owner) = owner.upgrade() {
+        // Explicitly typed (issue #239): rust-analyzer, unlike rustc, cannot infer `owner`'s
+        // type from an inline `if let Some(owner) = owner.upgrade() { owner.method(...) }` here.
+        let owner: Option<Rc<crate::DockingControl>> = owner.upgrade();
+        if let Some(owner) = owner {
             owner.handle_tab_context_action(item.clone(), action);
         }
     }));

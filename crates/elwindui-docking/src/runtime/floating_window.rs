@@ -107,9 +107,13 @@ fn bounds_changed_handler(
     owner: &std::rc::Weak<crate::DockingControl>,
     host_id: FloatingHostId,
 ) -> Rc<dyn Fn(Rect)> {
-    let weak_owner = owner.clone();
+    let weak_owner: Weak<crate::DockingControl> = owner.clone();
     Rc::new(move |bounds| {
-        if let Some(owner) = weak_owner.upgrade() {
+        // Explicitly typed, matching `close_handler` just above (issue #239): rust-analyzer,
+        // unlike rustc, cannot infer `owner`'s type from an inline `if let Some(owner) =
+        // weak_owner.upgrade() { owner.method(...) }` here.
+        let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+        if let Some(owner) = owner {
             owner.handle_floating_bounds_changed(host_id, bounds);
         }
     })

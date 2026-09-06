@@ -316,10 +316,13 @@ impl CustomTabView {
         // retained selection presentation immediately so the visible header/content pair cannot
         // fall back to index zero while the DockLayoutModel still names another active item.
         self.sync_presentation(&children);
-        if let Some(presenter) = self
+        // Explicitly typed (issue #239): rust-analyzer, unlike rustc, cannot infer `presenter`'s
+        // type from an inline `if let Some(presenter) = ... .and_then(...) { presenter.method(...) }`
+        // here the way the return-type-anchored `presenters()` above does.
+        let presenter: Option<Rc<CustomTabContentPresenter>> = self
             .content_presenter()
-            .and_then(|presenter| presenter.upgrade())
-        {
+            .and_then(|presenter| presenter.upgrade());
+        if let Some(presenter) = presenter {
             presenter.refresh_presentation();
         }
         self.invalidate_measure();

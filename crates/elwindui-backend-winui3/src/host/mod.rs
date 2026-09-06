@@ -155,11 +155,14 @@ pub struct TreeHostPanel {
 ///
 /// Unlike AppKit's `AppKitRelayoutHost` (where `NSView.setNeedsLayout(true)` is itself already
 /// coalesced by AppKit into a single pass per display cycle, no matter how many times it's called),
-/// `relayout_static` here rebuilds `Canvas.Children` synchronously and from scratch — so
-/// `request_relayout` debounces via `pending` + this thread's `DispatcherQueue`, matching
-/// docs/design/runtime/layout_design.md's `RelayoutHost` coalescing contract: repeated calls within the same
-/// synchronous burst (e.g. several property setters inside one `resync()`) collapse into a single
-/// deferred relayout pass, not one synchronous pass per call.
+/// `relayout_static` here rebuilds `Canvas.Children` synchronously and from scratch.
+/// `request_relayout` executes it synchronously and directly, on the calling thread, right there —
+/// it does not enqueue anything on a `DispatcherQueue` or otherwise defer to a later turn of the
+/// message loop. `pending` coalesces duplicate immediate requests arriving before this call's own
+/// synchronous pass has started (see `pending`'s own doc comment). A *different* kind of
+/// duplication — this same host's pass re-entering itself synchronously, from a structural change
+/// made while already mid-measure — is a separate concern `RelayoutCycleState::run_coalesced`
+/// handles (see `relayout_static`'s own doc comment); `pending` does not address that case.
 pub(crate) struct WinUI3RelayoutHost {
     canvas: Canvas,
     composition: Weak<RefCell<CompositionRenderer>>,
@@ -177,14 +180,21 @@ pub(crate) struct WinUI3RelayoutHost {
     /// See `RelayoutCycleState`'s own doc comment — this host's own reentrancy-coalescing state,
     /// never a thread-local, so it never suppresses a different `TreeHostPanel`'s relayout.
     relayout_cycle: Weak<RelayoutCycleState>,
-    /// `true` while a relayout pass is already enqueued on the `DispatcherQueue` and hasn't run
-    /// yet — makes `request_relayout` a no-op for any further call until that pass actually runs
-    /// (and clears it right before doing so).
+    /// `true` while the current synchronous `request_relayout` call has already claimed the
+    /// immediate relayout pass and hasn't finished dispatching it yet — makes a further
+    /// `request_relayout` call arriving before that happens a no-op (cleared right before the
+    /// claiming call actually runs `relayout_static`). This coalesces duplicate *immediate*
+    /// requests only; it says nothing about any queued/deferred job, since there isn't one. A
+    /// same-host reentrant call arriving *during* the pass itself (after `pending` is already
+    /// cleared) is a different case, handled by `RelayoutCycleState::run_coalesced` instead — see
+    /// `relayout_static`'s own doc comment.
     pending: Cell<bool>,
-    /// Lets `request_relayout` (which only ever sees `&self`) hand an owned `Rc<Self>` to the
-    /// `DispatcherQueueHandler` closure — set once, right after this host is `Rc`-wrapped (see
-    /// `TreeHostPanel::set_tree`), the same self-referential-`Weak` pattern
-    /// `InnerTabView`'s own event wiring uses for the same reason.
+    /// Lets `request_relayout` (which only ever sees `&self`) upgrade to an owned `Rc<Self>` so it
+    /// can read every other weakly-held backend field through one consistent handle — set once,
+    /// right after this host is `Rc`-wrapped (see `TreeHostPanel::set_tree`), the same
+    /// self-referential-`Weak` pattern `InnerTabView`'s own event wiring uses for the same reason.
+    /// Not related to any `DispatcherQueueHandler`: `request_relayout` runs everything
+    /// synchronously on the calling thread, it never posts a handler anywhere.
     weak_self: RefCell<Weak<WinUI3RelayoutHost>>,
 }
 
@@ -1237,9 +1247,9 @@ impl TreeHostPanel {
     }
 
     /// Issue #231/#235 review remediation: `request_relayout`'s own `pending` coalescing (see
-    /// `WinUI3RelayoutHost`'s doc comment) clears `pending` and calls this function directly
-    /// rather than actually deferring through the `DispatcherQueue` it documents — so a
-    /// `set_attached`/structural change made by a control while this very host's pass is already
+    /// `WinUI3RelayoutHost`'s doc comment) clears `pending` and calls this function directly,
+    /// synchronously, on the calling thread — there is no `DispatcherQueue` deferral here at all —
+    /// so a `set_attached`/structural change made by a control while this very host's pass is already
     /// measuring/arranging it (e.g. a `Control`'s `on_apply_template` reconciling its own template
     /// children, or `visual_collection.add`/`remove` invalidating measure) re-enters this
     /// function synchronously instead of the pass already running here picking it up. Left

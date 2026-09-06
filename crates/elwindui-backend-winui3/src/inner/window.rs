@@ -258,7 +258,7 @@ impl InnerWindow {
     /// callback reads the effective native position and size, so programmatic moves and user
     /// drags share the same model-owned bounds publication path.
     ///
-    /// Issue #231: `AppWindow.Changed`'s delegate (`TypedEventHandler<AppWindow,
+    /// Issue #234: `AppWindow.Changed`'s delegate (`TypedEventHandler<AppWindow,
     /// AppWindowChangedEventArgs>`) requires `Send`, which an `Rc`-holding closure is not — same
     /// reason every other native handler in this crate goes through `crate::ffi`'s numeric-key
     /// indirection (see `UiCallbackRegistryOwner::register_bounds`) instead of capturing `Rc`

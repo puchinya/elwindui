@@ -214,7 +214,7 @@ impl UiCallbackRegistryOwner {
     }
 
     /// Registers an `(x, y, width, height)` bounds-changed callback owned by this lifetime group —
-    /// e.g. `AppWindow.Changed` (Issue #231). Mirrors `register_size`: the generated
+    /// e.g. `AppWindow.Changed` (Issue #234). Mirrors `register_size`: the generated
     /// `TypedEventHandler<AppWindow, AppWindowChangedEventArgs>` delegate requires `Send`, which an
     /// `Rc`-holding closure is not, so the native delegate captures only the numeric id returned
     /// here and this owner removes the tracked entry when it drops with the owning `InnerWindow`.
@@ -409,7 +409,7 @@ pub(crate) fn ui_size_event_callback_count() -> usize {
     UI_SIZE_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().len())
 }
 
-/// Issue #231: `AppWindow.Changed`'s handler is `TypedEventHandler<AppWindow,
+/// Issue #234: `AppWindow.Changed`'s handler is `TypedEventHandler<AppWindow,
 /// AppWindowChangedEventArgs>` — a `Send`-bound WinRT delegate, same reason every other callback
 /// in this file goes through this numeric-key indirection instead of capturing `Rc` state
 /// directly. This is the low-level raw insert only — callers must go through

@@ -14,7 +14,7 @@ Snapshot: 2026-09-06. Docking behavior is defined by the docking specification a
 ## Current verification state
 
 - Focused model, reconciliation, retained-presentation, pointer-path, splitter, floating-host, snapshot, auto-hide, and weak-lifetime tests pass on this branch, together with the workspace verification baseline.
-- Native AppKit E2E passed for the GridSplitter ownership change. The custom-controls and Docking demo drag evidence is retained under `.agent-state/issues/237/e2e/2169696908a1/20260906T075553Z/`; both cases show a moved divider, successful focused drag/capture, and non-forced termination. The prior failure was an obsolete Accessibility status-text selector, not a resize failure.
+- Native AppKit E2E passed for the GridSplitter ownership change. The custom-controls and Docking demo drag evidence is retained under `.agent-state/issues/237/e2e/2169696908a1/20260906T075553Z/`; both cases show a moved divider, successful focused drag/capture, and non-forced termination. The prior failure was an obsolete Accessibility status-text selector, not a resize failure. A repeat on final commit `8551d42` was BLOCKED before action because `loginwindow` remained frontmost; no product failure was observed in that run.
 
 ## Platform boundaries and blockers
 

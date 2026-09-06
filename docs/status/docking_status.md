@@ -13,8 +13,7 @@ Snapshot: 2026-09-06. Docking behavior is defined by the docking specification a
 
 ## Current verification state
 
-- Focused model, reconciliation, retained-presentation, pointer-path, splitter, floating-host, snapshot, auto-hide, and weak-lifetime tests pass on this branch, together with the workspace verification baseline.
-- Final-head AppKit runtime interaction for CustomGridSplitter-owned Docking splitter resizing is currently blocked before GUI action because the target windows did not appear while `loginwindow` remained frontmost. Focused model, reconciliation, retained-presentation, pointer-path, splitter, floating-host, snapshot, auto-hide, and weak-lifetime tests pass on the current implementation.
+- Focused model, reconciliation, retained-presentation, pointer-path, splitter, floating-host, snapshot, auto-hide, weak-lifetime, and workspace tests pass. Final-head AppKit runtime interaction for CustomGridSplitter-owned Docking splitter resizing is currently blocked and therefore unverified. WinUI3 and GTK4 runtime interaction remain unverified.
 
 ## Platform boundaries and blockers
 

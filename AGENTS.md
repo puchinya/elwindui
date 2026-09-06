@@ -71,6 +71,8 @@ Use bounded search/ranges/diffs. Do not scan all specs/design/status, repeatedly
 
 `docs/status/` is current-state navigation, not an evidence/history archive. Detailed investigation and historical verification belong in Issue/PR/evidence artifacts.
 
+Do not load `docs_only_human/` during ordinary Agent work; it is human overview material and is not an Agent authority.
+
 Provider-specific context compressors such as RTK or context-mode may be used, but repository correctness must not depend on them.
 
 ## Branch and disk-space invariant

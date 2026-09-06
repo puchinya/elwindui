@@ -13,8 +13,9 @@ Snapshot: 2026-09-06. The public contract is [`../specs/custom_controls_spec.md`
 
 ## Current gaps and follow-up
 
-- Native runtime interaction for CustomTabView, CustomTabViewItem, and CustomSplitter is not established for every target backend. Docking integration remains the downstream Issue [#172](https://github.com/puchinya/elwindui/issues/172).
-- Common pointer cancellation and capture-loss semantics remain owned by [#179](https://github.com/puchinya/elwindui/issues/179); this crate consumes Core events and does not add a separate capture API.
+- Native runtime interaction for CustomTabView, CustomTabViewItem, and CustomSplitter is not established for every target backend.
+- Docking integration is implemented in the separate `elwindui-docking` crate; this crate remains the reusable custom-control layer.
+- Custom controls consume the common Core pointer cancellation and capture-loss semantics; this crate does not add a separate public capture API.
 
 ## Verification state
 

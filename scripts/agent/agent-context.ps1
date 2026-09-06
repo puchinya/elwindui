@@ -48,9 +48,22 @@ $workflow = switch ($phase) {
     default { '' }
 }
 
-$prs = @(& gh pr list --repo $repository --head $branch --state all --limit 1 --json number,url | ConvertFrom-Json)
-$prNumber = if ($prs.Count -gt 0) { [string]$prs[0].number } else { '' }
-$prUrl = if ($prs.Count -gt 0) { [string]$prs[0].url } else { '' }
+$prs = @(& gh pr list --repo $repository --state all --limit 100 --json number,url,state,updatedAt,closingIssuesReferences | ConvertFrom-Json)
+$linkedPrs = @($prs | Where-Object {
+    $references = @($_.closingIssuesReferences)
+    $references | Where-Object { [int]$_.number -eq $IssueNumber } | Select-Object -First 1
+})
+$openPrs = @($linkedPrs | Where-Object { $_.state -eq 'OPEN' })
+$mergedPrs = @($linkedPrs | Where-Object { $_.state -eq 'MERGED' })
+$selectedPr = $null
+if ($openPrs.Count -gt 0) {
+    $selectedPr = $openPrs | Sort-Object -Property updatedAt -Descending | Select-Object -First 1
+}
+elseif ($mergedPrs.Count -gt 0) {
+    $selectedPr = $mergedPrs | Sort-Object -Property updatedAt -Descending | Select-Object -First 1
+}
+$prNumber = if ($null -ne $selectedPr) { [string]$selectedPr.number } else { '' }
+$prUrl = if ($null -ne $selectedPr) { [string]$selectedPr.url } else { '' }
 
 $base = ".agent-state/issues/$IssueNumber"
 $contract = Join-Path $base 'implementation-contract.md'

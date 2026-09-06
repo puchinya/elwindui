@@ -146,7 +146,8 @@ else {
 # stale target/ artifacts. Development machines have constrained free disk space.
 # Do not remove/soften this clean or replace it with a persistent shared build cache.
 # Same-branch use does not clean.
-if ($branchChanged -and (Get-Command cargo -ErrorAction SilentlyContinue)) {
+if ($branchChanged) {
+    Assert-Command cargo
     Invoke-Checked cargo @('clean') | Out-Null
 }
 

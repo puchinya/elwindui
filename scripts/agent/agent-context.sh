@@ -50,17 +50,37 @@ case "$PHASE" in
   *) WORKFLOW="" ;;
 esac
 
-PR_JSON="$(gh pr list --repo "$REPOSITORY" --head "$BRANCH" --state all --limit 1 --json number,url)"
-PR_NUMBER="$(python3 - "$PR_JSON" <<'PY'
+PR_JSON="$(gh pr list --repo "$REPOSITORY" --state all --limit 100 --json number,url,state,updatedAt,closingIssuesReferences)"
+PR_NUMBER="$(python3 - "$PR_JSON" "$ISSUE_NUMBER" <<'PY'
 import json, sys
-a=json.loads(sys.argv[1])
-print(a[0]["number"] if a else "")
+
+prs=json.loads(sys.argv[1])
+issue_number=int(sys.argv[2]) if len(sys.argv) > 2 else 0
+linked=[
+    pr for pr in prs
+    if any(ref.get("number") == issue_number for ref in pr.get("closingIssuesReferences", []))
+]
+open_prs=[pr for pr in linked if pr.get("state") == "OPEN"]
+merged_prs=[pr for pr in linked if pr.get("state") == "MERGED"]
+candidates=open_prs or merged_prs
+candidates.sort(key=lambda pr: pr.get("updatedAt", ""), reverse=True)
+print(candidates[0].get("number", "") if candidates else "")
 PY
 )"
-PR_URL="$(python3 - "$PR_JSON" <<'PY'
+PR_URL="$(python3 - "$PR_JSON" "$ISSUE_NUMBER" <<'PY'
 import json, sys
-a=json.loads(sys.argv[1])
-print(a[0]["url"] if a else "")
+
+prs=json.loads(sys.argv[1])
+issue_number=int(sys.argv[2]) if len(sys.argv) > 2 else 0
+linked=[
+    pr for pr in prs
+    if any(ref.get("number") == issue_number for ref in pr.get("closingIssuesReferences", []))
+]
+open_prs=[pr for pr in linked if pr.get("state") == "OPEN"]
+merged_prs=[pr for pr in linked if pr.get("state") == "MERGED"]
+candidates=open_prs or merged_prs
+candidates.sort(key=lambda pr: pr.get("updatedAt", ""), reverse=True)
+print(candidates[0].get("url", "") if candidates else "")
 PY
 )"
 

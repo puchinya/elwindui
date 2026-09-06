@@ -119,7 +119,11 @@ fi
 # stale target/ artifacts. Development machines have constrained free disk space.
 # Do not remove/soften this clean or replace it with a persistent shared build cache.
 # Same-branch use does not clean.
-if [[ "$BRANCH_CHANGED" -eq 1 ]] && command -v cargo >/dev/null 2>&1; then
+if [[ "$BRANCH_CHANGED" -eq 1 ]]; then
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "error: cargo is required after an actual source branch switch" >&2
+    exit 1
+  fi
   cargo clean
 fi
 

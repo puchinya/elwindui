@@ -99,6 +99,8 @@ Before implementation-phase completion is reported, changes must be committed an
 
 Overall Issue completion remains merge-gated by the review workflow.
 
+Every implementation has a task-specific effective Reviewer Checklist fixed before editing. Final delivery requires item-by-item PASS/FAIL/N/A results with concrete evidence bound to the reviewed committed HEAD; pending, failed, stale, or incomplete self-review blocks delivery. Details live in `docs/agent-workflow/implementation.md`.
+
 ## Technical guides
 
 Read only the guide relevant to the task:

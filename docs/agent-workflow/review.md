@@ -28,6 +28,8 @@ Rules:
 - keep reviewer guidance focused on high-risk changed behavior;
 - keep raw logs and long evidence out of the PR body.
 
+Implementer self-review is evidence, not reviewer approval. The reviewer independently inspects the actual diff, Issue/spec/design/contract authority, comments, tests, and required checks. A concise self-review summary may guide focus, but a claimed `PASS` does not change review classification.
+
 Use `gh` to inspect PR comments/reviews/threads/checks.
 
 ## Review handling
@@ -40,8 +42,10 @@ Use `gh` to inspect PR comments/reviews/threads/checks.
    - create a follow-up Issue for valid out-of-scope work.
 4. Use focused checks while remediation is in progress.
 5. If remediation changes Rust-affecting files or generation semantics, once remediation is stable rerun the complete mandatory Rust verification gate in `docs/agents/testing.md`.
-6. Do not resolve a thread until addressed/answered.
-7. Keep unrelated follow-up work out of the PR.
+6. After repository-changing remediation, commit the remediation, inspect the complete diff again, redo the generic and task-specific self-review on the new HEAD, update `Reviewed-HEAD`, and rerun `validate-self-review.* <issue-number>` before considering the PR ready for another review cycle.
+7. A previous self-review is stale after any new commit.
+8. Do not resolve a thread until addressed/answered.
+9. Keep unrelated follow-up work out of the PR.
 
 If review requires a material requirements/design change, update the Issue, return to `phase:design`, obtain required approval, and come back through implementation/verification.
 

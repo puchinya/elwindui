@@ -9,10 +9,11 @@ Before editing:
 1. Re-read the approved Issue specification and acceptance criteria.
 2. Confirm that no newer comment or linked decision supersedes the Issue body.
 3. If the task was supplied as an Implementation Contract, follow the mirror gate below.
-4. For source-code changes, create/switch through `scripts/agent/start-feature-branch.sh <issue> <short-description>` or the PowerShell equivalent. Its branch name is authoritative for source work.
-5. An actual helper-driven branch switch must keep its mandatory `cargo clean`; this disk-space invariant must not be optimized away.
-6. Replace `phase:ready` with `phase:implementation`.
-7. Confirm required upstream spec/design updates are approved before code editing.
+4. Run `scripts/agent/prepare-self-review.sh <issue-number>` or the PowerShell equivalent and confirm the generated effective checklist matches the approved task.
+5. For source-code changes, create/switch through `scripts/agent/start-feature-branch.sh <issue> <short-description>` or the PowerShell equivalent. Its branch name is authoritative for source work.
+6. An actual helper-driven branch switch must keep its mandatory `cargo clean`; this disk-space invariant must not be optimized away.
+7. Replace `phase:ready` with `phase:implementation`.
+8. Confirm required upstream spec/design updates are approved before code editing.
 
 Documentation/workflow-only changes may use the existing `docs/` or `agent/` branch allowance.
 
@@ -73,6 +74,8 @@ Keep large output in `.agent-state/issues/<issue>/logs/` and inspect bounded exc
 
 If code/spec/design conflict requires a material public API, compatibility, ownership, backend-boundary, threading, dependency, non-goal, or acceptance change, stop and return to `phase:design`.
 
+A material requirement discovered during implementation that is missing from the effective checklist follows the same return-to-requirements/design rule. Do not silently add a design decision or checklist obligation in the implementation phase.
+
 ## Verification
 
 `docs/agents/testing.md` is the sole Rust verification command authority.
@@ -85,7 +88,11 @@ Record commands/results honestly, including untested environments.
 
 ## Self-review
 
-Before creating/updating the PR:
+The final self-review contains both the existing generic checks below and every item in the effective task-specific Reviewer Checklist. Stabilize the implementation first, run required verification, commit repository-controlled changes, and confirm the worktree is clean before recording the final review.
+
+Before setting `Reviewed-HEAD`, refresh the checklist with `prepare-self-review.* <issue-number>` to detect source drift, inspect the complete committed task diff against the current remote default branch, judge every task-specific item as `PASS`, `FAIL`, or `N/A`, and record concrete evidence for every `PASS` or a concrete reason for every `N/A`. Set `Reviewed-HEAD` to the current full commit SHA and run `validate-self-review.* <issue-number>`. Any validator failure blocks PR delivery.
+
+Generic repository self-review:
 
 1. If a contract mirror exists, verify its SHA/integrity with `scripts/agent/agent-context.*` and re-read the exact contract.
 2. Inspect the complete diff.
@@ -97,11 +104,14 @@ Before creating/updating the PR:
 8. Verify status contains current state rather than PR/evidence history.
 9. Verify error handling, unsafe assumptions, generated files, and lockfile changes are intentional.
 
+The final review must not be marked complete while implementation changes remain uncommitted. A new commit, source change, missing item, `PENDING`, `FAIL`, stale checklist, stale `Reviewed-HEAD`, or missing evidence requires the review gate to be performed again.
+
 ## Implementation completion gate
 
 Before reporting implementation-phase completion:
 
 - changes are committed;
+- `validate-self-review.* <issue-number>` passes with the complete effective checklist and current committed HEAD;
 - branch is pushed;
 - PR exists and contains `Closes #<issue-number>`;
 - Issue transitioned to `phase:review`;
@@ -113,6 +123,7 @@ If PR creation or phase transition fails, report the task as blocked with the ex
 
 1. Update the Issue acceptance checklist and only a concise implementation status.
 2. Put delta/evidence/risk/reviewer guidance in the PR; do not restate the whole Issue/contract.
+   Include only a concise self-review summary: checklist source(s), checklist SHA-256, reviewed HEAD, PASS/N/A/FAIL counts, and validator result. Keep item-level results in `.agent-state`.
 3. Create the PR with `Closes #<issue-number>`.
 4. Replace `phase:implementation` with `phase:review`.
 5. Read `docs/agent-workflow/review.md`.

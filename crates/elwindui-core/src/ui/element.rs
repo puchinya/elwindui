@@ -1082,7 +1082,9 @@ pub(crate) fn request_relayout(base: &UIElement, kind: InvalidationKind) {
 }
 
 pub(crate) fn flush_interactive_relayout(base: &UIElement) {
-    let mut current = base
+    // Explicitly typed (issue #239): rust-analyzer, unlike rustc, cannot infer `current`'s type
+    // from this chain alone before the `element.visual_parent()` call inside the loop below.
+    let mut current: Option<Rc<dyn UIElementExt>> = base
         .visual_parent
         .borrow()
         .as_ref()

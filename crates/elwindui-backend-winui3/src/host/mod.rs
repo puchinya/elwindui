@@ -274,25 +274,32 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
     }
 
     fn flush_interactive_relayout(&self) {
-        let Some(active) = self.active.upgrade() else {
+        // Explicitly typed intermediates below (matching `request_relayout`'s own style just
+        // above) are required for `rust-analyzer diagnostics .` (issue #239): inlining
+        // `.upgrade()` directly into a `let-else`/tuple `if let` pattern here leaves
+        // rust-analyzer, unlike rustc, unable to infer the bound names' types before the
+        // following field/method access — see issue #239 for the full investigation.
+        let active: Option<Rc<Cell<bool>>> = self.active.upgrade();
+        let Some(active) = active else {
             return;
         };
         if !active.get() {
             return;
         }
         self.pending.set(false);
-        let Some(this) = self.weak_self.borrow().upgrade() else {
+        let this: Option<Rc<WinUI3RelayoutHost>> = self.weak_self.borrow().upgrade();
+        let Some(this) = this else {
             return;
         };
-        if let (
-            Some(tree),
-            Some(render_tree),
-            Some(native_children),
-            Some(composition),
-            Some(keyboard),
-            Some(unconstrained_axes),
-            Some(active),
-            Some(relayout_cycle),
+        let upgraded: (
+            Option<Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>>,
+            Option<Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>>,
+            Option<Rc<RefCell<NativeChildMap>>>,
+            Option<Rc<RefCell<CompositionRenderer>>>,
+            Option<Rc<KeyboardDispatcher>>,
+            Option<Rc<Cell<(bool, bool)>>>,
+            Option<Rc<Cell<bool>>>,
+            Option<Rc<RelayoutCycleState>>,
         ) = (
             this.tree.upgrade(),
             this.render_tree.upgrade(),
@@ -302,7 +309,18 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
             this.unconstrained_axes.upgrade(),
             this.active.upgrade(),
             this.relayout_cycle.upgrade(),
-        ) {
+        );
+        if let (
+            Some(tree),
+            Some(render_tree),
+            Some(native_children),
+            Some(composition),
+            Some(keyboard),
+            Some(unconstrained_axes),
+            Some(active),
+            Some(relayout_cycle),
+        ) = upgraded
+        {
             TreeHostPanel::relayout_static(
                 &this.canvas,
                 &composition,

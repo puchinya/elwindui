@@ -1177,6 +1177,34 @@ impl TreeHostPanel {
         if !active.get() {
             return;
         }
+        // Issue #231: `request_relayout`'s own `pending` coalescing (see `WinUI3RelayoutHost`'s
+        // doc comment) clears `pending` and calls this function directly rather than actually
+        // deferring through the `DispatcherQueue` it documents — so a `set_attached`/structural
+        // change made by a control while this very function is already measuring/arranging it
+        // (e.g. a `Control`'s `on_apply_template` reconciling its own template children, or
+        // `visual_collection.add`/`remove` invalidating measure) re-enters this function
+        // synchronously instead of the pass already running here picking it up. Each reentry
+        // starts a brand-new full-tree pass nested on top of the still-running one, and none of
+        // them are tail calls, so a moderately nested tree overflows the stack (observed on
+        // `custom-controls-demo`, whose templated `CustomTabView`/`CustomTabContentPresenter`
+        // both reconcile structural children as part of being measured). This thread-local guard
+        // is safe, not just stack-saving: a reentrant call only ever fires from *inside* this same
+        // top-to-bottom traversal, before it has reached the very subtree that changed, so the
+        // still-running outer pass reads that subtree's current (already-mutated) state once it
+        // gets there and the reentrant call has nothing correct left to do.
+        thread_local! {
+            static IN_RELAYOUT: Cell<bool> = const { Cell::new(false) };
+        }
+        if IN_RELAYOUT.with(|in_relayout| in_relayout.replace(true)) {
+            return;
+        }
+        struct ReentrancyGuard;
+        impl Drop for ReentrancyGuard {
+            fn drop(&mut self) {
+                IN_RELAYOUT.with(|in_relayout| in_relayout.set(false));
+            }
+        }
+        let _reentrancy_guard = ReentrancyGuard;
         use elwindui_core::base::Size as LSize;
 
         // `ActualWidth`/`ActualHeight` only update after a real native layout pass runs on this

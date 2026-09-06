@@ -14,6 +14,16 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+/// Resets `reconciling` back to `false` once the structural reconciliation it guards returns,
+/// including on an unwinding panic — see `reconcile_contents`'s own doc comment.
+struct ReconcilingGuard<'a>(&'a CustomTabContentPresenter);
+
+impl Drop for ReconcilingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set_reconciling(false);
+    }
+}
+
 // This module is private; `pub` only allows the component macro to name the
 // state type in generated methods and does not expose it through the crate.
 pub struct ContentEntry {
@@ -40,6 +50,8 @@ pub(crate) struct CustomTabContentPresenter {
     last_arranged_selected_index: Option<usize>,
     #[state(default = true)]
     structure_dirty: bool,
+    #[state(default = false)]
+    reconciling: bool,
     template: template_view!(|this: Self| {
         on_mount {
             this.reconcile_contents();
@@ -62,6 +74,16 @@ impl CustomTabContentPresenter {
     }
 
     pub(crate) fn reconcile_contents(&self) {
+        if self.reconciling() {
+            // `visual_collection.add`/`remove` below can synchronously re-enter this method:
+            // WinUI3's relayout is synchronous, so adding a page's content can drive a full
+            // `layout_root` pass that re-measures this same presenter before `bound_items`
+            // reflects the update in progress. Without this guard that reentrant call would see
+            // the same stale `bound_items` and repeat the whole structural reconciliation from
+            // scratch, recursing without end and overflowing the stack. The in-progress call
+            // below finishes the reconciliation; the reentrant one is a no-op.
+            return;
+        }
         let items = self.items();
         let unchanged = self.bound_items().len() == items.len()
             && self
@@ -72,6 +94,9 @@ impl CustomTabContentPresenter {
         if unchanged {
             return;
         }
+
+        self.set_reconciling(true);
+        let _guard = ReconcilingGuard(self);
 
         #[cfg(test)]
         self.note_structural_reconciliation();
@@ -358,6 +383,62 @@ mod tests {
         assert_eq!(
             presenter.structural_reconciliation_count_for_test(),
             structural_count
+        );
+    }
+
+    /// Issue #231: on a backend whose relayout is synchronous (WinUI3), the
+    /// `visual_collection.add` calls below can synchronously re-enter this same presenter's
+    /// `measure_override` -> `reconcile_contents` before `bound_items` reflects the update already
+    /// in progress. Without the `reconciling` guard, the reentrant call sees the same stale
+    /// `bound_items`, repeats the whole structural reconciliation, and so does the relayout that
+    /// repetition triggers, recursing without bound (a real stack overflow in production — observed
+    /// on `custom-controls-demo`). The reentrant host below caps its own recursion so a
+    /// reintroduction of the bug fails the assertion instead of overflowing this test's own stack.
+    #[test]
+    fn reconcile_contents_does_not_repeat_when_a_synchronous_relayout_reenters_it() {
+        use elwindui_core::ui::{InvalidationKind, RelayoutHost};
+
+        struct ReenteringRelayoutHost {
+            presenter: RefCell<Option<Rc<CustomTabContentPresenter>>>,
+            depth: Cell<u32>,
+        }
+        impl RelayoutHost for ReenteringRelayoutHost {
+            fn request_relayout(&self, _dirty_group_id: u64, _kind: InvalidationKind) {
+                let depth = self.depth.get();
+                if depth >= 4 {
+                    return;
+                }
+                self.depth.set(depth + 1);
+                if let Some(presenter) = self.presenter.borrow().clone() {
+                    presenter.measure(Size {
+                        width: 200.0,
+                        height: 100.0,
+                    });
+                }
+                self.depth.set(depth);
+            }
+        }
+
+        let presenter = CustomTabContentPresenter::new();
+        let items = (0..2)
+            .map(|_| CustomTabViewItem::new_item())
+            .collect::<Vec<_>>();
+        presenter.set_items(items);
+
+        let host = Rc::new(ReenteringRelayoutHost {
+            presenter: RefCell::new(None),
+            depth: Cell::new(0),
+        });
+        *host.presenter.borrow_mut() = Some(presenter.clone());
+        presenter.as_ui_element().set_invalidate_host(Some(host));
+
+        presenter.reconcile_contents();
+
+        assert_eq!(
+            presenter.structural_reconciliation_count_for_test(),
+            1,
+            "a synchronous relayout re-entering this presenter's own measure pass must not repeat \
+             structural reconciliation"
         );
     }
 }

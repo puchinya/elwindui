@@ -50,9 +50,63 @@ use windows::core::Interface;
 /// elements appended to `Canvas.Children` in traversal order (`Canvas` z-orders by collection
 /// order — a parent's own paint is appended before its children's, so it stays behind them),
 /// rather than AppKit's separate `CAShapeLayer`/`CATextLayer` sublayer mechanism.
+/// Issue #235 review remediation: per-`TreeHostPanel` relayout-reentrancy state. A thread-local
+/// guard would suppress every *other* host's relayout while this one's pass is in progress, but
+/// `docs/design/runtime/layout_design.md` treats each hosted subtree as owning its own layout
+/// host/viewport/pending-invalidation state — one host's synchronous pass must never block a
+/// sibling host (e.g. a `TabView` page host, a `ScrollView` content host) from relaying out
+/// immediately. `in_progress` marks a pass as currently running *for this host*; a same-host
+/// request arriving while it's set means a structural/measure change happened synchronously
+/// during this host's own traversal (see `relayout_static`'s doc comment) — set `rerun_requested`
+/// instead of recursing, so the still-running pass repeats once more after it finishes rather than
+/// silently dropping the request or nesting a nont-tail call that can overflow the stack.
+#[derive(Default)]
+struct RelayoutCycleState {
+    in_progress: Cell<bool>,
+    rerun_requested: Cell<bool>,
+}
+
+impl RelayoutCycleState {
+    /// Runs `pass` for this exact host, coalescing a same-host reentrant call — one `pass` itself
+    /// triggers synchronously, on this same `RelayoutCycleState` — into one more run instead of
+    /// either recursing (the stack-overflow bug this replaces) or dropping the request (unsafe:
+    /// the subtree that just changed may already be behind the still-running pass). A call against
+    /// a *different* `RelayoutCycleState` is unaffected no matter how deeply nested, since each
+    /// host's in-progress/rerun state is its own `Cell` pair, never shared or thread-local.
+    ///
+    /// Returns `false` without running `pass` when a call for this same host is already in
+    /// progress further up the call stack; that call's own loop (below) picks up this request via
+    /// `rerun_requested` once it finishes its current iteration. Returns `true` once this call's
+    /// own loop (the outermost one for this host) has completed, including every coalesced rerun.
+    fn run_coalesced(&self, mut pass: impl FnMut()) -> bool {
+        if self.in_progress.replace(true) {
+            self.rerun_requested.set(true);
+            return false;
+        }
+        struct InProgressGuard<'a>(&'a RelayoutCycleState);
+        impl Drop for InProgressGuard<'_> {
+            fn drop(&mut self) {
+                self.0.in_progress.set(false);
+            }
+        }
+        let _guard = InProgressGuard(self);
+        loop {
+            self.rerun_requested.set(false);
+            pass();
+            if !self.rerun_requested.get() {
+                break;
+            }
+        }
+        true
+    }
+}
+
 #[derive(Clone)]
 pub struct TreeHostPanel {
     canvas: Canvas,
+    /// See `RelayoutCycleState`'s own doc comment. Owned here (not a thread-local) so reentrancy
+    /// coalescing is scoped to exactly this host.
+    relayout_cycle: Rc<RelayoutCycleState>,
     composition: Rc<RefCell<CompositionRenderer>>,
     tree: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
     render_tree: Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
@@ -101,11 +155,14 @@ pub struct TreeHostPanel {
 ///
 /// Unlike AppKit's `AppKitRelayoutHost` (where `NSView.setNeedsLayout(true)` is itself already
 /// coalesced by AppKit into a single pass per display cycle, no matter how many times it's called),
-/// `relayout_static` here rebuilds `Canvas.Children` synchronously and from scratch — so
-/// `request_relayout` debounces via `pending` + this thread's `DispatcherQueue`, matching
-/// docs/design/runtime/layout_design.md's `RelayoutHost` coalescing contract: repeated calls within the same
-/// synchronous burst (e.g. several property setters inside one `resync()`) collapse into a single
-/// deferred relayout pass, not one synchronous pass per call.
+/// `relayout_static` here rebuilds `Canvas.Children` synchronously and from scratch.
+/// `request_relayout` executes it synchronously and directly, on the calling thread, right there —
+/// it does not enqueue anything on a `DispatcherQueue` or otherwise defer to a later turn of the
+/// message loop. `pending` coalesces duplicate immediate requests arriving before this call's own
+/// synchronous pass has started (see `pending`'s own doc comment). A *different* kind of
+/// duplication — this same host's pass re-entering itself synchronously, from a structural change
+/// made while already mid-measure — is a separate concern `RelayoutCycleState::run_coalesced`
+/// handles (see `relayout_static`'s own doc comment); `pending` does not address that case.
 pub(crate) struct WinUI3RelayoutHost {
     canvas: Canvas,
     composition: Weak<RefCell<CompositionRenderer>>,
@@ -120,14 +177,24 @@ pub(crate) struct WinUI3RelayoutHost {
     unconstrained_axes: Weak<Cell<(bool, bool)>>,
     /// See `TreeHostPanel::active`.
     active: Weak<Cell<bool>>,
-    /// `true` while a relayout pass is already enqueued on the `DispatcherQueue` and hasn't run
-    /// yet — makes `request_relayout` a no-op for any further call until that pass actually runs
-    /// (and clears it right before doing so).
+    /// See `RelayoutCycleState`'s own doc comment — this host's own reentrancy-coalescing state,
+    /// never a thread-local, so it never suppresses a different `TreeHostPanel`'s relayout.
+    relayout_cycle: Weak<RelayoutCycleState>,
+    /// `true` while the current synchronous `request_relayout` call has already claimed the
+    /// immediate relayout pass and hasn't finished dispatching it yet — makes a further
+    /// `request_relayout` call arriving before that happens a no-op (cleared right before the
+    /// claiming call actually runs `relayout_static`). This coalesces duplicate *immediate*
+    /// requests only; it says nothing about any queued/deferred job, since there isn't one. A
+    /// same-host reentrant call arriving *during* the pass itself (after `pending` is already
+    /// cleared) is a different case, handled by `RelayoutCycleState::run_coalesced` instead — see
+    /// `relayout_static`'s own doc comment.
     pending: Cell<bool>,
-    /// Lets `request_relayout` (which only ever sees `&self`) hand an owned `Rc<Self>` to the
-    /// `DispatcherQueueHandler` closure — set once, right after this host is `Rc`-wrapped (see
-    /// `TreeHostPanel::set_tree`), the same self-referential-`Weak` pattern
-    /// `InnerTabView`'s own event wiring uses for the same reason.
+    /// Lets `request_relayout` (which only ever sees `&self`) upgrade to an owned `Rc<Self>` so it
+    /// can read every other weakly-held backend field through one consistent handle — set once,
+    /// right after this host is `Rc`-wrapped (see `TreeHostPanel::set_tree`), the same
+    /// self-referential-`Weak` pattern `InnerTabView`'s own event wiring uses for the same reason.
+    /// Not related to any `DispatcherQueueHandler`: `request_relayout` runs everything
+    /// synchronously on the calling thread, it never posts a handler anywhere.
     weak_self: RefCell<Weak<WinUI3RelayoutHost>>,
 }
 
@@ -170,6 +237,7 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
             Option<Rc<KeyboardDispatcher>>,
             Option<Rc<Cell<(bool, bool)>>>,
             Option<Rc<Cell<bool>>>,
+            Option<Rc<RelayoutCycleState>>,
         ) = (
             this.tree.upgrade(),
             this.render_tree.upgrade(),
@@ -178,6 +246,7 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
             this.keyboard.upgrade(),
             this.unconstrained_axes.upgrade(),
             this.active.upgrade(),
+            this.relayout_cycle.upgrade(),
         );
         if let (
             Some(tree),
@@ -187,6 +256,7 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
             Some(keyboard),
             Some(unconstrained_axes),
             Some(active),
+            Some(relayout_cycle),
         ) = upgraded
         {
             TreeHostPanel::relayout_static(
@@ -198,6 +268,7 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
                 &keyboard,
                 unconstrained_axes.get(),
                 &active,
+                &relayout_cycle,
             );
         }
     }
@@ -221,6 +292,7 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
             Some(keyboard),
             Some(unconstrained_axes),
             Some(active),
+            Some(relayout_cycle),
         ) = (
             this.tree.upgrade(),
             this.render_tree.upgrade(),
@@ -229,6 +301,7 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
             this.keyboard.upgrade(),
             this.unconstrained_axes.upgrade(),
             this.active.upgrade(),
+            this.relayout_cycle.upgrade(),
         ) {
             TreeHostPanel::relayout_static(
                 &this.canvas,
@@ -239,6 +312,7 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
                 &keyboard,
                 unconstrained_axes.get(),
                 &active,
+                &relayout_cycle,
             );
         }
     }
@@ -311,6 +385,7 @@ impl TreeHostPanel {
         let composition = CompositionRenderer::new(&canvas).expect("CompositionRenderer::new");
         let this = Self {
             canvas,
+            relayout_cycle: Rc::new(RelayoutCycleState::default()),
             composition: Rc::new(RefCell::new(composition)),
             tree: Rc::new(RefCell::new(None)),
             render_tree: Rc::new(RefCell::new(None)),
@@ -656,6 +731,7 @@ impl TreeHostPanel {
             let weak_keyboard = Rc::downgrade(&this.keyboard);
             let weak_unconstrained_axes = Rc::downgrade(&this.unconstrained_axes);
             let weak_active = Rc::downgrade(&this.active);
+            let weak_relayout_cycle = Rc::downgrade(&this.relayout_cycle);
             let canvas_for_handler = this.canvas.clone();
             let callback_id = this.callback_owner.register_event(Rc::new(move || {
                 let state: (
@@ -666,6 +742,7 @@ impl TreeHostPanel {
                     Option<Rc<KeyboardDispatcher>>,
                     Option<Rc<Cell<(bool, bool)>>>,
                     Option<Rc<Cell<bool>>>,
+                    Option<Rc<RelayoutCycleState>>,
                 ) = (
                     weak.upgrade(),
                     weak_render_tree.upgrade(),
@@ -674,6 +751,7 @@ impl TreeHostPanel {
                     weak_keyboard.upgrade(),
                     weak_unconstrained_axes.upgrade(),
                     weak_active.upgrade(),
+                    weak_relayout_cycle.upgrade(),
                 );
                 if let (
                     Some(tree),
@@ -683,8 +761,9 @@ impl TreeHostPanel {
                     Some(keyboard),
                     Some(unconstrained_axes),
                     Some(active),
+                    Some(relayout_cycle),
                 ) = (
-                    state.0, state.1, state.2, state.3, state.4, state.5, state.6,
+                    state.0, state.1, state.2, state.3, state.4, state.5, state.6, state.7,
                 ) {
                     Self::relayout_static(
                         &canvas_for_handler,
@@ -695,6 +774,7 @@ impl TreeHostPanel {
                         &keyboard,
                         unconstrained_axes.get(),
                         &active,
+                        &relayout_cycle,
                     );
                 }
             }));
@@ -997,6 +1077,7 @@ impl TreeHostPanel {
             &self.keyboard,
             self.unconstrained_axes.get(),
             &self.active,
+            &self.relayout_cycle,
         );
     }
 
@@ -1081,6 +1162,7 @@ impl TreeHostPanel {
             keyboard: Rc::downgrade(&self.keyboard),
             unconstrained_axes: Rc::downgrade(&self.unconstrained_axes),
             active: Rc::downgrade(&self.active),
+            relayout_cycle: Rc::downgrade(&self.relayout_cycle),
             pending: Cell::new(false),
             weak_self: RefCell::new(Weak::<WinUI3RelayoutHost>::new()),
         });
@@ -1164,6 +1246,25 @@ impl TreeHostPanel {
             .set_focus(element, elwindui_core::input::FocusState::Programmatic);
     }
 
+    /// Issue #231/#235 review remediation: `request_relayout`'s own `pending` coalescing (see
+    /// `WinUI3RelayoutHost`'s doc comment) clears `pending` and calls this function directly,
+    /// synchronously, on the calling thread — there is no `DispatcherQueue` deferral here at all —
+    /// so a `set_attached`/structural change made by a control while this very host's pass is already
+    /// measuring/arranging it (e.g. a `Control`'s `on_apply_template` reconciling its own template
+    /// children, or `visual_collection.add`/`remove` invalidating measure) re-enters this
+    /// function synchronously instead of the pass already running here picking it up. Left
+    /// unguarded, each reentry starts a brand-new full-tree pass nested on top of the still-running
+    /// one, and none of them are tail calls, so a moderately nested tree overflows the stack
+    /// (observed on `custom-controls-demo`, whose templated `CustomTabView`/
+    /// `CustomTabContentPresenter` both reconcile structural children as part of being measured).
+    ///
+    /// `relayout_cycle` (this exact host's own `RelayoutCycleState`, never a thread-local — see
+    /// its own doc comment) turns a same-host reentrant call into a queued rerun instead of either
+    /// a recursive call or a silently dropped request: the invalidated subtree may already have
+    /// been traversed by the outer pass, so the request cannot simply be discarded, but recursing
+    /// is what overflows the stack. `relayout_static_pass` (this method's actual traversal body)
+    /// runs in a loop, re-running once more whenever a same-host reentry arrived during the
+    /// previous iteration, until a full pass leaves no rerun pending.
     fn relayout_static(
         canvas: &Canvas,
         composition: &Rc<RefCell<CompositionRenderer>>,
@@ -1173,10 +1274,36 @@ impl TreeHostPanel {
         keyboard: &Rc<KeyboardDispatcher>,
         unconstrained_axes: (bool, bool),
         active: &Cell<bool>,
+        relayout_cycle: &RelayoutCycleState,
     ) {
         if !active.get() {
             return;
         }
+        relayout_cycle.run_coalesced(|| {
+            Self::relayout_static_pass(
+                canvas,
+                composition,
+                tree,
+                retained_tree,
+                native_children,
+                keyboard,
+                unconstrained_axes,
+            );
+        });
+    }
+
+    /// The actual measure/arrange/composition-reconcile traversal for one relayout pass. Never
+    /// call directly — go through `relayout_static`, which owns this host's reentrancy/rerun
+    /// coalescing (see that method's own doc comment).
+    fn relayout_static_pass(
+        canvas: &Canvas,
+        composition: &Rc<RefCell<CompositionRenderer>>,
+        tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
+        retained_tree: &Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
+        native_children: &Rc<RefCell<NativeChildMap>>,
+        keyboard: &Rc<KeyboardDispatcher>,
+        unconstrained_axes: (bool, bool),
+    ) {
         use elwindui_core::base::Size as LSize;
 
         // `ActualWidth`/`ActualHeight` only update after a real native layout pass runs on this
@@ -2087,6 +2214,115 @@ pub(crate) fn close_active_popup_slot(
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    /// T1 (Issue #235 review remediation): a same-host reentrant call — `pass` itself
+    /// synchronously calling `run_coalesced` again on the *same* `RelayoutCycleState`, mirroring
+    /// `relayout_static` re-entering itself via a structural change made mid-measure — must not
+    /// recurse into a nested `pass` invocation. It must instead queue exactly one rerun, which the
+    /// still-running outer loop picks up after the current iteration finishes.
+    #[test]
+    fn run_coalesced_same_host_reentry_reruns_once_without_recursing() {
+        let state = RelayoutCycleState::default();
+        let pass_count = Rc::new(Cell::new(0));
+        let max_observed_depth = Rc::new(Cell::new(0));
+        let depth = Rc::new(Cell::new(0));
+
+        let state_for_pass = &state;
+        let pass_count_for_pass = pass_count.clone();
+        let max_observed_depth_for_pass = max_observed_depth.clone();
+        let depth_for_pass = depth.clone();
+        let ran = state_for_pass.run_coalesced(|| {
+            depth_for_pass.set(depth_for_pass.get() + 1);
+            max_observed_depth_for_pass
+                .set(max_observed_depth_for_pass.get().max(depth_for_pass.get()));
+            pass_count_for_pass.set(pass_count_for_pass.get() + 1);
+            if pass_count_for_pass.get() == 1 {
+                // The reentrant call: same `RelayoutCycleState`, from inside the first pass.
+                let reentrant_ran = state_for_pass.run_coalesced(|| {
+                    depth_for_pass.set(depth_for_pass.get() + 1);
+                    max_observed_depth_for_pass
+                        .set(max_observed_depth_for_pass.get().max(depth_for_pass.get()));
+                    pass_count_for_pass.set(pass_count_for_pass.get() + 1);
+                    depth_for_pass.set(depth_for_pass.get() - 1);
+                });
+                assert!(
+                    !reentrant_ran,
+                    "a same-host reentrant call must not itself run pass or claim to have looped"
+                );
+            }
+            depth_for_pass.set(depth_for_pass.get() - 1);
+        });
+
+        assert!(ran, "the outermost call for this host must report it ran");
+        assert_eq!(
+            pass_count.get(),
+            2,
+            "the reentrant request must produce exactly one rerun after the current pass finishes"
+        );
+        assert_eq!(
+            max_observed_depth.get(),
+            1,
+            "the reentrant call must never nest a second pass invocation on the call stack"
+        );
+    }
+
+    /// T2 (Issue #235 review remediation): a *different* host's `RelayoutCycleState` must run
+    /// immediately and independently even while this host's own pass is in progress — the guard is
+    /// per-host state, never a thread-global.
+    #[test]
+    fn run_coalesced_different_host_is_not_suppressed() {
+        let host_a = RelayoutCycleState::default();
+        let host_b = RelayoutCycleState::default();
+        let a_count = Rc::new(Cell::new(0));
+        let b_count = Rc::new(Cell::new(0));
+
+        let b_count_for_a = b_count.clone();
+        let host_b_ref = &host_b;
+        let ran_a = host_a.run_coalesced(|| {
+            a_count.set(a_count.get() + 1);
+            let b_count_for_pass = b_count_for_a.clone();
+            let ran_b = host_b_ref.run_coalesced(move || {
+                b_count_for_pass.set(b_count_for_pass.get() + 1);
+            });
+            assert!(
+                ran_b,
+                "a different host's relayout must execute immediately, not be blocked by host A's \
+                 in-progress pass"
+            );
+        });
+
+        assert!(ran_a);
+        assert_eq!(a_count.get(), 1);
+        assert_eq!(b_count.get(), 1);
+    }
+
+    /// T3 (Issue #235 review remediation): several synchronous same-host reentrant requests raised
+    /// during one pass must coalesce into a single later rerun, not one rerun per request and not
+    /// a recursive call per request.
+    #[test]
+    fn run_coalesced_multiple_same_host_requests_coalesce_into_one_rerun() {
+        let state = RelayoutCycleState::default();
+        let pass_count = Rc::new(Cell::new(0));
+
+        let state_ref = &state;
+        let pass_count_ref = pass_count.clone();
+        state_ref.run_coalesced(|| {
+            let current = pass_count_ref.get() + 1;
+            pass_count_ref.set(current);
+            if current == 1 {
+                // Several reentrant requests within the same still-running pass.
+                assert!(!state_ref.run_coalesced(|| {}));
+                assert!(!state_ref.run_coalesced(|| {}));
+                assert!(!state_ref.run_coalesced(|| {}));
+            }
+        });
+
+        assert_eq!(
+            pass_count.get(),
+            2,
+            "multiple same-host requests during one pass must coalesce into exactly one rerun"
+        );
+    }
 
     struct FakePopupSurfaceHandle {
         slot: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,

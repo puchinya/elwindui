@@ -35,6 +35,7 @@ thread_local! {
     static UI_INDEX_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(usize)>>> = RefCell::new(HashMap::new());
     static UI_F32_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(f32)>>> = RefCell::new(HashMap::new());
     static UI_SIZE_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(f64, f64)>>> = RefCell::new(HashMap::new());
+    static UI_BOUNDS_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(f32, f32, f32, f32)>>> = RefCell::new(HashMap::new());
     static UI_KEY_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(RawKeyEvent)>>> = RefCell::new(HashMap::new());
     static UI_TEXT_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(String)>>> = RefCell::new(HashMap::new());
 }
@@ -48,6 +49,7 @@ enum UiCallbackKind {
     RightTapped,
     Index,
     Size,
+    Bounds,
     Key,
     Text,
 }
@@ -78,6 +80,9 @@ fn remove_ui_callback(kind: UiCallbackKind, id: usize) {
             callbacks.borrow_mut().remove(&id);
         }),
         UiCallbackKind::Size => UI_SIZE_EVENT_CALLBACKS.try_with(|callbacks| {
+            callbacks.borrow_mut().remove(&id);
+        }),
+        UiCallbackKind::Bounds => UI_BOUNDS_EVENT_CALLBACKS.try_with(|callbacks| {
             callbacks.borrow_mut().remove(&id);
         }),
         UiCallbackKind::Key => UI_KEY_EVENT_CALLBACKS.try_with(|callbacks| {
@@ -205,6 +210,20 @@ impl UiCallbackRegistryOwner {
             .registrations
             .borrow_mut()
             .push((UiCallbackKind::Size, id));
+        id
+    }
+
+    /// Registers an `(x, y, width, height)` bounds-changed callback owned by this lifetime group —
+    /// e.g. `AppWindow.Changed` (Issue #234). Mirrors `register_size`: the generated
+    /// `TypedEventHandler<AppWindow, AppWindowChangedEventArgs>` delegate requires `Send`, which an
+    /// `Rc`-holding closure is not, so the native delegate captures only the numeric id returned
+    /// here and this owner removes the tracked entry when it drops with the owning `InnerWindow`.
+    pub(crate) fn register_bounds(&self, callback: Rc<dyn Fn(f32, f32, f32, f32)>) -> usize {
+        let id = register_ui_bounds_event_callback(callback);
+        self.0
+            .registrations
+            .borrow_mut()
+            .push((UiCallbackKind::Bounds, id));
         id
     }
 
@@ -388,6 +407,33 @@ pub(crate) fn invoke_ui_size_event_callback(id: usize, width: f64, height: f64) 
 #[cfg(test)]
 pub(crate) fn ui_size_event_callback_count() -> usize {
     UI_SIZE_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().len())
+}
+
+/// Issue #234: `AppWindow.Changed`'s handler is `TypedEventHandler<AppWindow,
+/// AppWindowChangedEventArgs>` — a `Send`-bound WinRT delegate, same reason every other callback
+/// in this file goes through this numeric-key indirection instead of capturing `Rc` state
+/// directly. This is the low-level raw insert only — callers must go through
+/// `UiCallbackRegistryOwner::register_bounds` so the returned id is tracked and removed when the
+/// owning `Window`/`InnerWindow` drops.
+pub(crate) fn register_ui_bounds_event_callback(callback: Rc<dyn Fn(f32, f32, f32, f32)>) -> usize {
+    let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
+    UI_BOUNDS_EVENT_CALLBACKS.with(|callbacks| {
+        callbacks.borrow_mut().insert(id, callback);
+    });
+    id
+}
+
+pub(crate) fn invoke_ui_bounds_event_callback(id: usize, x: f32, y: f32, width: f32, height: f32) {
+    // See `invoke_ui_event_callback`'s doc comment — same re-entrancy hazard, same fix.
+    let callback = UI_BOUNDS_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
+    if let Some(callback) = callback {
+        callback(x, y, width, height);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn ui_bounds_event_callback_count() -> usize {
+    UI_BOUNDS_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().len())
 }
 
 /// Distinguishes a model-to-native property push from a real user-originated XAML event.
@@ -841,6 +887,54 @@ mod tests {
         assert_eq!(calls.get(), 2);
         remove_ui_callback(UiCallbackKind::Event, id);
         remove_ui_callback(UiCallbackKind::Event, outer_id);
+    }
+
+    /// Issue #234: `UiCallbackRegistryOwner::register_bounds` tracks its id like every other kind,
+    /// and the registered callback observes the exact `(x, y, width, height)` it was invoked with —
+    /// mirrors `size_callback_registration_and_invocation_use_exact_values` below.
+    #[test]
+    fn bounds_callback_registration_and_invocation_use_exact_values() {
+        let baseline = ui_bounds_event_callback_count();
+        let observed = Rc::new(Cell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+        let owner = UiCallbackRegistryOwner::default();
+        let observed_for_callback = observed.clone();
+        let id = owner.register_bounds(Rc::new(move |x, y, width, height| {
+            observed_for_callback.set((x, y, width, height));
+        }));
+
+        assert_eq!(ui_bounds_event_callback_count(), baseline + 1);
+        invoke_ui_bounds_event_callback(id, 10.0, 20.0, 640.0, 480.0);
+        assert_eq!(observed.get(), (10.0, 20.0, 640.0, 480.0));
+    }
+
+    /// Issue #234: dropping the owning `UiCallbackRegistryOwner` removes the `Bounds` TLS entry,
+    /// mirroring `size_callback_owner_drop_removes_entry_and_id_becomes_no_op` below.
+    #[test]
+    fn bounds_callback_owner_drop_removes_entry_and_id_becomes_no_op() {
+        let baseline = ui_bounds_event_callback_count();
+        let observed = Rc::new(Cell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+        let owner = UiCallbackRegistryOwner::default();
+        let observed_for_callback = observed.clone();
+        let id = owner.register_bounds(Rc::new(move |x, y, width, height| {
+            observed_for_callback.set((x, y, width, height));
+        }));
+
+        invoke_ui_bounds_event_callback(id, 1.0, 2.0, 100.0, 200.0);
+        assert_eq!(observed.get(), (1.0, 2.0, 100.0, 200.0));
+
+        drop(owner);
+        assert_eq!(
+            ui_bounds_event_callback_count(),
+            baseline,
+            "dropping the owner must remove the Bounds registry entry, not just leave it unreachable"
+        );
+
+        invoke_ui_bounds_event_callback(id, 9.0, 9.0, 999.0, 999.0);
+        assert_eq!(
+            observed.get(),
+            (1.0, 2.0, 100.0, 200.0),
+            "invoking a removed id must be a safe no-op that does not reach the old callback"
+        );
     }
 
     /// T1/T2 (Issue #225 post-merge review, PR #227): `UiCallbackRegistryOwner::register_size`

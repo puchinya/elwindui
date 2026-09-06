@@ -157,3 +157,21 @@ Checkpointは新しいproduct decisionの正本ではない。再開後はIssue�
 - category READMEから対象文書へ到達できるか;
 - removed path、broken link、古いIssue説明が残っていないか;
 - human overviewにしか存在しない必須ruleがないか。
+
+## Context-efficient supplied-contract workflow
+
+Supplied Implementation Contracts are kept as exact local mirrors under
+`.agent-state/issues/<issue>/implementation-contract.md` with a SHA-256 sidecar.
+After context compaction/resume and before final self-review, the agent re-reads
+that exact mirror rather than relying on a remembered summary.
+
+`scripts/agent/agent-context.* <issue>` provides compact Issue/phase/branch/PR/
+contract routing state. It does not replace GitHub authority.
+
+`docs/status` stores current capability/gap/verification state only; PR history,
+raw measurements, command transcripts, and remediation narratives remain in
+Issue/PR/evidence artifacts.
+
+For source branch switches, the existing `cargo clean` is intentionally
+mandatory because development-machine disk capacity is constrained. Do not
+replace it with persistent build caching.

@@ -2,56 +2,69 @@
 
 Read this file only while the associated Issue is in `phase:review` or an associated Pull Request is open.
 
-## Pull Request content
+The Issue remains the approved specification. The PR reports the actual implementation delta and evidence.
 
-The Pull Request description must contain:
+## Delta-oriented Pull Request content
 
-- purpose and user/developer impact;
-- main changes;
-- important implementation decisions;
-- verification commands and results;
-- untested platforms or configurations;
-- compatibility and residual risks;
-- focused reviewer guidance;
-- `Closes #<issue-number>`.
+Use this compact structure:
 
-Create and inspect the Pull Request, comments, reviews, labels, and Actions checks with `gh`.
+```text
+## Purpose / impact
+## Delta
+## Design deviations
+## Verification
+## Untested / residual risk
+## Reviewer focus
+Closes #<issue-number>
+```
 
-The Issue remains the approved specification. The Pull Request describes the actual implementation and evidence.
+Rules:
+
+- do not restate the full approved requirements/design/Implementation Contract;
+- reference the owning Issue/design and repeat only context needed to understand the delta;
+- list actual changed behavior/files at a useful level, not an investigation transcript;
+- record exact verification commands/results;
+- state deviations/conflicts explicitly, or `None`;
+- keep reviewer guidance focused on high-risk changed behavior;
+- keep raw logs and long evidence out of the PR body.
+
+Use `gh` to inspect PR comments/reviews/threads/checks.
 
 ## Review handling
 
-If review remediation changes Rust-affecting files or generation semantics, rerun the complete mandatory Rust verification gate defined in [`docs/agents/testing.md`](../agents/testing.md) before review can be considered complete. Review completion must not rely on a pass obtained before the remediation.
+1. Inspect all actionable review submissions, inline threads, and required CI checks.
+2. Also verify document synchronization: approved public changes have specs, durable architecture changes have design, current-state changes have concise status, and Agent paths/commands are current.
+3. For each actionable comment:
+   - implement it;
+   - explain why no change is appropriate; or
+   - create a follow-up Issue for valid out-of-scope work.
+4. Use focused checks while remediation is in progress.
+5. If remediation changes Rust-affecting files or generation semantics, once remediation is stable rerun the complete mandatory Rust verification gate in `docs/agents/testing.md`.
+6. Do not resolve a thread until addressed/answered.
+7. Keep unrelated follow-up work out of the PR.
 
-1. Inspect all review submissions, inline threads, and required CI checks.
-   Also verify the root `AGENTS.md` synchronization order: public changes have an approved spec, architecture changes have an updated design, current-state changes have an updated status, and no removed document path remains.
-2. For each actionable comment:
-   - implement the change;
-   - explain why no change is appropriate;
-   - or create a follow-up Issue when the work is valid but outside scope.
-3. Re-run checks affected by review changes.
-4. Do not resolve a review thread until the concern has been addressed or answered.
-5. Keep unrelated follow-up work out of the current Pull Request.
+If review requires a material requirements/design change, update the Issue, return to `phase:design`, obtain required approval, and come back through implementation/verification.
 
-If review requires a material requirements or design change:
+## Contract-aware review
 
-1. Update the Issue.
-2. Replace `phase:review` with `phase:design`.
-3. Obtain approval for the revised design when required.
-4. Return through implementation and verification before requesting review again.
+When the task began from a supplied Implementation Contract and the local mirror is available:
+
+- validate its integrity with `scripts/agent/agent-context.* <issue-number>`;
+- re-read the exact mirror before classifying a suspected contract violation;
+- repository authority still wins when the contract conflicts with approved specs/design/Issue decisions.
+
+Do not review from a remembered or compressed paraphrase when the exact mirror exists.
 
 ## Completion
 
-Do not close the Issue merely because the Pull Request is approved.
+Do not close the Issue merely because the PR is approved.
 
-The work is complete only when:
+Work is complete only when:
 
 - required reviews are approved;
-- required CI checks pass;
+- required checks pass;
 - acceptance criteria are satisfied;
-- required documentation is updated;
-- the Pull Request is merged into the default branch.
+- required documentation is synchronized;
+- PR is merged into the default branch.
 
-`Closes #<issue-number>` should close the Issue automatically on merge. After merge, verify that the Issue is closed. If automatic closure did not occur, close it manually only after confirming the merge.
-
-Create follow-up Issues for deferred work before declaring completion.
+`Closes #<issue-number>` should close the Issue on merge. Verify closure after merge and create follow-up Issues for deferred work before declaring completion.

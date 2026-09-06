@@ -8,109 +8,113 @@ Before editing:
 
 1. Re-read the approved Issue specification and acceptance criteria.
 2. Confirm that no newer comment or linked decision supersedes the Issue body.
-3. For any source-code change, create or switch to a dedicated feature branch:
-   - name it `feature/<issue-number>-<short-slug>`;
-   - create it from the current remote default branch;
-   - never edit source code directly on the default branch;
-   - use `scripts/agent/start-feature-branch.sh <issue-number> <short-description>` on macOS/Linux or `scripts/agent/start-feature-branch.ps1 <issue-number> <short-description>` in PowerShell;
-   - the script runs `cargo clean` automatically whenever it actually switches branches, to avoid accumulating stale `target/` build artifacts across feature branches.
-4. Documentation-only or workflow-only changes may use a `docs/` or `agent/` branch instead.
-5. Replace `phase:ready` with `phase:implementation`.
-6. Classify the change using the synchronization table in the root [`AGENTS.md`](../../AGENTS.md) and confirm that every required upstream spec/design update has been approved before code is edited.
+3. If the task was supplied as an Implementation Contract, follow the mirror gate below.
+4. For source-code changes, create/switch through `scripts/agent/start-feature-branch.sh <issue> <short-description>` or the PowerShell equivalent. Its branch name is authoritative for source work.
+5. An actual helper-driven branch switch must keep its mandatory `cargo clean`; this disk-space invariant must not be optimized away.
+6. Replace `phase:ready` with `phase:implementation`.
+7. Confirm required upstream spec/design updates are approved before code editing.
 
-The approved Issue is the implementation contract for the task scope.
+Documentation/workflow-only changes may use the existing `docs/` or `agent/` branch allowance.
 
-It does not silently override normative specifications. If an approved change intentionally changes a normative public contract, update the corresponding `docs/specs/` document as part of the same change.
+The approved Issue defines repository task scope. A compatible supplied contract is a compressed decision-complete handoff, not an override of normative specs/design.
+
+## Supplied Implementation Contract mirror
+
+After Issue ownership exists and before detailed implementation work, save the exact supplied contract:
+
+```bash
+scripts/agent/save-implementation-contract.sh <issue-number> <contract-file>
+```
+
+or on PowerShell:
+
+```powershell
+.\scripts\agent\save-implementation-contract.ps1 <issue-number> <contract-file>
+```
+
+The mirror lives at:
+
+```text
+.agent-state/issues/<issue-number>/implementation-contract.md
+.agent-state/issues/<issue-number>/implementation-contract.sha256
+```
+
+The helper is immutable-on-conflict and idempotent-on-match. Never silently replace a different existing contract.
+
+If the mirror exists, re-read it:
+
+- after context compaction;
+- after session resume/handoff;
+- before the final complete-diff self-review.
+
+Do not duplicate the contract into another persistent context summary.
+
+## Context-efficient execution
+
+Use `scripts/agent/agent-context.* <issue-number>` for compact routing/bootstrap state.
+
+Keep only the Issue-scoped working set described in `AGENTS.md`. Inspect referenced files/symbols for implementation details, but do not broadly re-derive architecture already resolved by an approved compatible contract unless repository evidence conflicts.
+
+Keep large output in `.agent-state/issues/<issue>/logs/` and inspect bounded excerpts.
 
 ## Implementation rules
 
-- Keep the change within the approved scope.
-- Do not mix unrelated refactoring, cleanup, or formatting.
-- Preserve the architectural rules in the root `AGENTS.md`.
-- Do not expose backend-specific types through common APIs unless explicitly approved.
-- Do not introduce a new dependency without recording and justifying the decision.
-- Add or update tests that verify behavior and acceptance criteria, not only implementation details.
-- Update the corresponding durable documentation when it changes:
-  - public contracts or normative behavior -> [`docs/specs/`](../specs/);
-  - durable implementation architecture -> [`docs/design/`](../design/);
-  - implementation progress, backend support, known gaps, or verification state -> [`docs/status/`](../status/).
-- Use `gh` for Issue, label, comment, Pull Request, review, and Actions operations. Use `git` for local branch, staging, commit, and push operations.
+- Stay inside approved scope.
+- Do not mix unrelated refactoring/cleanup.
+- Preserve repository authority and architectural invariants.
+- Do not expose backend-specific types through common APIs without approval.
+- Do not add dependencies without an approved reason.
+- Add/update tests for behavior and acceptance criteria.
+- Synchronize only documentation whose responsibility actually changed:
+  - public contract -> `docs/specs/`
+  - durable architecture -> `docs/design/`
+  - concise current implementation/gap/verification state -> `docs/status/`
+- Keep evidence/history in Issue/PR/evidence artifacts, not `docs/status/`.
 
-### Context-efficient execution
-
-Follow the Issue-scoped working-set and bounded-output rules in the root [`AGENTS.md`](../../AGENTS.md). When implementation begins from a supplied and approved Implementation Contract, its material architecture and behavioral decisions are resolved inputs. Inspect referenced files and symbols for implementation details, but do not re-derive the architecture through broad rescans unless repository evidence conflicts with the contract. Context reduction must not suppress required errors, acceptance evidence, or final verification.
-
-## Handling specification disagreement during implementation
-
-When code, design, status, and normative specifications disagree during implementation:
-
-1. **Implementation gap**: If the code does not yet support the specification, keep the specification and fix or complete the implementation.
-2. **Approved specification change**: If the approved Issue explicitly authorizes a specification change, update both the implementation and the corresponding `docs/specs/` document as part of the same change.
-3. **Unapproved specification difference**: If the Issue does not authorize a specification change, do not silently change `docs/specs/`. Return to `phase:design` if the specification or architecture needs to be revised.
-
-## When implementation invalidates the design
-
-Stop implementation and return to `phase:design` before continuing when any of the following becomes necessary:
-
-- changing an approved public API;
-- expanding a non-goal into scope;
-- breaking compatibility;
-- changing the backend boundary, ownership model, or thread model;
-- adding a major dependency;
-- changing acceptance criteria.
-
-Record the discovery and proposed resolution in the Issue. Do not let code and the approved Issue diverge.
+If code/spec/design conflict requires a material public API, compatibility, ownership, backend-boundary, threading, dependency, non-goal, or acceptance change, stop and return to `phase:design`.
 
 ## Verification
 
-For Rust-affecting changes, the mandatory Rust verification gate defined in [`docs/agents/testing.md`](../agents/testing.md) MUST pass before transition to review. After this baseline Issue, a known pre-existing formatter or analyzer failure is no longer an acceptable completion exception. If the gate cannot pass, remain in implementation or mark the Issue blocked as appropriate. The Pull Request verification report must contain the exact command and result.
+`docs/agents/testing.md` is the sole Rust verification command authority.
 
-Use the relevant commands and platform-specific verification rules already defined in the root `AGENTS.md`. Do not duplicate that command catalog here.
+During the edit/debug loop, use the narrowest relevant check/test. Do not repeatedly run the complete workspace/final gate merely as a progress probe.
 
-Record honestly:
+Once a Rust-affecting change is stable, run the complete mandatory Rust gate before PR delivery. If Rust-affecting review remediation occurs, use focused checks while editing, then rerun the complete gate once the remediation is stable.
 
-- commands run;
-- successful checks;
-- failed checks;
-- checks not run and why;
-- environments or backends not available;
-- residual risk.
-
-Passing compilation alone is not sufficient when the change requires tests, rust-analyzer verification, runtime behavior, or visual confirmation.
+Record commands/results honestly, including untested environments.
 
 ## Self-review
 
-Before creating the Pull Request, inspect the complete diff and verify:
+Before creating/updating the PR:
 
-- every acceptance criterion is satisfied or explicitly reported as incomplete;
-- implementation matches the approved design;
-- no unrelated changes are present;
-- tests cover important normal, boundary, and failure behavior;
-- public API and documentation are consistent;
-- architecture and design documentation are consistent;
-- implementation/verification changes are reflected in status without using status to redefine upstream behavior;
-- Agent instructions, commands, and document paths affected by the change are synchronized;
-- error handling and unsafe assumptions are justified;
-- generated files or lockfile changes are intentional.
+1. If a contract mirror exists, verify its SHA/integrity with `scripts/agent/agent-context.*` and re-read the exact contract.
+2. Inspect the complete diff.
+3. Verify every acceptance criterion is satisfied or explicitly incomplete.
+4. Verify implementation matches approved Issue/design/contract decisions.
+5. Verify no unrelated changes.
+6. Verify tests cover important normal/boundary/failure behavior.
+7. Verify specs/design/status/Agent paths remain synchronized.
+8. Verify status contains current state rather than PR/evidence history.
+9. Verify error handling, unsafe assumptions, generated files, and lockfile changes are intentional.
 
 ## Implementation completion gate
 
-Editing, testing, committing, or pushing alone does not make implementation complete. Before reporting implementation-phase completion:
+Before reporting implementation-phase completion:
 
-- the changes are committed and the working branch is pushed;
-- a Pull Request exists, includes `Closes #<issue-number>`, and the final implementation report includes the Pull Request URL;
-- the Issue has successfully transitioned from `phase:implementation` to `phase:review`, and the review workflow has been entered.
+- changes are committed;
+- branch is pushed;
+- PR exists and contains `Closes #<issue-number>`;
+- Issue transitioned to `phase:review`;
+- `docs/agent-workflow/review.md` has been entered.
 
-If Pull Request creation or the phase transition fails, report the result as blocked with the exact blocker and relevant command/error. Overall Issue/work completion remains governed by [`docs/agent-workflow/review.md`](review.md).
+If PR creation or phase transition fails, report the task as blocked with the exact command/error.
 
 ## Transition to review
 
-After implementation and verification:
-
-1. Update the Issue acceptance checklist and add only a concise implementation status.
-2. Put detailed changes, verification results, risks, and reviewer guidance in the Pull Request.
-3. Create the Pull Request with `Closes #<issue-number>`.
+1. Update the Issue acceptance checklist and only a concise implementation status.
+2. Put delta/evidence/risk/reviewer guidance in the PR; do not restate the whole Issue/contract.
+3. Create the PR with `Closes #<issue-number>`.
 4. Replace `phase:implementation` with `phase:review`.
 5. Read `docs/agent-workflow/review.md`.
 
-Perform the Issue update, Pull Request creation, and phase-label transition with `gh`.
+Use `gh` for GitHub operations and `git` for local branch/commit/push.

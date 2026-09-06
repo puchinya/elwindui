@@ -115,8 +115,10 @@ else
   BRANCH_CHANGED=1
 fi
 
-# Branch switches accumulate stale target/ build artifacts across feature
-# branches; clean them here rather than leaving disk usage to grow unbounded.
+# Mandatory disk-space invariant: actual source branch switches must delete
+# stale target/ artifacts. Development machines have constrained free disk space.
+# Do not remove/soften this clean or replace it with a persistent shared build cache.
+# Same-branch use does not clean.
 if [[ "$BRANCH_CHANGED" -eq 1 ]] && command -v cargo >/dev/null 2>&1; then
   cargo clean
 fi

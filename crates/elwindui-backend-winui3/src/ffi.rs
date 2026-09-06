@@ -889,6 +889,54 @@ mod tests {
         remove_ui_callback(UiCallbackKind::Event, outer_id);
     }
 
+    /// Issue #234: `UiCallbackRegistryOwner::register_bounds` tracks its id like every other kind,
+    /// and the registered callback observes the exact `(x, y, width, height)` it was invoked with —
+    /// mirrors `size_callback_registration_and_invocation_use_exact_values` below.
+    #[test]
+    fn bounds_callback_registration_and_invocation_use_exact_values() {
+        let baseline = ui_bounds_event_callback_count();
+        let observed = Rc::new(Cell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+        let owner = UiCallbackRegistryOwner::default();
+        let observed_for_callback = observed.clone();
+        let id = owner.register_bounds(Rc::new(move |x, y, width, height| {
+            observed_for_callback.set((x, y, width, height));
+        }));
+
+        assert_eq!(ui_bounds_event_callback_count(), baseline + 1);
+        invoke_ui_bounds_event_callback(id, 10.0, 20.0, 640.0, 480.0);
+        assert_eq!(observed.get(), (10.0, 20.0, 640.0, 480.0));
+    }
+
+    /// Issue #234: dropping the owning `UiCallbackRegistryOwner` removes the `Bounds` TLS entry,
+    /// mirroring `size_callback_owner_drop_removes_entry_and_id_becomes_no_op` below.
+    #[test]
+    fn bounds_callback_owner_drop_removes_entry_and_id_becomes_no_op() {
+        let baseline = ui_bounds_event_callback_count();
+        let observed = Rc::new(Cell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+        let owner = UiCallbackRegistryOwner::default();
+        let observed_for_callback = observed.clone();
+        let id = owner.register_bounds(Rc::new(move |x, y, width, height| {
+            observed_for_callback.set((x, y, width, height));
+        }));
+
+        invoke_ui_bounds_event_callback(id, 1.0, 2.0, 100.0, 200.0);
+        assert_eq!(observed.get(), (1.0, 2.0, 100.0, 200.0));
+
+        drop(owner);
+        assert_eq!(
+            ui_bounds_event_callback_count(),
+            baseline,
+            "dropping the owner must remove the Bounds registry entry, not just leave it unreachable"
+        );
+
+        invoke_ui_bounds_event_callback(id, 9.0, 9.0, 999.0, 999.0);
+        assert_eq!(
+            observed.get(),
+            (1.0, 2.0, 100.0, 200.0),
+            "invoking a removed id must be a safe no-op that does not reach the old callback"
+        );
+    }
+
     /// T1/T2 (Issue #225 post-merge review, PR #227): `UiCallbackRegistryOwner::register_size`
     /// tracks its id like every other kind, and the registered callback observes the exact
     /// `(width, height)` it was invoked with.

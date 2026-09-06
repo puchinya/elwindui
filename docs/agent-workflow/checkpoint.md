@@ -1,16 +1,15 @@
 # Local work checkpoint
 
-Read only when resuming or pausing incomplete Issue work.
+Read only when pausing or resuming incomplete Issue work.
 
 ## Commands
-
-Before pausing, record any incomplete spec/design/code/status synchronization and the next required document in the checkpoint. A resumed agent must not infer completion from code alone.
 
 macOS/Linux:
 
 ```bash
 scripts/agent/save-work-checkpoint.sh <issue-number>
 scripts/agent/resume-work.sh <issue-number>
+scripts/agent/agent-context.sh <issue-number>
 ```
 
 Windows PowerShell:
@@ -18,23 +17,36 @@ Windows PowerShell:
 ```powershell
 .\scripts\agent\save-work-checkpoint.ps1 <issue-number>
 .\scripts\agent\resume-work.ps1 <issue-number>
+.\scripts\agent\agent-context.ps1 <issue-number>
 ```
 
-The checkpoint is stored at:
+The checkpoint is:
 
 ```text
 .agent-state/issues/<issue-number>/checkpoint.md
 ```
 
-Keep it short: objective, completed work, current state, one concrete next
-action, checks, uncommitted files, and blockers. Do not store reasoning
-transcripts, secrets, full logs, or unapproved requirements.
+A supplied Implementation Contract, when present, is separately preserved exactly as:
 
-On resume, compare it with the Issue, PR, branch, HEAD, and worktree. Git and
-GitHub override stale local state.
+```text
+.agent-state/issues/<issue-number>/implementation-contract.md
+.agent-state/issues/<issue-number>/implementation-contract.sha256
+```
 
-Local state is not shared between clones. Before switching machines, add one
-concise `## Work checkpoint` Issue comment with branch, HEAD, completed work,
-next action, verification summary, and blockers.
+Do not copy the contract body into the checkpoint.
+
+Keep the checkpoint short: objective, completed work, current state, one concrete next action, checks, uncommitted files, and blockers. Do not store reasoning transcripts, secrets, full logs, or unapproved requirements.
+
+## Resume rule
+
+On resume:
+
+1. run the resume helper and compact `agent-context` helper;
+2. compare local state with Issue, PR, branch, HEAD, worktree, and contract integrity;
+3. Git/GitHub override stale checkpoint state;
+4. if a contract mirror exists and is valid, re-read the exact contract before continuing material implementation/review decisions;
+5. if `contract_status=invalid`, stop contract-dependent work and resolve the integrity conflict instead of regenerating/overwriting it silently.
+
+Local state is not shared between clones. Before changing machines, add one concise `## Work checkpoint` Issue comment with branch, HEAD, completed work, next action, verification summary, and blockers. Do not paste the full contract.
 
 Delete the local Issue directory after merge and Issue closure.

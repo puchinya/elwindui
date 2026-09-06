@@ -2,56 +2,27 @@
 
 Snapshot: 2026-09-06. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
 
+## Current capability matrix
+
 | Tool | State | Current capability / gap |
 |---|---|---|
-| `elwindui-codegen` | 🚧 | component/ViewModel/enum/ControlTemplate frontend, parser, diagnostics, and one shared semantic planner/emitter for ordinary `view!` plus template construction, property/content lowering, lifecycle, bindings, dynamic regions, ownership, Environment propagation, deferred views, and cleanup; `body: view!` remains ordinary composition, while explicit-target `template_view!(|alias: Target| { ... })` and component `template: template_view!(|alias: Self| { ... })` compile to typed `ControlTemplate<T>` values through the same lowerer. Template-only work is limited to declared-parent acquisition, capability bounds, factory wrapping, and template-root replacement. Targets are not inferred from expected types, `Self` is component-default-only, and reusable templates are ordinary Rust functions; the public `#[control_template]` marker API is absent. Property-free templates accept raw `ControlExt` targets; typed parent property paths are emitted only through `TemplateProperty`/`WritableTemplateProperty` capability bounds, with source-local analysis-only shadows preserving exact associated value types and writable/read-only capability; raw framework/class-managed property bridges are not synthesized. Bare children and dynamic regions lower from effective `#[content(field)]` metadata plus field shape (scalar setter or collection surface); Layout is not a special host category. Control-specific type-name lowering, standalone compiler/type lists, and hidden body-presentation metadata are absent. The generated component mount path installs only the typed provider; Core `Control` owns first-application selection/build/root attachment, reached through virtual `UIElement::apply_template()`, while ordinary `view!` remains eager. |
-| `elwindui-languageserver` | 🚧 | single-file diagnostics, member completion, and DSL semantic tokens; no cross-file resolution, hover, or generated-code preview |
-| Preview | ⬜ | design exists; no workspace preview application |
-| `elwindui-hotreload` | 🚧 | tested Patch/Remount decision helper exists; artifact loading and live replacement pipeline are absent |
-| `elwindui-test` | 🚧 | render-tree dump exists; canvas/image snapshots absent |
-| `macos-ui-driver` | 🚧 | process/window control, focus, Accessibility tree queries/actions, screenshots, explicit coordinate clicks, real press/drag/release gestures, and native lower-right window resize gestures are implemented; full keyboard synthesis and every AX action are not complete |
+| `elwindui-codegen` | 🚧 | Component/ViewModel/enum/ControlTemplate parsing, diagnostics, shared semantic planning/emission, bindings, dynamic regions, ownership, environment propagation, deferred views, cleanup, explicit-target templates, and component-default templates are implemented. Targets are not inferred, the public `#[control_template]` marker is absent, and raw framework/class-managed property bridges are not synthesized. |
+| `elwindui-languageserver` | 🚧 | Single-file diagnostics, member completion, and DSL semantic tokens; cross-file resolution, hover, and generated-code preview are incomplete. |
+| Preview | ⬜ | Design exists; no workspace preview application. |
+| `elwindui-hotreload` | 🚧 | Patch/Remount decision helper exists; artifact loading and live replacement are absent. |
+| `elwindui-test` | 🚧 | Render-tree dump exists; canvas/image snapshots are absent. |
+| `macos-ui-driver` | 🚧 | Process/window control, focus, Accessibility queries/actions, screenshots, coordinate clicks, real press/drag/release, and native resize gestures are implemented; full keyboard synthesis and every AX action are incomplete. |
 
 ## macOS UI driver verification
 
-Implemented commands cover launching/locating a process or window, waiting for window state, bringing a window to the front, querying the Accessibility tree, setting supported values, invoking supported actions, and applying a real lower-right native window resize gesture with before/after AX bounds. The driver must be run outside the Codex workspace-write sandbox for native GUI evidence: in this environment its `doctor` reports both TCC checks false inside the sandbox and both true through the elevated execution path or Terminal. A false check blocks native acceptance rather than providing a partial GUI PASS.
+The driver must run outside the Codex workspace-write sandbox for native GUI evidence. Accessibility and Screen Recording permission checks are host properties: a false check blocks native acceptance rather than providing a partial GUI PASS. The command catalog is [`../../tools/macos-ui-driver/README.md`](../../tools/macos-ui-driver/README.md), and its operational procedure belongs in [`../agents/appkit-e2e.md`](../agents/appkit-e2e.md).
 
-The command catalog belongs in [`../../tools/macos-ui-driver/README.md`](../../tools/macos-ui-driver/README.md); the native E2E operational procedure and fixed tester instruction example belong in [`../agents/appkit-e2e.md`](../agents/appkit-e2e.md), not in status.
+Current AppKit visual evidence exists for the control-template demo. No Accessibility-tree interaction result is claimed when the verification environment lacks the required permissions.
 
-On 2026-08-30, `cargo run -p control-template-demo` reached executable
-startup after the public-path remediation. Computer Use then captured the same
-rebuilt executable in an inspectable AppKit bundle: the screenshot showed
-`Captured: Environment override`, `Reactive parent alias label`, and
-`Logical content, visually hosted by ContentPresenter`; `Default template` was
-absent. This is an objective AppKit visual PASS. The repository
-`macos-ui-driver` doctor still reports unavailable Accessibility and Screen
-Recording permissions in this environment, so no AX-tree evidence is claimed.
+## External generated-component DSL
 
-## External generated-component DSL (#191/#193/#194)
+Qualified external generated components and named `elwindui::new!` construction share the local semantic planner and are covered by the downstream fixture. External properties/content, resync, two-way wiring, template dynamic regions, nested module paths, Cargo aliases, required/defaulted constructor inputs, and `Option` Props are supported. Inherited generated `Vec<Rc<T>>` content forwarding remains [#194](https://github.com/puchinya/elwindui/issues/194); same-basename path identity remains [#196](https://github.com/puchinya/elwindui/issues/196).
 
-Merged PR #192 provides qualified external generated-component paths in `view!`, keeps the authored
-type path for construction and extension traits, and resolves the `#[macro_export]` props shape at
-the defining crate root. Ordinary, template, dynamic, event, two-way, semantic-brush, and resync
-lowering share this path-origin decision. The real downstream fixture depends on `elwindui` and
-`elwindui-external-component-fixture` independently and covers external properties, collection/scalar
-content, property resync, two-way wiring, template dynamic `if`/`for`, nested module paths, and a
-Cargo alias.
+## Verification state
 
-Issue #193's named construction surface is implemented by PR #195: `elwindui::new!` routes local,
-builtin, and qualified external generated components through one construction planner. Required
-`#[param]`/`#[bindable]`, defaulted `#[param(default = ...)]`, ordinary mutable Props, full `Option`
-storage, pre-mount initial values, external root constructor ABI macros, exact diagnostics, and the
-required-before-mount-before-runtime-resync order are covered by focused codegen and downstream tests.
-Directly-declared generated `Vec<Rc<T>>` content hosts now separate raw slot mutation from one
-post-reconciliation property-change commit, so computed/template dependents observe the final
-collection state. A derived component that only inherits the `#[content]` declaration does not
-receive that generated host forwarding in #192; this capability boundary is tracked in follow-up
-Issue #194 and is not replaced with a fake reactive bridge. Unqualified imported shorthand and a
-defining-crate `pub mod ui` facade are not required. The inherited `Vec<Rc<T>>` content forwarding
-boundary remains follow-up Issue #194; #194 is intentionally outside PR #195.
-
-The current generated-component shape identity is basename-based within a crate: the same-crate
-registry and the hidden #192/#193 shape macros do not yet provide a path-aware identity for distinct
-components with the same basename in different modules. This is a current ElwindUI compile-time
-ABI/registry limitation, not a fundamental Rust limitation, and is tracked from requirements/design
-in [follow-up Issue #196](https://github.com/puchinya/elwindui/issues/196). PR #195 deliberately does
-not partially redesign that registry or either hidden shape ABI.
+Codegen, macro, language-server, external-fixture, GUI-driver, and workspace verification follow the commands in [`../agents/testing.md`](../agents/testing.md). Platform-specific GUI results must be recorded as PASS, FAIL, or NOT RUN according to the host evidence available.

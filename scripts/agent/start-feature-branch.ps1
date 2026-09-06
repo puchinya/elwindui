@@ -142,9 +142,12 @@ else {
     $branchChanged = $true
 }
 
-# Branch switches accumulate stale target/ build artifacts across feature
-# branches; clean them here rather than leaving disk usage to grow unbounded.
-if ($branchChanged -and (Get-Command cargo -ErrorAction SilentlyContinue)) {
+# Mandatory disk-space invariant: actual source branch switches must delete
+# stale target/ artifacts. Development machines have constrained free disk space.
+# Do not remove/soften this clean or replace it with a persistent shared build cache.
+# Same-branch use does not clean.
+if ($branchChanged) {
+    Assert-Command cargo
     Invoke-Checked cargo @('clean') | Out-Null
 }
 

@@ -1,49 +1,32 @@
 # Control implementation status
 
-Snapshot: 2026-08-30. Public behavior is defined by [`../specs/ui_spec.md`](../specs/ui_spec.md).
+Snapshot: 2026-09-06. Public behavior is defined by [`../specs/ui_spec.md`](../specs/ui_spec.md).
 
-| Control | AppKit | WinUI 3 | GTK4 | Notes |
+## Current support matrix
+
+| Control | AppKit | WinUI 3 | GTK4 | Current state |
 |---|---|---|---|---|
-| Window | ✅ | ✅ | ⬜ | lifecycle plus transparent client surface and normal/topmost Z-order; Issue #150 AppKit runtime verified, WinUI 3 additions not recompiled on macOS |
-| TextBlock | ✅ | ✅ | ⬜ | backend text measurement and rendering |
-| TextArea | ✅ | ✅ | ⬜ | native editable multiline control |
-| TextBox | ✅ | ✅ | ⬜ | value, placeholder, submit/focus paths |
-| PasswordBox | ✅ | ✅ | ⬜ | secure entry; AppKit uses system secure font cascade |
-| ScrollView | ✅ | ✅ | ⬜ | native viewport plus ElwindUI content host |
-| Button | ✅ | ✅ | ⬜ | role/default/tooltip verified |
-| CheckBox | ✅ | ✅ | ⬜ | tri-state behavior verified |
-| RadioButton | ✅ | ✅ | ⬜ | group behavior verified |
-| ToggleSwitch | ✅ | ✅ | ⬜ | TwoWay state verified |
-| Dropdown / DropdownItem | ✅ | ✅ | ⬜ | selection and dynamic item rebuild verified |
-| MenuBar / Menu / MenuItem | ✅ | 🚧 | ⬜ | menu bar and native/custom context menu attached via `context_menu` / `context_menu_presentation`; AppKit verified, WinUI 3 runtime verification in [#157](https://github.com/puchinya/elwindui/issues/157) ([#152](https://github.com/puchinya/elwindui/issues/152)). `MenuItem.icon` (`IconSource`/`SystemIcon`) added for both Native and Custom presentation ([#170](https://github.com/puchinya/elwindui/issues/170)). AppKit: SF Symbol system icons, user raster **and vector** icons, and the Custom canonical vector fallback are all screenshot-verified on `controls-demo`. WinUI 3: every `ImageSource` case (`SymbolIcon`, `Encoded` fast path, `Rgba8`/Win2D-`CanvasBitmap`-backed `Backend` via the existing `win2d_bitmap` conversion, and `Vector` via a `CanvasRenderTarget` rasterize-to-PNG bridge) is implemented, and regression test code has been added for each case, but — same #157 macOS-only-environment gap as the rest of Menu — none of it has actually been compiled, let alone executed or runtime-verified, on Windows; build/test execution/runtime verification for the icon paths is tracked in [#157](https://github.com/puchinya/elwindui/issues/157) alongside the rest of Menu's Windows verification |
-| PopupSurface / context_popup | ✅ | 🚧 | ⬜ | arbitrary UIElement popup surface with auto-flip placement, light dismiss, and above-native-control elevation; `ViewFactory`-based deferred build (owner captured `Weak`, popup-scoped derived Environment, declarative `#[environment(popup_dismiss)]`-resolvable `PopupDismissAction`) and `unmount_subtree` teardown-before-detach on close, both backends ([#161](https://github.com/puchinya/elwindui/issues/161)) — portable guarantee is unmount before ElwindUI's own host-tree detach on every path; framework-initiated close additionally unmounts before native visibility/detach on both backends, but WinUI3 native light-dismiss (`Popup.Closed`, which fires only after WinUI itself sets `IsOpen=false`) is a documented exception to that stronger ordering, not to the portable one; declarative `context_popup: view! { .. }` DSL sugar not yet implemented (low-level `ViewFactory::new(...)` only) — see [#162](https://github.com/puchinya/elwindui/issues/162); AppKit verified, WinUI 3 runtime verification (including native light-dismiss ordering) in [#157](https://github.com/puchinya/elwindui/issues/157) ([#152](https://github.com/puchinya/elwindui/issues/152)) |
-| TabView / TabViewItem | ✅ | ✅ | ⬜ | hosted page activation and native child reconciliation; AppKit tab chrome (layerless chip drawing, system-symbol close/new-tab, closable live sync, shrink-to-fit overflow) screenshot-verified on `controls-demo`/`notepad` ([#167](https://github.com/puchinya/elwindui/issues/167)) — Accessibility-driven interaction verification (`find`/`click`) not run, no Accessibility permission granted to the verification environment |
-| Rectangle / Ellipse / Image | ✅ | ✅ | ⬜ | backend-neutral self-rendered controls |
-| IconElement / IconSourceElement | ✅ | ✅ | ⬜ | backend-neutral self-rendered icon base/value wrapper; Core unit and cross-crate DSL tests, no backend-specific control path ([#176](https://github.com/puchinya/elwindui/issues/176)) |
-| CustomTabView / CustomTabViewItem / CustomSplitter | 🚧 | 🚧 | ⬜ | #173 component-layer prerequisite: templated `#[component]` controls with Grid/HorizontalLayout/Rectangle/TextBlock/IconSourceElement composition, stable content presentation, ownership, selection, pointer gesture, cancellation, splitter delta, and host-path tests; AppKit/WinUI3/GTK4 runtime interaction remains unverified |
-| ControlTemplate / ContentPresenter | ✅ | ✅ | ⬜ | typed Environment selection on the first successful `UIElement::apply_template()` (explicit call or participating measure), explicit `template_view!(|alias: Self| { ... })` defaults, and logical/Visual separation; backend-neutral runtime; ordinary view/template planner-emitter is shared, with readable `TemplateProperty<KEY>` and setter-only `WritableTemplateProperty<KEY>` bridges (including inherited base delegation); standalone/reusable forms require an explicit concrete target and reusable templates are ordinary Rust functions; property-free templates accept valid raw `ControlExt` targets, while property paths remain capability-gated and raw framework/class-managed property bridges are not guaranteed; `UIElement` owns only the virtual default `false` method, while template roots/provider/state remain on `Control`; template roots use private template-root ownership while caller bare content remains the inherited `content` slot |
+| Window | ✅ | ✅ | ⬜ | Lifecycle, transparent client surface, and normal/topmost ordering are implemented. |
+| TextBlock / TextArea / TextBox / PasswordBox | ✅ | ✅ | ⬜ | Native text and secure-entry paths are implemented; PasswordBox preserves the AppKit system font cascade. |
+| ScrollView | ✅ | ✅ | ⬜ | Native viewport with ElwindUI content host. |
+| Button / CheckBox / RadioButton / ToggleSwitch | ✅ | ✅ | ⬜ | Roles, tri-state/group behavior, TwoWay state, and focus/default paths are implemented. |
+| Dropdown / DropdownItem | ✅ | ✅ | ⬜ | Selection and dynamic item rebuilding are implemented. |
+| MenuBar / Menu / MenuItem | ✅ | 🚧 | ⬜ | Native/custom menus and icon sources are implemented; WinUI 3 runtime verification remains [#157](https://github.com/puchinya/elwindui/issues/157). |
+| PopupSurface / `context_popup` | ✅ | 🚧 | ⬜ | Auto-flip placement, light dismiss, deferred content, environment propagation, and teardown ordering are implemented; Windows runtime remains pending. |
+| TabView / TabViewItem | ✅ | ✅ | ⬜ | Hosted page activation, native child reconciliation, and AppKit chrome are implemented. |
+| Rectangle / Ellipse / Image | ✅ | ✅ | ⬜ | Backend-neutral self-rendered controls. |
+| IconElement / IconSourceElement | ✅ | ✅ | ⬜ | Backend-neutral icon values and rendering paths. |
+| CustomTabView / CustomTabViewItem / CustomSplitter | 🚧 | 🚧 | ⬜ | Templated custom controls, retained content, selection, pointer gestures, and splitter semantics are implemented; platform runtime interaction remains incomplete. |
+| ControlTemplate / ContentPresenter | ✅ | ✅ | ⬜ | Typed first-application selection and logical/visual separation are implemented; runtime re-template and related advanced features remain out of scope ([#83](https://github.com/puchinya/elwindui/issues/83)). |
 
 ## Current gaps
 
-- Runtime re-template、per-instance template property、TemplatePart、VisualStateは初期`ControlTemplate`の対象外である ([#83](https://github.com/puchinya/elwindui/issues/83))。
-- ContentControl-derived components declare their default visual template with `template: template_view!(|alias: Self| { ... })`; standalone/reusable templates declare a concrete target in the same header, and reusable templates are ordinary Rust functions. A static `ContentPresenter` is opt-in in that template, while raw `ContentControl` retains direct presentation. Caller bare children remain the inherited logical `content` slot.
+- Runtime re-template, per-instance template properties, `TemplatePart`, and `VisualState` are not implemented.
 - `tooltip` is implemented for NativeControl descendants, not backend-neutral self-rendered elements.
 - Native control support has no GTK4 implementation.
 - Accessibility scaffolds and the NavigationHost/VirtualList/ErrorBoundary surface require an explicit public-contract decision ([#85](https://github.com/puchinya/elwindui/issues/85)).
-- Additional planned controls remain backlog items until their public contract and design are approved.
+- Additional controls remain backlog items until their public contract and design are approved.
 
-## Verification
+## Verification state
 
-`examples/controls-demo` covers TextBox, PasswordBox, ScrollView, Button, selection controls, Dropdown, Slider, existing TextArea/Button regressions, and (Context Menu tab) `MenuItem.icon` — Native `SystemIcon` items, a Native user-vector-icon item, a Custom Context Menu mixing a `SystemIcon` item, a disabled `SystemIcon` item, a user raster `IconSource::Image` item, a user vector `IconSource::Image` item, and an icon-less item to verify leading-column alignment. `examples/control-template-demo` covers typed Environment override, capturing factory, reactive declared parent alias, and `ContentPresenter`. `examples/mascot-demo` covers a draggable transparent always-on-top Window with a real alpha PNG. AppKit uses `tools/macos-ui-driver`; WinUI 3 verification uses Windows UI Automation and real input.
-
-PR #200's final remediation keeps the demo on the public path: the reusable
-template is parameterized and installed directly, and logical content is
-provided as a Window constructor Param so it reaches the target before the
-target's first template application. The public `control_template` acceptance tests cover
-default/override selection, alias resync, ContentPresenter ownership, layout,
-and RenderTree descendants. On 2026-08-30, the rebuilt executable launched with
-`cargo run -p control-template-demo`; a Computer Use screenshot of that same
-executable showed `Captured: Environment override`, `Reactive parent alias
-label`, and `Logical content, visually hosted by ContentPresenter`. The
-default-only marker `Default template` was absent. This is AppKit runtime
-evidence; Windows and GTK4 remain unverified.
+The controls demo and control-template demo exercise the supported AppKit paths, while Core and codegen tests cover the backend-neutral semantics and RenderTree descendants. WinUI 3 verification uses Windows UI Automation and real input; GTK4 is unavailable. Verification commands remain authoritative in [`../agents/testing.md`](../agents/testing.md).

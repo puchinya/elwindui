@@ -1,120 +1,22 @@
 # Docking status
 
-## Implemented
+Snapshot: 2026-09-06. Docking behavior is defined by the docking specification and its durable design documents under [`../design/`](../design/).
 
-- `elwindui-docking` is a separate consumer crate with stable `DockItemId` and `DockGroupId`
-  registrations, authored-default metadata, and dynamic registration callbacks.
-- `DockLayoutModel` is an opaque immutable value for main/floating roots, global active selection,
-  closed return state, auto-hide state, generated groups, normalization, and version-2 snapshots;
-  version-1 input is rejected without migration or defaulting.
-- `DockingControl` keeps authored declarations mounted but collapsed, installs one retained private
-  runtime host, applies the actual TwoWay layout update path, publishes an empty initial default
-  once, and suppresses source echoes/latest-only reentrant updates.
-- The runtime retains item wrappers, group views, split Grids, and splitter instances. It realizes
-  N-pane splits with N-1 `CustomSplitter`s and uses explicit detach-before-attach ownership.
-- Structural model application is staged through a private `ReconcilePlan`; native floating hosts
-  are prepared outside the committed registry and are inserted/shown only after the runtime/model
-  commit. Failed preparation leaves committed wrapper parents, runtime maps, and existing hosts
-  unchanged; no old-model rollback is used.
-- CustomTabView selection/close/tab-drag callbacks and CustomSplitter callbacks are wired through
-  weak Docking owners. Drag preview is a real visual adornment and does not reparent page content.
-- Whole-group title-bar dragging, indexed tab context actions, compact tab metrics, and authored
-  `show_when_empty` groups with a non-interactive `Drop here` hint are wired through retained
-  runtime hosts.
-- Normal tab selection uses a retained value-only path, and live splitter movement updates retained
-  Grid tracks with arrange invalidation. CustomTabView caches private presenter references and the
-  content presenter measures only the selected page while retaining hidden page ownership.
-- Four custom auto-hide strips, icon/title entries, a single side-aware overlay pane with an
-  opaque background and dedicated page-content host, and pin affordances are present per Dock
-  surface. The popup keeps the tab header wrapper out of the page surface and anchors its fixed
-  panel to the selected side.
-- Drop discovery carries the selected `RootKind`, target group, and exact surface-local preview
-  rectangle together. Surface registration stores floating-root identity, corrects non-zero
-  `DockSurfaceView` offsets, filters group hit testing by root, and keeps only the target surface's
-  positioned preview visible. The retained five-button group compass and four-button root Dock set
-  are visually distinct and never alias highlights; both are non-hit-testable. Center tab insertion
-  uses actual retained arranged header midpoints, carries `tab_insert_index` in the resolved target,
-  and paints one retained two-logical-pixel semantic-accent insertion marker without preview
-  reconciliation or page measurement.
-- AppKit and WinUI3 have private native floating Window adapters with logical bounds, retained
-  surface content, stable host IDs, staged prepare/commit creation, close interception, and
-  empty-host cleanup. A native close callback marks the host as closing, hands the original OS
-  close back without reentrant `close()`, and commits the model on the following UI turn; rejected
-  closes keep both the model and native host intact. Interactive bounds preserve the source
-  group's arranged size and pointer offset, subject to a 160x120 minimum. GTK model floating
-  remains valid but interactive native floating reports `FloatingHostUnavailable` because the
-  baseline has no usable Window implementation.
-- Docking chrome close, pin, and floating affordances use a shared cached 16x16 vector geometry with
-  round caps/joins and centered hit-test-transparent presentation. Their hosting title-bar and
-  auto-hide button surfaces use an alpha-zero brush, preserving the full hit area without a
-  contrasting rectangle. The former 3x3 rectangle mosaics are no longer used.
-- `examples/docking-demo` visibly composes documents, nested tools, and the retained DockingControl
-  runtime; it exposes active-item, floating-window-count, and latest-layout status values, plus
-  authored `can_close=false`, `can_float=false`, and `can_dock=false` capability examples.
+## Current implementation
 
-## Tests and verification state
+- `elwindui-docking` is a separate consumer crate with stable item/group IDs, authored defaults, dynamic registration, immutable `DockLayoutModel` values, version-2 snapshots, active/closed/auto-hide state, normalization, and generated groups.
+- `DockingControl` keeps authored declarations collapsed, owns one retained runtime host, publishes the initial default once, suppresses source echoes, and stages structural changes through a private `ReconcilePlan`.
+- Retained wrappers, group views, split Grids, CustomSplitters, tab presenters, auto-hide strips, side-aware popup panes, drop previews, insertion markers, and explicit detach-before-attach ownership are implemented.
+- CustomTabView and CustomSplitter callbacks use weak docking owners. Selection, close, tab drag, splitter movement, whole-group dragging, indexed context actions, capability flags, and empty-group presentation are wired through retained hosts.
+- AppKit and WinUI 3 floating hosts use staged prepare/commit creation, stable host IDs, logical bounds, close interception, rejected-close preservation, and empty-host cleanup. GTK model floating remains valid but has no usable native Window implementation.
+- Docking chrome uses cached vector geometry and transparent hit-test surfaces; the docking demo composes documents, nested tools, floating windows, auto-hide, and retained DockingControl state.
 
-The focused `elwindui-docking` suite currently has 86 passing tests covering default
-initialization/reset, activation, close/reopen, all four split/edge sides, snapshot round-trip,
-auto-hide state, typed invalid values, latest-only source logic, removed-authored-group repair,
-adjacent split-weight transformation, generated-group drag targets, retained runtime presentation,
-callback-driven selection/close, initial publication, dynamic registration, cross-window target
-root/geometry and offset conversion, positioned previews, floating source geometry, staged host
-failure/success, stable host identity, native close veto/accept, final-root cleanup, actual tab and
-splitter pointer paths, prepare/commit ordering, and unmount/weak-lifetime cleanup, including V2
-active-item round-trip, V1 rejection, clear/reset, whole-group movement, empty-group presentation,
-indexed context-close actions, exact root/group target geometry, resolved center insertion, and
-auto-hide page-content ownership plus side-aware popup geometry.
-The focused `elwindui-custom-controls` suite has 9 library tests and 38 integration tests, including
-the 24-tab retained-selection operation budget, structural-selection counters, hidden-page measure
-checks, and compact presentation. Native GUI behavior still requires platform-host verification
-where noted below.
+## Current verification state
 
-The current workspace verification is `cargo test --workspace`: 82 suites, 1026 passed, 0 failed,
-3 ignored. `cargo check --workspace` passes, `cargo fmt --all -- --check` passes, and the repository
-rust-analyzer diagnostic gate passes with 227 intentional `Ra("inactive-code", WeakWarning)` records
-and zero actionable diagnostics. `git diff --check` also passes. Cargo reports the repository's
-existing future-incompatibility warning; it is not a new test failure.
+- Focused model, reconciliation, retained-presentation, pointer-path, floating-host, snapshot, auto-hide, and weak-lifetime tests are established, together with the workspace verification baseline.
+- AppKit native evidence covers the required selection, split, docking, floating, close, auto-hide, context-action, and cross-host transfer cases. Reviewer-visible captures are maintained under [`../issues/220-docking-ux-parity/evidence/`](../issues/220-docking-ux-parity/evidence/).
 
-## Platform boundaries
+## Platform boundaries and blockers
 
-- AppKit runtime interaction: the elevated `macos-ui-driver doctor` check reports
-  `accessibility=true` and `screen_recording=true`. Real foreground `docking-demo` sessions have
-  confirmed initial render, rapid selection, same-group reorder, top/bottom/left/right group
-  docking, cross-group tab docking, insertion-preview lifecycle, both splitter axes, V2 snapshot
-  save/reset/restore, auto-hide pin and unpin semantics, light/dark theme switching, item and
-  whole-group tear-out, native floating move/resize, floating-to-main return by title-bar drag,
-  simultaneous native floating windows, native floating close with process survival, and the
-  context-menu Close/Close Others/Close Tabs to Left/Close Tabs to Right/Float actions. The
-  context-menu Float and Close actions were re-run after retaining the menu-item wrappers: Float
-  created a native `Document B` window and Close removed it from the tabs while the process stayed
-  alive. Two independently created floating windows were also closed natively without a panic.
-  The transparent chrome/icon backgrounds were visually confirmed.
-- PR #221 final AppKit closure evidence is PASS for the required native cases: Document A was
-  dragged from floating host A into floating host B and remained interactive in B while the
-  source host disappeared; floating bounds were recorded as A, changed natively to B, and
-  restored to C equal to A and different from B; horizontal and vertical Splitter drags each ran
-  for 12 seconds with 480 tracking steps; and the main-thread menu lifetime example retained the
-  native item and fired its callback exactly once after the caller's `Rc` was dropped. The
-  reviewer-visible selected captures are committed under
-  `docs/issues/220-docking-ux-parity/evidence/`; the corresponding raw stdout/stderr remains in
-  `.agent-state/issues/220/e2e/` on the verification host.
-- AppKit GUI evidence is committed under `docs/issues/220-docking-ux-parity/evidence/`; raw command
-  stdout/stderr is retained under `.agent-state/issues/220/e2e/`. Abnormal cases are reported with both streams,
-  including the pre-fix inert context action, selector/foreground diagnostics, intermittent
-  direct-driver permission-denied shell invocations, and the pre-fix application panic reproduced
-  during a native capability-control click. The panic was `RefCell already mutably borrowed` at
-  `crates/elwindui-docking/src/docking_control.rs:1009:43`, in the
-  `handle_floating_bounds_changed` reentrant path. The callback now exits safely when the
-  realization is already mutably borrowed; the regression test passes, and the same native control
-  click plus native floating close were re-run with driver success, process survival, and empty app
-  stdout/stderr. V1 snapshot compatibility is not required; only the V2 save/reset/restore path is
-  part of this acceptance.
-- The broader disabled-capability interaction matrix is outside the final #220/#221 AppKit
-  closure cases and is not represented as a required acceptance PASS. The required two-host
-  floating transfer is proven above; no required AppKit closure case remains NOT RUN. Auto-hide
-  popup visual correctness is PASS:
-  the fixed AppKit run opened the right-side popup without document-tab overlap, placed the pin in
-  the panel's top-right, and restored the docked item after unpin.
-  WinUI3 native Docking acceptance is DEFERRED to a separate follow-up Issue; GTK4 native floating
-  remains unavailable without a usable GTK Window implementation.
+- WinUI 3 native Docking acceptance is deferred to a Windows follow-up. GTK4 native floating is unavailable without a usable GTK Window implementation.
+- The broader disabled-capability interaction matrix is not a required closure gate and is not represented as a PASS.

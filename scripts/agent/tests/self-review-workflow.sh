@@ -72,6 +72,40 @@ assert_contains() {
   }
 }
 
+failure_class() {
+  sed -n 's/.*error\[\([^]]*\)\].*/\1/p' <<<"$1" | tail -n 1
+}
+
+expect_parity_prepare_failure() {
+  local expected="$1"
+  local posix_output ps_output
+  if posix_output=$("$TMP/scripts/agent/prepare-self-review.sh" 123 2>&1); then
+    echo "expected POSIX prepare failure [$expected]" >&2
+    exit 1
+  fi
+  if ps_output=$(pwsh -NoProfile -File "$TMP/scripts/agent/prepare-self-review.ps1" 123 2>&1); then
+    echo "expected PowerShell prepare failure [$expected]" >&2
+    exit 1
+  fi
+  [[ "$(failure_class "$posix_output")" == "$expected" ]]
+  [[ "$(failure_class "$ps_output")" == "$expected" ]]
+}
+
+expect_parity_validate_failure() {
+  local expected="$1"
+  local posix_output ps_output
+  if posix_output=$("$TMP/scripts/agent/validate-self-review.sh" 123 2>&1); then
+    echo "expected POSIX validation failure [$expected]" >&2
+    exit 1
+  fi
+  if ps_output=$(pwsh -NoProfile -File "$TMP/scripts/agent/validate-self-review.ps1" 123 2>&1); then
+    echo "expected PowerShell validation failure [$expected]" >&2
+    exit 1
+  fi
+  [[ "$(failure_class "$posix_output")" == "$expected" ]]
+  [[ "$(failure_class "$ps_output")" == "$expected" ]]
+}
+
 fill_pass_review() {
   python3 - "$TMP/.agent-state/issues/123/self-review.md" "$(git rev-parse HEAD)" <<'PY'
 import re
@@ -80,7 +114,7 @@ from pathlib import Path
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
 text = re.sub(r"^Reviewed-HEAD:.*$", f"Reviewed-HEAD: {sys.argv[2]}", text, flags=re.M)
-text = re.sub(r"\| PENDING \|", "| PASS | Evidence: test::fixture", text)
+text = re.sub(r"\| PENDING \|", "| PASS | Evidence: test:fixture", text)
 path.write_text(text, encoding="utf-8")
 PY
 }
@@ -93,24 +127,29 @@ path = Path(sys.argv[1])
 mode = sys.argv[2]
 lines = path.read_text(encoding="utf-8").splitlines()
 if mode == "pending":
-    lines = [line.replace("| PASS | Evidence: test::fixture", "| PENDING |") if line.startswith("- ") else line for line in lines]
+    lines = [line.replace("| PASS | Evidence: test:fixture", "| PENDING |") if line.startswith("- ") else line for line in lines]
 elif mode == "fail":
     for index, line in enumerate(lines):
         if line.startswith("- ") and "| PASS | Evidence:" in line:
-            lines[index] = line.replace("| PASS | Evidence: test::fixture", "| FAIL | Evidence: fixture failure", 1)
+            lines[index] = line.replace("| PASS | Evidence: test:fixture", "| FAIL | Evidence: fixture failure", 1)
             break
 elif mode == "no-evidence":
     for index, line in enumerate(lines):
         if line.startswith("- ") and "| PASS | Evidence:" in line:
-            lines[index] = line.replace("| PASS | Evidence: test::fixture", "| PASS |", 1)
+            lines[index] = line.replace("| PASS | Evidence: test:fixture", "| PASS |", 1)
+            break
+elif mode == "prose-evidence":
+    for index, line in enumerate(lines):
+        if line.startswith("- ") and "| PASS | Evidence:" in line:
+            lines[index] = line.replace("| PASS | Evidence: test:fixture", "| PASS | Evidence: reviewed", 1)
             break
 elif mode == "no-reason":
     for index, line in enumerate(lines):
         if line.startswith("- ") and "| PASS | Evidence:" in line:
-            lines[index] = line.replace("| PASS | Evidence: test::fixture", "| N/A |", 1)
+            lines[index] = line.replace("| PASS | Evidence: test:fixture", "| N/A |", 1)
             break
 elif mode == "unknown":
-    lines.append("- X999 | PASS | Evidence: test::unknown")
+    lines.append("- X999 | PASS | Evidence: test:unknown")
 elif mode == "duplicate":
     lines.append(next(line for line in lines if line.startswith("- C001 ")))
 elif mode == "missing":
@@ -131,18 +170,18 @@ echo 'T1 direct extraction: PASS'
 python3 - .agent-state/issues/123/self-review.md <<'PY'
 from pathlib import Path
 p = Path(__import__("sys").argv[1])
-p.write_text(p.read_text().replace("| PENDING |", "| PASS | Evidence: test::partial"), encoding="utf-8")
+p.write_text(p.read_text().replace("| PENDING |", "| PASS | Evidence: test:partial"), encoding="utf-8")
 PY
 out="$("$TMP/scripts/agent/prepare-self-review.sh" 123)"
 assert_contains "$out" 'checklist_changed=0'
-grep -q -- 'I001 | PASS | Evidence: test::partial' .agent-state/issues/123/self-review.md
+grep -q -- 'I001 | PASS | Evidence: test:partial' .agent-state/issues/123/self-review.md
 echo 'T8 idempotent preparation: PASS'
 
 set_issue_body $'## Reviewer Checklist\n\n- [ ] resize preserves adjacent column minimums\n- [ ] repeated drag cancellation releases capture\n- [ ] keyboard resize preserves focus'
 out="$("$TMP/scripts/agent/prepare-self-review.sh" 123)"
 assert_contains "$out" 'checklist_changed=1'
 grep -q -- '- I003 | PENDING |' .agent-state/issues/123/self-review.md
-! grep -q -- 'I001 | PASS | Evidence: test::partial' .agent-state/issues/123/self-review.md
+! grep -q -- 'I001 | PASS | Evidence: test:partial' .agent-state/issues/123/self-review.md
 echo 'T9 source-change invalidation: PASS'
 
 set_issue_body $'## Purpose\nNo checklist.'
@@ -159,6 +198,25 @@ set_issue_body $'## Reviewer Checklist\n\n- [ ] same obligation\n- [x] same   ob
 reset_state
 expect_fail "$TMP/scripts/agent/prepare-self-review.sh" 123
 echo 'T7 duplicate checklist: PASS'
+
+set_issue_body $'## Reviewer Checklist\n\n- [ ] Foo Bar\n- [ ] foo   bar'
+reset_state
+out=$("$TMP/scripts/agent/prepare-self-review.sh" 123 2>&1 || true)
+assert_contains "$out" 'error[duplicate-checklist-item]'
+echo 'T3 ASCII duplicate normalization: PASS'
+
+set_issue_body $'## Reviewer Checklist\n\n- [ ] straße\n- [ ] STRASSE'
+reset_state
+out=$("$TMP/scripts/agent/prepare-self-review.sh" 123)
+assert_contains "$out" 'items=2'
+posix_non_ascii_sha="$(sed -n 's/^review_checklist_sha256=//p' <<<"$out")"
+grep -q -- '- I001 | issue | straße' .agent-state/issues/123/reviewer-checklist.md
+grep -q -- '- I002 | issue | STRASSE' .agent-state/issues/123/reviewer-checklist.md
+if command -v pwsh >/dev/null 2>&1; then
+  ps_non_ascii_sha="$(pwsh -NoProfile -File "$TMP/scripts/agent/prepare-self-review.ps1" 123 | sed -n 's/^review_checklist_sha256=//p')"
+  [[ "$ps_non_ascii_sha" == "$posix_non_ascii_sha" ]]
+fi
+echo 'T4 non-ASCII deterministic distinction: PASS'
 
 set_issue_body $'# 40. Reviewer Checklist\n\n- [ ] alternate heading works\n\n# Boundary\n- [ ] outside section is ignored'
 reset_state
@@ -214,19 +272,41 @@ assert_contains "$out" 'self_review_status=pass'
 assert_contains "$out" 'pass=4'
 echo 'T10 complete PASS validation: PASS'
 
+for token in \
+  'path:scripts/agent/validate-self-review.sh' \
+  'symbol:scripts/agent/validate-self-review.sh::evidence-parser' \
+  'test:T6' \
+  'cmd:bash scripts/agent/tests/self-review-workflow.sh' \
+  'artifact:.agent-state/issues/123/self-review.md' \
+  'issue:#243' \
+  'pr:#244'; do
+  fresh_review
+  fill_pass_review
+  python3 - .agent-state/issues/123/self-review.md "$token" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+token = sys.argv[2]
+p.write_text(p.read_text().replace("Evidence: test:fixture", f"Evidence: {token}"), encoding="utf-8")
+PY
+  out=$("$TMP/scripts/agent/validate-self-review.sh" 123)
+  assert_contains "$out" 'self_review_status=pass'
+done
+echo 'T6 structured evidence prefixes: PASS'
+
 fresh_review
 fill_pass_review
 python3 - .agent-state/issues/123/self-review.md <<'PY'
 from pathlib import Path
 p = Path(__import__("sys").argv[1])
-p.write_text(p.read_text().replace("| PASS | Evidence: test::fixture", "| N/A | Reason: this fixture does not exercise the platform-only path", 1), encoding="utf-8")
+p.write_text(p.read_text().replace("| PASS | Evidence: test:fixture", "| N/A | Reason: this fixture does not exercise the platform-only path", 1), encoding="utf-8")
 PY
 out="$("$TMP/scripts/agent/validate-self-review.sh" 123)"
 assert_contains "$out" 'pass=3'
 assert_contains "$out" 'na=1'
 echo 'T10 valid N/A validation: PASS'
 
-for mode in pending fail no-evidence no-reason unknown duplicate missing; do
+for mode in pending fail no-evidence prose-evidence no-reason unknown duplicate missing; do
   fresh_review
   fill_pass_review
   mutate_review "$mode"
@@ -235,6 +315,7 @@ for mode in pending fail no-evidence no-reason unknown duplicate missing; do
     pending) echo 'T11 PENDING rejection: PASS' ;;
     fail) echo 'T12 FAIL rejection: PASS' ;;
     no-evidence) echo 'T13 missing PASS evidence: PASS' ;;
+    prose-evidence) echo 'T5 prose-only evidence rejection: PASS' ;;
     no-reason) echo 'T14 missing N/A reason: PASS' ;;
     unknown) echo 'T16 unknown ID: PASS' ;;
     duplicate) echo 'T16 duplicate result ID: PASS' ;;
@@ -274,6 +355,84 @@ echo 'T17 stale HEAD rejection: PASS'
 fill_pass_review
 
 if command -v pwsh >/dev/null 2>&1; then
+  rm -f .agent-state/issues/123/implementation-contract.md .agent-state/issues/123/implementation-contract.sha256
+  set_issue_body $'## Purpose\nNo checklist.'
+  reset_state
+  expect_parity_prepare_failure missing-checklist
+
+  set_issue_body $'## Reviewer Checklist\n\nNo checkbox here.'
+  reset_state
+  expect_parity_prepare_failure empty-checklist
+
+  set_issue_body $'## Reviewer Checklist\n\n- [ ] Foo Bar\n- [ ] foo   bar'
+  reset_state
+  expect_parity_prepare_failure duplicate-checklist-item
+
+  set_issue_body $'## Purpose\nContract integrity fixture.'
+  reset_state
+  printf '%s\n' "$contract_body" > .agent-state/issues/123/implementation-contract.md
+  printf '%s  implementation-contract.md\n' deadbeef > .agent-state/issues/123/implementation-contract.sha256
+  expect_parity_prepare_failure contract-integrity
+
+  printf '%s\n' "$contract_body" > .agent-state/issues/123/implementation-contract.md
+  python3 - .agent-state/issues/123/implementation-contract.md .agent-state/issues/123/implementation-contract.sha256 <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+Path(sys.argv[2]).write_text(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  implementation-contract.md\n", encoding="utf-8")
+PY
+  set_issue_body $'## Reviewer Checklist\n\n- [ ] Issue supplemental one\n- [ ] Issue supplemental two'
+
+  for mode in pending fail no-evidence prose-evidence no-reason unknown duplicate missing; do
+    fresh_review
+    fill_pass_review
+    mutate_review "$mode"
+    case "$mode" in
+      pending) expected=pending-item ;;
+      fail) expected=failed-item ;;
+      no-evidence|prose-evidence) expected=missing-evidence ;;
+      no-reason) expected=missing-na-reason ;;
+      unknown) expected=unknown-result-id ;;
+      duplicate) expected=duplicate-result-id ;;
+      missing) expected=missing-result-id ;;
+    esac
+    expect_parity_validate_failure "$expected"
+  done
+
+  fresh_review
+  fill_pass_review
+  set_issue_body $'## Reviewer Checklist\n\n- [ ] changed source obligation'
+  expect_parity_validate_failure stale-checklist
+  set_issue_body $'## Reviewer Checklist\n\n- [ ] Issue supplemental one\n- [ ] Issue supplemental two'
+
+  fresh_review
+  fill_pass_review
+  printf '%s\n' changed >> .agent-state/issues/123/implementation-contract.md
+  expect_parity_validate_failure contract-integrity
+  printf '%s\n' "$contract_body" > .agent-state/issues/123/implementation-contract.md
+  python3 - .agent-state/issues/123/implementation-contract.md .agent-state/issues/123/implementation-contract.sha256 <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+Path(sys.argv[2]).write_text(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  implementation-contract.md\n", encoding="utf-8")
+PY
+
+  fresh_review
+  fill_pass_review
+  printf '%s\n' dirty >> tracked.txt
+  expect_parity_validate_failure dirty-worktree
+  git checkout -- tracked.txt
+
+  fresh_review
+  fill_pass_review
+  git commit --allow-empty -qm parity-stale-head
+  expect_parity_validate_failure stale-head
+  "$TMP/scripts/agent/prepare-self-review.sh" 123 >/dev/null
+  fill_pass_review
+  echo 'T7 POSIX/PowerShell failure-class parity: PASS'
+
   pwsh -NoProfile -File "$TMP/scripts/agent/prepare-self-review.ps1" 123 > "$STUB_BIN/pwsh-prepare.txt"
   ps_sha="$(sed -n 's/^review_checklist_sha256=//p' "$STUB_BIN/pwsh-prepare.txt")"
   posix_sha="$(sed -n 's/^Checklist-SHA256: //p' .agent-state/issues/123/reviewer-checklist.md)"

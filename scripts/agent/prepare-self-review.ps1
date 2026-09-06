@@ -8,6 +8,19 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+trap {
+    $message = $_.Exception.Message
+    if ($message -match '^error\[[^\]]+\]:') {
+        [Console]::Error.WriteLine($message)
+        exit 1
+    }
+    break
+}
+
+function Stop-Workflow([string] $Class, [string] $Message) {
+    throw "error[$Class]: $Message"
+}
+
 function Require-Command([string] $Name) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         throw "Required command not found: $Name"
@@ -19,7 +32,21 @@ function Write-Utf8NoBom([string] $Path, [string] $Text) {
 }
 
 function Normalize-ChecklistText([string] $Text) {
-    return (($Text -replace '\s+', ' ').Trim())
+    return (($Text -replace '\s+', ' ').Trim()).Normalize([System.Text.NormalizationForm]::FormC)
+}
+
+function Normalize-DuplicateKey([string] $Text) {
+    $normalized = Normalize-ChecklistText $Text
+    $builder = [System.Text.StringBuilder]::new()
+    foreach ($character in $normalized.ToCharArray()) {
+        if ($character -ge [char]'A' -and $character -le [char]'Z') {
+            [void] $builder.Append([char]([int]$character + 32))
+        }
+        else {
+            [void] $builder.Append($character)
+        }
+    }
+    return $builder.ToString()
 }
 
 function Extract-Checklist([string] $Text, [string] $Source) {
@@ -61,19 +88,19 @@ function Extract-Checklist([string] $Text, [string] $Source) {
                 break
             }
             if ([regex]::IsMatch($candidate, $emptyCheckboxPattern)) {
-                throw "$Source Reviewer Checklist has an empty checkbox item"
+                Stop-Workflow 'empty-checklist' "$Source Reviewer Checklist has an empty checkbox item"
             }
             $checkbox = [regex]::Match($candidate, $checkboxPattern)
             if ($checkbox.Success) {
                 $item = Normalize-ChecklistText $checkbox.Groups[1].Value
                 if ([string]::IsNullOrWhiteSpace($item)) {
-                    throw "$Source Reviewer Checklist has an empty item"
+                    Stop-Workflow 'empty-checklist' "$Source Reviewer Checklist has an empty item"
                 }
                 [void] $sectionItems.Add($item)
             }
         }
         if ($sectionItems.Count -eq 0) {
-            throw "$Source Reviewer Checklist section has zero checkbox items"
+            Stop-Workflow 'empty-checklist' "$Source Reviewer Checklist section has zero checkbox items"
         }
         foreach ($item in $sectionItems) {
             [void] $items.Add($item)
@@ -95,12 +122,12 @@ function Get-ContractItems([string] $Base) {
     }
     if (-not (Test-Path -LiteralPath $contract -PathType Leaf) -or
         -not (Test-Path -LiteralPath $contractSha -PathType Leaf)) {
-        throw 'Contract mirror is incomplete.'
+        Stop-Workflow 'contract-integrity' 'Contract mirror is incomplete.'
     }
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $contract).Hash.ToLowerInvariant()
     $recorded = [System.IO.File]::ReadAllText($contractSha).Trim()
     if ($recorded -notmatch '^([0-9a-f]{64})\s+implementation-contract\.md$' -or $Matches[1] -ne $actual) {
-        throw 'Contract mirror integrity check failed.'
+        Stop-Workflow 'contract-integrity' 'Contract mirror integrity check failed.'
     }
     $result = Extract-Checklist ([System.IO.File]::ReadAllText($contract)) 'contract'
     return [string[]] $result.Items
@@ -146,16 +173,17 @@ $contractItems = @(Get-ContractItems $base)
 $issueResult = Extract-Checklist ([string] $issue.body) 'Issue'
 $issueItems = @($issueResult.Items)
 if ($contractItems.Count -eq 0 -and $issueItems.Count -eq 0) {
-    throw 'No effective Reviewer Checklist exists.'
+    Stop-Workflow 'missing-checklist' 'No effective Reviewer Checklist exists.'
 }
 
 $entries = [System.Collections.Generic.List[object]]::new()
-$seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 function Add-Items([string] $Prefix, [string] $Source, [string[]] $Items) {
     for ($offset = 0; $offset -lt $Items.Count; $offset++) {
         $item = $Items[$offset]
-        if (-not $seen.Add($item)) {
-            throw "Duplicate effective Reviewer Checklist item: $Source item $($Prefix)$('{0:D3}' -f ($offset + 1))."
+        $key = Normalize-DuplicateKey $item
+        if (-not $seen.Add($key)) {
+            Stop-Workflow 'duplicate-checklist-item' "Duplicate effective Reviewer Checklist item: $Source item $($Prefix)$('{0:D3}' -f ($offset + 1))."
         }
         [void] $entries.Add([pscustomobject]@{
             Id = "$Prefix$('{0:D3}' -f ($offset + 1))"

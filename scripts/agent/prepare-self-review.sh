@@ -39,6 +39,7 @@ import hashlib
 import json
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 
@@ -52,8 +53,21 @@ checklist_sha_path = base / "reviewer-checklist.sha256"
 self_review_path = base / "self-review.md"
 
 
-def fail(message: str) -> "NoReturn":
-    raise SystemExit(f"error: {message}")
+def fail(message: str, failure_class: str = "invalid-input") -> "NoReturn":
+    raise SystemExit(f"error[{failure_class}]: {message}")
+
+
+def normalize_checklist_text(text: str) -> str:
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    return unicodedata.normalize("NFC", collapsed)
+
+
+def normalize_duplicate_key(text: str) -> str:
+    normalized = normalize_checklist_text(text)
+    return "".join(
+        chr(ord(char) + 32) if "A" <= char <= "Z" else char
+        for char in normalized
+    )
 
 
 try:
@@ -102,15 +116,15 @@ def extract_checklist(text: str, source: str) -> list[str]:
             if next_heading and len(next_heading.group(1)) <= level:
                 break
             if empty_checkbox_re.fullmatch(candidate):
-                fail(f"{source} Reviewer Checklist has an empty checkbox item")
+                fail(f"{source} Reviewer Checklist has an empty checkbox item", "empty-checklist")
             checkbox = checkbox_re.fullmatch(candidate)
             if checkbox:
-                item = " ".join(checkbox.group(1).split())
+                item = normalize_checklist_text(checkbox.group(1))
                 if not item:
-                    fail(f"{source} Reviewer Checklist has an empty item")
+                    fail(f"{source} Reviewer Checklist has an empty item", "empty-checklist")
                 section_items.append(item)
         if not section_items:
-            fail(f"{source} Reviewer Checklist section has zero checkbox items")
+            fail(f"{source} Reviewer Checklist section has zero checkbox items", "empty-checklist")
         items.extend(section_items)
     return items if found else []
 
@@ -120,19 +134,19 @@ def validate_contract() -> list[str]:
     if not present:
         return []
     if not contract.is_file() or not contract_sha.is_file():
-        fail("contract mirror is incomplete")
+        fail("contract mirror is incomplete", "contract-integrity")
     actual = hashlib.sha256(contract.read_bytes()).hexdigest()
     recorded = contract_sha.read_text(encoding="utf-8").strip()
     match = re.fullmatch(r"([0-9a-f]{64})\s+implementation-contract\.md", recorded)
     if not match or match.group(1) != actual:
-        fail("contract mirror integrity check failed")
+        fail("contract mirror integrity check failed", "contract-integrity")
     return extract_checklist(contract.read_text(encoding="utf-8"), "contract")
 
 
 contract_items = validate_contract()
 issue_items = extract_checklist(issue_body, "Issue")
 if not contract_items and not issue_items:
-    fail("no effective Reviewer Checklist exists")
+    fail("no effective Reviewer Checklist exists", "missing-checklist")
 
 entries: list[tuple[str, str, str]] = []
 seen: dict[str, str] = {}
@@ -140,11 +154,12 @@ seen: dict[str, str] = {}
 
 def add_items(prefix: str, source: str, items: list[str]) -> None:
     for offset, item in enumerate(items, start=1):
-        key = item.casefold()
+        key = normalize_duplicate_key(item)
         if key in seen:
             fail(
                 "duplicate effective Reviewer Checklist item: "
-                f"{source} item {prefix}{offset:03d} duplicates {seen[key]}"
+                f"{source} item {prefix}{offset:03d} duplicates {seen[key]}",
+                "duplicate-checklist-item",
             )
         item_id = f"{prefix}{offset:03d}"
         seen[key] = item_id

@@ -38,6 +38,7 @@ import json
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 
@@ -51,8 +52,21 @@ checklist_sha_path = base / "reviewer-checklist.sha256"
 self_review_path = base / "self-review.md"
 
 
-def fail(message: str) -> "NoReturn":
-    raise SystemExit(f"error: {message}")
+def fail(message: str, failure_class: str = "invalid-input") -> "NoReturn":
+    raise SystemExit(f"error[{failure_class}]: {message}")
+
+
+def normalize_checklist_text(text: str) -> str:
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    return unicodedata.normalize("NFC", collapsed)
+
+
+def normalize_duplicate_key(text: str) -> str:
+    normalized = normalize_checklist_text(text)
+    return "".join(
+        chr(ord(char) + 32) if "A" <= char <= "Z" else char
+        for char in normalized
+    )
 
 
 try:
@@ -71,6 +85,14 @@ heading_re = re.compile(
 generic_heading_re = re.compile(r"^(#{1,6})(?:[ \t]+.*)?$")
 checkbox_re = re.compile(r"^[ \t]*-[ \t]+\[[ xX]\][ \t]+(.+?)\s*$")
 empty_checkbox_re = re.compile(r"^[ \t]*-[ \t]+\[[ xX]\][ \t]*$")
+structured_evidence_re = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:"
+    r"symbol:[^;\s]+::[^;\s]+|"
+    r"path:[^;\s]+|test:[^;\s]+|artifact:[^;\s]+|"
+    r"issue:#[1-9][0-9]*|pr:#[1-9][0-9]*|"
+    r"cmd:[^;\s](?:[^;]*[^;\s])?"
+    r")(?![A-Za-z0-9_-])"
+)
 
 
 def extract_checklist(text: str, source: str) -> list[str]:
@@ -100,15 +122,15 @@ def extract_checklist(text: str, source: str) -> list[str]:
             if next_heading and len(next_heading.group(1)) <= level:
                 break
             if empty_checkbox_re.fullmatch(candidate):
-                fail(f"{source} Reviewer Checklist has an empty checkbox item")
+                fail(f"{source} Reviewer Checklist has an empty checkbox item", "empty-checklist")
             checkbox = checkbox_re.fullmatch(candidate)
             if checkbox:
-                item = " ".join(checkbox.group(1).split())
+                item = normalize_checklist_text(checkbox.group(1))
                 if not item:
-                    fail(f"{source} Reviewer Checklist has an empty item")
+                    fail(f"{source} Reviewer Checklist has an empty item", "empty-checklist")
                 section_items.append(item)
         if not section_items:
-            fail(f"{source} Reviewer Checklist section has zero checkbox items")
+            fail(f"{source} Reviewer Checklist section has zero checkbox items", "empty-checklist")
         items.extend(section_items)
     return items if found else []
 
@@ -118,19 +140,19 @@ def validate_contract() -> list[str]:
     if not present:
         return []
     if not contract.is_file() or not contract_sha.is_file():
-        fail("contract mirror is incomplete")
+        fail("contract mirror is incomplete", "contract-integrity")
     actual = hashlib.sha256(contract.read_bytes()).hexdigest()
     recorded = contract_sha.read_text(encoding="utf-8").strip()
     match = re.fullmatch(r"([0-9a-f]{64})\s+implementation-contract\.md", recorded)
     if not match or match.group(1) != actual:
-        fail("contract mirror integrity check failed")
+        fail("contract mirror integrity check failed", "contract-integrity")
     return extract_checklist(contract.read_text(encoding="utf-8"), "contract")
 
 
 contract_items = validate_contract()
 issue_items = extract_checklist(issue_body, "Issue")
 if not contract_items and not issue_items:
-    fail("no effective Reviewer Checklist exists")
+    fail("no effective Reviewer Checklist exists", "missing-checklist")
 
 entries: list[tuple[str, str]] = []
 seen: dict[str, str] = {}
@@ -138,9 +160,12 @@ seen: dict[str, str] = {}
 
 def add_items(prefix: str, items: list[str]) -> None:
     for offset, item in enumerate(items, start=1):
-        key = item.casefold()
+        key = normalize_duplicate_key(item)
         if key in seen:
-            fail(f"duplicate effective Reviewer Checklist item: {prefix}{offset:03d} duplicates {seen[key]}")
+            fail(
+                f"duplicate effective Reviewer Checklist item: {prefix}{offset:03d} duplicates {seen[key]}",
+                "duplicate-checklist-item",
+            )
         item_id = f"{prefix}{offset:03d}"
         seen[key] = item_id
         entries.append((item_id, item))
@@ -153,10 +178,10 @@ fingerprint = hashlib.sha256(
 ).hexdigest()
 
 if not checklist_path.is_file() or not checklist_sha_path.is_file():
-    fail("prepared Reviewer Checklist artifacts are missing")
+    fail("prepared Reviewer Checklist artifacts are missing", "stale-checklist")
 prepared_sha = checklist_sha_path.read_text(encoding="utf-8").strip()
 if not re.fullmatch(r"[0-9a-f]{64}", prepared_sha) or prepared_sha != fingerprint:
-    fail("prepared Reviewer Checklist source is stale")
+    fail("prepared Reviewer Checklist source is stale", "stale-checklist")
 
 if not self_review_path.is_file():
     fail("self-review artifact is missing")
@@ -186,17 +211,17 @@ dirty = subprocess.run(
     text=True,
 ).stdout.strip()
 if dirty:
-    fail("repository-controlled worktree is dirty")
+    fail("repository-controlled worktree is dirty", "dirty-worktree")
 
 current_head = subprocess.run(
     ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
 ).stdout.strip()
 if reviewed_head != current_head:
-    fail("Reviewed-HEAD is stale")
+    fail("Reviewed-HEAD is stale", "stale-head")
 try:
     subprocess.run(["git", "cat-file", "-e", f"{reviewed_head}^{{commit}}"], check=True, capture_output=True)
 except subprocess.CalledProcessError:
-    fail("Reviewed-HEAD is not a valid commit")
+    fail("Reviewed-HEAD is not a valid commit", "stale-head")
 
 expected = {item_id for item_id, _item in entries}
 results: dict[str, tuple[str, str]] = {}
@@ -208,33 +233,33 @@ for line in self_review.splitlines():
         fail("self-review contains a malformed result entry")
     item_id, status, detail = (part.strip() for part in parts)
     if item_id in results:
-        fail(f"self-review contains duplicate result ID: {item_id}")
+        fail(f"self-review contains duplicate result ID: {item_id}", "duplicate-result-id")
     if item_id not in expected:
-        fail(f"self-review contains unknown result ID: {item_id}")
+        fail(f"self-review contains unknown result ID: {item_id}", "unknown-result-id")
     results[item_id] = (status, detail)
 
 missing = sorted(expected - results.keys())
 if missing:
-    fail("self-review is missing result IDs: " + ", ".join(missing))
+    fail("self-review is missing result IDs: " + ", ".join(missing), "missing-result-id")
 
 pass_count = 0
 na_count = 0
 for item_id, (status, detail) in results.items():
     if status == "PASS":
         if not detail.startswith("Evidence:") or not detail[len("Evidence:") :].strip():
-            fail(f"PASS item {item_id} requires concrete Evidence:")
-        evidence = detail[len("Evidence:") :].strip().casefold()
-        if evidence in {"looks good", "none", "n/a", "todo", "pending"}:
-            fail(f"PASS item {item_id} has non-concrete Evidence:")
+            fail(f"PASS item {item_id} requires concrete Evidence:", "missing-evidence")
+        evidence = detail[len("Evidence:") :].strip()
+        if not structured_evidence_re.search(evidence):
+            fail(f"PASS item {item_id} has no valid structured Evidence token:", "missing-evidence")
         pass_count += 1
     elif status == "N/A":
         if not detail.startswith("Reason:") or not detail[len("Reason:") :].strip():
-            fail(f"N/A item {item_id} requires a concrete Reason:")
+            fail(f"N/A item {item_id} requires a concrete Reason:", "missing-na-reason")
         na_count += 1
     elif status == "PENDING":
-        fail(f"self-review item {item_id} is PENDING")
+        fail(f"self-review item {item_id} is PENDING", "pending-item")
     elif status == "FAIL":
-        fail(f"self-review item {item_id} is FAIL")
+        fail(f"self-review item {item_id} is FAIL", "failed-item")
     else:
         fail(f"self-review item {item_id} has invalid status: {status}")
 

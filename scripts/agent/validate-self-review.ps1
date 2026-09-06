@@ -8,10 +8,46 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+trap {
+    $message = $_.Exception.Message
+    if ($message -match '^error\[[^\]]+\]:') {
+        [Console]::Error.WriteLine($message)
+        exit 1
+    }
+    break
+}
+
+function Stop-Workflow([string] $Class, [string] $Message) {
+    throw "error[$Class]: $Message"
+}
+
 function Require-Command([string] $Name) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         throw "Required command not found: $Name"
     }
+}
+
+function Normalize-ChecklistText([string] $Text) {
+    return (($Text -replace '\s+', ' ').Trim()).Normalize([System.Text.NormalizationForm]::FormC)
+}
+
+function Normalize-DuplicateKey([string] $Text) {
+    $normalized = Normalize-ChecklistText $Text
+    $builder = [System.Text.StringBuilder]::new()
+    foreach ($character in $normalized.ToCharArray()) {
+        if ($character -ge [char]'A' -and $character -le [char]'Z') {
+            [void] $builder.Append([char]([int]$character + 32))
+        }
+        else {
+            [void] $builder.Append($character)
+        }
+    }
+    return $builder.ToString()
+}
+
+function Has-StructuredEvidence([string] $Text) {
+    $pattern = '(?<![A-Za-z0-9_-])(?:symbol:[^;\s]+::[^;\s]+|path:[^;\s]+|test:[^;\s]+|artifact:[^;\s]+|issue:#[1-9][0-9]*|pr:#[1-9][0-9]*|cmd:[^;\s](?:[^;]*[^;\s])?)(?![A-Za-z0-9_-])'
+    return [regex]::IsMatch($Text, $pattern, [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
 }
 
 function Extract-Checklist([string] $Text, [string] $Source) {
@@ -53,19 +89,19 @@ function Extract-Checklist([string] $Text, [string] $Source) {
                 break
             }
             if ([regex]::IsMatch($candidate, $emptyCheckboxPattern)) {
-                throw "$Source Reviewer Checklist has an empty checkbox item"
+                Stop-Workflow 'empty-checklist' "$Source Reviewer Checklist has an empty checkbox item"
             }
             $checkbox = [regex]::Match($candidate, $checkboxPattern)
             if ($checkbox.Success) {
-                $item = (($checkbox.Groups[1].Value -replace '\s+', ' ').Trim())
+                $item = Normalize-ChecklistText $checkbox.Groups[1].Value
                 if ([string]::IsNullOrWhiteSpace($item)) {
-                    throw "$Source Reviewer Checklist has an empty item"
+                    Stop-Workflow 'empty-checklist' "$Source Reviewer Checklist has an empty item"
                 }
                 [void] $sectionItems.Add($item)
             }
         }
         if ($sectionItems.Count -eq 0) {
-            throw "$Source Reviewer Checklist section has zero checkbox items"
+            Stop-Workflow 'empty-checklist' "$Source Reviewer Checklist section has zero checkbox items"
         }
         foreach ($item in $sectionItems) {
             [void] $items.Add($item)
@@ -87,12 +123,12 @@ function Get-ContractItems([string] $Base) {
     }
     if (-not (Test-Path -LiteralPath $contract -PathType Leaf) -or
         -not (Test-Path -LiteralPath $contractSha -PathType Leaf)) {
-        throw 'Contract mirror is incomplete.'
+        Stop-Workflow 'contract-integrity' 'Contract mirror is incomplete.'
     }
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $contract).Hash.ToLowerInvariant()
     $recorded = [System.IO.File]::ReadAllText($contractSha).Trim()
     if ($recorded -notmatch '^([0-9a-f]{64})\s+implementation-contract\.md$' -or $Matches[1] -ne $actual) {
-        throw 'Contract mirror integrity check failed.'
+        Stop-Workflow 'contract-integrity' 'Contract mirror integrity check failed.'
     }
     $result = Extract-Checklist ([System.IO.File]::ReadAllText($contract)) 'contract'
     return [string[]] $result.Items
@@ -144,16 +180,17 @@ $contractItems = @(Get-ContractItems $base)
 $issueResult = Extract-Checklist ([string] $issue.body) 'Issue'
 $issueItems = @($issueResult.Items)
 if ($contractItems.Count -eq 0 -and $issueItems.Count -eq 0) {
-    throw 'No effective Reviewer Checklist exists.'
+    Stop-Workflow 'missing-checklist' 'No effective Reviewer Checklist exists.'
 }
 
 $entries = [System.Collections.Generic.List[object]]::new()
-$seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 function Add-Items([string] $Prefix, [string[]] $Items) {
     for ($offset = 0; $offset -lt $Items.Count; $offset++) {
         $item = $Items[$offset]
-        if (-not $seen.Add($item)) {
-            throw "Duplicate effective Reviewer Checklist item: $Prefix$('{0:D3}' -f ($offset + 1))."
+        $key = Normalize-DuplicateKey $item
+        if (-not $seen.Add($key)) {
+            Stop-Workflow 'duplicate-checklist-item' "Duplicate effective Reviewer Checklist item: $Prefix$('{0:D3}' -f ($offset + 1))."
         }
         [void] $entries.Add([pscustomobject]@{
             Id = "$Prefix$('{0:D3}' -f ($offset + 1))"
@@ -171,11 +208,11 @@ $fingerprint = (-join ($sha256.ComputeHash($utf8.GetBytes($canonical)) | ForEach
 
 if (-not (Test-Path -LiteralPath $checklistPath -PathType Leaf) -or
     -not (Test-Path -LiteralPath $checklistShaPath -PathType Leaf)) {
-    throw 'Prepared Reviewer Checklist artifacts are missing.'
+    Stop-Workflow 'stale-checklist' 'Prepared Reviewer Checklist artifacts are missing.'
 }
 $preparedSha = [System.IO.File]::ReadAllText($checklistShaPath).Trim()
 if ($preparedSha -notmatch '^[0-9a-f]{64}$' -or $preparedSha -ne $fingerprint) {
-    throw 'Prepared Reviewer Checklist source is stale.'
+    Stop-Workflow 'stale-checklist' 'Prepared Reviewer Checklist source is stale.'
 }
 
 if (-not (Test-Path -LiteralPath $selfReviewPath -PathType Leaf)) {
@@ -191,15 +228,15 @@ $reviewedHead = Get-Metadata $selfReview 'Reviewed-HEAD' '^Reviewed-HEAD: ([0-9a
 
 $dirty = (& git status --porcelain --untracked-files=all | Out-String).Trim()
 if (-not [string]::IsNullOrWhiteSpace($dirty)) {
-    throw 'Repository-controlled worktree is dirty.'
+    Stop-Workflow 'dirty-worktree' 'Repository-controlled worktree is dirty.'
 }
 $currentHead = (& git rev-parse HEAD | Out-String).Trim()
 if ($reviewedHead -ne $currentHead) {
-    throw 'Reviewed-HEAD is stale.'
+    Stop-Workflow 'stale-head' 'Reviewed-HEAD is stale.'
 }
 & git cat-file -e "$reviewedHead^{commit}" *> $null
 if ($LASTEXITCODE -ne 0) {
-    throw 'Reviewed-HEAD is not a valid commit.'
+    Stop-Workflow 'stale-head' 'Reviewed-HEAD is not a valid commit.'
 }
 
 $expected = [System.Collections.Generic.HashSet[string]]::new()
@@ -219,17 +256,17 @@ foreach ($line in ($selfReview -split "`n")) {
     $status = $parts[1].Trim()
     $detail = $parts[2].Trim()
     if ($results.ContainsKey($itemId)) {
-        throw "Self-review contains duplicate result ID: $itemId"
+        Stop-Workflow 'duplicate-result-id' "Self-review contains duplicate result ID: $itemId"
     }
     if (-not $expected.Contains($itemId)) {
-        throw "Self-review contains unknown result ID: $itemId"
+        Stop-Workflow 'unknown-result-id' "Self-review contains unknown result ID: $itemId"
     }
     $results[$itemId] = [pscustomobject]@{ Status = $status; Detail = $detail }
 }
 
 $missing = @($expected | Where-Object { -not $results.ContainsKey($_) } | Sort-Object)
 if ($missing.Count -gt 0) {
-    throw "Self-review is missing result IDs: $($missing -join ', ')"
+    Stop-Workflow 'missing-result-id' "Self-review is missing result IDs: $($missing -join ', ')"
 }
 
 $passCount = 0
@@ -237,26 +274,22 @@ $naCount = 0
 foreach ($itemId in $results.Keys) {
     $result = $results[$itemId]
     if ($result.Status -eq 'PASS') {
-        if (-not $result.Detail.StartsWith('Evidence:') -or [string]::IsNullOrWhiteSpace($result.Detail.Substring(9))) {
-            throw "PASS item $itemId requires concrete Evidence:"
-        }
-        $evidence = $result.Detail.Substring(9).Trim().ToLowerInvariant()
-        if (@('looks good', 'none', 'n/a', 'todo', 'pending') -contains $evidence) {
-            throw "PASS item $itemId has non-concrete Evidence:"
+        if (-not $result.Detail.StartsWith('Evidence:', [System.StringComparison]::Ordinal) -or [string]::IsNullOrWhiteSpace($result.Detail.Substring(9)) -or -not (Has-StructuredEvidence $result.Detail.Substring(9).Trim())) {
+            Stop-Workflow 'missing-evidence' "PASS item $itemId requires at least one valid structured Evidence token."
         }
         $passCount++
     }
     elseif ($result.Status -eq 'N/A') {
-        if (-not $result.Detail.StartsWith('Reason:') -or [string]::IsNullOrWhiteSpace($result.Detail.Substring(7))) {
-            throw "N/A item $itemId requires a concrete Reason:"
+        if (-not $result.Detail.StartsWith('Reason:', [System.StringComparison]::Ordinal) -or [string]::IsNullOrWhiteSpace($result.Detail.Substring(7))) {
+            Stop-Workflow 'missing-na-reason' "N/A item $itemId requires a concrete Reason:"
         }
         $naCount++
     }
     elseif ($result.Status -eq 'PENDING') {
-        throw "Self-review item $itemId is PENDING."
+        Stop-Workflow 'pending-item' "Self-review item $itemId is PENDING."
     }
     elseif ($result.Status -eq 'FAIL') {
-        throw "Self-review item $itemId is FAIL."
+        Stop-Workflow 'failed-item' "Self-review item $itemId is FAIL."
     }
     else {
         throw "Self-review item $itemId has invalid status: $($result.Status)"

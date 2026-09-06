@@ -80,6 +80,15 @@ one atomic transaction, with no pointer positions; pointer-active sessions
 suppress keyboard resizing. Routed handlers and callback closures use weak
 owners, and mutable session/Grid borrows are released before notifications.
 
+The splitter's appearance is also composed from ordinary template visuals. Its
+natural short-axis surface remains six logical pixels: an explicit column
+direction uses a six-pixel vertical bar, an explicit row direction uses a
+six-pixel horizontal bar, and `Auto` keeps a centered six-by-six grip. The
+default fill is a subdued neutral; pointer-over or focus uses a light accent,
+and an active press uses the stronger accent. These visual states are private
+component state and do not change the resize transaction or public API. No
+backend cursor, native GridSplitter wrapper, or VisualStateManager is involved.
+
 ## Visual ownership and reconciliation
 
 `CustomTabView` strongly owns the ordered `Rc<CustomTabViewItem>` list. The

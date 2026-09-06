@@ -146,9 +146,12 @@ with `set_on_resize_started`, `set_on_resize_delta`, and
 `set_on_resize_completed`. Notifications identify direction, target/sibling
 indices, input kind, optional positions, and the effective cumulative delta.
 Grid mutation or rollback, session update/clear, and then notification are the
-required ordering. The default template is a composed six-by-six Rectangle
-surface that relies on normal Grid/alignment stretch and does not draw chrome
-through a `RenderContext` override.
+required ordering. The default template is ordinary composed chrome with a
+six-logical-pixel natural splitter surface. Explicit column and row directions
+stretch a six-pixel vertical or horizontal bar along the active axis; `Auto`
+uses a centered six-by-six grip until a direction is explicitly selected. The
+surface uses neutral, pointer-over/focus, and pressed Fluent-style colors and
+does not draw chrome through a `RenderContext` override.
 
 ## Ownership and input
 

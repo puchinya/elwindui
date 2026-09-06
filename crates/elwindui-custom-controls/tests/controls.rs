@@ -10,8 +10,8 @@ use elwindui_custom_controls::core::layout::{
     GridLength, GridTrackConstraint, HorizontalAlignment, VerticalAlignment,
 };
 use elwindui_custom_controls::core::ui::{
-    ContentControlExt, Control, ControlExt, Grid, GridExt, LayoutExt, ListExt, UIElementExt,
-    dispatch_routed, hit_test, layout_root, unmount_subtree,
+    ContentControlExt, Control, ControlExt, Grid, GridExt, LayoutExt, ListExt, Rectangle,
+    UIElementExt, dispatch_routed, hit_test, layout_root, unmount_subtree,
 };
 use elwindui_custom_controls::{
     CloseButtonPresentation, CustomGridSplitter, CustomGridSplitterExt, CustomTabView,
@@ -2092,6 +2092,70 @@ fn custom_grid_splitter_default_template_is_six_by_six() {
             height: 6.0
         })
     );
+}
+
+#[test]
+fn custom_grid_splitter_visual_follows_explicit_axis() {
+    let splitter = CustomGridSplitter::new_splitter();
+    let root: Rc<dyn UIElementExt> = splitter.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+
+    let template_root = splitter.__template_root().expect("splitter template root");
+    let rectangle = template_root
+        .as_any()
+        .downcast_ref::<Rectangle>()
+        .expect("splitter template rectangle");
+    assert_eq!(rectangle.width(), Some(6.0));
+    assert_eq!(rectangle.height(), Some(6.0));
+    assert_eq!(
+        rectangle.horizontal_alignment(),
+        HorizontalAlignment::Center
+    );
+    assert_eq!(rectangle.vertical_alignment(), VerticalAlignment::Center);
+
+    splitter.set_resize_direction(GridResizeDirection::Columns);
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    assert_eq!(rectangle.width(), Some(6.0));
+    assert_eq!(rectangle.height(), None);
+    assert_eq!(rectangle.min_height(), Some(6.0));
+    assert_eq!(
+        rectangle.horizontal_alignment(),
+        HorizontalAlignment::Stretch
+    );
+    assert_eq!(rectangle.vertical_alignment(), VerticalAlignment::Stretch);
+    assert_eq!(rectangle.arranged_width(), Some(6.0));
+    assert_eq!(rectangle.arranged_height(), Some(120.0));
+
+    splitter.set_resize_direction(GridResizeDirection::Rows);
+    layout_root(
+        &root,
+        Size {
+            width: 240.0,
+            height: 120.0,
+        },
+    );
+    assert_eq!(rectangle.width(), None);
+    assert_eq!(rectangle.height(), Some(6.0));
+    assert_eq!(rectangle.min_width(), Some(6.0));
+    assert_eq!(
+        rectangle.horizontal_alignment(),
+        HorizontalAlignment::Stretch
+    );
+    assert_eq!(rectangle.vertical_alignment(), VerticalAlignment::Stretch);
+    assert_eq!(rectangle.arranged_width(), Some(240.0));
+    assert_eq!(rectangle.arranged_height(), Some(6.0));
 }
 
 #[test]

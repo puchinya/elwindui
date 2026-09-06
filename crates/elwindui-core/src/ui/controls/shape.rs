@@ -42,6 +42,17 @@ impl Shape {
         *self.fill.borrow_mut() = fill;
         self.invalidate();
     }
+    /// Updates a composed visual state's painted fill without invalidating layout.
+    ///
+    /// The owning control is already in a host-driven presentation pass (for example, a
+    /// pointer event followed by the next retained render), so do not turn this state transition
+    /// into an extra interactive layout pass.
+    fn set_fill_render_only(&self, fill: Option<Brush>) {
+        if *self.fill.borrow() == fill {
+            return;
+        }
+        *self.fill.borrow_mut() = fill;
+    }
     /// Removes the explicit fill.
     fn clear_fill(&self) {
         self.set_fill(None);

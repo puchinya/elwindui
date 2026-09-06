@@ -1,9 +1,10 @@
 use super::core::base::Point;
+use super::core::graphics::{Brush, Color};
 use super::core::input::{Key, KeyEventArgs, MouseButton, PointerEventArgs};
 use super::core::layout::{
     GridLength, GridTrackConstraint, HorizontalAlignment, VerticalAlignment,
 };
-use super::core::ui::{Grid, GridExt, UIElementExt};
+use super::core::ui::{ControlExt, Grid, GridExt, Rectangle, ShapeExt, UIElementExt};
 use super::{
     GridResizeBehavior, GridResizeDirection, GridSplitterInputKind,
     GridSplitterResizeCompletedEventArgs, GridSplitterResizeDeltaEventArgs,
@@ -192,10 +193,17 @@ pub struct CustomGridSplitter {
     resize_completed_callback: Option<Rc<dyn Fn(GridSplitterResizeCompletedEventArgs)>>,
     #[state(default = None)]
     resize_session: Option<ResizeSession>,
+    #[state(default = false)]
+    pointer_over: bool,
+    #[state(default = false)]
+    pressed: bool,
+    #[state(default = false)]
+    focused: bool,
     template: template_view!(|this: Self| {
         on_mount {
             this.set_tab_stop(true);
             this.bind_input_handlers();
+            this.sync_visual(true);
             let weak_self = weak_self_from_visual_owner(this.as_ref());
             this.add_unmount_hook(Box::new(move || {
                 if let Some(splitter) = weak_self.upgrade() {
@@ -203,10 +211,14 @@ pub struct CustomGridSplitter {
                 }
             }));
         }
+        on_update(resize_direction) {
+            this.sync_visual(true);
+        }
         Rectangle {
             width: 6.0
             height: 6.0
-            fill: "#d0d0d0"
+            fill: "#7a7f87"
+            corner_radius: 2.0
         }
     }),
 }
@@ -216,6 +228,11 @@ impl CustomGridSplitter {
     #[overrides]
     fn hit_test_content(&self) -> bool {
         true
+    }
+
+    #[overrides]
+    fn on_apply_template(&self) {
+        self.sync_visual(true);
     }
 }
 
@@ -237,6 +254,62 @@ impl CustomGridSplitter {
         callback: Box<dyn Fn(GridSplitterResizeCompletedEventArgs)>,
     ) {
         self.set_resize_completed_callback(Some(Rc::from(callback)));
+    }
+
+    fn visual_fill(&self) -> Brush {
+        let color = if self.pressed() {
+            Color::rgb(96, 205, 255)
+        } else if self.pointer_over() || self.focused() {
+            Color::rgb(141, 200, 255)
+        } else {
+            Color::rgb(122, 127, 135)
+        };
+        Brush::Solid(color)
+    }
+
+    fn sync_visual(&self, invalidate_layout: bool) {
+        let Some(root) = self.visual_children().into_iter().next() else {
+            return;
+        };
+        let Some(rectangle) = root.as_any().downcast_ref::<Rectangle>() else {
+            return;
+        };
+        let element = rectangle.as_ui_element();
+        if invalidate_layout {
+            match self.resize_direction() {
+                GridResizeDirection::Columns => {
+                    element.width.set(Some(6.0));
+                    element.height.set(None);
+                    element.min_width.set(None);
+                    element.min_height.set(Some(6.0));
+                    element
+                        .horizontal_alignment
+                        .set(HorizontalAlignment::Stretch);
+                    element.vertical_alignment.set(VerticalAlignment::Stretch);
+                }
+                GridResizeDirection::Rows => {
+                    element.width.set(None);
+                    element.height.set(Some(6.0));
+                    element.min_width.set(Some(6.0));
+                    element.min_height.set(None);
+                    element
+                        .horizontal_alignment
+                        .set(HorizontalAlignment::Stretch);
+                    element.vertical_alignment.set(VerticalAlignment::Stretch);
+                }
+                GridResizeDirection::Auto => {
+                    element.width.set(Some(6.0));
+                    element.height.set(Some(6.0));
+                    element.min_width.set(None);
+                    element.min_height.set(None);
+                    element
+                        .horizontal_alignment
+                        .set(HorizontalAlignment::Center);
+                    element.vertical_alignment.set(VerticalAlignment::Center);
+                }
+            }
+        }
+        rectangle.set_fill_render_only(Some(self.visual_fill()));
     }
 
     fn target_control(&self) -> Option<Rc<dyn UIElementExt>> {
@@ -445,6 +518,8 @@ impl CustomGridSplitter {
         ) else {
             return;
         };
+        self.set_pressed(true);
+        self.sync_visual(false);
         self.set_resize_session(Some(session.clone()));
         self.emit_started(&session);
     }
@@ -509,6 +584,8 @@ impl CustomGridSplitter {
         }
         session.position = Some(event.position);
         session.screen_position = event.screen_position;
+        self.set_pressed(false);
+        self.sync_visual(false);
         self.set_resize_session(None);
         self.emit_completed(&session, false);
     }
@@ -520,6 +597,8 @@ impl CustomGridSplitter {
         if session.input_kind != GridSplitterInputKind::Pointer {
             return;
         }
+        self.set_pressed(false);
+        self.sync_visual(false);
         self.set_resize_session(None);
         self.apply_tracks(&session, session.original_tracks.clone());
         self.emit_completed(&session, true);
@@ -605,6 +684,50 @@ impl CustomGridSplitter {
             Box::new(move |_, _| {
                 if let Some(splitter) = weak_self.upgrade() {
                     splitter.pointer_canceled();
+                }
+            }),
+        );
+
+        let weak_self = weak_self_from_visual_owner(self);
+        self.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_entered",
+            Box::new(move |_, _| {
+                if let Some(splitter) = weak_self.upgrade() {
+                    splitter.set_pointer_over(true);
+                    splitter.sync_visual(false);
+                }
+            }),
+        );
+
+        let weak_self = weak_self_from_visual_owner(self);
+        self.register_routed_handler::<PointerEventArgs>(
+            "on_pointer_exited",
+            Box::new(move |_, _| {
+                if let Some(splitter) = weak_self.upgrade() {
+                    splitter.set_pointer_over(false);
+                    splitter.sync_visual(false);
+                }
+            }),
+        );
+
+        let weak_self = weak_self_from_visual_owner(self);
+        self.register_routed_handler::<()>(
+            "on_got_focus",
+            Box::new(move |_, _| {
+                if let Some(splitter) = weak_self.upgrade() {
+                    splitter.set_focused(true);
+                    splitter.sync_visual(false);
+                }
+            }),
+        );
+
+        let weak_self = weak_self_from_visual_owner(self);
+        self.register_routed_handler::<()>(
+            "on_lost_focus",
+            Box::new(move |_, _| {
+                if let Some(splitter) = weak_self.upgrade() {
+                    splitter.set_focused(false);
+                    splitter.sync_visual(false);
                 }
             }),
         );

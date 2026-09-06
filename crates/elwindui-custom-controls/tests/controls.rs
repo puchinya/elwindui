@@ -1530,6 +1530,20 @@ fn custom_grid_splitter_rejects_out_of_range_pair_without_transaction() {
 
 #[test]
 fn custom_grid_splitter_release_applies_and_notifies_final_delta() {
+    #[derive(Debug, PartialEq)]
+    enum ResizeObservation {
+        Delta {
+            delta: f32,
+            cumulative_delta: f32,
+            columns: Vec<GridLength>,
+        },
+        Completed {
+            cumulative_delta: f32,
+            canceled: bool,
+            columns: Vec<GridLength>,
+        },
+    }
+
     let grid = Grid::new();
     grid.set_rows(vec![GridLength::Star(1.0)]);
     grid.set_columns(vec![
@@ -1552,32 +1566,28 @@ fn custom_grid_splitter_release_applies_and_notifies_final_delta() {
         },
     );
 
-    let deltas = Rc::new(RefCell::new(Vec::<(f32, f32)>::new()));
-    let completed = Rc::new(RefCell::new(Vec::<f32>::new()));
-    let order = Rc::new(RefCell::new(Vec::<String>::new()));
-    let deltas_for_callback = deltas.clone();
-    let order_for_delta = order.clone();
+    let observations = Rc::new(RefCell::new(Vec::<ResizeObservation>::new()));
+    let observations_for_delta = observations.clone();
     let grid_for_delta = grid.clone();
     splitter.set_on_resize_delta(Box::new(move |payload| {
-        deltas_for_callback
+        observations_for_delta
             .borrow_mut()
-            .push((payload.delta, payload.cumulative_delta));
-        order_for_delta.borrow_mut().push(format!(
-            "delta:{:?}",
-            grid_for_delta.columns.borrow().as_slice()
-        ));
+            .push(ResizeObservation::Delta {
+                delta: payload.delta,
+                cumulative_delta: payload.cumulative_delta,
+                columns: grid_for_delta.columns.borrow().clone(),
+            });
     }));
-    let completed_for_callback = completed.clone();
-    let order_for_completed = order.clone();
+    let observations_for_completed = observations.clone();
     let grid_for_completed = grid.clone();
     splitter.set_on_resize_completed(Box::new(move |payload| {
-        completed_for_callback
+        observations_for_completed
             .borrow_mut()
-            .push(payload.cumulative_delta);
-        order_for_completed.borrow_mut().push(format!(
-            "completed:{:?}",
-            grid_for_completed.columns.borrow().as_slice()
-        ));
+            .push(ResizeObservation::Completed {
+                cumulative_delta: payload.cumulative_delta,
+                canceled: payload.canceled,
+                columns: grid_for_completed.columns.borrow().clone(),
+            });
     }));
 
     dispatch_routed(
@@ -1615,12 +1625,38 @@ fn custom_grid_splitter_release_applies_and_notifies_final_delta() {
             GridLength::Fixed(80.0),
         ]
     );
-    assert_eq!(&*deltas.borrow(), &[(8.0, 8.0), (12.0, 20.0)]);
-    assert_eq!(&*completed.borrow(), &[20.0]);
-    assert_eq!(order.borrow().len(), 3);
-    assert!(order.borrow()[0].starts_with("delta:"));
-    assert!(order.borrow()[1].starts_with("delta:"));
-    assert!(order.borrow()[2].starts_with("completed:"));
+    assert_eq!(
+        &*observations.borrow(),
+        &[
+            ResizeObservation::Delta {
+                delta: 8.0,
+                cumulative_delta: 8.0,
+                columns: vec![
+                    GridLength::Fixed(108.0),
+                    GridLength::Fixed(6.0),
+                    GridLength::Fixed(92.0),
+                ],
+            },
+            ResizeObservation::Delta {
+                delta: 12.0,
+                cumulative_delta: 20.0,
+                columns: vec![
+                    GridLength::Fixed(120.0),
+                    GridLength::Fixed(6.0),
+                    GridLength::Fixed(80.0),
+                ],
+            },
+            ResizeObservation::Completed {
+                cumulative_delta: 20.0,
+                canceled: false,
+                columns: vec![
+                    GridLength::Fixed(120.0),
+                    GridLength::Fixed(6.0),
+                    GridLength::Fixed(80.0),
+                ],
+            },
+        ]
+    );
 
     layout_root(
         &root,
@@ -1647,8 +1683,56 @@ fn custom_grid_splitter_release_applies_and_notifies_final_delta() {
         &pointer(Point { x: 131.0, y: 50.0 }, Some(MouseButton::Left)),
         &RoutedEventArgs::default(),
     );
-    assert_eq!(deltas.borrow().len(), 3);
-    assert_eq!(completed.borrow().len(), 2);
+    assert_eq!(
+        &*observations.borrow(),
+        &[
+            ResizeObservation::Delta {
+                delta: 8.0,
+                cumulative_delta: 8.0,
+                columns: vec![
+                    GridLength::Fixed(108.0),
+                    GridLength::Fixed(6.0),
+                    GridLength::Fixed(92.0),
+                ],
+            },
+            ResizeObservation::Delta {
+                delta: 12.0,
+                cumulative_delta: 20.0,
+                columns: vec![
+                    GridLength::Fixed(120.0),
+                    GridLength::Fixed(6.0),
+                    GridLength::Fixed(80.0),
+                ],
+            },
+            ResizeObservation::Completed {
+                cumulative_delta: 20.0,
+                canceled: false,
+                columns: vec![
+                    GridLength::Fixed(120.0),
+                    GridLength::Fixed(6.0),
+                    GridLength::Fixed(80.0),
+                ],
+            },
+            ResizeObservation::Delta {
+                delta: 8.0,
+                cumulative_delta: 8.0,
+                columns: vec![
+                    GridLength::Fixed(128.0),
+                    GridLength::Fixed(6.0),
+                    GridLength::Fixed(72.0),
+                ],
+            },
+            ResizeObservation::Completed {
+                cumulative_delta: 8.0,
+                canceled: false,
+                columns: vec![
+                    GridLength::Fixed(128.0),
+                    GridLength::Fixed(6.0),
+                    GridLength::Fixed(72.0),
+                ],
+            },
+        ]
+    );
 }
 
 #[test]

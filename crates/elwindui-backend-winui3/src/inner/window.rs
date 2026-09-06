@@ -5,7 +5,8 @@ use crate::bindings;
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 use crate::bindings::Microsoft::UI::Xaml::{Window as XamlWindow, WindowSizeChangedEventArgs};
 use crate::ffi::{
-    UiCallbackRegistryOwner, invoke_ui_bool_event_callback, invoke_ui_size_event_callback,
+    UiCallbackRegistryOwner, invoke_ui_bool_event_callback, invoke_ui_bounds_event_callback,
+    invoke_ui_size_event_callback,
 };
 use crate::host::TreeHostPanel;
 use elwindui_core::base::Rect;
@@ -256,6 +257,13 @@ impl InnerWindow {
     /// Registers the AppWindow geometry notification once the native AppWindow exists. The
     /// callback reads the effective native position and size, so programmatic moves and user
     /// drags share the same model-owned bounds publication path.
+    ///
+    /// Issue #231: `AppWindow.Changed`'s delegate (`TypedEventHandler<AppWindow,
+    /// AppWindowChangedEventArgs>`) requires `Send`, which an `Rc`-holding closure is not — same
+    /// reason every other native handler in this crate goes through `crate::ffi`'s numeric-key
+    /// indirection (see `UiCallbackRegistryOwner::register_bounds`) instead of capturing `Rc`
+    /// state directly, as the previous version of this method did (it could not actually compile
+    /// against this crate's pinned `windows`/`windows-core` version).
     fn try_register_bounds_changed_handler(&self) {
         if self.bounds_changed_registered.get() {
             return;
@@ -264,12 +272,35 @@ impl InnerWindow {
             return;
         };
         let bounds_changed_handler = Rc::clone(&self.bounds_changed_handler);
-        let handler =
-            windows::Foundation::TypedEventHandler::new(move |sender, args: &Option<_>| {
-                let args: &Option<
-                    crate::bindings::Microsoft::UI::Windowing::AppWindowChangedEventArgs,
-                > = args;
-                let Some(args) = args else {
+        let callback_id = self.callback_owner.register_bounds(Rc::new(
+            move |x: f32, y: f32, width: f32, height: f32| {
+                let bounds = Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                };
+                if !bounds.x.is_finite()
+                    || !bounds.y.is_finite()
+                    || !bounds.width.is_finite()
+                    || !bounds.height.is_finite()
+                    || bounds.width <= 0.0
+                    || bounds.height <= 0.0
+                {
+                    return;
+                }
+                if let Some(callback) = bounds_changed_handler.borrow().clone() {
+                    callback(bounds);
+                }
+            },
+        ));
+        let handler = windows::Foundation::TypedEventHandler::new(
+            move |sender: windows::core::Ref<'_, bindings::Microsoft::UI::Windowing::AppWindow>,
+                  args: windows::core::Ref<
+                '_,
+                bindings::Microsoft::UI::Windowing::AppWindowChangedEventArgs,
+            >| {
+                let Some(args) = args.as_ref() else {
                     return Ok(());
                 };
                 let position_changed = args.DidPositionChange().unwrap_or(false);
@@ -286,26 +317,16 @@ impl InnerWindow {
                 let Some(size) = observed_window.Size().ok() else {
                     return Ok(());
                 };
-                let bounds = Rect {
-                    x: position.X as f32,
-                    y: position.Y as f32,
-                    width: size.Width as f32,
-                    height: size.Height as f32,
-                };
-                if !bounds.x.is_finite()
-                    || !bounds.y.is_finite()
-                    || !bounds.width.is_finite()
-                    || !bounds.height.is_finite()
-                    || bounds.width <= 0.0
-                    || bounds.height <= 0.0
-                {
-                    return Ok(());
-                }
-                if let Some(callback) = bounds_changed_handler.borrow().clone() {
-                    callback(bounds);
-                }
+                invoke_ui_bounds_event_callback(
+                    callback_id,
+                    position.X as f32,
+                    position.Y as f32,
+                    size.Width as f32,
+                    size.Height as f32,
+                );
                 Ok(())
-            });
+            },
+        );
         if app_window.Changed(&handler).is_ok() {
             self.bounds_changed_registered.set(true);
         }

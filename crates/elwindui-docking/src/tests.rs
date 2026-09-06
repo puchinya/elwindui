@@ -4539,13 +4539,19 @@ fn actual_splitter_pointer_path_lets_grid_own_preview_and_commits_once_or_restor
     assert_eq!(docking.layout(), original);
     assert_ne!(*grid.columns.borrow(), original_tracks);
     assert_eq!(relayout.flushes.get(), 30);
-    assert_eq!(relayout.requests.borrow().len(), 30);
+    let measure_requests = relayout
+        .requests
+        .borrow()
+        .iter()
+        .filter(|kind| **kind == InvalidationKind::Measure)
+        .count();
+    assert_eq!(measure_requests, 30);
     assert!(
         relayout
             .requests
             .borrow()
             .iter()
-            .all(|kind| *kind == InvalidationKind::Measure)
+            .all(|kind| matches!(kind, InvalidationKind::Measure | InvalidationKind::Render))
     );
     assert_eq!(
         realization.borrow().full_reconcile_count_for_test(),

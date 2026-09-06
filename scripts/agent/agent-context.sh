@@ -50,18 +50,19 @@ case "$PHASE" in
   *) WORKFLOW="" ;;
 esac
 
-PR_DETAILS="$(python3 - "$ISSUE_JSON" "$REPOSITORY" <<'PY'
+PR_DETAILS="$(python3 - "$ISSUE_JSON" "$REPOSITORY" "$ISSUE_NUMBER" <<'PY'
 import json
 import subprocess
 import sys
 
 issue=json.loads(sys.argv[1])
 repository=sys.argv[2]
+issue_number=int(sys.argv[3])
 details=[]
 for reference in issue.get("closedByPullRequestsReferences", []):
     number=reference.get("number")
     if not number:
-        continue
+        raise SystemExit(f"error: Issue #{issue_number} has a linked PR reference without a number")
     try:
         result=subprocess.run(
             [
@@ -72,27 +73,68 @@ for reference in issue.get("closedByPullRequestsReferences", []):
                 "--repo",
                 repository,
                 "--json",
-                "number,url,state,updatedAt",
+                "number,url,state,updatedAt,mergedAt",
             ],
             check=True,
             capture_output=True,
             text=True,
         )
-    except subprocess.CalledProcessError:
-        continue
-    details.append(json.loads(result.stdout))
+    except (subprocess.CalledProcessError, OSError):
+        raise SystemExit(f"error: Issue #{issue_number} linked PR #{number} lookup failed")
+    try:
+        candidate=json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise SystemExit(f"error: Issue #{issue_number} linked PR #{number} returned invalid metadata")
+    if (
+        not isinstance(candidate, dict)
+        or candidate.get("number") != number
+        or not isinstance(candidate.get("url"), str)
+        or not candidate.get("url")
+        or not isinstance(candidate.get("state"), str)
+        or not candidate.get("state")
+    ):
+        raise SystemExit(f"error: Issue #{issue_number} linked PR #{number} returned incomplete metadata")
+    details.append(candidate)
 
 print(json.dumps(details))
 PY
 )"
-PR_FIELDS="$(python3 - "$PR_DETAILS" <<'PY'
+PR_FIELDS="$(python3 - "$PR_DETAILS" "$ISSUE_NUMBER" <<'PY'
 import json, sys
+from datetime import datetime
 
 prs=json.loads(sys.argv[1])
-open_prs=[pr for pr in prs if pr.get("state") == "OPEN"]
-merged_prs=[pr for pr in prs if pr.get("state") == "MERGED"]
+issue_number=int(sys.argv[2])
+open_prs=[]
+merged_prs=[]
+
+def parse_timestamp(pr, field):
+    value=pr.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit(
+            f"error: Issue #{issue_number} linked PR #{pr.get('number', '?')} has invalid {field}"
+        )
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise SystemExit(
+            f"error: Issue #{issue_number} linked PR #{pr.get('number', '?')} has invalid {field}"
+        )
+
+for pr in prs:
+    number=pr.get("number")
+    if not isinstance(number, int) or number <= 0 or not isinstance(pr.get("url"), str) or not pr.get("url"):
+        raise SystemExit(f"error: Issue #{issue_number} linked PR metadata is incomplete")
+    state=pr.get("state")
+    if state == "OPEN":
+        open_prs.append((parse_timestamp(pr, "updatedAt"), pr))
+    elif state == "MERGED":
+        merged_prs.append((parse_timestamp(pr, "mergedAt"), pr))
+    elif state != "CLOSED":
+        raise SystemExit(f"error: Issue #{issue_number} linked PR #{number} has invalid state")
+
 candidates=open_prs or merged_prs
-selected=max(candidates, key=lambda pr: pr.get("updatedAt", "")) if candidates else {}
+selected=max(candidates, key=lambda pair: pair[0])[1] if candidates else {}
 print("{}\t{}".format(selected.get("number", ""), selected.get("url", "")))
 PY
 )"

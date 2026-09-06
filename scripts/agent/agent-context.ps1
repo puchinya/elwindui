@@ -14,6 +14,30 @@ function Require-Command([string] $Name) {
     }
 }
 
+function Get-RequiredTimestamp {
+    param(
+        [Parameter()][object] $Value,
+        [Parameter(Mandatory = $true)][string] $Field,
+        [Parameter(Mandatory = $true)][int] $IssueNumber,
+        [Parameter(Mandatory = $true)][int] $PrNumber
+    )
+
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        throw "error: Issue #$IssueNumber linked PR #$PrNumber has invalid $Field"
+    }
+
+    try {
+        return [DateTimeOffset]::Parse(
+            [string]$Value,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        )
+    }
+    catch {
+        throw "error: Issue #$IssueNumber linked PR #$PrNumber has invalid $Field"
+    }
+}
+
 Require-Command git
 Require-Command gh
 
@@ -50,22 +74,87 @@ $workflow = switch ($phase) {
 
 $prCandidates = @()
 foreach ($reference in @($issue.closedByPullRequestsReferences)) {
-    $prOutput = (& gh pr view $reference.number --repo $repository --json number,url,state,updatedAt 2>$null | Out-String).Trim()
-    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($prOutput)) {
-        $prCandidates += ($prOutput | ConvertFrom-Json)
+    $referenceNumberProperty = $reference.PSObject.Properties['number']
+    if ($null -eq $referenceNumberProperty -or [int]$referenceNumberProperty.Value -le 0) {
+        throw "error: Issue #$IssueNumber has a linked PR reference without a number"
+    }
+    $referenceNumber = [int]$referenceNumberProperty.Value
+    $prOutputLines = @(& gh pr view $referenceNumber --repo $repository --json number,url,state,updatedAt,mergedAt 2>$null)
+    $prExitCode = $LASTEXITCODE
+    $prOutput = ($prOutputLines | Out-String).Trim()
+    if ($prExitCode -ne 0) {
+        throw "error: Issue #$IssueNumber linked PR #$referenceNumber lookup failed"
+    }
+    if ([string]::IsNullOrWhiteSpace($prOutput)) {
+        throw "error: Issue #$IssueNumber linked PR #$referenceNumber returned empty metadata"
+    }
+    try {
+        $candidate = $prOutput | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "error: Issue #$IssueNumber linked PR #$referenceNumber returned invalid metadata"
+    }
+
+    if ($null -eq $candidate -or $candidate -is [System.Array]) {
+        throw "error: Issue #$IssueNumber linked PR #$referenceNumber returned invalid metadata"
+    }
+    $numberProperty = $candidate.PSObject.Properties['number']
+    $urlProperty = $candidate.PSObject.Properties['url']
+    $stateProperty = $candidate.PSObject.Properties['state']
+    $candidateNumber = 0
+    if (
+        $null -eq $numberProperty -or
+        $null -eq $urlProperty -or
+        $null -eq $stateProperty -or
+        -not [int]::TryParse([string]$numberProperty.Value, [ref]$candidateNumber) -or
+        $candidateNumber -le 0 -or
+        [string]::IsNullOrWhiteSpace([string]$urlProperty.Value) -or
+        [string]::IsNullOrWhiteSpace([string]$stateProperty.Value)
+    ) {
+        throw "error: Issue #$IssueNumber linked PR #$referenceNumber returned incomplete metadata"
+    }
+    if ($candidateNumber -ne $referenceNumber) {
+        throw "error: Issue #$IssueNumber linked PR #$referenceNumber returned mismatched metadata"
+    }
+    $state = [string]$stateProperty.Value
+    if ($state -notin @('OPEN', 'MERGED', 'CLOSED')) {
+        throw "error: Issue #$IssueNumber linked PR #$referenceNumber has invalid state"
+    }
+    $prCandidates += $candidate
+}
+
+$openPrs = @()
+$mergedPrs = @()
+foreach ($candidate in $prCandidates) {
+    $number = [int]$candidate.PSObject.Properties['number'].Value
+    $state = [string]$candidate.PSObject.Properties['state'].Value
+    if ($state -eq 'OPEN') {
+        $updatedProperty = $candidate.PSObject.Properties['updatedAt']
+        $updatedAt = if ($null -ne $updatedProperty) { $updatedProperty.Value } else { $null }
+        $openPrs += [pscustomobject]@{
+            Candidate = $candidate
+            SortTime = Get-RequiredTimestamp $updatedAt 'updatedAt' $IssueNumber $number
+        }
+    }
+    elseif ($state -eq 'MERGED') {
+        $mergedProperty = $candidate.PSObject.Properties['mergedAt']
+        $mergedAt = if ($null -ne $mergedProperty) { $mergedProperty.Value } else { $null }
+        $mergedPrs += [pscustomobject]@{
+            Candidate = $candidate
+            SortTime = Get-RequiredTimestamp $mergedAt 'mergedAt' $IssueNumber $number
+        }
     }
 }
-$openPrs = @($prCandidates | Where-Object { $_.state -eq 'OPEN' })
-$mergedPrs = @($prCandidates | Where-Object { $_.state -eq 'MERGED' })
-$selectedPr = $null
+
+$selectedEntry = $null
 if ($openPrs.Count -gt 0) {
-    $selectedPr = $openPrs | Sort-Object -Property updatedAt -Descending | Select-Object -First 1
+    $selectedEntry = $openPrs | Sort-Object -Property SortTime -Descending | Select-Object -First 1
 }
 elseif ($mergedPrs.Count -gt 0) {
-    $selectedPr = $mergedPrs | Sort-Object -Property updatedAt -Descending | Select-Object -First 1
+    $selectedEntry = $mergedPrs | Sort-Object -Property SortTime -Descending | Select-Object -First 1
 }
-$prNumber = if ($null -ne $selectedPr) { [string]$selectedPr.number } else { '' }
-$prUrl = if ($null -ne $selectedPr) { [string]$selectedPr.url } else { '' }
+$prNumber = if ($null -ne $selectedEntry) { [string]$selectedEntry.Candidate.number } else { '' }
+$prUrl = if ($null -ne $selectedEntry) { [string]$selectedEntry.Candidate.url } else { '' }
 
 $base = ".agent-state/issues/$IssueNumber"
 $contract = Join-Path $base 'implementation-contract.md'

@@ -19,4 +19,4 @@ Snapshot: 2026-09-06. The public contract is [`../specs/custom_controls_spec.md`
 
 ## Verification state
 
-Focused custom-control, external declarative-content, formatter, workspace build/check/test, and warning-regression verification passes on the current implementation. Final-head AppKit runtime interaction for CustomGridSplitter and Docking splitter resizing is currently blocked before GUI action because the target windows did not appear while `loginwindow` remained frontmost; Windows and GTK4 runtime interaction remain unverified.
+Focused custom-control, external declarative-content, formatter, workspace build/check/test, and warning-regression verification passes on the current implementation. Final-head AppKit runtime interaction for CustomGridSplitter and Docking splitter resizing is verified on the current implementation. WinUI3 and GTK4 runtime interaction remain unverified.

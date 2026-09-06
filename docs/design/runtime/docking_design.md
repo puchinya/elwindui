@@ -44,17 +44,29 @@ splitter tracks. Horizontal splits use columns and one Star row; vertical splits
 Star column. Every splitter records a private `SplitAddress` (main/floating root plus child path)
 and adjacent boundary index.
 
-On splitter start, the retained Grid extent and committed model are captured. Delta updates derive
-a transient track vector directly from the captured adjacent weights and update only the retained
-Grid's rows or columns with arrange invalidation. Completion either restores the captured tracks
-or performs one adjacent-weight model transformation, one model commit, and one notification;
-the completed split-weight value update does not structurally reconcile the Dock runtime.
+Each realized splitter is a `CustomGridSplitter` with explicit
+`Columns`/`Rows` direction and `PreviousAndNext` behavior. Realization copies
+Docking pane min/max rules into the Grid's indexed track constraints; fixed
+splitter tracks remain unconstrained. The splitter captures the authoritative
+Grid definitions, resolved sizes, and constraints and owns all live preview,
+baseline-derived cumulative resizing, relayout, and cancellation restoration.
+
+Docking's `SplitterSession` retains only the committed model, split address,
+boundary, and the weak/runtime identity needed to interpret one effective
+completed cumulative delta. Start and delta callbacks do not mutate Grid
+tracks. A canceled completion discards this model-only session. A successful
+completion transforms adjacent normalized weights once and routes the result
+through the existing reentrancy-safe value path; it never applies the delta to
+Grid a second time. If validation rejects the model update, existing
+authoritative-state re-realization semantics remain in force.
 
 ## Callback and source flow
 
 Runtime group callbacks are installed once and capture only a weak `DockingControl`. They dispatch
-selection, close, and all three tab-drag events. Splitter callbacks dispatch start/delta/completion.
-The custom controls remain the owners of pointer threshold and capture state.
+selection, close, and all three tab-drag events. `CustomGridSplitter` callbacks dispatch
+start/delta/completion after Grid mutation or rollback. The custom controls remain the owners of
+pointer threshold, capture, Grid resize, and cancellation state; Docking is an observer/persistence
+consumer.
 
 The generated `layout` update callback routes to one internal source-application method. It compares
 against `last_applied_model`, cancels transient state, attaches authored metadata, normalizes, and

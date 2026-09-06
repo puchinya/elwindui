@@ -5,12 +5,10 @@
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
-use std::{cell::Cell, rc::Rc};
-
 use elwindui::core::graphics::FontWeight;
-use elwindui::core::layout::{GridLength, Orientation};
+use elwindui::core::layout::GridLength;
 use elwindui::core::ui::WindowExt;
-use elwindui_custom_controls::CloseButtonPresentation;
+use elwindui_custom_controls::{CloseButtonPresentation, GridResizeBehavior, GridResizeDirection};
 
 #[elwindui::component(inherits VerticalLayout)]
 struct OverviewPage {
@@ -100,7 +98,7 @@ struct ActivityPage {
         spacing: 10.0
         background: "#303740"
         TextBlock {
-            text: "CustomSplitter"
+            text: "CustomGridSplitter"
             font_size: 20.0
             font_weight: FontWeight::BOLD
             foreground: "#eef2f7"
@@ -140,22 +138,9 @@ struct CustomControlsDemoSurface {
             tabs.set_attached("Grid", "column", 0i32);
 
             let splitter = this.splitter();
-            splitter.set_orientation(Orientation::Horizontal);
+            splitter.set_resize_direction(GridResizeDirection::Columns);
+            splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
             splitter.set_attached("Grid", "column", 1i32);
-
-            let content_grid = this.content_grid();
-            let left_column_width = Rc::new(Cell::new(460.0_f32));
-            let left_column_width_for_drag = left_column_width.clone();
-            let content_grid_for_drag = content_grid.clone();
-            splitter.set_on_drag_delta(Box::new(move |event| {
-                let next_width = (left_column_width_for_drag.get() + event.delta).clamp(180.0, 700.0);
-                left_column_width_for_drag.set(next_width);
-                content_grid_for_drag.set_columns(vec![
-                    GridLength::Fixed(next_width),
-                    GridLength::Fixed(6.0),
-                    GridLength::Star(1.0),
-                ]);
-            }));
 
             let status_for_selection = this.status();
             tabs.set_on_selected_index_changed(move |index| {
@@ -186,9 +171,9 @@ struct CustomControlsDemoSurface {
             }));
 
             let status_for_splitter = this.status();
-            splitter.set_on_drag_completed(Box::new(move |event| {
+            splitter.set_on_resize_completed(Box::new(move |event| {
                 status_for_splitter.set_text(&format!(
-                    "Splitter drag completed: cumulative delta={:.1}px canceled={} · panes resized",
+                    "Grid resize completed: cumulative delta={:.1}px canceled={} · panes resized",
                     event.cumulative_delta, event.canceled
                 ));
             }));
@@ -219,7 +204,7 @@ struct CustomControlsDemoSurface {
         };
 
         #[id("splitter")]
-        let splitter = elwindui_custom_controls::CustomSplitter {};
+        let splitter = elwindui_custom_controls::CustomGridSplitter {};
 
         #[id("content_grid")]
         let content_grid = Grid {
@@ -279,7 +264,7 @@ struct CustomControlsDemoSurface {
                 foreground: "#eef2f7"
             }
             TextBlock {
-                text: "Template-backed CustomTabView, ContentControl page ownership, and CustomSplitter input."
+                text: "Template-backed CustomTabView, ContentControl page ownership, and CustomGridSplitter input."
                 font_size: 14.0
                 foreground: "#abb7c4"
             }

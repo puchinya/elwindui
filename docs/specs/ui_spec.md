@@ -355,16 +355,17 @@ tab drag は左ボタンの移動が 4 logical px に達してから開始し、
 完了 payload は root-relative position と optional `screen_position` を保持する。
 Core cancellation は active drag を `canceled = true` で一度だけ完了させる。
 
-### `elwindui_custom_controls::CustomSplitter`
+### `elwindui_custom_controls::CustomGridSplitter`
 
-`Control` を継承する templated splitter。`template: template_view! { ... }` の
-orientation-dependent `Rectangle` が hit-test surface と six-pixel natural
-thickness を提供する。`orientation` は既定値 `Horizontal` で、水平時は
-X 軸/幅 6、垂直時は Y 軸/高さ 6 を使う。
-drag delta は incremental/cumulative logical pixels を持ち、press 中に
-orientation を変更しても axis は変わらない。release と cancellation は
-`SplitterDragCompletedEventArgs` を一度だけ発行し、後者は `canceled = true`
-となる。
+`Control` を継承する backend-neutral な templated splitter。親の
+`Grid` と attached row/column を解決し、Grid の track definitions を
+baseline-derived に変更する。既定 template は six-by-six の `Rectangle` で、
+通常の Grid/alignment によって長軸へ stretch される。
+
+`resize_direction`（`Auto` / `Columns` / `Rows`）、`resize_behavior`、
+`parent_level`、`drag_increment`、`keyboard_increment` を持ち、pointer と
+keyboard は同じ制約付き resize engine を使う。通知は Grid mutation または
+rollback の後に `GridSplitterResize*EventArgs` として発行される。
 
 ---
 
@@ -451,6 +452,8 @@ A `#[elwindui::component(inherits Window)]`-declared component ("host compositio
 |---|---|---|---|
 | `rows` | `Vec<GridLength>` | OneTime | 行サイズ定義（`Auto`, `Fixed(f32)`, `Star(f32)`） |
 | `columns` | `Vec<GridLength>` | OneTime | 列サイズ定義（`Auto`, `Fixed(f32)`, `Star(f32)`） |
+| `row_constraints` | `Vec<GridTrackConstraint>` | OneTime | 行ごとの最小・最大サイズ制約 |
+| `column_constraints` | `Vec<GridTrackConstraint>` | OneTime | 列ごとの最小・最大サイズ制約 |
 
 #### Attached Properties
 
@@ -458,6 +461,20 @@ Gridの直下にある子要素は以下の添付プロパティを指定でき�
 
 - `Grid::row`: 配置対象の行インデックス（0開始、既定値 `0`）
 - `Grid::column`: 配置対象の列インデックス（0開始、既定値 `0`）
+
+`GridTrackConstraint { min, max }` は Grid のトラックメタデータであり、対応する
+行・列の実サイズを制約する。未指定の `min` は `0.0`、未指定の `max` は
+`f32::INFINITY` として扱う。負の最小値は `0.0` に正規化され、非有限値は未指定として
+扱われ、最大値が最小値より小さい場合は最小値まで引き上げられる。制約ベクタの不足要素は
+無制約であり、現在の明示・暗黙トラック数を超える要素は効果を持たない。制約は通常の
+Measure/Arrange の Fixed・Auto・Star 解決に適用され、Star は制約を満たすまで残余領域を
+反復的に比例配分する。最小値の合計が利用可能領域を超える場合はオーバーフローを許容し、
+最大値に達した Star が残る場合は余剰領域を未使用のままにする。
+
+Grid は直近の成功した Arrange による実サイズを `resolved_row_sizes()` と
+`resolved_column_sizes()` で読み取り専用に公開する。Arrange 前は空で、明示定義がない場合も
+暗黙の 1 トラックを含む。行・列定義または制約の変更でレイアウトが無効化された場合、古い
+解決済みサイズは公開されない。
 
 #### Example
 

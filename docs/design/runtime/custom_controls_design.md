@@ -6,7 +6,7 @@ machinery. There is no second observable system and no backend-specific code.
 
 ## Templated component architecture
 
-`CustomTabView` and `CustomSplitter` are
+`CustomTabView` and `CustomGridSplitter` are
 `#[component(inherits = Control)]` controls. `CustomTabViewItem` is a
 `#[component(inherits = ContentControl)]`. Their authored
 `template: template_view! { ... }` is the default visual composition, using the
@@ -36,7 +36,7 @@ the public shared value/event types and their public aliases; component- and
 presenter-private state is owned by the implementation file that uses it:
 `custom_tab_view.rs` owns tab gesture state and item pointer events,
 `custom_tab_content_presenter.rs` owns `ContentEntry`, and
-`custom_splitter.rs` owns `SplitterGesture`. Those implementation modules stay
+`custom_grid_splitter.rs` owns the private resize session. Those implementation modules stay
 private, and their state types are not crate-root API. The facade lists the
 intended public `types.rs` names explicitly rather than re-exporting the module
 wildcard. Non-component cross-cutting implementation support is limited to
@@ -50,6 +50,35 @@ authored root of its own. The private `CustomTabContentPresenter` owns the visua
 of every current item content. Top uses `Fixed(32)` then `Star(1)`; Bottom uses
 `Star(1)` then `Fixed(32)`, with the presenters’ attached `Grid::row` values
 updated together.
+
+## CustomGridSplitter transaction ownership
+
+`CustomGridSplitter` is the only owner of live Grid mutation for splitter input.
+At transaction start it walks the visual-parent chain according to
+`parent_level`, requires the target's visual parent to be a Core `Grid`, and
+reads the target placement from the target's attached `Grid::row` or
+`Grid::column`. It snapshots the exact active-axis definitions, the Grid-owned
+constraints, and the authoritative resolved sizes from the Grid. Direction,
+behavior, indices, and effective increments are frozen in the private session.
+
+Pointer moves calculate one cumulative axis delta from the original press,
+truncate it to the effective drag increment, clamp it using the two baseline
+actual sizes and their effective min/max values, and derive a complete preview
+from the baseline definitions. The pure definition transformation preserves
+Star/Star semantics by using every Star track's baseline resolved size as its
+weight basis. A valid preview updates definitions, invalidates the Grid, and
+uses the existing interactive relayout path before the delta callback is
+invoked. The callback is therefore a notification and cannot be the owner of
+the preview.
+
+Cancellation clears the session before restoring the exact original
+definitions, relayouts the Grid, and then emits one canceled completion.
+Release applies the final cumulative position if needed, clears the session,
+keeps the preview, and emits one non-canceled completion. Late release or
+cancellation is a no-op. Keyboard arrows call the same pure transformation in
+one atomic transaction, with no pointer positions; pointer-active sessions
+suppress keyboard resizing. Routed handlers and callback closures use weak
+owners, and mutable session/Grid borrows are released before notifications.
 
 ## Visual ownership and reconciliation
 
@@ -108,9 +137,10 @@ produce no selected page. Tab drag state is owned by `CustomTabView`; item
 identity is the authority and indices are resolved at dispatch time. A
 threshold-crossing callback sets `Dragging` before invoking external code,
 then re-reads gesture state and current index before emitting `moved`. Removal
-or cancellation emits one canceled completion. Splitter orientation is frozen
-at press time, deltas are incremental on the active axis, and completion clears
-state before invoking callbacks.
+or cancellation emits one canceled completion. Grid splitter direction,
+behavior, indices, and increments are frozen per transaction; pointer deltas
+are baseline-derived cumulative values, while keyboard input uses the same
+engine. Grid mutation or rollback and session clear precede notifications.
 
 ## Scope boundary
 

@@ -10,7 +10,7 @@ use crate::runtime::metrics::{FLOATING_MIN_HEIGHT, FLOATING_MIN_WIDTH};
 use crate::snapshot::SnapshotGroupKey;
 use crate::{DockItemId, DockLayoutError, DockPlacement};
 use elwindui_custom_controls::{
-    SplitterDragCompletedEventArgs, SplitterDragDeltaEventArgs, SplitterDragStartedEventArgs,
+    GridResizeDirection, GridSplitterResizeCompletedEventArgs, GridSplitterResizeStartedEventArgs,
     TabDragCompletedEventArgs, TabDragMovedEventArgs, TabDragStartedEventArgs,
 };
 #[cfg(all(target_os = "macos", not(test)))]
@@ -869,9 +869,13 @@ impl DockingControl {
         address: SplitAddress,
         boundary: usize,
         grid: Rc<Grid>,
-        orientation: crate::Orientation,
-        _args: SplitterDragStartedEventArgs,
+        args: GridSplitterResizeStartedEventArgs,
     ) {
+        let orientation = match args.direction {
+            GridResizeDirection::Columns => crate::Orientation::Horizontal,
+            GridResizeDirection::Rows => crate::Orientation::Vertical,
+            GridResizeDirection::Auto => return,
+        };
         if let Some(realization) = self.runtime_realization() {
             let _ = realization.borrow_mut().begin_splitter(
                 &self.layout(),
@@ -883,19 +887,13 @@ impl DockingControl {
         }
     }
 
-    pub(crate) fn handle_splitter_delta(&self, args: SplitterDragDeltaEventArgs) {
-        if let Some(realization) = self.runtime_realization() {
-            realization
-                .borrow_mut()
-                .preview_splitter(args.cumulative_delta);
-        }
-    }
-
-    pub(crate) fn handle_splitter_completed(&self, args: SplitterDragCompletedEventArgs) {
+    pub(crate) fn handle_splitter_completed(&self, args: GridSplitterResizeCompletedEventArgs) {
         let Some(realization) = self.runtime_realization() else {
             return;
         };
-        let next = realization.borrow_mut().finish_splitter(args.canceled);
+        let next = realization
+            .borrow_mut()
+            .finish_splitter(args.canceled, args.cumulative_delta);
         if args.canceled {
             return;
         }

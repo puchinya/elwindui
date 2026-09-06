@@ -227,6 +227,31 @@ pub enum GridLength {
     Star(f32),
 }
 
+/// Per-track size limits owned by a Grid. Missing values are normalized to an
+/// unconstrained lower/upper bound when track resolution runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GridTrackConstraint {
+    pub min: Option<f32>,
+    pub max: Option<f32>,
+}
+
+impl GridTrackConstraint {
+    /// Returns the finite, ordered bounds used by Grid layout math.
+    pub fn effective(self) -> (f32, f32) {
+        let min = self
+            .min
+            .filter(|value| value.is_finite())
+            .unwrap_or(0.0)
+            .max(0.0);
+        let max = self
+            .max
+            .filter(|value| value.is_finite())
+            .unwrap_or(f32::INFINITY)
+            .max(min);
+        (min, max)
+    }
+}
+
 /// A `Grid`-child's attached `Grid::row`/`Grid::column` position (docs/specs/dsl_spec.md §3) —
 /// 0-indexed, defaulting to the top-left cell (`0, 0`) like WPF's own `Grid.Row`/`Grid.Column`
 /// defaults. Row/column spanning isn't implemented yet (each cell holds exactly one child).
@@ -298,25 +323,101 @@ fn fixed_and_auto_track_sizes(defs: &[GridLength], indices: &[usize], dims: &[f3
 /// `sizes` has already taken its share) across `Star` tracks, proportional to their weights. A
 /// no-op if there are no `Star` tracks at all (mirrors WPF: content simply doesn't stretch to fill
 /// without at least one `*` track).
-fn distribute_star(defs: &[GridLength], sizes: &mut [f32], total_final: f32) {
-    let used: f32 = sizes.iter().sum();
-    let remaining = (total_final - used).max(0.0);
-    let total_weight: f32 = defs
-        .iter()
-        .filter_map(|d| {
-            if let GridLength::Star(w) = d {
-                Some(*w)
-            } else {
-                None
-            }
-        })
-        .sum();
-    if total_weight <= 0.0 {
-        return;
+fn constraint_at(constraints: &[GridTrackConstraint], index: usize) -> (f32, f32) {
+    constraints
+        .get(index)
+        .copied()
+        .unwrap_or_default()
+        .effective()
+}
+
+fn clamp_non_star_sizes(
+    defs: &[GridLength],
+    sizes: &mut [f32],
+    constraints: &[GridTrackConstraint],
+) {
+    for (index, size) in sizes.iter_mut().enumerate() {
+        if matches!(defs.get(index), Some(GridLength::Star(_))) {
+            continue;
+        }
+        let (min, max) = constraint_at(constraints, index);
+        *size = if size.is_nan() {
+            min
+        } else {
+            size.max(min).min(max)
+        };
     }
-    for (i, d) in defs.iter().enumerate() {
-        if let GridLength::Star(w) = d {
-            sizes[i] = remaining * (w / total_weight);
+}
+
+fn clamp_star_sizes(defs: &[GridLength], sizes: &mut [f32], constraints: &[GridTrackConstraint]) {
+    for (index, size) in sizes.iter_mut().enumerate() {
+        if !matches!(defs.get(index), Some(GridLength::Star(_))) {
+            continue;
+        }
+        let (min, max) = constraint_at(constraints, index);
+        *size = if size.is_nan() {
+            min
+        } else {
+            size.max(min).min(max)
+        };
+    }
+}
+
+fn distribute_star_constrained(
+    defs: &[GridLength],
+    sizes: &mut [f32],
+    total_final: f32,
+    constraints: &[GridTrackConstraint],
+) {
+    let used: f32 = sizes.iter().sum();
+    let mut remaining = (total_final - used).max(0.0);
+    let mut active: Vec<usize> = defs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, definition)| match definition {
+            GridLength::Star(weight) if weight.is_finite() && *weight > 0.0 => Some(index),
+            _ => None,
+        })
+        .collect();
+
+    while !active.is_empty() {
+        let total_weight: f32 = active
+            .iter()
+            .filter_map(|&index| match defs[index] {
+                GridLength::Star(weight) => Some(weight),
+                _ => None,
+            })
+            .sum();
+        if !total_weight.is_finite() || total_weight <= 0.0 {
+            break;
+        }
+
+        let mut frozen = Vec::new();
+        for &index in &active {
+            let GridLength::Star(weight) = defs[index] else {
+                continue;
+            };
+            let provisional = remaining * (weight / total_weight);
+            let (min, max) = constraint_at(constraints, index);
+            if provisional < min || provisional > max {
+                frozen.push((index, provisional.max(min).min(max)));
+            }
+        }
+
+        if frozen.is_empty() {
+            for &index in &active {
+                let GridLength::Star(weight) = defs[index] else {
+                    continue;
+                };
+                sizes[index] = remaining * (weight / total_weight);
+            }
+            break;
+        }
+
+        for (index, size) in frozen {
+            sizes[index] = size;
+            remaining = (remaining - size).max(0.0);
+            active.retain(|candidate| *candidate != index);
         }
     }
 }
@@ -368,6 +469,26 @@ pub fn grid_resolve_track_sizes(
     pass1_sizes: &[Size],
     available: Size,
 ) -> (Vec<f32>, Vec<f32>) {
+    grid_resolve_track_sizes_with_constraints(
+        rows,
+        columns,
+        cells,
+        pass1_sizes,
+        available,
+        &[],
+        &[],
+    )
+}
+
+pub fn grid_resolve_track_sizes_with_constraints(
+    rows: &[GridLength],
+    columns: &[GridLength],
+    cells: &[GridCell],
+    pass1_sizes: &[Size],
+    available: Size,
+    row_constraints: &[GridTrackConstraint],
+    column_constraints: &[GridTrackConstraint],
+) -> (Vec<f32>, Vec<f32>) {
     let row_indices: Vec<usize> = cells
         .iter()
         .map(|c| clamp_track_index(c.row, rows.len()))
@@ -381,17 +502,25 @@ pub fn grid_resolve_track_sizes(
 
     let row_sizes = if available.height.is_finite() {
         let mut sizes = fixed_and_auto_track_sizes(rows, &row_indices, &heights);
-        distribute_star(rows, &mut sizes, available.height);
+        clamp_non_star_sizes(rows, &mut sizes, row_constraints);
+        distribute_star_constrained(rows, &mut sizes, available.height, row_constraints);
         sizes
     } else {
-        natural_track_sizes(rows, &row_indices, &heights)
+        let mut sizes = natural_track_sizes(rows, &row_indices, &heights);
+        clamp_non_star_sizes(rows, &mut sizes, row_constraints);
+        clamp_star_sizes(rows, &mut sizes, row_constraints);
+        sizes
     };
     let col_sizes = if available.width.is_finite() {
         let mut sizes = fixed_and_auto_track_sizes(columns, &col_indices, &widths);
-        distribute_star(columns, &mut sizes, available.width);
+        clamp_non_star_sizes(columns, &mut sizes, column_constraints);
+        distribute_star_constrained(columns, &mut sizes, available.width, column_constraints);
         sizes
     } else {
-        natural_track_sizes(columns, &col_indices, &widths)
+        let mut sizes = natural_track_sizes(columns, &col_indices, &widths);
+        clamp_non_star_sizes(columns, &mut sizes, column_constraints);
+        clamp_star_sizes(columns, &mut sizes, column_constraints);
+        sizes
     };
     (row_sizes, col_sizes)
 }
@@ -425,13 +554,15 @@ pub fn grid_pass2_available(
 /// function, independent of any backend): resolves `Fixed`/`Auto` track sizes first, distributes
 /// any space `final_size` has left over across `Star` tracks (`distribute_star`), then places each
 /// child at its (clamped) `GridCell`'s row/column offset. One child per cell — no spanning yet.
-pub fn grid_arrange(
+pub fn grid_arrange_track_sizes(
     final_size: Size,
     rows: &[GridLength],
     columns: &[GridLength],
     cells: &[GridCell],
     child_sizes: &[Size],
-) -> Vec<Rect> {
+    row_constraints: &[GridTrackConstraint],
+    column_constraints: &[GridTrackConstraint],
+) -> (Vec<f32>, Vec<f32>) {
     let row_indices: Vec<usize> = cells
         .iter()
         .map(|c| clamp_track_index(c.row, rows.len()))
@@ -445,9 +576,54 @@ pub fn grid_arrange(
 
     let mut row_sizes = fixed_and_auto_track_sizes(rows, &row_indices, &heights);
     let mut col_sizes = fixed_and_auto_track_sizes(columns, &col_indices, &widths);
-    distribute_star(rows, &mut row_sizes, final_size.height);
-    distribute_star(columns, &mut col_sizes, final_size.width);
+    clamp_non_star_sizes(rows, &mut row_sizes, row_constraints);
+    clamp_non_star_sizes(columns, &mut col_sizes, column_constraints);
+    distribute_star_constrained(rows, &mut row_sizes, final_size.height, row_constraints);
+    distribute_star_constrained(
+        columns,
+        &mut col_sizes,
+        final_size.width,
+        column_constraints,
+    );
+    (row_sizes, col_sizes)
+}
 
+pub fn grid_arrange(
+    final_size: Size,
+    rows: &[GridLength],
+    columns: &[GridLength],
+    cells: &[GridCell],
+    child_sizes: &[Size],
+) -> Vec<Rect> {
+    grid_arrange_with_constraints(final_size, rows, columns, cells, child_sizes, &[], &[])
+}
+
+pub fn grid_arrange_with_constraints(
+    final_size: Size,
+    rows: &[GridLength],
+    columns: &[GridLength],
+    cells: &[GridCell],
+    child_sizes: &[Size],
+    row_constraints: &[GridTrackConstraint],
+    column_constraints: &[GridTrackConstraint],
+) -> Vec<Rect> {
+    let (row_sizes, col_sizes) = grid_arrange_track_sizes(
+        final_size,
+        rows,
+        columns,
+        cells,
+        child_sizes,
+        row_constraints,
+        column_constraints,
+    );
+    let row_indices: Vec<usize> = cells
+        .iter()
+        .map(|c| clamp_track_index(c.row, rows.len()))
+        .collect();
+    let col_indices: Vec<usize> = cells
+        .iter()
+        .map(|c| clamp_track_index(c.column, columns.len()))
+        .collect();
     let row_offsets = prefix_offsets(&row_sizes);
     let col_offsets = prefix_offsets(&col_sizes);
 
@@ -791,5 +967,138 @@ mod tests {
             rects[1], rects[0],
             "both children share the single implicit cell"
         );
+    }
+
+    #[test]
+    fn grid_track_constraints_normalize_invalid_values() {
+        assert_eq!(
+            GridTrackConstraint {
+                min: Some(-5.0),
+                max: Some(-2.0),
+            }
+            .effective(),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            GridTrackConstraint {
+                min: Some(20.0),
+                max: Some(10.0),
+            }
+            .effective(),
+            (20.0, 20.0)
+        );
+        assert_eq!(
+            GridTrackConstraint {
+                min: Some(f32::NAN),
+                max: Some(f32::INFINITY),
+            }
+            .effective(),
+            (0.0, f32::INFINITY)
+        );
+    }
+
+    #[test]
+    fn constrained_fixed_and_auto_tracks_are_clamped() {
+        let cells = [cell(0, 0), cell(0, 1)];
+        let children = [size(1.0, 10.0), size(20.0, 10.0)];
+        let (_, columns) = grid_arrange_track_sizes(
+            size(100.0, 50.0),
+            &[GridLength::Fixed(20.0)],
+            &[GridLength::Fixed(50.0), GridLength::Auto],
+            &cells,
+            &children,
+            &[],
+            &[
+                GridTrackConstraint {
+                    min: Some(60.0),
+                    max: Some(80.0),
+                },
+                GridTrackConstraint {
+                    min: Some(30.0),
+                    max: Some(40.0),
+                },
+            ],
+        );
+        assert_eq!(columns, vec![60.0, 30.0]);
+    }
+
+    #[test]
+    fn constrained_star_tracks_use_iterative_water_filling() {
+        let cells = [cell(0, 0), cell(0, 1), cell(0, 2)];
+        let children = [size(0.0, 0.0); 3];
+        let (_, columns) = grid_arrange_track_sizes(
+            size(100.0, 20.0),
+            &[GridLength::Fixed(20.0)],
+            &[
+                GridLength::Star(1.0),
+                GridLength::Star(2.0),
+                GridLength::Star(1.0),
+            ],
+            &cells,
+            &children,
+            &[],
+            &[
+                GridTrackConstraint {
+                    min: Some(30.0),
+                    max: None,
+                },
+                GridTrackConstraint {
+                    min: None,
+                    max: Some(20.0),
+                },
+                GridTrackConstraint::default(),
+            ],
+        );
+        assert_eq!(columns, vec![30.0, 20.0, 50.0]);
+    }
+
+    #[test]
+    fn constrained_star_minima_overflow_available_space() {
+        let cells = [cell(0, 0), cell(0, 1)];
+        let children = [size(0.0, 0.0); 2];
+        let (_, columns) = grid_arrange_track_sizes(
+            size(100.0, 20.0),
+            &[GridLength::Fixed(20.0)],
+            &[GridLength::Star(1.0), GridLength::Star(1.0)],
+            &cells,
+            &children,
+            &[],
+            &[
+                GridTrackConstraint {
+                    min: Some(60.0),
+                    max: None,
+                },
+                GridTrackConstraint {
+                    min: Some(60.0),
+                    max: None,
+                },
+            ],
+        );
+        assert_eq!(columns, vec![60.0, 60.0]);
+    }
+
+    #[test]
+    fn constrained_star_maxima_leave_residual_space_unused() {
+        let cells = [cell(0, 0), cell(0, 1)];
+        let children = [size(0.0, 0.0); 2];
+        let (_, columns) = grid_arrange_track_sizes(
+            size(100.0, 20.0),
+            &[GridLength::Fixed(20.0)],
+            &[GridLength::Star(1.0), GridLength::Star(1.0)],
+            &cells,
+            &children,
+            &[],
+            &[
+                GridTrackConstraint {
+                    min: None,
+                    max: Some(30.0),
+                },
+                GridTrackConstraint {
+                    min: None,
+                    max: Some(30.0),
+                },
+            ],
+        );
+        assert_eq!(columns, vec![30.0, 30.0]);
     }
 }

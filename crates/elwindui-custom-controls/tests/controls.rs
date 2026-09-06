@@ -3,18 +3,19 @@ use elwindui_custom_controls::core::graphics::{
     IconSource, RenderCommand, RenderGroup, RenderTree, SystemIcon,
 };
 use elwindui_custom_controls::core::input::{
-    KeyModifiers, MouseButton, PointerEventArgs, RawPointerEvent, RawPointerEventKind,
-    RoutedEventArgs,
+    Key, KeyEventArgs, KeyModifiers, MouseButton, PointerEventArgs, RawPointerEvent,
+    RawPointerEventKind, RoutedEventArgs,
 };
-use elwindui_custom_controls::core::layout::GridLength;
+use elwindui_custom_controls::core::layout::{GridLength, GridTrackConstraint};
 use elwindui_custom_controls::core::ui::{
-    ContentControlExt, ControlExt, Grid, ListExt, UIElementExt, dispatch_routed, hit_test,
-    layout_root, unmount_subtree,
+    ContentControlExt, Control, ControlExt, Grid, GridExt, LayoutExt, ListExt, UIElementExt,
+    dispatch_routed, hit_test, layout_root, unmount_subtree,
 };
 use elwindui_custom_controls::{
-    CloseButtonPresentation, CustomSplitter, CustomSplitterExt, CustomTabView, CustomTabViewExt,
-    CustomTabViewItem, CustomTabViewItemExt, Orientation, SplitterDragCompleted, TabDragCompleted,
-    TabStripPosition,
+    CloseButtonPresentation, CustomGridSplitter, CustomGridSplitterExt, CustomTabView,
+    CustomTabViewExt, CustomTabViewItem, CustomTabViewItemExt, GridResizeBehavior,
+    GridResizeDirection, GridSplitterInputKind, GridSplitterResizeCompletedEventArgs,
+    TabDragCompleted, TabStripPosition,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -181,7 +182,7 @@ fn mounted_public_controls_release_after_external_owners_drop() {
     let item = CustomTabViewItem::new_item();
     let view = CustomTabView::new_view();
     view.set_children(vec![item.clone()]);
-    let splitter = CustomSplitter::new_splitter();
+    let splitter = CustomGridSplitter::new_splitter();
     let root: Rc<dyn UIElementExt> = view.clone();
     let splitter_root: Rc<dyn UIElementExt> = splitter.clone();
     layout_root(
@@ -1374,16 +1375,28 @@ fn removing_item_detaches_header_and_content_without_destroying_external_content
 }
 
 #[test]
-fn splitter_reports_logical_axis_delta_and_canceled_completion() {
-    let splitter = CustomSplitter::new_splitter();
-    splitter.set_orientation(Orientation::Horizontal);
-    let completed = Rc::new(RefCell::new(Vec::<SplitterDragCompleted>::new()));
-    let completed_for_callback = completed.clone();
-    splitter.set_on_drag_completed(Box::new(move |payload| {
-        completed_for_callback.borrow_mut().push(payload);
-    }));
-
-    let target: Rc<dyn UIElementExt> = splitter;
+fn custom_grid_splitter_resizes_columns_without_a_callback() {
+    let grid = Grid::new();
+    grid.set_rows(vec![GridLength::Star(1.0)]);
+    grid.set_columns(vec![
+        GridLength::Fixed(100.0),
+        GridLength::Fixed(6.0),
+        GridLength::Fixed(100.0),
+    ]);
+    let splitter = CustomGridSplitter::new_splitter();
+    splitter.set_resize_direction(GridResizeDirection::Columns);
+    splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
+    splitter.set_attached("Grid", "column", 1i32);
+    grid.children().add(splitter.clone());
+    let root: Rc<dyn UIElementExt> = grid.clone();
+    let target: Rc<dyn UIElementExt> = splitter.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 206.0,
+            height: 100.0,
+        },
+    );
     dispatch_routed(
         &target,
         "on_pointer_pressed",
@@ -1393,33 +1406,268 @@ fn splitter_reports_logical_axis_delta_and_canceled_completion() {
     dispatch_routed(
         &target,
         "on_pointer_moved",
-        &pointer(Point { x: 12.0, y: 4.0 }, None),
+        &pointer(Point { x: 22.0, y: 4.0 }, None),
         &RoutedEventArgs::default(),
     );
-    dispatch_routed(
-        &target,
-        "on_pointer_released",
-        &pointer(Point { x: 12.0, y: 4.0 }, Some(MouseButton::Left)),
-        &RoutedEventArgs::default(),
+    assert_eq!(
+        grid.columns.borrow().as_slice(),
+        &[
+            GridLength::Fixed(120.0),
+            GridLength::Fixed(6.0),
+            GridLength::Fixed(80.0),
+        ]
     );
-    assert_eq!(completed.borrow().len(), 1);
-    assert_eq!(completed.borrow()[0].cumulative_delta, 10.0);
-    assert!(!completed.borrow()[0].canceled);
+}
 
+#[test]
+fn custom_grid_splitter_resizes_rows_without_a_callback() {
+    let grid = Grid::new();
+    grid.set_columns(vec![GridLength::Star(1.0)]);
+    grid.set_rows(vec![
+        GridLength::Fixed(100.0),
+        GridLength::Fixed(6.0),
+        GridLength::Fixed(100.0),
+    ]);
+    let splitter = CustomGridSplitter::new_splitter();
+    splitter.set_resize_direction(GridResizeDirection::Rows);
+    splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
+    splitter.set_attached("Grid", "row", 1i32);
+    grid.children().add(splitter.clone());
+    let root: Rc<dyn UIElementExt> = grid.clone();
+    let target: Rc<dyn UIElementExt> = splitter;
+    layout_root(
+        &root,
+        Size {
+            width: 100.0,
+            height: 206.0,
+        },
+    );
     dispatch_routed(
         &target,
         "on_pointer_pressed",
-        &pointer(Point { x: 12.0, y: 4.0 }, Some(MouseButton::Left)),
+        &pointer(Point { x: 4.0, y: 2.0 }, Some(MouseButton::Left)),
         &RoutedEventArgs::default(),
     );
     dispatch_routed(
         &target,
-        "on_pointer_canceled",
-        &pointer(Point { x: 12.0, y: 4.0 }, None),
+        "on_pointer_moved",
+        &pointer(Point { x: 4.0, y: 22.0 }, None),
         &RoutedEventArgs::default(),
     );
-    assert_eq!(completed.borrow().len(), 2);
-    assert!(completed.borrow()[1].canceled);
+    assert_eq!(
+        grid.rows.borrow().as_slice(),
+        &[
+            GridLength::Fixed(120.0),
+            GridLength::Fixed(6.0),
+            GridLength::Fixed(80.0),
+        ]
+    );
+}
+
+#[test]
+fn custom_grid_splitter_auto_direction_uses_arranged_aspect_ratio() {
+    let columns_grid = Grid::new();
+    columns_grid.set_rows(vec![GridLength::Star(1.0)]);
+    columns_grid.set_columns(vec![
+        GridLength::Fixed(100.0),
+        GridLength::Fixed(6.0),
+        GridLength::Fixed(100.0),
+    ]);
+    let columns_splitter = CustomGridSplitter::new_splitter();
+    columns_splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
+    columns_splitter.set_attached("Grid", "column", 1i32);
+    columns_grid.children().add(columns_splitter.clone());
+    let columns_root: Rc<dyn UIElementExt> = columns_grid.clone();
+    let columns_target: Rc<dyn UIElementExt> = columns_splitter.clone();
+    layout_root(
+        &columns_root,
+        Size {
+            width: 206.0,
+            height: 100.0,
+        },
+    );
+    dispatch_routed(
+        &columns_target,
+        "on_pointer_pressed",
+        &pointer(Point { x: 103.0, y: 50.0 }, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &columns_target,
+        "on_pointer_moved",
+        &pointer(Point { x: 123.0, y: 50.0 }, None),
+        &RoutedEventArgs::default(),
+    );
+    assert_eq!(
+        columns_grid.columns.borrow().as_slice(),
+        &[
+            GridLength::Fixed(120.0),
+            GridLength::Fixed(6.0),
+            GridLength::Fixed(80.0),
+        ]
+    );
+
+    let rows_grid = Grid::new();
+    rows_grid.set_columns(vec![GridLength::Star(1.0)]);
+    rows_grid.set_rows(vec![
+        GridLength::Fixed(100.0),
+        GridLength::Fixed(6.0),
+        GridLength::Fixed(100.0),
+    ]);
+    let rows_splitter = CustomGridSplitter::new_splitter();
+    rows_splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
+    rows_splitter.set_attached("Grid", "row", 1i32);
+    rows_grid.children().add(rows_splitter.clone());
+    let rows_root: Rc<dyn UIElementExt> = rows_grid.clone();
+    let rows_target: Rc<dyn UIElementExt> = rows_splitter.clone();
+    layout_root(
+        &rows_root,
+        Size {
+            width: 100.0,
+            height: 206.0,
+        },
+    );
+    dispatch_routed(
+        &rows_target,
+        "on_pointer_pressed",
+        &pointer(Point { x: 50.0, y: 103.0 }, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &rows_target,
+        "on_pointer_moved",
+        &pointer(Point { x: 50.0, y: 123.0 }, None),
+        &RoutedEventArgs::default(),
+    );
+    assert_eq!(
+        rows_grid.rows.borrow().as_slice(),
+        &[
+            GridLength::Fixed(120.0),
+            GridLength::Fixed(6.0),
+            GridLength::Fixed(80.0),
+        ]
+    );
+}
+
+#[test]
+fn custom_grid_splitter_parent_level_reads_placement_from_the_ancestor_control() {
+    let grid = Grid::new();
+    grid.set_rows(vec![GridLength::Star(1.0)]);
+    grid.set_columns(vec![
+        GridLength::Fixed(100.0),
+        GridLength::Fixed(6.0),
+        GridLength::Fixed(100.0),
+    ]);
+    let wrapper = Control::new();
+    wrapper.set_attached("Grid", "column", 1i32);
+    let splitter = CustomGridSplitter::new_splitter();
+    splitter.set_resize_direction(GridResizeDirection::Columns);
+    splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
+    splitter.set_parent_level(1);
+    wrapper
+        .as_ui_element()
+        .visual_collection
+        .add(splitter.clone());
+    grid.children().add(wrapper);
+    let root: Rc<dyn UIElementExt> = grid.clone();
+    let target: Rc<dyn UIElementExt> = splitter.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 206.0,
+            height: 100.0,
+        },
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_pressed",
+        &pointer(Point { x: 103.0, y: 50.0 }, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_moved",
+        &pointer(Point { x: 123.0, y: 50.0 }, None),
+        &RoutedEventArgs::default(),
+    );
+    assert_eq!(
+        grid.columns.borrow().as_slice(),
+        &[
+            GridLength::Fixed(120.0),
+            GridLength::Fixed(6.0),
+            GridLength::Fixed(80.0),
+        ]
+    );
+}
+
+#[test]
+fn custom_grid_splitter_uses_grid_constraints_without_cumulative_drift() {
+    let grid = Grid::new();
+    grid.set_rows(vec![GridLength::Star(1.0)]);
+    grid.set_columns(vec![
+        GridLength::Fixed(100.0),
+        GridLength::Fixed(6.0),
+        GridLength::Fixed(100.0),
+    ]);
+    grid.set_column_constraints(vec![
+        GridTrackConstraint {
+            min: Some(100.0),
+            max: Some(115.0),
+        },
+        GridTrackConstraint::default(),
+        GridTrackConstraint {
+            min: Some(90.0),
+            max: Some(100.0),
+        },
+    ]);
+    let splitter = CustomGridSplitter::new_splitter();
+    splitter.set_resize_direction(GridResizeDirection::Columns);
+    splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
+    splitter.set_attached("Grid", "column", 1i32);
+    grid.children().add(splitter.clone());
+    let root: Rc<dyn UIElementExt> = grid.clone();
+    let target: Rc<dyn UIElementExt> = splitter;
+    layout_root(
+        &root,
+        Size {
+            width: 206.0,
+            height: 100.0,
+        },
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_pressed",
+        &pointer(Point { x: 103.0, y: 4.0 }, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_moved",
+        &pointer(Point { x: 153.0, y: 4.0 }, None),
+        &RoutedEventArgs::default(),
+    );
+    assert_eq!(
+        grid.columns.borrow().as_slice(),
+        &[
+            GridLength::Fixed(110.0),
+            GridLength::Fixed(6.0),
+            GridLength::Fixed(90.0),
+        ]
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_moved",
+        &pointer(Point { x: 105.0, y: 4.0 }, None),
+        &RoutedEventArgs::default(),
+    );
+    assert_eq!(
+        grid.columns.borrow().as_slice(),
+        &[
+            GridLength::Fixed(102.0),
+            GridLength::Fixed(6.0),
+            GridLength::Fixed(98.0),
+        ]
+    );
 }
 
 #[test]
@@ -1610,30 +1858,19 @@ fn close_affordance_is_composed_and_respects_presentation() {
 }
 
 #[test]
-fn splitter_host_layout_uses_orientation_axis() {
-    let splitter = CustomSplitter::new_splitter();
+fn custom_grid_splitter_default_template_is_six_by_six() {
+    let splitter = CustomGridSplitter::new_splitter();
     let root: Rc<dyn UIElementExt> = splitter.clone();
     let available = Size {
         width: 240.0,
         height: 120.0,
     };
 
-    splitter.set_orientation(Orientation::Horizontal);
     layout_root(&root, available);
     assert_eq!(
         splitter.measured_size(),
         Some(Size {
             width: 6.0,
-            height: 0.0
-        })
-    );
-
-    splitter.set_orientation(Orientation::Vertical);
-    layout_root(&root, available);
-    assert_eq!(
-        splitter.measured_size(),
-        Some(Size {
-            width: 0.0,
             height: 6.0
         })
     );
@@ -1722,21 +1959,48 @@ fn pointer_dispatcher_implicit_capture_completes_tab_outside_and_cancels() {
 }
 
 #[test]
-fn pointer_dispatcher_implicit_capture_completes_splitter_outside() {
-    let splitter = CustomSplitter::new_splitter();
-    splitter.set_orientation(Orientation::Horizontal);
-    let root: Rc<dyn UIElementExt> = splitter.clone();
+fn pointer_dispatcher_cancellation_restores_grid_before_notification() {
+    let grid = Grid::new();
+    grid.set_rows(vec![GridLength::Star(1.0)]);
+    grid.set_columns(vec![
+        GridLength::Fixed(100.0),
+        GridLength::Fixed(6.0),
+        GridLength::Fixed(100.0),
+    ]);
+    let splitter = CustomGridSplitter::new_splitter();
+    splitter.set_resize_direction(GridResizeDirection::Columns);
+    splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
+    splitter.set_attached("Grid", "column", 1i32);
+    grid.children().add(splitter.clone());
+    let root: Rc<dyn UIElementExt> = grid.clone();
     layout_root(
         &root,
         Size {
-            width: 20.0,
-            height: 20.0,
+            width: 206.0,
+            height: 100.0,
         },
     );
-    let completed = Rc::new(RefCell::new(Vec::<SplitterDragCompleted>::new()));
+    let original = grid.columns.borrow().clone();
+    let completed = Rc::new(RefCell::new(
+        Vec::<GridSplitterResizeCompletedEventArgs>::new(),
+    ));
     let completed_for_callback = completed.clone();
-    splitter.set_on_drag_completed(Box::new(move |payload| {
+    let observed = Rc::new(RefCell::new(Vec::<Vec<GridLength>>::new()));
+    let observed_for_callback = observed.clone();
+    let grid_for_callback = grid.clone();
+    let delta_observed = Rc::new(RefCell::new(Vec::<Vec<GridLength>>::new()));
+    let delta_observed_for_callback = delta_observed.clone();
+    let grid_for_delta = grid.clone();
+    splitter.set_on_resize_delta(Box::new(move |_| {
+        delta_observed_for_callback
+            .borrow_mut()
+            .push(grid_for_delta.columns.borrow().clone());
+    }));
+    splitter.set_on_resize_completed(Box::new(move |payload| {
         completed_for_callback.borrow_mut().push(payload);
+        observed_for_callback
+            .borrow_mut()
+            .push(grid_for_callback.columns.borrow().clone());
     }));
     let dispatcher = elwindui_custom_controls::core::input::PointerDispatcher::new();
     let focus = elwindui_custom_controls::core::focus::FocusTracker::new();
@@ -1745,72 +2009,176 @@ fn pointer_dispatcher_implicit_capture_completes_splitter_outside() {
         &focus,
         raw_pointer(
             RawPointerEventKind::Pressed(MouseButton::Left),
-            Point { x: 3.0, y: 3.0 },
+            Point { x: 103.0, y: 3.0 },
             0.0,
         ),
     );
     dispatcher.handle(
         &root,
         &focus,
-        raw_pointer(RawPointerEventKind::Moved, Point { x: 500.0, y: 3.0 }, 1.0),
+        raw_pointer(RawPointerEventKind::Moved, Point { x: 123.0, y: 3.0 }, 1.0),
     );
+    assert_ne!(grid.columns.borrow().as_slice(), original.as_slice());
+    assert_eq!(delta_observed.borrow().len(), 1);
+    assert_ne!(delta_observed.borrow()[0], original);
+    dispatcher.handle(
+        &root,
+        &focus,
+        raw_pointer(
+            RawPointerEventKind::Canceled,
+            Point { x: 500.0, y: 3.0 },
+            2.0,
+        ),
+    );
+    assert_eq!(completed.borrow().len(), 1);
+    assert!(completed.borrow()[0].canceled);
+    assert_eq!(grid.columns.borrow().as_slice(), original.as_slice());
+    assert_eq!(observed.borrow().as_slice(), &[original]);
     dispatcher.handle(
         &root,
         &focus,
         raw_pointer(
             RawPointerEventKind::Released(MouseButton::Left),
             Point { x: 500.0, y: 3.0 },
-            2.0,
+            3.0,
         ),
     );
     assert_eq!(completed.borrow().len(), 1);
-    assert!(!completed.borrow()[0].canceled);
-    assert_eq!(completed.borrow()[0].cumulative_delta, 497.0);
 }
 
 #[test]
-fn splitter_freezes_axis_and_does_not_emit_zero_deltas() {
-    let splitter = CustomSplitter::new_splitter();
-    splitter.set_orientation(Orientation::Horizontal);
+fn keyboard_resize_uses_the_same_grid_engine_and_reports_input_kind() {
+    let grid = Grid::new();
+    grid.set_rows(vec![GridLength::Star(1.0)]);
+    grid.set_columns(vec![
+        GridLength::Fixed(100.0),
+        GridLength::Fixed(6.0),
+        GridLength::Fixed(100.0),
+    ]);
+    let splitter = CustomGridSplitter::new_splitter();
+    splitter.set_resize_direction(GridResizeDirection::Columns);
+    splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
+    splitter.set_keyboard_increment(10.0);
+    splitter.set_attached("Grid", "column", 1i32);
+    grid.children().add(splitter.clone());
+    let root: Rc<dyn UIElementExt> = grid.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 206.0,
+            height: 100.0,
+        },
+    );
+    assert!(splitter.is_tab_stop());
+
+    let completed = Rc::new(RefCell::new(
+        Vec::<GridSplitterResizeCompletedEventArgs>::new(),
+    ));
     let deltas = Rc::new(RefCell::new(Vec::new()));
+    let started = Rc::new(RefCell::new(Vec::new()));
+    let completed_for_callback = completed.clone();
     let deltas_for_callback = deltas.clone();
-    splitter.set_on_drag_delta(Box::new(move |payload| {
+    let started_for_callback = started.clone();
+    splitter.set_on_resize_started(Box::new(move |payload| {
+        started_for_callback.borrow_mut().push(payload);
+    }));
+    splitter.set_on_resize_delta(Box::new(move |payload| {
         deltas_for_callback.borrow_mut().push(payload);
     }));
-    let completed = Rc::new(RefCell::new(Vec::new()));
-    let completed_for_callback = completed.clone();
-    splitter.set_on_drag_completed(Box::new(move |payload| {
+    splitter.set_on_resize_completed(Box::new(move |payload| {
         completed_for_callback.borrow_mut().push(payload);
     }));
-    let target: Rc<dyn UIElementExt> = splitter.clone();
+    let key = KeyEventArgs {
+        key: Key::Right,
+        modifiers: KeyModifiers::default(),
+        is_repeat: false,
+    };
+    let target: Rc<dyn UIElementExt> = splitter;
+    let wrong_axis_key = KeyEventArgs {
+        key: Key::Up,
+        modifiers: KeyModifiers::default(),
+        is_repeat: false,
+    };
+    dispatch_routed(
+        &target,
+        "on_key_down",
+        &wrong_axis_key,
+        &RoutedEventArgs::default(),
+    );
+    assert_eq!(
+        grid.columns.borrow().as_slice(),
+        &[
+            GridLength::Fixed(100.0),
+            GridLength::Fixed(6.0),
+            GridLength::Fixed(100.0),
+        ]
+    );
+    assert!(started.borrow().is_empty());
+    assert!(deltas.borrow().is_empty());
+    assert!(completed.borrow().is_empty());
+
     dispatch_routed(
         &target,
         "on_pointer_pressed",
-        &pointer(Point { x: 5.0, y: 5.0 }, Some(MouseButton::Left)),
+        &pointer(Point { x: 103.0, y: 4.0 }, Some(MouseButton::Left)),
         &RoutedEventArgs::default(),
     );
-    splitter.set_orientation(Orientation::Vertical);
-    dispatch_routed(
-        &target,
-        "on_pointer_moved",
-        &pointer(Point { x: 5.0, y: 8.0 }, None),
-        &RoutedEventArgs::default(),
-    );
+    assert_eq!(started.borrow().len(), 1);
+    dispatch_routed(&target, "on_key_down", &key, &RoutedEventArgs::default());
     assert!(deltas.borrow().is_empty());
-    dispatch_routed(
-        &target,
-        "on_pointer_moved",
-        &pointer(Point { x: 8.0, y: 8.0 }, None),
-        &RoutedEventArgs::default(),
+    assert!(completed.borrow().is_empty());
+    assert_eq!(
+        grid.columns.borrow().as_slice(),
+        &[
+            GridLength::Fixed(100.0),
+            GridLength::Fixed(6.0),
+            GridLength::Fixed(100.0),
+        ]
     );
-    assert_eq!(deltas.borrow().len(), 1);
-    assert_eq!(deltas.borrow()[0].delta, 3.0);
     dispatch_routed(
         &target,
-        "on_pointer_released",
-        &pointer(Point { x: 8.0, y: 8.0 }, Some(MouseButton::Left)),
+        "on_pointer_canceled",
+        &PointerEventArgs {
+            position: Point { x: 103.0, y: 4.0 },
+            screen_position: None,
+            button: None,
+            modifiers: KeyModifiers::default(),
+        },
         &RoutedEventArgs::default(),
     );
     assert_eq!(completed.borrow().len(), 1);
-    assert_eq!(completed.borrow()[0].cumulative_delta, 3.0);
+    assert!(completed.borrow()[0].canceled);
+    layout_root(
+        &root,
+        Size {
+            width: 206.0,
+            height: 100.0,
+        },
+    );
+    dispatch_routed(&target, "on_key_down", &key, &RoutedEventArgs::default());
+
+    assert_eq!(
+        grid.columns.borrow().as_slice(),
+        &[
+            GridLength::Fixed(110.0),
+            GridLength::Fixed(6.0),
+            GridLength::Fixed(90.0),
+        ]
+    );
+    assert_eq!(started.borrow().len(), 2);
+    assert_eq!(deltas.borrow().len(), 1);
+    assert_eq!(deltas.borrow()[0].delta, 10.0);
+    assert_eq!(deltas.borrow()[0].cumulative_delta, 10.0);
+    assert_eq!(
+        deltas.borrow()[0].input_kind,
+        GridSplitterInputKind::Keyboard
+    );
+    assert!(deltas.borrow()[0].position.is_none());
+    assert_eq!(completed.borrow().len(), 2);
+    assert!(!completed.borrow()[1].canceled);
+    assert_eq!(
+        completed.borrow()[1].input_kind,
+        GridSplitterInputKind::Keyboard
+    );
+    assert!(completed.borrow()[1].position.is_none());
 }

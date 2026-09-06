@@ -3,7 +3,9 @@
 use crate::core::base::{Point, Rect};
 use crate::core::graphics::Color;
 use crate::core::input::PointerEventArgs;
-use crate::core::layout::{GridLength, HorizontalAlignment, VerticalAlignment, Visibility};
+use crate::core::layout::{
+    GridLength, GridTrackConstraint, HorizontalAlignment, VerticalAlignment, Visibility,
+};
 use crate::core::theme::BrushStyle;
 use crate::core::ui::{
     Grid, GridExt, LayoutExt, TextBlock, TextBlockExt, TextStyleOwner, UIElementExt,
@@ -17,9 +19,9 @@ use crate::{
     DockSplitPanel,
 };
 use elwindui_custom_controls::{
-    CustomSplitter, CustomSplitterExt, CustomTabView, CustomTabViewExt, CustomTabViewItem,
-    CustomTabViewItemExt, SplitterDragCompletedEventArgs, SplitterDragDeltaEventArgs,
-    SplitterDragStartedEventArgs, TabStripPosition,
+    CustomGridSplitter, CustomGridSplitterExt, CustomTabView, CustomTabViewExt, CustomTabViewItem,
+    CustomTabViewItemExt, GridResizeBehavior, GridResizeDirection,
+    GridSplitterResizeCompletedEventArgs, GridSplitterResizeStartedEventArgs, TabStripPosition,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -266,7 +268,7 @@ struct PlannedGroup {
 
 struct PlannedSplit {
     grid: Rc<Grid>,
-    splitters: Vec<Rc<CustomSplitter>>,
+    splitters: Vec<Rc<CustomGridSplitter>>,
     orientation: SnapshotOrientation,
     weights: Vec<f32>,
 }
@@ -308,7 +310,7 @@ pub struct RuntimeRealization {
     owners: BTreeMap<DockItemId, RuntimePresentationOwner>,
     root: Option<RuntimeNode>,
     floating: Vec<FloatingRuntime>,
-    split_views: BTreeMap<SplitAddress, (Rc<Grid>, Vec<Rc<CustomSplitter>>)>,
+    split_views: BTreeMap<SplitAddress, (Rc<Grid>, Vec<Rc<CustomGridSplitter>>)>,
     drag: Option<DragSession>,
     group_drag: Option<GroupDragSession>,
     splitter: Option<SplitterSession>,
@@ -1271,19 +1273,17 @@ impl RuntimeRealization {
         self.splitter.is_some()
     }
 
-    pub(crate) fn preview_splitter(&mut self, cumulative_delta: f32) {
-        if let Some(splitter) = self.splitter.as_mut() {
-            splitter.preview(cumulative_delta);
-        }
-    }
-
-    pub(crate) fn finish_splitter(&mut self, canceled: bool) -> Option<DockLayoutModel> {
+    pub(crate) fn finish_splitter(
+        &mut self,
+        canceled: bool,
+        cumulative_delta: f32,
+    ) -> Option<DockLayoutModel> {
         self.splitter.take().and_then(|mut splitter| {
             if canceled {
                 splitter.cancel();
                 None
             } else {
-                splitter.commit()
+                splitter.commit(cumulative_delta)
             }
         })
     }
@@ -1607,14 +1607,8 @@ impl RuntimeRealization {
                     .unwrap_or_else(|| (Grid::new(), Vec::new()));
                 while splitters.len() < children.len().saturating_sub(1) {
                     let index = splitters.len();
-                    let splitter = CustomSplitter::new_splitter();
-                    self.wire_splitter(
-                        &splitter,
-                        grid.clone(),
-                        split_address.clone(),
-                        index,
-                        (*orientation).into(),
-                    );
+                    let splitter = CustomGridSplitter::new_splitter();
+                    self.wire_splitter(&splitter, grid.clone(), split_address.clone(), index);
                     splitters.push(splitter);
                 }
                 splitters.truncate(children.len().saturating_sub(1));
@@ -1961,6 +1955,7 @@ impl RuntimeRealization {
                     SnapshotOrientation::Horizontal => {
                         grid.set_rows(vec![GridLength::Star(1.0)]);
                         let mut columns = Vec::new();
+                        let mut column_constraints = Vec::new();
                         for (index, child) in children.iter().enumerate() {
                             columns.push(GridLength::Star(snapshot_split_weight(
                                 planned.weights[index],
@@ -1973,6 +1968,10 @@ impl RuntimeRealization {
                                 &child_path,
                                 splits,
                             );
+                            column_constraints.push(GridTrackConstraint {
+                                min: element.min_width(),
+                                max: element.max_width(),
+                            });
                             element.as_ui_element().set_attached(
                                 "Grid",
                                 "column",
@@ -1981,24 +1980,22 @@ impl RuntimeRealization {
                             grid.children().add(element);
                             if index + 1 < children.len() {
                                 columns.push(GridLength::Fixed(SPLITTER_HIT_SIZE));
+                                column_constraints.push(GridTrackConstraint::default());
                                 let splitter = planned.splitters[index].clone();
-                                splitter.set_orientation(crate::Orientation::Horizontal);
+                                splitter.set_resize_direction(GridResizeDirection::Columns);
+                                splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
                                 splitter.set_attached("Grid", "column", (index * 2 + 1) as i32);
-                                self.wire_splitter(
-                                    &splitter,
-                                    grid.clone(),
-                                    address.clone(),
-                                    index,
-                                    crate::Orientation::Horizontal,
-                                );
+                                self.wire_splitter(&splitter, grid.clone(), address.clone(), index);
                                 grid.children().add(splitter);
                             }
                         }
                         grid.set_columns(columns);
+                        grid.set_column_constraints(column_constraints);
                     }
                     SnapshotOrientation::Vertical => {
                         grid.set_columns(vec![GridLength::Star(1.0)]);
                         let mut rows = Vec::new();
+                        let mut row_constraints = Vec::new();
                         for (index, child) in children.iter().enumerate() {
                             rows.push(GridLength::Star(snapshot_split_weight(
                                 planned.weights[index],
@@ -2011,26 +2008,27 @@ impl RuntimeRealization {
                                 &child_path,
                                 splits,
                             );
+                            row_constraints.push(GridTrackConstraint {
+                                min: element.min_height(),
+                                max: element.max_height(),
+                            });
                             element
                                 .as_ui_element()
                                 .set_attached("Grid", "row", (index * 2) as i32);
                             grid.children().add(element);
                             if index + 1 < children.len() {
                                 rows.push(GridLength::Fixed(SPLITTER_HIT_SIZE));
+                                row_constraints.push(GridTrackConstraint::default());
                                 let splitter = planned.splitters[index].clone();
-                                splitter.set_orientation(crate::Orientation::Vertical);
+                                splitter.set_resize_direction(GridResizeDirection::Rows);
+                                splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
                                 splitter.set_attached("Grid", "row", (index * 2 + 1) as i32);
-                                self.wire_splitter(
-                                    &splitter,
-                                    grid.clone(),
-                                    address.clone(),
-                                    index,
-                                    crate::Orientation::Vertical,
-                                );
+                                self.wire_splitter(&splitter, grid.clone(), address.clone(), index);
                                 grid.children().add(splitter);
                             }
                         }
                         grid.set_rows(rows);
+                        grid.set_row_constraints(row_constraints);
                     }
                 }
                 grid.clone()
@@ -2106,55 +2104,45 @@ impl RuntimeRealization {
 
     fn wire_splitter(
         &self,
-        splitter: &Rc<CustomSplitter>,
+        splitter: &Rc<CustomGridSplitter>,
         grid: Rc<Grid>,
         address: SplitAddress,
         boundary: usize,
-        orientation: crate::Orientation,
     ) {
         let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let reconciling = self.reconciling.clone();
-        let start_grid = grid.clone();
+        let start_grid = Rc::downgrade(&grid);
         let start_address = address.clone();
-        splitter.set_on_drag_started(Box::new(move |args: SplitterDragStartedEventArgs| {
-            if reconciling.get() {
-                return;
-            }
-            let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
-            if let Some(owner) = owner {
-                owner.handle_splitter_started(
-                    start_address.clone(),
-                    boundary,
-                    start_grid.clone(),
-                    orientation,
-                    args,
-                );
-            }
-        }));
+        splitter.set_on_resize_started(Box::new(
+            move |args: GridSplitterResizeStartedEventArgs| {
+                if reconciling.get() {
+                    return;
+                }
+                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                if let (Some(owner), Some(start_grid)) = (owner, start_grid.upgrade()) {
+                    owner.handle_splitter_started(
+                        start_address.clone(),
+                        boundary,
+                        start_grid.clone(),
+                        args,
+                    );
+                }
+            },
+        ));
 
         let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let reconciling = self.reconciling.clone();
-        splitter.set_on_drag_delta(Box::new(move |args: SplitterDragDeltaEventArgs| {
-            if reconciling.get() {
-                return;
-            }
-            let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
-            if let Some(owner) = owner {
-                owner.handle_splitter_delta(args);
-            }
-        }));
-
-        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
-        let reconciling = self.reconciling.clone();
-        splitter.set_on_drag_completed(Box::new(move |args: SplitterDragCompletedEventArgs| {
-            if reconciling.get() {
-                return;
-            }
-            let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
-            if let Some(owner) = owner {
-                owner.handle_splitter_completed(args);
-            }
-        }));
+        splitter.set_on_resize_completed(Box::new(
+            move |args: GridSplitterResizeCompletedEventArgs| {
+                if reconciling.get() {
+                    return;
+                }
+                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                if let Some(owner) = owner {
+                    owner.handle_splitter_completed(args);
+                }
+            },
+        ));
     }
 
     pub(crate) fn group_item(&self, group: &SnapshotGroupKey, index: usize) -> Option<DockItemId> {

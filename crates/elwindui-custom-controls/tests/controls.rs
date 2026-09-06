@@ -1467,6 +1467,191 @@ fn custom_grid_splitter_resizes_rows_without_a_callback() {
 }
 
 #[test]
+fn custom_grid_splitter_rejects_out_of_range_pair_without_transaction() {
+    let grid = Grid::new();
+    grid.set_rows(vec![GridLength::Star(1.0)]);
+    grid.set_columns(vec![GridLength::Fixed(100.0), GridLength::Fixed(100.0)]);
+    let splitter = CustomGridSplitter::new_splitter();
+    splitter.set_resize_direction(GridResizeDirection::Columns);
+    splitter.set_resize_behavior(GridResizeBehavior::CurrentAndNext);
+    splitter.set_attached("Grid", "column", 1i32);
+    grid.children().add(splitter.clone());
+    let root: Rc<dyn UIElementExt> = grid.clone();
+    let target: Rc<dyn UIElementExt> = splitter.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 200.0,
+            height: 100.0,
+        },
+    );
+
+    let started = Rc::new(RefCell::new(0));
+    let delta = Rc::new(RefCell::new(0));
+    let completed = Rc::new(RefCell::new(0));
+    let started_for_callback = started.clone();
+    splitter.set_on_resize_started(Box::new(move |_| {
+        *started_for_callback.borrow_mut() += 1;
+    }));
+    let delta_for_callback = delta.clone();
+    splitter.set_on_resize_delta(Box::new(move |_| {
+        *delta_for_callback.borrow_mut() += 1;
+    }));
+    let completed_for_callback = completed.clone();
+    splitter.set_on_resize_completed(Box::new(move |_| {
+        *completed_for_callback.borrow_mut() += 1;
+    }));
+
+    let original = grid.columns.borrow().clone();
+    dispatch_routed(
+        &target,
+        "on_pointer_pressed",
+        &pointer(Point { x: 150.0, y: 50.0 }, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_moved",
+        &pointer(Point { x: 170.0, y: 50.0 }, None),
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_released",
+        &pointer(Point { x: 170.0, y: 50.0 }, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+
+    assert_eq!(*started.borrow(), 0);
+    assert_eq!(*delta.borrow(), 0);
+    assert_eq!(*completed.borrow(), 0);
+    assert_eq!(*grid.columns.borrow(), original);
+}
+
+#[test]
+fn custom_grid_splitter_release_applies_and_notifies_final_delta() {
+    let grid = Grid::new();
+    grid.set_rows(vec![GridLength::Star(1.0)]);
+    grid.set_columns(vec![
+        GridLength::Fixed(100.0),
+        GridLength::Fixed(6.0),
+        GridLength::Fixed(100.0),
+    ]);
+    let splitter = CustomGridSplitter::new_splitter();
+    splitter.set_resize_direction(GridResizeDirection::Columns);
+    splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
+    splitter.set_attached("Grid", "column", 1i32);
+    grid.children().add(splitter.clone());
+    let root: Rc<dyn UIElementExt> = grid.clone();
+    let target: Rc<dyn UIElementExt> = splitter.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 206.0,
+            height: 100.0,
+        },
+    );
+
+    let deltas = Rc::new(RefCell::new(Vec::<(f32, f32)>::new()));
+    let completed = Rc::new(RefCell::new(Vec::<f32>::new()));
+    let order = Rc::new(RefCell::new(Vec::<String>::new()));
+    let deltas_for_callback = deltas.clone();
+    let order_for_delta = order.clone();
+    let grid_for_delta = grid.clone();
+    splitter.set_on_resize_delta(Box::new(move |payload| {
+        deltas_for_callback
+            .borrow_mut()
+            .push((payload.delta, payload.cumulative_delta));
+        order_for_delta.borrow_mut().push(format!(
+            "delta:{:?}",
+            grid_for_delta.columns.borrow().as_slice()
+        ));
+    }));
+    let completed_for_callback = completed.clone();
+    let order_for_completed = order.clone();
+    let grid_for_completed = grid.clone();
+    splitter.set_on_resize_completed(Box::new(move |payload| {
+        completed_for_callback
+            .borrow_mut()
+            .push(payload.cumulative_delta);
+        order_for_completed.borrow_mut().push(format!(
+            "completed:{:?}",
+            grid_for_completed.columns.borrow().as_slice()
+        ));
+    }));
+
+    dispatch_routed(
+        &target,
+        "on_pointer_pressed",
+        &pointer(Point { x: 103.0, y: 50.0 }, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_moved",
+        &pointer(Point { x: 111.0, y: 50.0 }, None),
+        &RoutedEventArgs::default(),
+    );
+    assert_eq!(
+        grid.columns.borrow().as_slice(),
+        &[
+            GridLength::Fixed(108.0),
+            GridLength::Fixed(6.0),
+            GridLength::Fixed(92.0),
+        ]
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_released",
+        &pointer(Point { x: 123.0, y: 50.0 }, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+
+    assert_eq!(
+        grid.columns.borrow().as_slice(),
+        &[
+            GridLength::Fixed(120.0),
+            GridLength::Fixed(6.0),
+            GridLength::Fixed(80.0),
+        ]
+    );
+    assert_eq!(&*deltas.borrow(), &[(8.0, 8.0), (12.0, 20.0)]);
+    assert_eq!(&*completed.borrow(), &[20.0]);
+    assert_eq!(order.borrow().len(), 3);
+    assert!(order.borrow()[0].starts_with("delta:"));
+    assert!(order.borrow()[1].starts_with("delta:"));
+    assert!(order.borrow()[2].starts_with("completed:"));
+
+    layout_root(
+        &root,
+        Size {
+            width: 206.0,
+            height: 100.0,
+        },
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_pressed",
+        &pointer(Point { x: 123.0, y: 50.0 }, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_moved",
+        &pointer(Point { x: 131.0, y: 50.0 }, None),
+        &RoutedEventArgs::default(),
+    );
+    dispatch_routed(
+        &target,
+        "on_pointer_released",
+        &pointer(Point { x: 131.0, y: 50.0 }, Some(MouseButton::Left)),
+        &RoutedEventArgs::default(),
+    );
+    assert_eq!(deltas.borrow().len(), 3);
+    assert_eq!(completed.borrow().len(), 2);
+}
+
+#[test]
 fn custom_grid_splitter_auto_direction_uses_arranged_aspect_ratio() {
     let columns_grid = Grid::new();
     columns_grid.set_rows(vec![GridLength::Star(1.0)]);

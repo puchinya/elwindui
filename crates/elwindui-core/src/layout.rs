@@ -392,19 +392,41 @@ fn distribute_star_constrained(
             break;
         }
 
-        let mut frozen = Vec::new();
+        let mut min_violations = Vec::new();
         for &index in &active {
             let GridLength::Star(weight) = defs[index] else {
                 continue;
             };
             let provisional = remaining * (weight / total_weight);
-            let (min, max) = constraint_at(constraints, index);
-            if provisional < min || provisional > max {
-                frozen.push((index, provisional.max(min).min(max)));
+            let (min, _) = constraint_at(constraints, index);
+            if provisional < min {
+                min_violations.push((index, min));
             }
         }
 
-        if frozen.is_empty() {
+        if !min_violations.is_empty() {
+            let frozen_size: f32 = min_violations.iter().map(|(_, size)| *size).sum();
+            for (index, size) in min_violations {
+                sizes[index] = size;
+                active.retain(|candidate| *candidate != index);
+            }
+            remaining = (remaining - frozen_size).max(0.0);
+            continue;
+        }
+
+        let mut max_violations = Vec::new();
+        for &index in &active {
+            let GridLength::Star(weight) = defs[index] else {
+                continue;
+            };
+            let provisional = remaining * (weight / total_weight);
+            let (_, max) = constraint_at(constraints, index);
+            if provisional > max {
+                max_violations.push((index, max));
+            }
+        }
+
+        if max_violations.is_empty() {
             for &index in &active {
                 let GridLength::Star(weight) = defs[index] else {
                     continue;
@@ -414,11 +436,12 @@ fn distribute_star_constrained(
             break;
         }
 
-        for (index, size) in frozen {
+        let frozen_size: f32 = max_violations.iter().map(|(_, size)| *size).sum();
+        for (index, size) in max_violations {
             sizes[index] = size;
-            remaining = (remaining - size).max(0.0);
             active.retain(|candidate| *candidate != index);
         }
+        remaining = (remaining - frozen_size).max(0.0);
     }
 }
 
@@ -1075,6 +1098,56 @@ mod tests {
             ],
         );
         assert_eq!(columns, vec![60.0, 60.0]);
+    }
+
+    #[test]
+    fn constrained_star_minimum_is_recomputed_before_maximum_freezing() {
+        let cells = [cell(0, 0), cell(0, 1)];
+        let children = [size(0.0, 0.0); 2];
+        let (_, columns) = grid_arrange_track_sizes(
+            size(100.0, 20.0),
+            &[GridLength::Fixed(20.0)],
+            &[GridLength::Star(1.0), GridLength::Star(10.0)],
+            &cells,
+            &children,
+            &[],
+            &[
+                GridTrackConstraint {
+                    min: Some(60.0),
+                    max: None,
+                },
+                GridTrackConstraint {
+                    min: None,
+                    max: Some(80.0),
+                },
+            ],
+        );
+
+        assert_eq!(columns, vec![60.0, 40.0]);
+        assert_eq!(columns.iter().sum::<f32>(), 100.0);
+    }
+
+    #[test]
+    fn constrained_star_maximum_redistributes_remaining_space() {
+        let cells = [cell(0, 0), cell(0, 1)];
+        let children = [size(0.0, 0.0); 2];
+        let (_, columns) = grid_arrange_track_sizes(
+            size(100.0, 20.0),
+            &[GridLength::Fixed(20.0)],
+            &[GridLength::Star(1.0), GridLength::Star(1.0)],
+            &cells,
+            &children,
+            &[],
+            &[
+                GridTrackConstraint {
+                    min: None,
+                    max: Some(20.0),
+                },
+                GridTrackConstraint::default(),
+            ],
+        );
+
+        assert_eq!(columns, vec![20.0, 80.0]);
     }
 
     #[test]

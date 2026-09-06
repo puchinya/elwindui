@@ -397,6 +397,10 @@ impl CustomGridSplitter {
         if baseline_sizes.is_empty()
             || baseline_sizes.len() != original_tracks.len().max(1)
             || baseline_sizes.iter().any(|size| !size.is_finite())
+            || target_index >= original_tracks.len()
+            || sibling_index >= original_tracks.len()
+            || target_index >= baseline_sizes.len()
+            || sibling_index >= baseline_sizes.len()
         {
             return None;
         }
@@ -568,6 +572,7 @@ impl CustomGridSplitter {
         if session.input_kind != GridSplitterInputKind::Pointer {
             return;
         }
+        let old_effective_delta = session.last_effective_delta;
         if let Some(start) = session.start_position {
             let raw_delta = match session.direction {
                 GridResizeDirection::Columns => event.position.x - start.x,
@@ -584,6 +589,11 @@ impl CustomGridSplitter {
         }
         session.position = Some(event.position);
         session.screen_position = event.screen_position;
+        let final_delta = session.last_effective_delta - old_effective_delta;
+        self.set_resize_session(Some(session.clone()));
+        if final_delta != 0.0 {
+            self.emit_delta(&session, final_delta);
+        }
         self.set_pressed(false);
         self.sync_visual(false);
         self.set_resize_session(None);

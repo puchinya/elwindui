@@ -10,12 +10,12 @@ Snapshot: 2026-09-06. The public contract is [`../specs/custom_controls_spec.md`
 - Close presentation, tab drag cancellation/reentrancy, splitter axis/delta semantics, weak callbacks, content replacement/removal, pointer capture, and IconSourceElement realization are implemented.
 - The component override bridge, source-local module topology, explicit public type exports, weak-owner callback lifetime, paint-only close-glyph updates, and cross-crate generated shape forwarding are implemented.
 - `examples/custom-controls-demo` provides an AppKit sample covering tab selection, advisory close requests, tab dragging, and splitter-driven pane resizing.
+- Docking integration is implemented in the separate `elwindui-docking` crate; this crate remains the reusable custom-control layer.
+- Custom controls consume the common Core pointer cancellation and capture-loss semantics; this crate does not add a separate public capture API.
 
 ## Current gaps and follow-up
 
 - Native runtime interaction for CustomTabView, CustomTabViewItem, and CustomSplitter is not established for every target backend.
-- Docking integration is implemented in the separate `elwindui-docking` crate; this crate remains the reusable custom-control layer.
-- Custom controls consume the common Core pointer cancellation and capture-loss semantics; this crate does not add a separate public capture API.
 
 ## Verification state
 

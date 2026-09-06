@@ -33,7 +33,7 @@ BRANCH="$(git branch --show-current)"
 HEAD_COMMIT="$(git rev-parse HEAD)"
 [[ -z "$(git status --porcelain)" ]] && WORKTREE="clean" || WORKTREE="dirty"
 
-ISSUE_JSON="$(gh issue view "$ISSUE_NUMBER" --repo "$REPOSITORY" --json labels,url)"
+ISSUE_JSON="$(gh issue view "$ISSUE_NUMBER" --repo "$REPOSITORY" --json labels,url,closedByPullRequestsReferences)"
 PHASE="$(python3 - "$ISSUE_JSON" <<'PY'
 import json, sys
 obj=json.loads(sys.argv[1])
@@ -50,39 +50,53 @@ case "$PHASE" in
   *) WORKFLOW="" ;;
 esac
 
-PR_JSON="$(gh pr list --repo "$REPOSITORY" --state all --limit 100 --json number,url,state,updatedAt,closingIssuesReferences)"
-PR_NUMBER="$(python3 - "$PR_JSON" "$ISSUE_NUMBER" <<'PY'
+PR_DETAILS="$(python3 - "$ISSUE_JSON" "$REPOSITORY" <<'PY'
+import json
+import subprocess
+import sys
+
+issue=json.loads(sys.argv[1])
+repository=sys.argv[2]
+details=[]
+for reference in issue.get("closedByPullRequestsReferences", []):
+    number=reference.get("number")
+    if not number:
+        continue
+    try:
+        result=subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(number),
+                "--repo",
+                repository,
+                "--json",
+                "number,url,state,updatedAt",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError:
+        continue
+    details.append(json.loads(result.stdout))
+
+print(json.dumps(details))
+PY
+)"
+PR_FIELDS="$(python3 - "$PR_DETAILS" <<'PY'
 import json, sys
 
 prs=json.loads(sys.argv[1])
-issue_number=int(sys.argv[2]) if len(sys.argv) > 2 else 0
-linked=[
-    pr for pr in prs
-    if any(ref.get("number") == issue_number for ref in pr.get("closingIssuesReferences", []))
-]
-open_prs=[pr for pr in linked if pr.get("state") == "OPEN"]
-merged_prs=[pr for pr in linked if pr.get("state") == "MERGED"]
+open_prs=[pr for pr in prs if pr.get("state") == "OPEN"]
+merged_prs=[pr for pr in prs if pr.get("state") == "MERGED"]
 candidates=open_prs or merged_prs
-candidates.sort(key=lambda pr: pr.get("updatedAt", ""), reverse=True)
-print(candidates[0].get("number", "") if candidates else "")
+selected=max(candidates, key=lambda pr: pr.get("updatedAt", "")) if candidates else {}
+print("{}\t{}".format(selected.get("number", ""), selected.get("url", "")))
 PY
 )"
-PR_URL="$(python3 - "$PR_JSON" "$ISSUE_NUMBER" <<'PY'
-import json, sys
-
-prs=json.loads(sys.argv[1])
-issue_number=int(sys.argv[2]) if len(sys.argv) > 2 else 0
-linked=[
-    pr for pr in prs
-    if any(ref.get("number") == issue_number for ref in pr.get("closingIssuesReferences", []))
-]
-open_prs=[pr for pr in linked if pr.get("state") == "OPEN"]
-merged_prs=[pr for pr in linked if pr.get("state") == "MERGED"]
-candidates=open_prs or merged_prs
-candidates.sort(key=lambda pr: pr.get("updatedAt", ""), reverse=True)
-print(candidates[0].get("url", "") if candidates else "")
-PY
-)"
+IFS=$'\t' read -r PR_NUMBER PR_URL <<< "$PR_FIELDS"
 
 BASE=".agent-state/issues/$ISSUE_NUMBER"
 CONTRACT="$BASE/implementation-contract.md"

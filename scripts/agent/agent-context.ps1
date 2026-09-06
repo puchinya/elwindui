@@ -35,7 +35,7 @@ $head = (& git rev-parse HEAD).Trim()
 $status = (& git status --porcelain | Out-String).Trim()
 $worktree = if ([string]::IsNullOrWhiteSpace($status)) { 'clean' } else { 'dirty' }
 
-$issue = (& gh issue view $IssueNumber --repo $repository --json labels,url | ConvertFrom-Json)
+$issue = (& gh issue view $IssueNumber --repo $repository --json labels,url,closedByPullRequestsReferences | ConvertFrom-Json)
 $phaseValues = @($issue.labels | ForEach-Object { $_.name } | Where-Object { $_ -like 'phase:*' } | Select-Object -First 1)
 $phase = if ($phaseValues.Count -gt 0) { [string]$phaseValues[0] } else { '' }
 
@@ -48,13 +48,15 @@ $workflow = switch ($phase) {
     default { '' }
 }
 
-$prs = @(& gh pr list --repo $repository --state all --limit 100 --json number,url,state,updatedAt,closingIssuesReferences | ConvertFrom-Json)
-$linkedPrs = @($prs | Where-Object {
-    $references = @($_.closingIssuesReferences)
-    $references | Where-Object { [int]$_.number -eq $IssueNumber } | Select-Object -First 1
-})
-$openPrs = @($linkedPrs | Where-Object { $_.state -eq 'OPEN' })
-$mergedPrs = @($linkedPrs | Where-Object { $_.state -eq 'MERGED' })
+$prCandidates = @()
+foreach ($reference in @($issue.closedByPullRequestsReferences)) {
+    $prOutput = (& gh pr view $reference.number --repo $repository --json number,url,state,updatedAt 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($prOutput)) {
+        $prCandidates += ($prOutput | ConvertFrom-Json)
+    }
+}
+$openPrs = @($prCandidates | Where-Object { $_.state -eq 'OPEN' })
+$mergedPrs = @($prCandidates | Where-Object { $_.state -eq 'MERGED' })
 $selectedPr = $null
 if ($openPrs.Count -gt 0) {
     $selectedPr = $openPrs | Sort-Object -Property updatedAt -Descending | Select-Object -First 1

@@ -34,7 +34,7 @@ use super::{
 };
 use elwindui_core::base::Rect;
 use elwindui_custom_controls::{
-    CustomSplitter, CustomTabView, CustomTabViewItem, TabDragCompletedEventArgs,
+    CustomGridSplitter, CustomTabView, CustomTabViewItem, TabDragCompletedEventArgs,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -3125,7 +3125,7 @@ fn three_pane_runtime_split_realizes_two_splitters() {
     docking.mount(application_environment());
     assert!(docking.apply_template());
 
-    let splitters = find_all::<CustomSplitter>(docking.as_ref());
+    let splitters = find_all::<CustomGridSplitter>(docking.as_ref());
     assert_eq!(splitters.len(), 2);
 }
 
@@ -4473,8 +4473,8 @@ fn screen_drop_on_floating_surface_uses_only_that_surface_group_for_center() {
 }
 
 #[test]
-fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_cancel() {
-    let (docking, probes) = mounted_three_pane_probed_docking();
+fn actual_splitter_pointer_path_lets_grid_own_preview_and_commits_once_or_restores_on_cancel() {
+    let (docking, _probes) = mounted_three_pane_probed_docking();
     let original = docking.layout();
     let root: Rc<dyn UIElementExt> = docking.clone();
     layout_root(
@@ -4484,7 +4484,7 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
             height: 420.0,
         },
     );
-    let splitter = find_all::<CustomSplitter>(docking.as_ref())
+    let splitter = find_all::<CustomGridSplitter>(docking.as_ref())
         .into_iter()
         .next()
         .expect("three-pane runtime split should contain a splitter");
@@ -4515,13 +4515,6 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
     let relayout = RecordingRelayoutHost::new();
     root.as_ui_element()
         .set_invalidate_host(Some(relayout.clone() as Rc<dyn RelayoutHost>));
-    for probe in &probes {
-        probe.reset_measure_count();
-    }
-    let measure_counts_before_drag = probes
-        .iter()
-        .map(|probe| probe.measure_count())
-        .collect::<Vec<_>>();
     let dispatcher = PointerDispatcher::new();
     let focus = FocusTracker::new();
     dispatcher.handle(
@@ -4546,19 +4539,19 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
     assert_eq!(docking.layout(), original);
     assert_ne!(*grid.columns.borrow(), original_tracks);
     assert_eq!(relayout.flushes.get(), 30);
-    assert_eq!(relayout.requests.borrow().len(), 30);
+    let measure_requests = relayout
+        .requests
+        .borrow()
+        .iter()
+        .filter(|kind| **kind == InvalidationKind::Measure)
+        .count();
+    assert_eq!(measure_requests, 30);
     assert!(
         relayout
             .requests
             .borrow()
             .iter()
-            .all(|kind| *kind == InvalidationKind::Arrange)
-    );
-    assert!(
-        probes
-            .iter()
-            .zip(measure_counts_before_drag.iter())
-            .all(|(probe, before)| probe.measure_count() == *before)
+            .all(|kind| matches!(kind, InvalidationKind::Measure | InvalidationKind::Render))
     );
     assert_eq!(
         realization.borrow().full_reconcile_count_for_test(),
@@ -4601,7 +4594,7 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
             height: 420.0,
         },
     );
-    let canceled_splitter = find_all::<CustomSplitter>(canceled.as_ref())
+    let canceled_splitter = find_all::<CustomGridSplitter>(canceled.as_ref())
         .into_iter()
         .next()
         .expect("canceled split should contain a splitter");
@@ -4660,7 +4653,7 @@ fn actual_splitter_pointer_path_previews_tracks_and_commits_once_or_restores_on_
 }
 
 #[test]
-fn splitter_preview_arranges_retained_children_without_measuring_them() {
+fn splitter_preview_remeasures_retained_children_for_live_layout() {
     let (docking, probes) = mounted_three_pane_probed_docking();
     let root: Rc<dyn UIElementExt> = docking.clone();
     let size = Size {
@@ -4668,7 +4661,7 @@ fn splitter_preview_arranges_retained_children_without_measuring_them() {
         height: 420.0,
     };
     layout_root(&root, size);
-    let splitter = find_all::<CustomSplitter>(docking.as_ref())
+    let splitter = find_all::<CustomGridSplitter>(docking.as_ref())
         .into_iter()
         .next()
         .expect("probed split should contain a splitter");
@@ -4736,7 +4729,7 @@ fn splitter_preview_arranges_retained_children_without_measuring_them() {
         "arrange-only preview should move the pane boundary: columns={:?}",
         grid.columns.borrow(),
     );
-    assert!(probes.iter().all(|probe| probe.measure_count() == 0));
+    assert!(probes.iter().all(|probe| probe.measure_count() > 0));
     assert!(dispatcher.cancel());
 }
 

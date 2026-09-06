@@ -16,7 +16,7 @@ Snapshot: 2026-09-06. Public behavior is defined by [`../specs/ui_spec.md`](../s
 | TabView / TabViewItem | ✅ | ✅ | ⬜ | Hosted page activation, native child reconciliation, and AppKit chrome are implemented. |
 | Rectangle / Ellipse / Image | ✅ | ✅ | ⬜ | Backend-neutral self-rendered controls. |
 | IconElement / IconSourceElement | ✅ | ✅ | ⬜ | Backend-neutral icon values and rendering paths. |
-| CustomTabView / CustomTabViewItem / CustomSplitter | 🚧 | 🚧 | ⬜ | Templated custom controls, retained content, selection, pointer gestures, and splitter semantics are implemented; platform runtime interaction remains incomplete. |
+| CustomTabView / CustomTabViewItem / CustomGridSplitter | 🚧 | 🚧 | ⬜ | Templated custom controls, retained content, selection, pointer gestures, and Grid-aware splitter semantics are implemented; platform runtime interaction remains incomplete. |
 | ControlTemplate / ContentPresenter | ✅ | ✅ | ⬜ | Typed first-application selection and logical/visual separation are implemented; runtime re-template and related advanced features remain out of scope ([#83](https://github.com/puchinya/elwindui/issues/83)). |
 
 ## Current gaps

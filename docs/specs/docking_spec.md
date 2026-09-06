@@ -36,13 +36,20 @@ dragging, splitter resizing, auto-hide, floating, and re-docking preserve that w
 content identity. Runtime ownership changes use detach-before-attach.
 
 `CustomTabView` supplies selection, close, and tab-drag callbacks, including its existing threshold,
-capture, cancellation, root-relative position, and optional logical screen position. `CustomSplitter`
-supplies splitter gestures. Split nodes with N children realize as one retained Grid with N panes and
-N-1 six-pixel `CustomSplitter`s. Splitter movement changes only transient Grid tracks; a successful
-completion writes adjacent normalized weights once, while cancellation restores the original tracks.
-Selection-only changes and completed adjacent split-weight changes update the retained runtime and
-bound value without rebuilding unchanged structural Dock content; live splitter movement only
-updates retained tracks and arrange state.
+capture, cancellation, root-relative position, and optional logical screen position.
+`CustomGridSplitter` owns splitter Grid discovery, track mutation, constraints, live relayout,
+rollback, and resize notifications. Split nodes with N children realize as one retained Grid with N
+panes and N-1 six-pixel `CustomGridSplitter`s. Horizontal splitters use explicit
+`resize_direction = Columns` and `resize_behavior = PreviousAndNext`; vertical splitters use
+`Rows` and `PreviousAndNext`.
+
+Docking supplies pane min/max rules as Grid-owned track constraints during realization. Splitter
+tracks remain unconstrained unless a Docking rule says otherwise. A successful splitter completion
+updates adjacent normalized model weights exactly once from the effective completed cumulative delta;
+Docking does not preview, clamp, restore, or reapply Grid definitions. A canceled completion
+discards only Docking's model transaction and publishes no model change because the splitter has
+already restored the Grid. Selection-only changes and completed adjacent split-weight changes update
+the retained runtime and bound value without rebuilding unchanged structural Dock content.
 
 Document and tool groups expose the authored tab-strip position and chrome appropriate to that
 position. Top-tab groups render tabs above their content; bottom-tab groups render the selected

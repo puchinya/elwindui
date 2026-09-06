@@ -73,44 +73,66 @@ pub type TabDragCompleted = TabDragCompletedEventArgs;
 /// Backwards-compatible short name for [`TabCloseRequestedEventArgs`].
 pub type TabCloseRequested = TabCloseRequestedEventArgs;
 
-/// Payload emitted when splitter dragging starts.
+/// Direction of the Grid axis resized by a `CustomGridSplitter`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GridResizeDirection {
+    #[default]
+    Auto,
+    Columns,
+    Rows,
+}
+
+/// Pair of Grid tracks affected by a `CustomGridSplitter`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GridResizeBehavior {
+    #[default]
+    BasedOnAlignment,
+    CurrentAndNext,
+    PreviousAndCurrent,
+    PreviousAndNext,
+}
+
+/// Input source that created one Grid splitter transaction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GridSplitterInputKind {
+    #[default]
+    Pointer,
+    Keyboard,
+}
+
+/// Payload emitted after a valid Grid splitter transaction starts.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SplitterDragStartedEventArgs {
-    /// The root-relative pointer position.
-    pub position: Point,
-    /// The logical desktop position, when the host supplies it.
+pub struct GridSplitterResizeStartedEventArgs {
+    pub direction: GridResizeDirection,
+    pub target_index: usize,
+    pub sibling_index: usize,
+    pub input_kind: GridSplitterInputKind,
+    pub position: Option<Point>,
     pub screen_position: Option<Point>,
 }
 
-/// Payload emitted for an incremental splitter movement.
+/// Payload emitted after a Grid splitter preview changes the definitions.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SplitterDragDeltaEventArgs {
-    /// Movement along the splitter's logical axis since the previous event.
+pub struct GridSplitterResizeDeltaEventArgs {
     pub delta: f32,
-    /// Total movement along the logical axis since the gesture began.
     pub cumulative_delta: f32,
-    /// The root-relative pointer position.
-    pub position: Point,
-    /// The logical desktop position, when the host supplies it.
+    pub direction: GridResizeDirection,
+    pub target_index: usize,
+    pub sibling_index: usize,
+    pub input_kind: GridSplitterInputKind,
+    pub position: Option<Point>,
     pub screen_position: Option<Point>,
 }
 
-/// Payload emitted when splitter dragging completes or is canceled.
+/// Payload emitted when a Grid splitter transaction completes or is canceled.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SplitterDragCompletedEventArgs {
-    /// Total movement along the logical axis.
+pub struct GridSplitterResizeCompletedEventArgs {
     pub cumulative_delta: f32,
-    /// The final root-relative pointer position.
-    pub position: Point,
-    /// The final normalized logical desktop position, when supplied by the host.
+    pub direction: GridResizeDirection,
+    pub target_index: usize,
+    pub sibling_index: usize,
+    pub input_kind: GridSplitterInputKind,
+    pub position: Option<Point>,
     pub screen_position: Option<Point>,
-    /// Whether the gesture was canceled rather than committed.
     pub canceled: bool,
 }
-
-/// Backwards-compatible short name for [`SplitterDragStartedEventArgs`].
-pub type SplitterDragStarted = SplitterDragStartedEventArgs;
-/// Backwards-compatible short name for [`SplitterDragDeltaEventArgs`].
-pub type SplitterDragDelta = SplitterDragDeltaEventArgs;
-/// Backwards-compatible short name for [`SplitterDragCompletedEventArgs`].
-pub type SplitterDragCompleted = SplitterDragCompletedEventArgs;

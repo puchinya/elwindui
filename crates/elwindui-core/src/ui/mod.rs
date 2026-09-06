@@ -47,9 +47,8 @@ use crate::graphics::{
 use crate::input::{FocusState, RoutedEventArgs};
 use crate::layout::{
     GridCell, GridLength, HorizontalAlignment, Orientation, VerticalAlignment, Visibility,
-    align_within, apply_size_constraints, grid_arrange, grid_measure_pass1_available,
-    grid_pass2_available, grid_resolve_track_sizes, grow_by_margin, shrink_by_margin,
-    shrink_rect_by_margin, stack_arrange, stack_natural_size,
+    align_within, apply_size_constraints, grid_measure_pass1_available, grid_pass2_available,
+    grow_by_margin, shrink_by_margin, shrink_rect_by_margin, stack_arrange, stack_natural_size,
 };
 use std::any::Any;
 use std::cell::{Cell, RefCell};

@@ -1,6 +1,10 @@
 //! `elwindui::ui::Grid` — row/column layout, plus the attached-property read-back its cell placement uses.
 
 use super::*;
+use crate::layout::{
+    GridTrackConstraint, grid_arrange_track_sizes, grid_arrange_with_constraints,
+    grid_resolve_track_sizes_with_constraints,
+};
 
 /// WPF/WinUI3-style row/column layout (`elwindui::ui::Grid`, docs/specs/dsl_spec.md §3). Each child's
 /// cell placement comes from its own `UIElement::attached` bag (the `Grid::row`/`Grid::column`
@@ -32,11 +36,17 @@ pub(crate) fn grid_cell_of(child: &Rc<dyn UIElementExt>) -> GridCell {
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
 #[prop(rows: Vec<crate::layout::GridLength>)]
 #[prop(columns: Vec<crate::layout::GridLength>)]
+#[prop(row_constraints: Vec<crate::layout::GridTrackConstraint>)]
+#[prop(column_constraints: Vec<crate::layout::GridTrackConstraint>)]
 #[prop(attached, row: i32 = 0)]
 #[prop(attached, column: i32 = 0)]
 pub struct Grid {
     pub rows: RefCell<Vec<GridLength>>,
     pub columns: RefCell<Vec<GridLength>>,
+    pub row_constraints: RefCell<Vec<GridTrackConstraint>>,
+    pub column_constraints: RefCell<Vec<GridTrackConstraint>>,
+    resolved_row_sizes: RefCell<Vec<f32>>,
+    resolved_column_sizes: RefCell<Vec<f32>>,
 }
 
 #[elwindui_macros::class]
@@ -47,6 +57,8 @@ impl Grid {
         let cells: Vec<GridCell> = children.iter().map(grid_cell_of).collect();
         let rows = self.rows.borrow();
         let columns = self.columns.borrow();
+        let row_constraints = self.row_constraints.borrow();
+        let column_constraints = self.column_constraints.borrow();
 
         // Pass 1: each child's own natural size, constrained only by its own track where that
         // track already has a known size (`Fixed`) — see `grid_measure_pass1_available`'s own doc
@@ -60,8 +72,15 @@ impl Grid {
             .map(|c| c.measured_size().unwrap_or_default())
             .collect();
 
-        let (row_sizes, col_sizes) =
-            grid_resolve_track_sizes(&rows, &columns, &cells, &pass1_sizes, available);
+        let (row_sizes, col_sizes) = grid_resolve_track_sizes_with_constraints(
+            &rows,
+            &columns,
+            &cells,
+            &pass1_sizes,
+            available,
+            &row_constraints,
+            &column_constraints,
+        );
 
         // Pass 2: re-measure every child against its now-fully-resolved cell size, so
         // `measured_size()` afterward — read back by `arrange_override`'s own track resolution
@@ -86,13 +105,30 @@ impl Grid {
             .iter()
             .map(|c| c.measured_size().unwrap_or_default())
             .collect();
-        let child_rects = grid_arrange(
+        let rows = self.rows.borrow();
+        let columns = self.columns.borrow();
+        let row_constraints = self.row_constraints.borrow();
+        let column_constraints = self.column_constraints.borrow();
+        let (row_sizes, col_sizes) = grid_arrange_track_sizes(
             final_size,
-            &self.rows.borrow(),
-            &self.columns.borrow(),
+            &rows,
+            &columns,
             &cells,
             &child_sizes,
+            &row_constraints,
+            &column_constraints,
         );
+        let child_rects = grid_arrange_with_constraints(
+            final_size,
+            &rows,
+            &columns,
+            &cells,
+            &child_sizes,
+            &row_constraints,
+            &column_constraints,
+        );
+        *self.resolved_row_sizes.borrow_mut() = row_sizes;
+        *self.resolved_column_sizes.borrow_mut() = col_sizes;
         for (child, rect) in children.iter().zip(child_rects) {
             child.arrange(rect);
         }
@@ -100,17 +136,43 @@ impl Grid {
     }
     fn set_rows(&self, rows: Vec<GridLength>) {
         *self.rows.borrow_mut() = rows;
+        self.resolved_row_sizes.borrow_mut().clear();
+        self.resolved_column_sizes.borrow_mut().clear();
         self.invalidate_measure();
     }
     fn set_columns(&self, columns: Vec<GridLength>) {
         *self.columns.borrow_mut() = columns;
+        self.resolved_column_sizes.borrow_mut().clear();
+        self.resolved_row_sizes.borrow_mut().clear();
         self.invalidate_measure();
+    }
+    fn set_row_constraints(&self, constraints: Vec<GridTrackConstraint>) {
+        *self.row_constraints.borrow_mut() = constraints;
+        self.resolved_row_sizes.borrow_mut().clear();
+        self.resolved_column_sizes.borrow_mut().clear();
+        self.invalidate_measure();
+    }
+    fn set_column_constraints(&self, constraints: Vec<GridTrackConstraint>) {
+        *self.column_constraints.borrow_mut() = constraints;
+        self.resolved_column_sizes.borrow_mut().clear();
+        self.resolved_row_sizes.borrow_mut().clear();
+        self.invalidate_measure();
+    }
+    pub fn resolved_row_sizes(&self) -> Vec<f32> {
+        self.resolved_row_sizes.borrow().clone()
+    }
+    pub fn resolved_column_sizes(&self) -> Vec<f32> {
+        self.resolved_column_sizes.borrow().clone()
     }
     fn construct() -> Self {
         Self {
             base: Layout::construct(),
             rows: RefCell::new(Vec::new()),
             columns: RefCell::new(Vec::new()),
+            row_constraints: RefCell::new(Vec::new()),
+            column_constraints: RefCell::new(Vec::new()),
+            resolved_row_sizes: RefCell::new(Vec::new()),
+            resolved_column_sizes: RefCell::new(Vec::new()),
         }
     }
 }
@@ -182,5 +244,42 @@ mod tests {
                 height: 10.0
             }
         );
+    }
+
+    #[test]
+    fn grid_resolved_track_sizes_are_empty_until_arrange_and_clear_on_definition_change() {
+        let root = Grid::new();
+        assert!(root.resolved_row_sizes().is_empty());
+        assert!(root.resolved_column_sizes().is_empty());
+
+        root.set_rows(vec![GridLength::Fixed(10.0)]);
+        root.set_columns(vec![GridLength::Fixed(40.0), GridLength::Star(1.0)]);
+        root.measure(Size {
+            width: 200.0,
+            height: 100.0,
+        });
+        root.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        });
+        assert_eq!(root.resolved_row_sizes(), vec![10.0]);
+        assert_eq!(root.resolved_column_sizes(), vec![40.0, 160.0]);
+
+        root.set_columns(vec![GridLength::Fixed(80.0), GridLength::Star(1.0)]);
+        assert!(root.resolved_row_sizes().is_empty());
+        assert!(root.resolved_column_sizes().is_empty());
+        root.measure(Size {
+            width: 200.0,
+            height: 100.0,
+        });
+        root.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        });
+        assert_eq!(root.resolved_column_sizes(), vec![80.0, 120.0]);
     }
 }

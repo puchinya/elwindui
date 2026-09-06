@@ -16,7 +16,7 @@ pub struct CustomTabView { /* ... */ }
 pub struct CustomTabViewItem { /* ... */ }
 
 #[elwindui::component(inherits Control)]
-pub struct CustomSplitter { /* ... */ }
+pub struct CustomGridSplitter { /* ... */ }
 ```
 
 They use the existing `#[component]` and `template_view!` composition
@@ -106,20 +106,52 @@ the owning tab through a private weak callback. `IconSource` values are realized
 only by Core's `IconSourceElement`; user images are not recolored and no
 SystemIcon geometry is copied into this crate.
 
-## CustomSplitter
+## CustomGridSplitter
 
-`CustomSplitter` inherits `Control`, declares no child collection, and exposes
-`orientation: Orientation`, default `Horizontal`. Horizontal panes use the X
-axis and a 6-pixel width; vertical panes use the Y axis and a 6-pixel height.
-`SplitterDragStartedEventArgs`, `SplitterDragDeltaEventArgs`, and
-`SplitterDragCompletedEventArgs` carry root/screen positions, incremental and
-cumulative logical-pixel movement, and a cancellation flag on completion.
-Orientation is frozen at press time, zero deltas are suppressed, and Core
-cancellation completes an active gesture with `canceled = true`.
+`CustomGridSplitter` inherits `Control`, declares no child collection, and is a
+backend-neutral composed control. Its public properties are
+`resize_direction: GridResizeDirection` (default `Auto`),
+`resize_behavior: GridResizeBehavior` (default `BasedOnAlignment`),
+`parent_level: usize` (default `0`), `drag_increment: f32` (default `1.0`),
+and `keyboard_increment: f32` (default `8.0`). There is no orientation
+property or compatibility alias.
 
-The default splitter template is an orientation-dependent `Rectangle` with
-the six-pixel natural thickness. It does not draw its line through a
-`RenderContext` override.
+At the beginning of each transaction the splitter resolves and freezes the
+target visual ancestor, its parent Grid, the attached row/column index, the
+affected pair, the active direction, the exact track definitions, resolved
+track sizes, and effective track constraints. `Auto` chooses columns when
+horizontal alignment is not `Stretch`, rows when vertical alignment is not
+`Stretch`, then columns when arranged width is no greater than height, and
+rows otherwise. `BasedOnAlignment` maps the non-stretch edge to the adjacent
+pair and centered/stretch alignment to the previous-and-next pair. Invalid
+ancestors, Grids, resolved sizes, or pair indices create no transaction.
+
+The splitter owns live Grid mutation. Pointer deltas are cumulative from the
+original press, truncated to the effective drag increment, clamped by both
+affected tracks' Grid-owned min/max constraints, and derived from the original
+track snapshot. Fixed/Auto pairs become Fixed when resized; mixed Star pairs
+retain their Star side; Star/Star pairs retain Star definitions and use
+baseline resolved sizes as their weight basis. Pointer cancellation restores
+the exact original definitions before completion notification. A normal
+completion keeps the resized definitions.
+
+`CustomGridSplitter` is focusable. Relevant arrow keys create one atomic
+keyboard transaction using the same resolution, constraint, and mutation engine;
+keyboard positions are `None`, and keyboard input is ignored while a pointer
+transaction is active. Invalid increments fall back to `1.0` and `8.0`.
+
+The public notifications are `GridSplitterResizeStartedEventArgs`,
+`GridSplitterResizeDeltaEventArgs`, and `GridSplitterResizeCompletedEventArgs`,
+with `set_on_resize_started`, `set_on_resize_delta`, and
+`set_on_resize_completed`. Notifications identify direction, target/sibling
+indices, input kind, optional positions, and the effective cumulative delta.
+Grid mutation or rollback, session update/clear, and then notification are the
+required ordering. The default template is ordinary composed chrome with a
+six-logical-pixel natural splitter surface. Explicit column and row directions
+stretch a six-pixel vertical or horizontal bar along the active axis; `Auto`
+uses a centered six-by-six grip until a direction is explicitly selected. The
+surface uses neutral, pointer-over/focus, and pressed Fluent-style colors and
+does not draw chrome through a `RenderContext` override.
 
 ## Ownership and input
 

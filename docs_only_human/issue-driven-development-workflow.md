@@ -108,6 +108,8 @@ Implementationでは:
 - 未実行platformやresidual riskを正直に記録する;
 - staging前に全diffをself-reviewする。
 
+実装の前にapproved task-specific Reviewer Checklistを固定し、実装・commit後にevidence-backedなitem-by-item self-reviewを行う。Reviewed-HEADに結び付いたvalidatorがPASSしてからPR/reviewへ進む。
+
 詳細は [`implementation.md`](../docs/agent-workflow/implementation.md) を参照する。
 
 ## 8. Pull Request and review
@@ -121,6 +123,8 @@ PR本文には次を含める。
 - compatibility/residual risk;
 - reviewer guidance;
 - `Closes #<issue-number>`。
+
+PRにはchecklist全体を貼らず、checklist source、SHA-256、reviewed HEAD、PASS/N/A/FAIL件数、validator結果だけを簡潔に記録する。self-reviewは外部reviewの代替ではない。
 
 PR作成、review/comment取得、check確認、label更新は`gh`を使う。reviewでrequirements/design変更が必要になった場合はIssueを`phase:design`へ戻し、承認後に再実装する。
 

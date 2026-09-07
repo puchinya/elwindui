@@ -32,6 +32,16 @@ Cover only the topics relevant to the change:
 
 Do not duplicate stable project-wide rules already present in the root `AGENTS.md` or authoritative specification documents. Link to them and record only decisions specific to the Issue.
 
+## Reviewer Checklist approval gate
+
+Before `phase:ready`, approve one effective task-specific Reviewer Checklist for implementation self-review.
+
+- Direct requests require an Issue `## Reviewer Checklist` with at least one concrete checkbox item. It must cover task-specific risks that acceptance criteria alone do not make safe to infer, without generic repository-wide boilerplate.
+- Supplied contracts use the checklist from the valid exact local contract mirror. Do not copy a complete usable contract checklist into the Issue.
+- Add an Issue `## Reviewer Checklist` only for approved repository-specific supplemental obligations not represented by the contract. Preserve source identity and reject duplicate normalized item text across sources.
+- If the supplied contract has no usable checklist, the Issue checklist is mandatory before `phase:ready`.
+- The effective checklist must be decision-complete enough to judge normal, boundary, failure, synchronization, and platform/runtime risks relevant to the task. A material requirement discovered later returns to requirements/design rather than being silently added during implementation.
+
 ## Design artifacts
 
 Keep ordinary changes in the Issue.

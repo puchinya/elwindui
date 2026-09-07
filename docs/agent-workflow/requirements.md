@@ -11,6 +11,8 @@ For a new repository-changing request with no existing Issue, `phase:requirement
 
 Turn the initial request into a bounded, testable problem statement without starting implementation.
 
+For a direct request, acceptance criteria must describe enough observable behavior to derive the later task-specific Reviewer Checklist. Do not decide architecture-specific checklist obligations in this phase; resolve them in design. For a supplied Implementation Contract, preserve its checklist through the exact local mirror and do not duplicate it into the initial Issue merely for workflow compliance.
+
 ## Required actions
 
 Use `gh` for every GitHub Issue, label, milestone, comment, and Pull Request operation in this workflow. The root [`AGENTS.md`](../../AGENTS.md) is authoritative for GitHub tooling, task bootstrap order, and document synchronization.
@@ -45,6 +47,8 @@ Use `gh` for every GitHub Issue, label, milestone, comment, and Pull Request ope
 8. Use `needs-user-decision` when a user decision blocks progress. Use `blocked` only for an external or technical blocker.
 9. Do not rewrite the Issue body after every exchange. Keep draft reasoning in the active conversation.
 10. If planning must continue in another session, add one concise checkpoint comment containing only decisions, remaining questions, and the next action.
+
+Do not run implementation helpers such as `prepare-self-review.*` during the requirements phase.
 
 ## Issue creation boundary
 

@@ -47,6 +47,8 @@ On resume:
 4. if a contract mirror exists and is valid, re-read the exact contract before continuing material implementation/review decisions;
 5. if `contract_status=invalid`, stop contract-dependent work and resolve the integrity conflict instead of regenerating/overwriting it silently.
 
+`reviewer-checklist.md` and `self-review.md` are local derived workflow state, not requirements/design authority. After resume, do not trust a prior `PASS` blindly: rerun `prepare-self-review.*` and the final `validate-self-review.*` against current sources and HEAD. Do not copy the full checklist or result entries into checkpoint comments.
+
 Local state is not shared between clones. Before changing machines, add one concise `## Work checkpoint` Issue comment with branch, HEAD, completed work, next action, verification summary, and blockers. Do not paste the full contract.
 
 Delete the local Issue directory after merge and Issue closure.

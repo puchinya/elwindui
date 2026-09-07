@@ -5,13 +5,22 @@ This is the durable procedure for native AppKit GUI acceptance. It is separate f
 instruction example. Raw GUI logs remain Issue-scoped evidence; the small reviewer-facing result
 set belongs under `docs/issues/<issue>-<slug>/evidence/`.
 
-## Codex routing and tester ownership
+## Codex and Claude Code routing and tester ownership
 
-This rule applies to Codex only. For every AppKit E2E request, the Codex main agent must assign
-the real GUI execution to one bounded sub-agent before invoking the driver itself. Use the
-`elwindui-appkit-e2e-tester` skill so the role is visibly a tester. The standard Codex E2E
-sub-agent is `gpt-5.6-luna` with standard reasoning effort (`medium`). Claude Code uses its own
-sub-agent mechanism and is not changed by this rule.
+This tester routing is provider-neutral (see also `docs/agents/winui3-e2e.md`'s own copy of this
+policy for WinUI3): both providers use the same bounded tester contract, evidence obligations,
+retry rules, and PASS/FAIL/NOT RUN/BLOCKED semantics. Only the selected tester model and
+provider-specific sub-agent mechanism differ:
+
+```text
+Codex:        GPT-5.6 Luna, standard reasoning effort (medium)
+Claude Code:  Claude Haiku 4.5, normal/default reasoning configuration
+              (do not enable extended thinking for routine E2E execution)
+```
+
+For every AppKit E2E request, the main agent must assign the real GUI execution to one bounded
+sub-agent before invoking the driver itself, using its own provider's sub-agent mechanism (Codex:
+the `elwindui-appkit-e2e-tester` skill, so the role is visibly a tester).
 
 The assigned tester owns the complete case and must not delegate again, commit, push, or change
 Issue/PR state unless explicitly assigned. The main agent reviews the source diff, evidence, and

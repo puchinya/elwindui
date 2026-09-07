@@ -97,5 +97,6 @@ RUSTFLAGS="--cfg rust_analyzer" cargo check --workspace
 ## Visual & UI Verification
 
 - Run relevant examples when UI behavior requires live/visual evidence.
-- For AppKit use `docs/agents/appkit.md`.
-- For WinUI 3 / Windows use `docs/agents/winui3.md`.
+- For AppKit use `docs/agents/appkit.md`; native AppKit E2E routes to `docs/agents/appkit-e2e.md`.
+- For WinUI 3 / Windows use `docs/agents/winui3.md`; native WinUI3 E2E (process/window control,
+  UIA, real input, screenshots) routes to `docs/agents/winui3-e2e.md`, not ad-hoc scripts.

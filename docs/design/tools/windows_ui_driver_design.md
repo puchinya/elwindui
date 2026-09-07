@@ -82,12 +82,21 @@ a product defect.
 
 ## 6. Foreground and coordinate model
 
-Every real-input action follows the same sequence: resolve the exact HWND, call `focus-window`,
-re-read `GetForegroundWindow` to confirm the target actually became foreground, only then perform
-the input, then verify the application postcondition. `SetForegroundWindow`'s own return value is
-never trusted alone. If foreground cannot be established, the action is not attempted and the case
-is classified `environment_blocker` / BLOCKED, with at most one controlled retry after restoring the
-documented precondition.
+For real input, the adapter resolves the exact HWND and delegates the action to the corresponding
+`winapp` real-input command. The `winapp` action owns target foreground establishment and reports
+foreground/session failure through its own backend result — a separate `focus-window` call is not
+a mandatory prerequisite, because Windows' anti-focus-stealing rules can reject an independent
+`SetForegroundWindow` request even when the subsequent `winapp` real-input path can correctly
+target the healthy window (this driver's own `focus-window` was observed to reliably report
+`BLOCKED` in exactly that situation, against a target `winapp` itself could still act on correctly).
+`focus-window` remains available as an explicit diagnostic or case-specific operation — for example,
+a case whose own subject is foreground behavior — but is not part of the default real-input path.
+
+PASS still always requires an independently observed application postcondition; successful
+injection alone (`winapp` exit 0) is never sufficient by itself (see §5). If `winapp` itself reports
+`no_interactive_desktop`, `foreground_not_target`, or an equivalent session/integrity failure, the
+action is classified `environment_blocker` / BLOCKED, with at most one controlled retry after
+restoring the documented precondition.
 
 Custom/self-drawn coordinates absent from the UIA tree are always `window.left/top + case-local
 offset`, recomputed from a fresh `list-windows` immediately before the action — never a coordinate

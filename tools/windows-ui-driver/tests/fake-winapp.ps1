@@ -16,6 +16,10 @@ param(
 )
 
 if ($FakeArgs -contains '--version') {
+    if ($env:ELWINDUI_FAKE_WINAPP_VERSION_FAIL -eq '1') {
+        [Console]::Error.WriteLine('fake-winapp.ps1: simulated broken install (--version failed)')
+        exit 3
+    }
     Write-Output 'fake-winapp 0.0.0-test'
     exit 0
 }

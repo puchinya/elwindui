@@ -343,6 +343,7 @@ function Get-WindowInfo {
     [void][ElwindUI.Win32Driver]::GetWindowThreadProcessId($Hwnd, [ref]$pidOut)
     $dpi = 96
     try { $dpi = [ElwindUI.Win32Driver]::GetDpiForWindow($Hwnd) } catch { $dpi = 96 }
+    $monitor = $null
     $monitorBounds = $null
     $workArea = $null
     $monitorHandle = [ElwindUI.Win32Driver]::MonitorFromWindow($Hwnd, $MONITOR_DEFAULTTONEAREST)
@@ -350,6 +351,7 @@ function Get-WindowInfo {
         $mi = New-Object ElwindUI.Win32Driver+MONITORINFOEX
         $mi.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type][ElwindUI.Win32Driver+MONITORINFOEX])
         if ([ElwindUI.Win32Driver]::GetMonitorInfoW($monitorHandle, [ref]$mi)) {
+            $monitor = $mi.szDevice
             $monitorBounds = @{ left = $mi.rcMonitor.Left; top = $mi.rcMonitor.Top; right = $mi.rcMonitor.Right; bottom = $mi.rcMonitor.Bottom }
             $workArea = @{ left = $mi.rcWork.Left; top = $mi.rcWork.Top; right = $mi.rcWork.Right; bottom = $mi.rcWork.Bottom }
         }
@@ -366,6 +368,7 @@ function Get-WindowInfo {
         width          = ($rect.Right - $rect.Left)
         height         = ($rect.Bottom - $rect.Top)
         dpi            = $dpi
+        monitor        = $monitor
         monitor_bounds = $monitorBounds
         work_area      = $workArea
     }
@@ -449,6 +452,28 @@ function Cmd-Doctor {
             foreground_hwnd      = ('0x{0:X}' -f [int64]$fgHwnd)
             input_desktop_probe  = $inputDesktopProbe
             notes                = @('winapp is an external dependency; this driver never auto-installs it.')
+        }
+    }
+
+    # A successfully *started* `winapp --version` process is not the same as a *healthy* one --
+    # a broken install can still launch and then exit non-zero, or print nothing. Both are
+    # tool_error, not success:true; doctor must never claim a healthy backend from process launch
+    # alone.
+    if (($result.ExitCode -ne 0) -or (-not $winappVersion)) {
+        Emit-Result @{
+            success              = $false
+            category             = 'tool_error'
+            platform             = 'windows'
+            winapp_available     = $false
+            install_command      = 'winget install Microsoft.winappcli --source winget'
+            error                = "winapp --version exited with code $($result.ExitCode) or produced no version output"
+            backend_exit_code    = $result.ExitCode
+            backend_stdout       = $result.StdOut
+            backend_stderr       = $result.StdErr
+            session_id           = $sessionId
+            foreground_hwnd      = ('0x{0:X}' -f [int64]$fgHwnd)
+            input_desktop_probe  = $inputDesktopProbe
+            notes                = @('winapp launched but did not report a healthy version -- treat this the same as a missing/broken install.')
         }
     }
 

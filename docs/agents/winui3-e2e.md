@@ -83,12 +83,16 @@ design a plan. Every sheet has these five sections in this order:
 
 ## Foreground and action grouping
 
-`focus-window` and real-input commands (`point-click`, `drag`, `send-keys --via send-input`) are
-each their own separate `windows-ui-driver.ps1` process invocation, so nothing about "focus, then
-act in the same shell" is implicit -- for UIA-pattern commands this does not matter (they run
-headless); for real input, deliver the action immediately after resolving the exact HWND, since
-`winapp`'s own real-input verbs bring their target to the foreground as part of injecting input
-and fail fast (`environment_blocker`) rather than acting on the wrong window.
+`focus-window` is not a mandatory prerequisite for real-input commands (`point-click`, `drag`,
+`send-keys --via send-input`) -- `winapp`'s own real-input verbs bring their target to the
+foreground themselves as part of injecting input, and fail fast (`environment_blocker`) rather than
+acting on the wrong window. This driver's own `focus-window` (a plain `SetForegroundWindow`) is
+separately subject to Windows' anti-focus-stealing restriction when called from a non-interactive
+process and was observed to reliably report `BLOCKED` in exactly that situation even against a
+healthy, responsive target `winapp` could still act on correctly. Use it only as an explicit
+diagnostic, or for a case whose own subject is foreground behavior. UIA-pattern commands need no
+foreground at all -- they run headless. For real input, deliver the action immediately after
+resolving the exact HWND from the most recent `list-windows`/`search`.
 
 ## Window-relative coordinates
 

@@ -100,6 +100,19 @@ Assert ($r.Json.category -eq 'tool_error') 'doctor (missing backend) -- category
 Assert ($r.Json.install_command -eq 'winget install Microsoft.winappcli --source winget') 'doctor (missing backend) -- exact WinGet install command present'
 Assert ($r.ExitCode -eq 1) 'doctor (missing backend) -- exit code 1'
 
+# T2b -- backend launches but `--version` itself fails (broken install, not a missing one).
+$env:ELWINDUI_WINAPP_PATH = $FakeBackend
+$env:ELWINDUI_FAKE_WINAPP_VERSION_FAIL = '1'
+$r = Invoke-Driver @('doctor')
+Assert-OneJsonObject $r 'doctor (broken version)'
+Assert ($r.Json.success -eq $false) 'doctor (broken version) -- success:false'
+Assert ($r.Json.category -eq 'tool_error') 'doctor (broken version) -- category:tool_error'
+Assert ($r.Json.winapp_available -ne $true) 'doctor (broken version) -- winapp_available is not true'
+Assert ($r.Json.backend_exit_code -eq 3) 'doctor (broken version) -- backend_exit_code preserved (3)'
+Assert ($r.Json.backend_stderr -like '*simulated broken install*') 'doctor (broken version) -- backend_stderr preserved'
+Assert ($r.ExitCode -eq 1) 'doctor (broken version) -- exit code 1'
+Remove-Item Env:ELWINDUI_FAKE_WINAPP_VERSION_FAIL -ErrorAction SilentlyContinue
+
 Remove-Item Env:ELWINDUI_WINAPP_PATH -ErrorAction SilentlyContinue
 
 if ($script:FailureCount -gt 0) {

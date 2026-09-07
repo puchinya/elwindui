@@ -50,6 +50,8 @@ If the mirror exists, re-read it:
 
 Do not duplicate the contract into another persistent context summary.
 
+Supplied contracts may include the paste-safe `ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN` / `END` block. Preparation and validation use that canonical block before legacy Markdown Reviewer Checklist extraction; this preserves checklist semantics across rendered chat copy/paste. Direct Issue checklists and approved Issue supplements remain standard Markdown.
+
 ## Context-efficient execution
 
 Use `scripts/agent/agent-context.* <issue-number>` for compact routing/bootstrap state.

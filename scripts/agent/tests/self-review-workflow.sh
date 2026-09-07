@@ -44,6 +44,21 @@ Path(sys.argv[1]).write_text(json.dumps({"number": 123, "body": sys.argv[2]}), e
 PY
 }
 
+write_contract() {
+  printf '%s\n' "$1" > "$TMP/.agent-state/issues/123/implementation-contract.md"
+  python3 - .agent-state/issues/123/implementation-contract.md .agent-state/issues/123/implementation-contract.sha256 <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+Path(sys.argv[2]).write_text(
+    f"{hashlib.sha256(path.read_bytes()).hexdigest()}  implementation-contract.md\n",
+    encoding="utf-8",
+)
+PY
+}
+
 reset_state() {
   rm -rf "$TMP/.agent-state/issues/123"
   "$TMP/scripts/agent/prepare-work-evidence.sh" 123 >/dev/null
@@ -240,6 +255,76 @@ out="$("$TMP/scripts/agent/prepare-self-review.sh" 123)"
 assert_contains "$out" 'items=2'
 grep -q -- '- C001 | contract | contract obligation one' .agent-state/issues/123/reviewer-checklist.md
 echo 'T2 contract extraction: PASS'
+
+canonical_contract=$'transport heading\nELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\n\nREVIEW_ITEM: canonical obligation one\nREVIEW_ITEM: canonical obligation two\n\nELWINDUI_REVIEWER_CHECKLIST_V1_END\n'
+set_issue_body $'## Purpose\nCanonical contract supplies the checklist.'
+reset_state
+write_contract "$canonical_contract"
+out="$($TMP/scripts/agent/prepare-self-review.sh 123)"
+assert_contains "$out" 'items=2'
+canonical_sha="$(sed -n 's/^review_checklist_sha256=//p' <<<"$out")"
+grep -q -- '- C001 | contract | canonical obligation one' .agent-state/issues/123/reviewer-checklist.md
+grep -q -- '- C002 | contract | canonical obligation two' .agent-state/issues/123/reviewer-checklist.md
+echo 'T22 raw canonical contract: PASS'
+
+fenced_canonical=$'```\nELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\nREVIEW_ITEM: canonical obligation one\nREVIEW_ITEM: canonical obligation two\nELWINDUI_REVIEWER_CHECKLIST_V1_END\n```\n'
+write_contract "$fenced_canonical"
+out="$($TMP/scripts/agent/prepare-self-review.sh 123)"
+assert_contains "$out" 'items=2'
+[[ "$(sed -n 's/^review_checklist_sha256=//p' <<<"$out")" == "$canonical_sha" ]]
+echo 'T23 fenced canonical contract: PASS'
+
+rendered_copy=$'10. Reviewer Checklist\n☐ rendered presentation item\n\nELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\nREVIEW_ITEM: canonical obligation one\nREVIEW_ITEM: canonical obligation two\nELWINDUI_REVIEWER_CHECKLIST_V1_END\n'
+write_contract "$rendered_copy"
+out="$($TMP/scripts/agent/prepare-self-review.sh 123)"
+assert_contains "$out" 'items=2'
+[[ "$(sed -n 's/^review_checklist_sha256=//p' <<<"$out")" == "$canonical_sha" ]]
+! grep -q -- 'rendered presentation item' .agent-state/issues/123/reviewer-checklist.md
+echo 'T24 rendered-copy simulation: PASS'
+
+if command -v pwsh >/dev/null 2>&1; then
+  ps_out="$(pwsh -NoProfile -File "$TMP/scripts/agent/prepare-self-review.ps1" 123)"
+  [[ "$(sed -n 's/^review_checklist_sha256=//p' <<<"$ps_out")" == "$canonical_sha" ]]
+  grep -q -- '- C001 | contract | canonical obligation one' .agent-state/issues/123/reviewer-checklist.md
+  grep -q -- '- C002 | contract | canonical obligation two' .agent-state/issues/123/reviewer-checklist.md
+  echo 'T32 canonical POSIX/PowerShell success parity: PASS'
+else
+  echo 'T32 canonical POSIX/PowerShell success parity: NOT RUN (pwsh unavailable)'
+fi
+
+precedence_contract=$'# Reviewer Checklist\n\n- [ ] legacy Markdown obligation\n\nELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\nREVIEW_ITEM: canonical obligation one\nREVIEW_ITEM: canonical obligation two\nELWINDUI_REVIEWER_CHECKLIST_V1_END\n'
+write_contract "$precedence_contract"
+out="$($TMP/scripts/agent/prepare-self-review.sh 123)"
+assert_contains "$out" 'items=2'
+! grep -q -- 'legacy Markdown obligation' .agent-state/issues/123/reviewer-checklist.md
+echo 'T25 canonical precedence: PASS'
+
+expect_canonical_failure() {
+  local expected="$1"
+  local body="$2"
+  set_issue_body $'## Purpose\nCanonical failure fixture.'
+  reset_state
+  write_contract "$body"
+  expect_parity_prepare_failure "$expected"
+}
+
+expect_canonical_failure canonical-checklist-malformed $'ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\nREVIEW_ITEM: missing end'
+echo 'T26 canonical begin without end: PASS'
+expect_canonical_failure canonical-checklist-multiple $'ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\nREVIEW_ITEM: one\nELWINDUI_REVIEWER_CHECKLIST_V1_END\nELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\nREVIEW_ITEM: two\nELWINDUI_REVIEWER_CHECKLIST_V1_END'
+echo 'T27 multiple canonical blocks: PASS'
+expect_canonical_failure canonical-checklist-empty $'ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\n\nELWINDUI_REVIEWER_CHECKLIST_V1_END'
+echo 'T28 empty canonical block: PASS'
+expect_canonical_failure canonical-checklist-empty $'ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\nREVIEW_ITEM:\nELWINDUI_REVIEWER_CHECKLIST_V1_END'
+echo 'T29 empty canonical item: PASS'
+expect_canonical_failure canonical-checklist-malformed $'ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\nunexpected line\nELWINDUI_REVIEWER_CHECKLIST_V1_END'
+echo 'T30 unexpected canonical line: PASS'
+
+set_issue_body $'## Purpose\nContract supplies the checklist.'
+reset_state
+write_contract "$contract_body"
+out="$($TMP/scripts/agent/prepare-self-review.sh 123)"
+assert_contains "$out" 'items=2'
+echo 'T31 legacy Markdown-only compatibility: PASS'
 
 set_issue_body $'## Reviewer Checklist\n\n- [ ] Issue supplemental one\n- [ ] Issue supplemental two'
 out="$("$TMP/scripts/agent/prepare-self-review.sh" 123)"

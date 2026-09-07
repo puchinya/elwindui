@@ -40,6 +40,7 @@ import subprocess
 import sys
 import unicodedata
 from pathlib import Path
+from typing import Optional
 
 
 issue_json, issue_number_text, base_text = sys.argv[1:]
@@ -85,6 +86,8 @@ heading_re = re.compile(
 generic_heading_re = re.compile(r"^(#{1,6})(?:[ \t]+.*)?$")
 checkbox_re = re.compile(r"^[ \t]*-[ \t]+\[[ xX]\][ \t]+(.+?)\s*$")
 empty_checkbox_re = re.compile(r"^[ \t]*-[ \t]+\[[ xX]\][ \t]*$")
+canonical_begin = "ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN"
+canonical_end = "ELWINDUI_REVIEWER_CHECKLIST_V1_END"
 structured_evidence_re = re.compile(
     r"(?<![A-Za-z0-9_-])(?:"
     r"symbol:[^;\s]+::[^;\s]+|"
@@ -135,6 +138,38 @@ def extract_checklist(text: str, source: str) -> list[str]:
     return items if found else []
 
 
+def extract_canonical_checklist(text: str, source: str) -> Optional[list[str]]:
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    begin_indices = [index for index, line in enumerate(lines) if line.strip() == canonical_begin]
+    end_indices = [index for index, line in enumerate(lines) if line.strip() == canonical_end]
+    if not begin_indices and not end_indices:
+        return None
+    if len(begin_indices) > 1 or len(end_indices) > 1:
+        fail(f"{source} canonical checklist has multiple blocks", "canonical-checklist-multiple")
+    if len(begin_indices) != 1 or len(end_indices) != 1 or end_indices[0] <= begin_indices[0]:
+        fail(f"{source} canonical checklist markers are incomplete", "canonical-checklist-malformed")
+
+    items: list[str] = []
+    for line in lines[begin_indices[0] + 1 : end_indices[0]]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("REVIEW_ITEM:"):
+            fail(f"{source} canonical checklist contains an unexpected line", "canonical-checklist-malformed")
+        item = normalize_checklist_text(stripped[len("REVIEW_ITEM:") :])
+        if not item:
+            fail(f"{source} canonical checklist contains an empty REVIEW_ITEM", "canonical-checklist-empty")
+        items.append(item)
+    if not items:
+        fail(f"{source} canonical checklist block is empty", "canonical-checklist-empty")
+    return items
+
+
+def extract_contract_checklist(text: str, source: str) -> list[str]:
+    canonical_items = extract_canonical_checklist(text, source)
+    return canonical_items if canonical_items is not None else extract_checklist(text, source)
+
+
 def validate_contract() -> list[str]:
     present = contract.exists() or contract_sha.exists()
     if not present:
@@ -146,7 +181,7 @@ def validate_contract() -> list[str]:
     match = re.fullmatch(r"([0-9a-f]{64})\s+implementation-contract\.md", recorded)
     if not match or match.group(1) != actual:
         fail("contract mirror integrity check failed", "contract-integrity")
-    return extract_checklist(contract.read_text(encoding="utf-8"), "contract")
+    return extract_contract_checklist(contract.read_text(encoding="utf-8"), "contract")
 
 
 contract_items = validate_contract()

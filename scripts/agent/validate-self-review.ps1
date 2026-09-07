@@ -45,6 +45,47 @@ function Normalize-DuplicateKey([string] $Text) {
     return $builder.ToString()
 }
 
+function Extract-CanonicalChecklist([string] $Text, [string] $Source) {
+    $canonicalBegin = 'ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN'
+    $canonicalEnd = 'ELWINDUI_REVIEWER_CHECKLIST_V1_END'
+    $normalized = $Text -replace "`r`n", "`n" -replace "`r", "`n"
+    $lines = $normalized -split "`n"
+    $beginIndices = @()
+    $endIndices = @()
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $trimmed = $lines[$index].Trim()
+        if ($trimmed -ceq $canonicalBegin) { $beginIndices += $index }
+        if ($trimmed -ceq $canonicalEnd) { $endIndices += $index }
+    }
+    if ($beginIndices.Count -eq 0 -and $endIndices.Count -eq 0) {
+        return $null
+    }
+    if ($beginIndices.Count -gt 1 -or $endIndices.Count -gt 1) {
+        Stop-Workflow 'canonical-checklist-multiple' "$Source canonical checklist has multiple blocks"
+    }
+    if ($beginIndices.Count -ne 1 -or $endIndices.Count -ne 1 -or $endIndices[0] -le $beginIndices[0]) {
+        Stop-Workflow 'canonical-checklist-malformed' "$Source canonical checklist markers are incomplete"
+    }
+
+    $items = [System.Collections.Generic.List[string]]::new()
+    for ($index = $beginIndices[0] + 1; $index -lt $endIndices[0]; $index++) {
+        $trimmed = $lines[$index].Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+        if (-not $trimmed.StartsWith('REVIEW_ITEM:', [System.StringComparison]::Ordinal)) {
+            Stop-Workflow 'canonical-checklist-malformed' "$Source canonical checklist contains an unexpected line"
+        }
+        $item = Normalize-ChecklistText $trimmed.Substring('REVIEW_ITEM:'.Length)
+        if ([string]::IsNullOrWhiteSpace($item)) {
+            Stop-Workflow 'canonical-checklist-empty' "$Source canonical checklist contains an empty REVIEW_ITEM"
+        }
+        [void] $items.Add($item)
+    }
+    if ($items.Count -eq 0) {
+        Stop-Workflow 'canonical-checklist-empty' "$Source canonical checklist block is empty"
+    }
+    return [string[]] $items.ToArray()
+}
+
 function Has-StructuredEvidence([string] $Text) {
     $pattern = '(?<![A-Za-z0-9_-])(?:symbol:[^;\s]+::[^;\s]+|path:[^;\s]+|test:[^;\s]+|artifact:[^;\s]+|issue:#[1-9][0-9]*|pr:#[1-9][0-9]*|cmd:[^;\s](?:[^;]*[^;\s])?)(?![A-Za-z0-9_-])'
     return [regex]::IsMatch($Text, $pattern, [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
@@ -114,6 +155,15 @@ function Extract-Checklist([string] $Text, [string] $Source) {
     }
 }
 
+function Extract-ContractChecklist([string] $Text, [string] $Source) {
+    $canonicalItems = Extract-CanonicalChecklist $Text $Source
+    if ($null -ne $canonicalItems) {
+        return [string[]] $canonicalItems
+    }
+    $result = Extract-Checklist $Text $Source
+    return [string[]] $result.Items
+}
+
 function Get-ContractItems([string] $Base) {
     $contract = Join-Path $Base 'implementation-contract.md'
     $contractSha = Join-Path $Base 'implementation-contract.sha256'
@@ -130,8 +180,7 @@ function Get-ContractItems([string] $Base) {
     if ($recorded -notmatch '^([0-9a-f]{64})\s+implementation-contract\.md$' -or $Matches[1] -ne $actual) {
         Stop-Workflow 'contract-integrity' 'Contract mirror integrity check failed.'
     }
-    $result = Extract-Checklist ([System.IO.File]::ReadAllText($contract)) 'contract'
-    return [string[]] $result.Items
+    return Extract-ContractChecklist ([System.IO.File]::ReadAllText($contract)) 'contract'
 }
 
 function Get-Metadata([string] $Text, [string] $Name, [string] $Pattern) {

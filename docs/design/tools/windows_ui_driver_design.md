@@ -134,3 +134,12 @@ No ElwindUI public API or WinUI3 backend behavior change. No second UI Automatio
 No vendored `winapp`. No Rust workspace crate for the driver (this is PowerShell, matching the
 already-PowerShell Windows host workflow). This design does not execute or close Issues #224, #226,
 or #157 — it is infrastructure those Issues' own verification work can build on.
+
+## 11. Product E2E ownership boundary
+
+The Windows driver implements platform automation primitives only. It does not own product E2E
+scenario definitions. Durable product scenarios live under
+[`tests/e2e/`](../../../tests/e2e/README.md) and call this driver through the repository E2E
+workflow (`docs/agents/winui3-e2e.md`). This driver's own `tools/windows-ui-driver/tests/` holds
+only its deterministic adapter-contract tests (`driver-contract.ps1`, `fake-winapp.ps1`), never a
+permanent product-specific scenario.

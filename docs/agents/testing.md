@@ -100,3 +100,15 @@ RUSTFLAGS="--cfg rust_analyzer" cargo check --workspace
 - For AppKit use `docs/agents/appkit.md`; native AppKit E2E routes to `docs/agents/appkit-e2e.md`.
 - For WinUI 3 / Windows use `docs/agents/winui3.md`; native WinUI3 E2E (process/window control,
   UIA, real input, screenshots) routes to `docs/agents/winui3-e2e.md`, not ad-hoc scripts.
+
+## Durable E2E case ownership
+
+Durable product/application E2E test cases belong under `tests/e2e/`. Platform drivers remain
+under `tools/*-ui-driver/`. Driver contract/self-tests (e.g.
+`tools/windows-ui-driver/tests/driver-contract.ps1`, `tools/macos-ui-driver`'s own tests) are not
+moved to `tests/e2e/` -- they verify the driver itself, not product behavior.
+
+`docs/agents/appkit-e2e.md` and `docs/agents/winui3-e2e.md` route native execution through their
+respective platform driver, while the durable case a tester executes is selected from `tests/e2e/`.
+Case definition ownership (`tests/e2e/`) is not the same thing as platform driver ownership
+(`tools/*-ui-driver/`) -- do not add permanent product E2E scenarios to a driver's own directory.

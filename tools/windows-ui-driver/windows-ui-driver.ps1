@@ -194,6 +194,24 @@ function ConvertTo-ArgMap {
         if ($tok -like '--*') {
             $name = $tok.Substring(2)
             $next = if ($i + 1 -lt $Tokens.Count) { $Tokens[$i + 1] } else { $null }
+            if ($name -eq 'arg') {
+                # `--arg <value>` is launch's repeated application-argument syntax, mirroring the
+                # AppKit driver's own repeated `--arg <a>` form (tools/macos-ui-driver). Unlike
+                # every other flag, the immediately following token is always consumed verbatim as
+                # this occurrence's value -- including one that itself begins with "--" -- so a
+                # launched application argument such as --some-app-option is never misread as a
+                # driver flag. Every occurrence accumulates, in order, into a list so repeated
+                # `--arg one --arg two` is never collapsed to only the last value (the generic
+                # single-value-per-key map below cannot represent that).
+                if ($null -eq $next) {
+                    $i += 1
+                    continue
+                }
+                if (-not $map.ContainsKey($name)) { $map[$name] = New-Object System.Collections.Generic.List[string] }
+                $map[$name].Add($next)
+                $i += 2
+                continue
+            }
             if ($null -ne $next -and $next -notlike '--*') {
                 $map[$name] = $next
                 $i += 2
@@ -494,17 +512,16 @@ function Cmd-Launch {
     $path = Require-Arg 'path'
     $cwd = Get-Arg 'cwd'
     $timeout = [double](Get-Arg 'wait-window-timeout' 0)
+    # Each `--arg <value>` occurrence is collected in order by ConvertTo-ArgMap (see its own
+    # comment); read it back as a plain array here regardless of whether zero, one, or many
+    # occurrences were given.
     $launchArgs = @()
-    foreach ($k in $Args2.Keys) {
-        if ($k -eq 'arg') {
-            $v = $Args2[$k]
-            if ($v -is [array]) { $launchArgs += $v } else { $launchArgs += $v }
-        }
-    }
+    if ($Args2.ContainsKey('arg')) { $launchArgs = @($Args2['arg']) }
     # Redirect the launched process's own stdin/stdout/stderr to fresh, dedicated pipes -- this is
     # required, not optional, whenever this script's own stdout is itself being captured by a
-    # caller (as tests/theme-demo-e2e.ps1's Invoke-Driver does): without it, the launched (long-
-    # lived) process inherits *this script's own* standard handles, including this script's own
+    # caller (as an E2E case driving this script through a nested pwsh invocation would): without
+    # it, the launched (long-lived) process inherits *this script's own* standard handles, including
+    # this script's own
     # stdout pipe if the caller redirected it. A long-lived child holding that inherited pipe open
     # then prevents the caller's read (e.g. Process.StandardOutput.ReadToEnd()) from ever seeing
     # EOF, even though this script itself exits immediately -- observed as "launch never returns

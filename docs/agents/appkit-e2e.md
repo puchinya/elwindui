@@ -28,6 +28,12 @@ PASS/FAIL/NOT RUN/BLOCKED classification before updating GitHub. This routing ga
 after context compaction and when a GUI process is already running. If no suitable sub-agent or
 GUI-capable execution path is available, report BLOCKED rather than falling back to the main task.
 
+## Durable case ownership
+
+When executing a permanent repository E2E scenario, the scenario must originate under
+[`tests/e2e/`](../../tests/e2e/README.md). Do not create AppKit-only permanent product scenarios
+under `tools/macos-ui-driver/` or `docs/agents/`.
+
 ## Stable driver artifact and rebuild policy
 
 Swift source is the development authority. The checked-in binary is the permission-stable native

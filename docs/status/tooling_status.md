@@ -29,13 +29,10 @@ command catalog is [`../../tools/windows-ui-driver/README.md`](../../tools/windo
 the architecture is [`../design/tools/windows_ui_driver_design.md`](../design/tools/windows_ui_driver_design.md),
 and the operational procedure is [`../agents/winui3-e2e.md`](../agents/winui3-e2e.md).
 
-Live evidence exists for `theme-demo`: a UIA theme-button action (Ocean) and a real-mouse
-theme-button action (Solarized) both verified by resulting label-text postcondition (not
-injection-return-code alone), plus a `--capture-screen` screenshot and clean process termination.
-Two structural gaps found relative to the removed `tools/test-theme-demo-uia.py` migration
-source: current `theme-demo` no longer has a disabled-state native control or a nested `TabView`
-(that content predates a since-simplified `theme-demo`) -- those cases are NOT AVAILABLE against
-the current demo, not FAIL.
+The Windows UI driver and deterministic adapter-contract tests are implemented. Durable product
+E2E scenarios are intentionally deferred to the shared [`tests/e2e/`](../../tests/e2e/README.md)
+suite so AppKit and WinUI3 can consume common case definitions; no permanent Windows product E2E
+coverage is claimed yet.
 
 A genuine host-level `SetForegroundWindow`/`CreateProcess` handle-inheritance issue was found and
 fixed during this driver's own development: a launched long-lived GUI process could keep a caller's

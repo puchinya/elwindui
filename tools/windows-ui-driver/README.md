@@ -34,6 +34,11 @@ pwsh -NoProfile -File .\windows-ui-driver.ps1 doctor
 ```powershell
 $D = '.\windows-ui-driver.ps1'
 pwsh -NoProfile -File $D launch --path C:\path\to\app.exe --wait-window-timeout 10
+# --arg <value> is launch's repeated application-argument syntax (mirrors the AppKit driver's own
+# repeated --arg form). Each occurrence's immediately following token is taken verbatim, in order,
+# even one that itself starts with "--", so a launched app argument is never misread as a driver
+# flag: --arg one --arg two --arg --some-app-option -> child argv ["one", "two", "--some-app-option"].
+pwsh -NoProfile -File $D launch --path C:\path\to\app.exe --arg one --arg two --arg --some-app-option
 pwsh -NoProfile -File $D list-windows --pid <pid>
 pwsh -NoProfile -File $D focus-window --hwnd <hwnd> --timeout 3
 pwsh -NoProfile -File $D search --hwnd <hwnd> --query "Ocean"
@@ -99,13 +104,9 @@ pwsh -NoProfile -File .\tests\driver-contract.ps1
 Deterministic adapter-contract tests against `tests\fake-winapp.ps1` (`ELWINDUI_WINAPP_PATH`
 override) -- no real `winapp`, no real GUI process. Run this before live GUI testing.
 
-```powershell
-pwsh -NoProfile -File .\tests\theme-demo-e2e.ps1 -Issue <issue-number>
-```
-
-Live smoke test against the real `theme-demo` example -- host-context only. See
-[`docs/agents/winui3-e2e.md`](../../docs/agents/winui3-e2e.md) for the full tester procedure this
-is meant to be run under.
+Durable product E2E scenarios are owned by [`tests/e2e/`](../../tests/e2e/README.md) and consume
+this driver. Do not add product-specific E2E scenarios to `tools/windows-ui-driver/tests/`; that
+directory holds only this driver's own deterministic adapter-contract tests.
 
 ## No-vendoring rule
 

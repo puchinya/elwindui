@@ -2,7 +2,8 @@
 .SYNOPSIS
     Deterministic contract tests for windows-ui-driver.ps1, run against tests/fake-winapp.ps1 --
     no real winapp install, no real GUI process. See docs/agents/winui3-e2e.md for the live-GUI
-    smoke test (tests/theme-demo-e2e.ps1), which this script does not replace.
+    tester procedure and tests/e2e/README.md for durable product E2E case ownership, neither of
+    which this script replaces.
 
 .NOTES
     No Pester dependency (contract requirement). Exits non-zero on any assertion failure.
@@ -114,6 +115,37 @@ Assert ($r.ExitCode -eq 1) 'doctor (broken version) -- exit code 1'
 Remove-Item Env:ELWINDUI_FAKE_WINAPP_VERSION_FAIL -ErrorAction SilentlyContinue
 
 Remove-Item Env:ELWINDUI_WINAPP_PATH -ErrorAction SilentlyContinue
+
+# T2/T3 -- launch --arg list semantics: repeated occurrences preserved in order, and a
+# dash-prefixed application argument is passed through rather than misread as a driver flag.
+# `launch` never calls winapp, so these do not need ELWINDUI_WINAPP_PATH; they launch pwsh.exe
+# itself against tests/fake-app.ps1, which records the argv it actually received.
+$FakeApp = Join-Path $PSScriptRoot 'fake-app.ps1'
+$PwshPath = (Get-Process -Id $PID).Path
+$ArgvOut = Join-Path ([System.IO.Path]::GetTempPath()) ("elwindui-launch-argv-{0}.json" -f ([guid]::NewGuid()))
+try {
+    $r = Invoke-Driver @(
+        'launch', '--path', $PwshPath,
+        '--arg', '-NoProfile', '--arg', '-File', '--arg', $FakeApp,
+        '--arg', $ArgvOut,
+        '--arg', 'one', '--arg', 'two', '--arg', '--some-app-option'
+    )
+    Assert-OneJsonObject $r 'launch (--arg list)'
+    Assert ($r.Json.success -eq $true) 'launch (--arg list) -- success:true'
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not (Test-Path -LiteralPath $ArgvOut) -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    Assert (Test-Path -LiteralPath $ArgvOut) 'launch (--arg list) -- fake-app.ps1 wrote its recorded argv'
+    if (Test-Path -LiteralPath $ArgvOut) {
+        $recorded = (Get-Content -LiteralPath $ArgvOut -Raw | ConvertFrom-Json).args
+        Assert (($recorded -join '|') -eq 'one|two|--some-app-option') 'T2/T3 -- repeated --arg values and a dash-prefixed app arg are preserved, in order, verbatim'
+    }
+}
+finally {
+    Remove-Item -LiteralPath $ArgvOut -ErrorAction SilentlyContinue
+}
 
 if ($script:FailureCount -gt 0) {
     Write-Output "`n$script:FailureCount assertion(s) failed."

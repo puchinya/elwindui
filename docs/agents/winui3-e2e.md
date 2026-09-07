@@ -139,85 +139,42 @@ Always end a batch with `terminate --pid <pid> --timeout 5`, even after an abnor
 record whether it needed to force-kill. Do not leave a healthy launched app running after a
 completed run.
 
-## Copy/paste example: theme-demo Ocean/Solarized transitions
+## Durable case ownership
 
-This is a complete fixed instruction sheet. Replace only placeholders explicitly marked as values
-read from the immediately preceding command.
+This guide owns the WinUI3 tester procedure, not the set of permanent product E2E cases. Durable
+product/application E2E scenarios originate under [`tests/e2e/`](../../tests/e2e/README.md); this
+driver and guide only execute them. Do not create WinUI3-only permanent product scenarios under
+`tools/windows-ui-driver/` or this `docs/agents/` guide.
 
-### Scope and prohibitions
+## Executing a durable case
 
-Run exactly these two cases against `theme-demo`: a UIA theme transition (Ocean) and a real-mouse
-theme transition (Solarized). Own both cases to completion; do not delegate again, commit, push,
-or update Issue/PR state.
+1. Select the durable case from `tests/e2e/`.
+2. The main agent resolves that case into a fixed tester instruction sheet (the five-section format
+   above), filling in the case's concrete setup/actions/expected-results/evidence.
+3. The tester executes the instruction sheet through `windows-ui-driver.ps1`, per the fast
+   execution and foreground rules above.
+4. Evidence is stored under the owning Issue's run directory (see "Immutable evidence" above).
+5. The tester returns PASS / FAIL / NOT RUN / BLOCKED for each case, per the classification above.
+6. The tester does not modify the durable case definition during execution -- a case defect or gap
+   is reported back to the main agent, not silently patched by the tester.
 
-### Fixed setup
+The following is a non-authoritative command illustration of driver mechanics, not a durable
+product E2E test case:
 
 ```powershell
 $Root = git rev-parse --show-toplevel
 $D = "$Root\tools\windows-ui-driver\windows-ui-driver.ps1"
 pwsh -NoProfile -File $D doctor
-pwsh -NoProfile -File $D launch --path "$Root\target\debug\theme-demo.exe" --wait-window-timeout 10
-```
-
-Read `pid` and `window.hwnd` from `launch`'s own JSON output and reuse them for every following
-step. Required setup result: `doctor.success == true`, `launch.success == true` with exactly one
-`window`. If either fails, stop as BLOCKED with both JSON results.
-
-```powershell
+pwsh -NoProfile -File $D launch --path "$Root\target\debug\<example>.exe" --wait-window-timeout 10
+# Read pid and window.hwnd from launch's own JSON output and reuse them for every following step.
 pwsh -NoProfile -File $D wait-for --hwnd <hwnd> --selector Default --timeout-ms 5000
-```
-
-A freshly-appeared HWND does not guarantee its UIA tree is populated yet -- wait for a known
-element before the first UIA action rather than querying immediately. If this times out, stop as
-BLOCKED.
-
-### Exact actions
-
-1. UIA theme transition:
-
-   ```powershell
-   pwsh -NoProfile -File $D search --hwnd <hwnd> --query Ocean
-   ```
-
-   Read the `Button`-typed match's `selector` from the result.
-
-   ```powershell
-   pwsh -NoProfile -File $D invoke --hwnd <hwnd> --selector <ocean-button-selector>
-   pwsh -NoProfile -File $D search --hwnd <hwnd> --query Ocean
-   ```
-
-   PASS requires the second `search`'s matches to include a `Text`-typed element named exactly
-   `Ocean`. `invoke` reporting `success: true` alone is NOT RUN/insufficient without this
-   postcondition check.
-
-2. Real-mouse theme transition:
-
-   ```powershell
-   pwsh -NoProfile -File $D search --hwnd <hwnd> --query Solarized
-   ```
-
-   Read the `Button`-typed match's `x`/`y`/`width`/`height`; compute the center point.
-
-   ```powershell
-   pwsh -NoProfile -File $D point-click --hwnd <hwnd> --x <center-x> --y <center-y>
-   pwsh -NoProfile -File $D search --hwnd <hwnd> --query Solarized
-   ```
-
-   PASS requires the second `search`'s matches to include a `Text`-typed element named exactly
-   `Solarized`. If `point-click` itself fails with `category: "environment_blocker"`, classify
-   BLOCKED and cross-reference #224 rather than FAIL. If it reports success but the label never
-   changes, classify FAIL -- this is the exact defect class #224 documents (injection success
-   without observed delivery).
-
-### Expected results, report, and cleanup
-
-Use only PASS, FAIL, NOT RUN, or BLOCKED. Report one compact table containing case, status,
-PID/HWND, the resolved selectors/coordinates, and the immutable run directory path. Finish with:
-
-```powershell
+pwsh -NoProfile -File $D search --hwnd <hwnd> --query <element-name>
+pwsh -NoProfile -File $D invoke --hwnd <hwnd> --selector <selector-from-search>
 pwsh -NoProfile -File $D terminate --pid <pid> --timeout 5
 ```
 
-The process must terminate without force under normal conditions; if force was required, report
-that explicitly. The tester must not update Issue/PR state -- the main agent consumes the report
-and performs the GitHub workflow.
+A freshly-appeared HWND does not guarantee its UIA tree is populated yet -- wait for a known
+element before the first UIA action rather than querying immediately. The process must terminate
+without force under normal conditions; if force was required, report that explicitly. The tester
+must not update Issue/PR state -- the main agent consumes the report and performs the GitHub
+workflow.

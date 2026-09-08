@@ -110,7 +110,7 @@ preceding UIA action or focus change.
 ## Immutable evidence
 
 ```powershell
-$Issue = 242
+$Issue = <owning-issue-number>
 $HeadShort = (git rev-parse --short=12 HEAD)
 $RunId = (Get-Date -AsUTC).ToString('yyyyMMddTHHmmssZ')
 $Run = "$Root\.agent-state\issues\$Issue\e2e\$HeadShort\$RunId"

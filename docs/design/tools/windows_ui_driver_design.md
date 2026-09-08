@@ -103,14 +103,44 @@ offset`, recomputed from a fresh `list-windows` immediately before the action �
 cached across a move, resize, floating-window create/close, dock/undock, monitor transition, or
 DPI-affecting transition.
 
-## 7. Screenshot modes
+## 7. Process launch and stdio ownership
+
+The driver owns process creation and PID/window discovery, not application log transport.
+
+Before launching any child, the driver clears the inherit flag on its own standard handles
+(`MakeOwnStdHandlesNonInheritable`, called once at script startup). This is the invariant that
+prevents a long-lived launched process from inheriting the *driver's own* caller-facing stdout
+pipe and holding its write end open past the driver's own exit — the original failure mode
+observed when a caller captured this driver's stdout across a nested process invocation.
+
+`launch` then starts the target application without any driver-owned redirected
+stdin/stdout/stderr pipes (`RedirectStandardOutput`/`RedirectStandardError`/`RedirectStandardInput`
+are never set on the launched process's own `ProcessStartInfo`). This is deliberate, not an
+oversight: a redirected-but-unread pipe backpressures the child once the OS buffer fills, which is
+a *different* deadlock class than the one the handle-inheritance fix addresses, and was rejected
+as a design (no drain jobs, no `BeginOutputReadLine` event handlers, no `CopyToAsync` drain
+ownership — each was tried during this driver's own development and each introduced its own
+reproducible hang).
+
+Together these two invariants mean: a caller capturing this driver's own stdout sees EOF as soon
+as the driver process itself exits, regardless of whether the launched application is still
+running, and the launched application's own stdout/stderr never becomes part of the driver's JSON
+protocol. Application log capture is explicitly out of scope for `launch` — a durable case that
+needs application logs must use an explicit case/application logging mechanism, not implicit
+driver capture. This split is proven by a deterministic regression in
+`tools/windows-ui-driver/tests/driver-contract.ps1` that launches a nested driver process, launches
+a long-lived fake child through it, and asserts the nested driver's own stdout reaches EOF while
+that child is still alive and that the child's own output never appears in the driver's captured
+stdout/stderr.
+
+## 8. Screenshot modes
 
 `capture-window` defaults to `winapp ui screenshot` targeting the exact HWND. A case whose evidence
 requires a `MenuFlyout`, popup, tooltip, dropdown, or other overlay outside the owning window's own
 paint must explicitly request the `--capture-screen` path, and the recorded evidence states which
 mode was actually used — a case never silently reports one mode's result as equivalent to the other.
 
-## 8. Evidence model
+## 9. Evidence model
 
 Each run uses the same Issue-scoped, immutable shape already established for AppKit:
 `.agent-state/issues/<issue>/e2e/<head-short>/<run-id>/`, with separate stdout/stderr per action,
@@ -119,7 +149,7 @@ repository HEAD and `origin/master`, host OS version/architecture/session metada
 Raw logs stay under `.agent-state`; only a small reviewer-facing result set is committed, and only
 when the owning Issue requires durable evidence.
 
-## 9. External dependency lifecycle
+## 10. External dependency lifecycle
 
 `winapp` is versioned and updated entirely outside this repository. The adapter's contract is
 therefore defined against `winapp`'s documented JSON/exit-code behavior, not against a pinned
@@ -128,14 +158,14 @@ removes or changes a verb this adapter depends on, that is reported as an exact
 command/version/error against this design, not silently absorbed by switching to a different
 automation framework.
 
-## 10. Non-goals
+## 11. Non-goals
 
 No ElwindUI public API or WinUI3 backend behavior change. No second UI Automation implementation.
 No vendored `winapp`. No Rust workspace crate for the driver (this is PowerShell, matching the
 already-PowerShell Windows host workflow). This design does not execute or close Issues #224, #226,
 or #157 — it is infrastructure those Issues' own verification work can build on.
 
-## 11. Product E2E ownership boundary
+## 12. Product E2E ownership boundary
 
 The Windows driver implements platform automation primitives only. It does not own product E2E
 scenario definitions. Durable product scenarios live under

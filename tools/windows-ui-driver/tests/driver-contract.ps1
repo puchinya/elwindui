@@ -116,7 +116,7 @@ Remove-Item Env:ELWINDUI_FAKE_WINAPP_VERSION_FAIL -ErrorAction SilentlyContinue
 
 Remove-Item Env:ELWINDUI_WINAPP_PATH -ErrorAction SilentlyContinue
 
-# T5 -- launch --arg list semantics regression: repeated occurrences preserved in order, and a
+# T9 -- launch --arg list semantics regression: repeated occurrences preserved in order, and a
 # dash-prefixed application argument is passed through rather than misread as a driver flag.
 # `launch` never calls winapp, so these do not need ELWINDUI_WINAPP_PATH; they launch pwsh.exe
 # itself against tests/fake-app.ps1, which records the argv it actually received.
@@ -140,7 +140,7 @@ try {
     Assert (Test-Path -LiteralPath $ArgvOut) 'launch (--arg list) -- fake-app.ps1 wrote its recorded argv'
     if (Test-Path -LiteralPath $ArgvOut) {
         $recorded = (Get-Content -LiteralPath $ArgvOut -Raw | ConvertFrom-Json).args
-        Assert (($recorded -join '|') -eq 'one|two|--some-app-option') 'T5 -- repeated --arg values and a dash-prefixed app arg are preserved, in order, verbatim'
+        Assert (($recorded -join '|') -eq 'one|two|--some-app-option') 'T9 -- repeated --arg values and a dash-prefixed app arg are preserved, in order, verbatim'
     }
 }
 finally {
@@ -162,6 +162,58 @@ Assert-OneJsonObject $r 'launch (--path swallowed by next flag)'
 Assert ($r.Json.success -eq $false) 'launch (--path swallowed by next flag) -- success:false'
 Assert ($r.Json.category -eq 'usage_error') 'launch (--path swallowed by next flag) -- category:usage_error'
 Assert ($r.ExitCode -eq 1) 'launch (--path swallowed by next flag) -- exit code 1'
+
+# T5/T6 -- child stdio ownership regression: a caller capturing the (nested) driver's own stdout
+# must see EOF as soon as the driver itself exits, never held open by a long-lived launched child,
+# and the child's own stdout/stderr must never leak into the driver's captured JSON stdout. This
+# reproduces the original nested-caller hang (theme-demo-e2e.ps1 -> windows-ui-driver.ps1 launch
+# -> a long-lived GUI process) with a fake child standing in for the GUI process.
+$NestedArgvOut = Join-Path ([System.IO.Path]::GetTempPath()) ("elwindui-nested-argv-{0}.json" -f ([guid]::NewGuid()))
+$childPid = $null
+try {
+    $childArgs = @('-NoProfile', '-File', $FakeApp, '-HoldSeconds', '5', '-WriteStdoutMarker', '-WriteStderrMarker', $NestedArgvOut)
+    $nestedDriverArgs = New-Object System.Collections.Generic.List[string]
+    $nestedDriverArgs.Add('-NoProfile'); $nestedDriverArgs.Add('-File'); $nestedDriverArgs.Add($Driver)
+    $nestedDriverArgs.Add('launch'); $nestedDriverArgs.Add('--path'); $nestedDriverArgs.Add($PwshPath)
+    foreach ($a in $childArgs) { $nestedDriverArgs.Add('--arg'); $nestedDriverArgs.Add($a) }
+
+    $nestedPsi = New-Object System.Diagnostics.ProcessStartInfo
+    $nestedPsi.FileName = $PwshPath
+    foreach ($a in $nestedDriverArgs) { $nestedPsi.ArgumentList.Add($a) }
+    $nestedPsi.UseShellExecute = $false
+    $nestedPsi.CreateNoWindow = $true
+    $nestedPsi.RedirectStandardOutput = $true
+    $nestedPsi.RedirectStandardError = $true
+
+    $nestedProc = [System.Diagnostics.Process]::Start($nestedPsi)
+    $stdoutTask = $nestedProc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $nestedProc.StandardError.ReadToEndAsync()
+    # Bounded timeout: the nested driver itself must exit and its stdout must reach EOF in well
+    # under this, regardless of the 5s-held child -- a regression here means the caller is blocked
+    # on the child again.
+    $eofReached = $stdoutTask.Wait(15000)
+    Assert $eofReached 'T5 -- nested driver stdout reaches EOF within the bounded timeout, independent of the long-lived child'
+
+    if ($eofReached) {
+        $nestedProc.WaitForExit(5000) | Out-Null
+        $nestedStdout = $stdoutTask.Result
+        $nestedStderr = $stderrTask.Result
+        $nestedJson = $null
+        try { $nestedJson = $nestedStdout.Trim() | ConvertFrom-Json -ErrorAction Stop } catch { $nestedJson = $null }
+        Assert ($null -ne $nestedJson) 'T5 -- nested driver stdout parses as one JSON object'
+        Assert ($nestedJson.success -eq $true) 'T5 -- nested driver launch success:true'
+        if ($null -ne $nestedJson) { $childPid = [int]$nestedJson.pid }
+
+        Assert ($null -ne $childPid -and (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) 'T5 -- the long-lived child is still alive when the nested driver''s stdout reaches EOF'
+
+        Assert (-not ($nestedStdout -match 'FAKE_APP_STDOUT_MARKER')) 'T6 -- the child''s own stdout marker does not leak into the driver''s captured stdout JSON'
+        Assert (-not ($nestedStderr -match 'FAKE_APP_STDERR_MARKER')) 'T6 -- the child''s own stderr marker does not leak into the driver''s captured stderr'
+    }
+}
+finally {
+    if ($childPid) { Stop-Process -Id $childPid -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $NestedArgvOut -ErrorAction SilentlyContinue
+}
 
 if ($script:FailureCount -gt 0) {
     Write-Output "`n$script:FailureCount assertion(s) failed."

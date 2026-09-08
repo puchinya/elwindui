@@ -1,9 +1,12 @@
 # AppKit Native E2E Tester Guide
 
-This is the durable procedure for native AppKit GUI acceptance. It is separate from
-[`appkit.md`](appkit.md), so a fresh clone contains the complete tester workflow and its fixed
-instruction example. Raw GUI logs remain Issue-scoped evidence; the small reviewer-facing result
-set belongs under `docs/issues/<issue>-<slug>/evidence/`.
+This guide defines the durable AppKit tester procedure and fixed tester instruction-sheet format.
+It is separate from [`appkit.md`](appkit.md), so a fresh clone contains the complete tester
+workflow. Any command snippet in this guide is a non-authoritative mechanics illustration, not a
+fixed product instruction example -- durable product cases originate under
+[`tests/e2e/`](../../tests/e2e/README.md). Raw GUI logs remain Issue-scoped evidence under the
+owning Issue's immutable `.agent-state` run directory; commit only a small reviewer-facing evidence
+subset when the owning Issue/workflow explicitly requires it.
 
 ## Codex and Claude Code routing and tester ownership
 
@@ -119,31 +122,37 @@ screen_x = current_window.x + case_local_x
 screen_y = current_window.y + case_local_y
 ```
 
-For example, if the current MAIN origin is `<main-x>,<main-y>`, the stable Document A tab offset
-`(80,127)` becomes `TAB_A_X=$((MAIN_X+80))` and `TAB_A_Y=$((MAIN_Y+127))`. Do not reuse a stale
-origin after moving or resizing a window.
+`case_local_x`/`case_local_y` are supplied by the selected durable case under `tests/e2e/`, not by
+this guide -- for example, if the current window origin is `<window-x>,<window-y>` and the case
+defines a target offset `<case-local-x>,<case-local-y>`, compute
+`TARGET_X=$((WINDOW_X+CASE_LOCAL_X))` and `TARGET_Y=$((WINDOW_Y+CASE_LOCAL_Y))`. Do not reuse a
+stale origin after moving or resizing a window.
 
 ## Immutable evidence and session metadata
 
 Every run uses a new directory and never overwrites earlier evidence:
 
 ```zsh
-ISSUE=220
+ISSUE=<owning-issue-number>
+CASE_ID=<case-id>
 HEAD_SHORT="$(git rev-parse --short=12 HEAD)"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN="$ROOT/.agent-state/issues/$ISSUE/e2e/$HEAD_SHORT/$RUN_ID"
-CASE="$RUN/snapshot"
+CASE="$RUN/$CASE_ID"
 mkdir -p "$CASE"
 ```
 
 Record `HEAD`, `origin/master`, driver SHA-256, source fingerprint and freshness result, macOS
-version, architecture, `doctor` output, and demo SHA-256 in the run directory. Raw logs go under
-that run directory. Commit only the small selected result set under
-`docs/issues/220-docking-ux-parity/evidence/`; do not commit `.agent-state` or full logs.
+version, architecture, `doctor` output, and demo SHA-256 in the run directory. Raw logs remain
+under the owning Issue's immutable `.agent-state` run directory; commit only a small
+reviewer-facing evidence subset when the owning Issue/workflow explicitly requires it -- do not
+invent a universal committed-evidence directory, and do not commit full `.agent-state` logs.
 
-Native evidence is invalidated only by effective changes to the AppKit backend, Core layout/input/
-host, Custom Controls used by the case, Docking, `docking-demo`, driver source, or checked-in
-driver binary. Unrelated WinUI3 and documentation changes do not invalidate it.
+Native evidence is invalidated by effective changes to: the selected durable case definition or
+its declared dependencies; AppKit/backend/core behavior relevant to that case; the target
+example/application used by that case; or `macos-ui-driver` source or the checked-in driver
+binary. Unrelated WinUI3-only or documentation-only changes do not invalidate AppKit evidence
+unless the selected case explicitly depends on them.
 
 ## Executing a durable case
 

@@ -1,10 +1,10 @@
 # WinUI3 Native E2E Tester Guide
 
-This is the durable procedure for native WinUI3 GUI acceptance. It is separate from
-[`winui3.md`](winui3.md), so a fresh clone contains the complete tester workflow and its fixed
-instruction example. Raw GUI logs remain Issue-scoped evidence under
-`.agent-state/issues/<issue>/e2e/<head>/<run-id>/`; a small reviewer-facing result set may be
-committed when the owning Issue requires durable evidence.
+This is the complete tester workflow, fixed instruction-sheet format, and non-authoritative driver
+command illustration for native WinUI3 GUI acceptance. It is separate from
+[`winui3.md`](winui3.md), so a fresh clone contains the complete tester workflow. Raw GUI logs
+remain Issue-scoped evidence under `.agent-state/issues/<issue>/e2e/<head>/<run-id>/`; a small
+reviewer-facing result set may be committed when the owning Issue requires durable evidence.
 
 ## Codex and Claude Code routing and tester ownership
 

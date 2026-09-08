@@ -39,6 +39,9 @@ pwsh -NoProfile -File $D launch --path C:\path\to\app.exe --wait-window-timeout 
 # even one that itself starts with "--", so a launched app argument is never misread as a driver
 # flag: --arg one --arg two --arg --some-app-option -> child argv ["one", "two", "--some-app-option"].
 pwsh -NoProfile -File $D launch --path C:\path\to\app.exe --arg one --arg two --arg --some-app-option
+# `launch` does not capture application stdout/stderr. Driver stdout remains reserved for the
+# driver's single JSON result. If a durable case needs application logs, use an explicit
+# case/application logging mechanism -- do not depend on implicit driver capture.
 pwsh -NoProfile -File $D list-windows --pid <pid>
 pwsh -NoProfile -File $D focus-window --hwnd <hwnd> --timeout 3
 pwsh -NoProfile -File $D search --hwnd <hwnd> --query "Ocean"
@@ -112,5 +115,5 @@ directory holds only this driver's own deterministic adapter-contract tests.
 
 `winapp` is external, Microsoft-maintained, and versioned independently of this repository. Do not
 check its executable into this repository and do not have this driver install or update it as a
-side effect of running -- see the design doc's Section 9 for why the external tool's own `doctor`
+side effect of running -- see the design doc's Section 10 for why the external tool's own `doctor`
 version output, not a pinned binary, is this driver's reproducibility anchor.

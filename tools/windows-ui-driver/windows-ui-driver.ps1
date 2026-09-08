@@ -533,33 +533,32 @@ function Cmd-Launch {
     # occurrences were given.
     $launchArgs = @()
     if ($Args2.ContainsKey('arg')) { $launchArgs = @($Args2['arg']) }
-    # Redirect the launched process's own stdin/stdout/stderr to fresh, dedicated pipes -- this is
-    # required, not optional, whenever this script's own stdout is itself being captured by a
-    # caller (as an E2E case driving this script through a nested pwsh invocation would): without
-    # it, the launched (long-lived) process inherits *this script's own* standard handles, including
-    # this script's own
-    # stdout pipe if the caller redirected it. A long-lived child holding that inherited pipe open
-    # then prevents the caller's read (e.g. Process.StandardOutput.ReadToEnd()) from ever seeing
-    # EOF, even though this script itself exits immediately -- observed as "launch never returns
-    # until the launched window is closed" when driven through a nested pwsh invocation.
+    # This driver never connects the launched product process's own stdin/stdout/stderr to a
+    # driver-owned pipe. Two invariants together make that safe for a caller capturing *this
+    # script's own* stdout (as an E2E case driving this script through a nested pwsh invocation
+    # does):
+    #   1. MakeOwnStdHandlesNonInheritable() (called once, at script startup, before any child is
+    #      launched) clears the inherit flag on this process's own standard handles, so the
+    #      launched (long-lived) child cannot inherit this script's own stdout pipe and hold its
+    #      write end open past this script's own exit -- that inherited-handle propagation was the
+    #      original cause of a caller's read never reaching EOF even though this script itself had
+    #      already exited.
+    #   2. Simply not setting RedirectStandardOutput/Error/Input here means there is no
+    #      driver-owned pipe for the child to fill in the first place -- a redirected-but-unread
+    #      pipe backpressures the child once the OS buffer fills, which is a *different* deadlock
+    #      class than (1) and was rejected as a design (see docs/design/tools/windows_ui_driver_design.md).
+    #      A launched process's stdout/stderr is therefore not part of this driver's JSON protocol
+    #      and is never captured -- application log capture is out of scope for `launch`.
     # CreateNoWindow additionally suppresses the console-host window Windows would otherwise
     # allocate for this workspace's examples (default console subsystem, no
     # `#![windows_subsystem = "windows"]`), which was separately observed to appear as an extra,
     # nearly-full-screen top-level window for the same PID and get misidentified as the main window.
-    # Deliberately not draining the redirected pipes: two different active-draining approaches
-    # (BeginOutputReadLine with a PowerShell scriptblock handler; Stream.CopyToAsync to a file) each
-    # introduced their own reproducible hang. Redirecting without reading risks the launched process
-    # blocking if it fills the pipe's OS buffer, but theme-demo (and this workspace's other simple
-    # examples) do not write meaningfully to stdout/stderr during normal operation.
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $path
     foreach ($a in $launchArgs) { $psi.ArgumentList.Add($a) }
     if ($cwd) { $psi.WorkingDirectory = $cwd }
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.RedirectStandardInput = $true
     try {
         $proc = [System.Diagnostics.Process]::Start($psi)
     }

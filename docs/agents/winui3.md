@@ -7,6 +7,7 @@ Guidelines for AI agents modifying `elwindui-backend-winui3` or building/testing
 - Architecture: [`docs/design/backends/winui3_backend_design.md`](../design/backends/winui3_backend_design.md)
 - Backend state: [`docs/status/backend_status.md`](../status/backend_status.md)
 - Control state: [`docs/status/control_status.md`](../status/control_status.md)
+- Native E2E driver and tester procedure: [`winui3-e2e.md`](winui3-e2e.md)
 
 ## Windows Build Environment
 

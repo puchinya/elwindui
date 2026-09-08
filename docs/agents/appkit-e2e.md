@@ -145,49 +145,26 @@ Native evidence is invalidated only by effective changes to the AppKit backend, 
 host, Custom Controls used by the case, Docking, `docking-demo`, driver source, or checked-in
 driver binary. Unrelated WinUI3 and documentation changes do not invalidate it.
 
-## Copy/paste example: PR #221 Snapshot and menu lifetime
+## Executing a durable case
 
-This is a complete fixed instruction sheet. Replace only placeholders explicitly marked as values
-read from the immediately preceding command, such as `<PID>` and `<window-id>`. Do not redesign
-the sequence in the tester.
+1. Select the durable case from [`tests/e2e/`](../../tests/e2e/README.md).
+2. The main agent resolves that case into the fixed five-section tester instruction sheet.
+3. The tester executes it through `macos-ui-driver`.
+4. Evidence is stored under the owning Issue's immutable run directory.
+5. The tester reports PASS / FAIL / NOT RUN / BLOCKED.
+6. The tester does not modify the durable case definition during execution.
 
-### Scope and prohibitions
-
-Run exactly these two cases:
-
-1. Native floating bounds A -> B -> restored C using Save/Restore.
-2. Main-thread native menu wrapper lifetime after dropping the caller's `Rc`.
-
-Own both cases to completion. Do not delegate again, commit, push, or update Issue/PR state.
-
-### Fixed setup
+The following is a non-authoritative command illustration of driver mechanics, not a durable
+product E2E test case:
 
 ```zsh
-set -e
 ROOT="$(git rev-parse --show-toplevel)"
 BIN="$ROOT/tools/macos-ui-driver/bin/macos-ui-driver"
-APP="$ROOT/target/debug/docking-demo"
-ISSUE=220
-HEAD_SHORT="$(git rev-parse --short=12 HEAD)"
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-RUN="$ROOT/.agent-state/issues/$ISSUE/e2e/$HEAD_SHORT/$RUN_ID"
-CASE="$RUN/snapshot"
-mkdir -p "$CASE"
-
-"$ROOT/tools/macos-ui-driver/verify-e2e-binary.sh" \
-  >"$CASE/verify-binary.stdout" 2>"$CASE/verify-binary.stderr"
-"$BIN" doctor >"$CASE/doctor.stdout" 2>"$CASE/doctor.stderr"
-"$BIN" launch --path "$APP" --wait-window-timeout 5 \
-  >"$CASE/launch.stdout" 2>"$CASE/launch.stderr"
-# Read PID once from launch.stdout and reuse it for every compatible step.
-PID=<PID-from-launch.stdout>
-"$BIN" list-windows --pid "$PID" >"$CASE/setup-windows.stdout" 2>"$CASE/setup-windows.stderr"
-MAIN=<window-id-for-title-ElwindUI-Docking-Demo>
-MAIN_X=<x-from-setup-windows.stdout>
-MAIN_Y=<y-from-setup-windows.stdout>
-TAB_A_X=$((MAIN_X+80))
-TAB_A_Y=$((MAIN_Y+127))
-
+"$ROOT/tools/macos-ui-driver/verify-e2e-binary.sh"
+"$BIN" doctor
+"$BIN" launch --path "$ROOT/target/debug/<example>" --wait-window-timeout 5
+# Read PID once from launch's own output and reuse it for every compatible step.
+"$BIN" list-windows --pid "$PID"
 run_focused() {
   local target="$1" focus_stdout="$2" focus_stderr="$3" action_stdout="$4" action_stderr="$5"
   shift 5
@@ -195,113 +172,15 @@ run_focused() {
     >"$focus_stdout" 2>"$focus_stderr" || return
   "$BIN" "$@" >"$action_stdout" 2>"$action_stderr"
 }
-
-if ! run_focused "$MAIN" "$CASE/main-focus.stdout" "$CASE/main-focus.stderr" \
-    "$CASE/open-menu.stdout" "$CASE/open-menu.stderr" \
-    point-click --pid "$PID" --window-id "$MAIN" --x "$TAB_A_X" --y "$TAB_A_Y" --button right; then
-  exit 1
-fi
+"$BIN" terminate --pid "$PID" --timeout 5
 ```
-
-Required setup result: freshness is `SYNCED` (or the explicitly documented baseline exception),
-`doctor` has `success:true`, `accessibility:true`, and `screen_recording:true`, and launch has a
-live PID plus a `window` object. If any requirement fails, stop as BLOCKED with both streams.
-
-### Exact actions: Snapshot native bounds
-
-1. After the setup block opens the menu, select Float through Accessibility in the same shell
-   invocation as its focus check:
-
-   ```zsh
-   run_focused "$MAIN" "$CASE/float-focus.stdout" "$CASE/float-focus.stderr" \
-     "$CASE/float.stdout" "$CASE/float.stderr" \
-     click --pid "$PID" --window-title 'ElwindUI Docking Demo' --title 'Float' --via ax-press
-   ```
-
-2. List windows, set FLOAT to the window titled `Document A`, then focus/capture it atomically:
-
-   ```zsh
-   "$BIN" list-windows --pid "$PID" >"$CASE/a-windows.stdout" 2>"$CASE/a-windows.stderr"
-   FLOAT=<window-id-titled-Document-A>
-   run_focused "$FLOAT" "$CASE/a-focus.stdout" "$CASE/a-focus.stderr" \
-     "$CASE/a-capture.stdout" "$CASE/a-capture.stderr" \
-     capture-window --window-id "$FLOAT" --out "$CASE/snapshot-bounds-a.png"
-   ```
-
-   Record A as `(x,y,width,height)` from `a-windows.stdout`.
-
-3. Focus MAIN and invoke Save through Accessibility in one shell invocation:
-
-   ```zsh
-   run_focused "$MAIN" "$CASE/save-focus.stdout" "$CASE/save-focus.stderr" \
-     "$CASE/save.stdout" "$CASE/save.stderr" \
-     click --pid "$PID" --window-title 'ElwindUI Docking Demo' --title 'Save snapshot' --via ax-press
-   ```
-
-4. Move FLOAT using its current bounds plus case-local offsets, then focus/resize and list B:
-
-   ```zsh
-   FLOAT_X=<x-from-a-windows.stdout>
-   FLOAT_Y=<y-from-a-windows.stdout>
-   MOVE_X=$((FLOAT_X+400))
-   MOVE_Y=$((FLOAT_Y+240))
-   "$BIN" focus-window --pid "$PID" --window-id "$FLOAT" --timeout 5 \
-     >"$CASE/move-focus.stdout" 2>"$CASE/move-focus.stderr"
-   osascript -e "tell application \"System Events\" to tell process \"docking-demo\" to set position of window \"Document A\" to {$MOVE_X, $MOVE_Y}" \
-     >"$CASE/move.stdout" 2>"$CASE/move.stderr"
-   run_focused "$FLOAT" "$CASE/resize-focus.stdout" "$CASE/resize-focus.stderr" \
-     "$CASE/resize.stdout" "$CASE/resize.stderr" \
-     resize --pid "$PID" --window-id "$FLOAT" --delta-width -120 --delta-height -80 \
-       --steps 30 --duration 1.0 --timeout 2.0
-   "$BIN" list-windows --pid "$PID" >"$CASE/b-windows.stdout" 2>"$CASE/b-windows.stderr"
-   run_focused "$FLOAT" "$CASE/b-focus.stdout" "$CASE/b-focus.stderr" \
-     "$CASE/b-capture.stdout" "$CASE/b-capture.stderr" \
-     capture-window --window-id "$FLOAT" --out "$CASE/snapshot-bounds-b.png"
-   ```
-
-   `resize.stdout` must contain `success:true` and `changed:true`; otherwise report NOT RUN with
-   both resize streams. Record B from `b-windows.stdout`.
-
-5. Focus MAIN and invoke Restore, list C, and capture C atomically:
-
-   ```zsh
-   run_focused "$MAIN" "$CASE/restore-focus.stdout" "$CASE/restore-focus.stderr" \
-     "$CASE/restore.stdout" "$CASE/restore.stderr" \
-     click --pid "$PID" --window-title 'ElwindUI Docking Demo' --title 'Restore snapshot' --via ax-press
-   "$BIN" list-windows --pid "$PID" >"$CASE/c-windows.stdout" 2>"$CASE/c-windows.stderr"
-   run_focused "$FLOAT" "$CASE/c-focus.stdout" "$CASE/c-focus.stderr" \
-     "$CASE/c-capture.stdout" "$CASE/c-capture.stderr" \
-     capture-window --window-id "$FLOAT" --out "$CASE/snapshot-bounds-c.png"
-   ```
-
-   Record C from `c-windows.stdout`. PASS requires every C component within 2 points of A and at
-   least one C component different from B. Do not report PASS without A/B/C values and all three
-   capture paths.
-
-### Exact actions: menu wrapper lifetime
-
-Run the example after compiling only if it is missing or stale:
-
-```zsh
-cargo build -q -p elwindui-backend-appkit --example menu_lifetime_runtime \
-  >"$CASE/menu-lifetime-build.stdout" 2>"$CASE/menu-lifetime-build.stderr"
-"$ROOT/target/debug/examples/menu_lifetime_runtime" \
-  >"$CASE/menu-lifetime-runtime.stdout" 2>"$CASE/menu-lifetime-runtime.stderr"
-```
-
-PASS requires runtime stdout containing `native_item_retained=true` and `callback_count=1`, with
-empty runtime stderr. Build diagnostics belong to the build log and do not replace the runtime
-stderr check. Any panic, missing token, or non-empty runtime stderr is FAIL.
-
-### Expected results, report, and cleanup
 
 Use only PASS, FAIL, NOT RUN, or BLOCKED. Report one compact table containing case, status,
-PID/window IDs, numeric evidence, and immutable run/log/image paths. Finish with:
+PID/window IDs, numeric evidence, and immutable run/log/image paths. The process must terminate
+without force under normal conditions. The tester must not update Issue/PR state; the main agent
+consumes the report and performs the GitHub workflow.
 
-```zsh
-"$BIN" terminate --pid "$PID" --timeout 5 \
-  >"$RUN/terminate.stdout" 2>"$RUN/terminate.stderr"
-```
-
-The process must terminate without force. The tester must not update Issue/PR state; the main
-agent consumes the report and performs the GitHub workflow.
+Historical evidence from prior durable AppKit cases (e.g. PR #221 / Issue #220's floating-bounds
+and menu-lifetime verification) remains under `docs/issues/220-docking-ux-parity/evidence/` and
+`.agent-state/issues/220/`; it is retained as historical record, not as a current permanent case
+definition -- current durable case definitions originate from `tests/e2e/`.

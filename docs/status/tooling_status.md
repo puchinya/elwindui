@@ -47,4 +47,4 @@ Qualified external generated components and named `elwindui::new!` construction 
 
 ## Verification state
 
-Codegen, macro, language-server, external-fixture, GUI-driver, and workspace verification follow the commands in [`../agents/testing.md`](../agents/testing.md). Platform-specific GUI results must be recorded as PASS, FAIL, or NOT RUN according to the host evidence available.
+Codegen, macro, language-server, external-fixture, GUI-driver, and workspace verification follow the commands in [`../agents/testing.md`](../agents/testing.md). Platform-specific GUI results must be recorded as PASS, FAIL, NOT RUN, or BLOCKED according to the host evidence available.

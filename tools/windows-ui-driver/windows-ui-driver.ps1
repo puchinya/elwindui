@@ -180,6 +180,28 @@ $SW_RESTORE = 9
 $MONITOR_DEFAULTTONEAREST = 2
 
 # ---------------------------------------------------------------------------
+# JSON envelope helpers. Defined before argument parsing (below) because
+# ConvertTo-ArgMap itself is invoked immediately, at script top level, and
+# must be able to fail closed (Emit-UsageError) on malformed input rather
+# than silently accepting it -- a function's own *definition* may reference
+# another function defined later in the script, but a top-level *call* may
+# not, since PowerShell does not hoist top-level function definitions ahead
+# of top-level statement execution.
+# ---------------------------------------------------------------------------
+
+function Emit-Result {
+    param([hashtable]$Obj)
+    $json = $Obj | ConvertTo-Json -Depth 16 -Compress
+    Write-Output $json
+    if ($Obj.ContainsKey('success') -and $Obj['success']) { exit 0 } else { exit 1 }
+}
+
+function Emit-UsageError {
+    param([string]$Message)
+    Emit-Result @{ success = $false; category = 'usage_error'; error = $Message }
+}
+
+# ---------------------------------------------------------------------------
 # Argument parsing: manual "--key value" / "--flag" parser (semantics are
 # fixed by the owning Issue's contract; exact flag spelling is a repository
 # convention, not a winapp passthrough).
@@ -202,10 +224,10 @@ function ConvertTo-ArgMap {
                 # launched application argument such as --some-app-option is never misread as a
                 # driver flag. Every occurrence accumulates, in order, into a list so repeated
                 # `--arg one --arg two` is never collapsed to only the last value (the generic
-                # single-value-per-key map below cannot represent that).
+                # single-value-per-key map below cannot represent that). A trailing `--arg` with
+                # no following token at all is malformed input, not a silently-dropped no-op.
                 if ($null -eq $next) {
-                    $i += 1
-                    continue
+                    Emit-UsageError '--arg requires a value'
                 }
                 if (-not $map.ContainsKey($name)) { $map[$name] = New-Object System.Collections.Generic.List[string] }
                 $map[$name].Add($next)
@@ -241,23 +263,17 @@ function Require-Arg {
     if (-not $Args2.ContainsKey($Name)) {
         Emit-UsageError "missing required argument --$Name"
     }
-    return $Args2[$Name]
-}
-
-# ---------------------------------------------------------------------------
-# JSON envelope helpers.
-# ---------------------------------------------------------------------------
-
-function Emit-Result {
-    param([hashtable]$Obj)
-    $json = $Obj | ConvertTo-Json -Depth 16 -Compress
-    Write-Output $json
-    if ($Obj.ContainsKey('success') -and $Obj['success']) { exit 0 } else { exit 1 }
-}
-
-function Emit-UsageError {
-    param([string]$Message)
-    Emit-Result @{ success = $false; category = 'usage_error'; error = $Message }
+    $value = $Args2[$Name]
+    if ($value -is [bool]) {
+        # Every Require-Arg caller wants a string/numeric value, never a bare boolean flag. This
+        # single check catches both a genuinely missing value (--path with nothing after it) and
+        # the following-token-looked-like-a-flag case (--path --wait-window-timeout 10, where the
+        # generic parser above could not tell that --wait-window-timeout was never meant as
+        # --path's own value) -- both must fail closed as usage_error, never silently launch a
+        # process whose path is the literal string "True".
+        Emit-UsageError "--$Name requires a value"
+    }
+    return $value
 }
 
 # ---------------------------------------------------------------------------

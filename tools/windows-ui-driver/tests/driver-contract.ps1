@@ -116,7 +116,7 @@ Remove-Item Env:ELWINDUI_FAKE_WINAPP_VERSION_FAIL -ErrorAction SilentlyContinue
 
 Remove-Item Env:ELWINDUI_WINAPP_PATH -ErrorAction SilentlyContinue
 
-# T2/T3 -- launch --arg list semantics: repeated occurrences preserved in order, and a
+# T5 -- launch --arg list semantics regression: repeated occurrences preserved in order, and a
 # dash-prefixed application argument is passed through rather than misread as a driver flag.
 # `launch` never calls winapp, so these do not need ELWINDUI_WINAPP_PATH; they launch pwsh.exe
 # itself against tests/fake-app.ps1, which records the argv it actually received.
@@ -140,12 +140,28 @@ try {
     Assert (Test-Path -LiteralPath $ArgvOut) 'launch (--arg list) -- fake-app.ps1 wrote its recorded argv'
     if (Test-Path -LiteralPath $ArgvOut) {
         $recorded = (Get-Content -LiteralPath $ArgvOut -Raw | ConvertFrom-Json).args
-        Assert (($recorded -join '|') -eq 'one|two|--some-app-option') 'T2/T3 -- repeated --arg values and a dash-prefixed app arg are preserved, in order, verbatim'
+        Assert (($recorded -join '|') -eq 'one|two|--some-app-option') 'T5 -- repeated --arg values and a dash-prefixed app arg are preserved, in order, verbatim'
     }
 }
 finally {
     Remove-Item -LiteralPath $ArgvOut -ErrorAction SilentlyContinue
 }
+
+# T3 -- malformed trailing --arg (no value at all) must fail closed as usage_error, not be
+# silently dropped and not launch any process.
+$r = Invoke-Driver @('launch', '--path', $PwshPath, '--arg')
+Assert-OneJsonObject $r 'launch (trailing --arg)'
+Assert ($r.Json.success -eq $false) 'launch (trailing --arg) -- success:false'
+Assert ($r.Json.category -eq 'usage_error') 'launch (trailing --arg) -- category:usage_error'
+Assert ($r.ExitCode -eq 1) 'launch (trailing --arg) -- exit code 1'
+
+# T4 -- a required option (--path) whose apparent value is actually the next driver flag must
+# fail closed as usage_error, not silently become the boolean true and attempt to launch "True".
+$r = Invoke-Driver @('launch', '--path', '--wait-window-timeout', '10')
+Assert-OneJsonObject $r 'launch (--path swallowed by next flag)'
+Assert ($r.Json.success -eq $false) 'launch (--path swallowed by next flag) -- success:false'
+Assert ($r.Json.category -eq 'usage_error') 'launch (--path swallowed by next flag) -- category:usage_error'
+Assert ($r.ExitCode -eq 1) 'launch (--path swallowed by next flag) -- exit code 1'
 
 if ($script:FailureCount -gt 0) {
     Write-Output "`n$script:FailureCount assertion(s) failed."

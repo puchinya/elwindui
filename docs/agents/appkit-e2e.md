@@ -65,11 +65,13 @@ BLOCKED until it is re-established. Never use a refresh sidecar for unrelated wo
 
 - Run every driver invocation outside the Codex workspace-write sandbox.
 - Run `doctor` once and require `success:true`, `accessibility:true`, and `screen_recording:true`.
-- Launch the already-built demo once and reuse one healthy PID for compatible cases.
+- Launch the already-built target application/example once and reuse one healthy PID for
+  compatible cases.
 - Batch deterministic observations such as `list-windows`; do not relaunch or capture redundant
   images.
-- Use one tester, one checked-in binary, one doctor, one demo launch, and one PID for a compatible
-  batch. Refresh window IDs and geometry after floating create/close, move, resize, and restore.
+- Use one tester, one checked-in binary, one doctor, one target launch, and one PID for a
+  compatible batch. Refresh window IDs and geometry after floating create/close, move, resize, and
+  restore.
 - Use one controlled retry at most, only after restoring foreground, target identity, geometry, and
   the expected precondition. After a second abnormal result, classify behavior mismatch as FAIL,
   host permission/session failure as BLOCKED, and an unexecuted case as NOT RUN.
@@ -143,7 +145,8 @@ mkdir -p "$CASE"
 ```
 
 Record `HEAD`, `origin/master`, driver SHA-256, source fingerprint and freshness result, macOS
-version, architecture, `doctor` output, and demo SHA-256 in the run directory. Raw logs remain
+version, architecture, `doctor` output, and target application/example SHA-256 in the run
+directory. Raw logs remain
 under the owning Issue's immutable `.agent-state` run directory; commit only a small
 reviewer-facing evidence subset when the owning Issue/workflow explicitly requires it -- do not
 invent a universal committed-evidence directory, and do not commit full `.agent-state` logs.

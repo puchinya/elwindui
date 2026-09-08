@@ -41,7 +41,9 @@ pwsh -NoProfile -File $D launch --path C:\path\to\app.exe --wait-window-timeout 
 pwsh -NoProfile -File $D launch --path C:\path\to\app.exe --arg one --arg two --arg --some-app-option
 # `launch` does not capture application stdout/stderr. Driver stdout remains reserved for the
 # driver's single JSON result. If a durable case needs application logs, use an explicit
-# case/application logging mechanism -- do not depend on implicit driver capture.
+# case/application logging mechanism -- do not depend on implicit driver capture. External
+# `winapp` stdout/stderr (for UIA/input/capture commands) are captured by the adapter and drained
+# concurrently; that is a separate, short-lived-backend-only mechanism from `launch`.
 pwsh -NoProfile -File $D list-windows --pid <pid>
 pwsh -NoProfile -File $D focus-window --hwnd <hwnd> --timeout 3
 pwsh -NoProfile -File $D search --hwnd <hwnd> --query "Ocean"

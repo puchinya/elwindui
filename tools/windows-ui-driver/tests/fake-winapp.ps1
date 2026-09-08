@@ -57,6 +57,16 @@ if ($joined -match 'FAKE_WAIT_TIMEOUT') {
     exit 1
 }
 
+if ($joined -match 'FAKE_LARGE_STDERR') {
+    # Regression fixture for windows-ui-driver.ps1's own Invoke-WinApp: writes a small parseable
+    # stdout body, then >= 256 KiB to stderr before exiting -- enough to exceed an ordinary OS pipe
+    # buffer, reproducing the deadlock class a sequential stdout-then-stderr ReadToEnd() is
+    # vulnerable to (blocked writing stderr while the caller is still waiting for stdout EOF).
+    Write-Output '{"success":false,"error":{"code":"element_not_found","message":"large stderr regression"}}'
+    [Console]::Error.Write(('E' * (256 * 1024)))
+    exit 1
+}
+
 # Default: unrecognized scenario -- fail loudly so a broken test case is visible, not silently
 # treated as one of the above.
 [Console]::Error.WriteLine("fake-winapp.ps1: no matching fake scenario for args: $joined")

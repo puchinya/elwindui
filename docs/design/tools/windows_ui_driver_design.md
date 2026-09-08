@@ -40,6 +40,15 @@ behavior evolves. `doctor` never claims real-mouse-input capability from environ
 alone — that capability is proven only by a live case whose application postcondition changed
 (see §5).
 
+The adapter captures external `winapp` stdout/stderr, but must drain both streams concurrently
+(`ReadToEndAsync()` on both immediately after process start, before waiting for exit). Sequential
+`ReadToEnd()` on redirected stdout/stderr is forbidden because either stream can fill its OS pipe
+while the adapter blocks waiting for EOF on the other. This is intentionally a different ownership
+model from `Cmd-Launch` (§7), which does not capture the target application's stdout/stderr at
+all — `Invoke-WinApp` captures a short-lived external backend's own output as part of the driver's
+JSON result; `Cmd-Launch` never redirects a long-lived launched application's output in the first
+place.
+
 ## 3. Win32 helper boundary
 
 The adapter embeds only the minimal P/Invoke needed for operations it owns: `EnumWindows`,

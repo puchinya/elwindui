@@ -341,9 +341,15 @@ function Invoke-WinApp {
             Json     = $null
         }
     }
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $stderr = $proc.StandardError.ReadToEnd()
+    # stdout/stderr must be drained concurrently because either backend stream may exceed pipe
+    # capacity; sequential ReadToEnd can deadlock while waiting for process exit/EOF (this backend
+    # process is short-lived, unlike Cmd-Launch's target application, which this driver never
+    # redirects at all -- see Cmd-Launch's own comment for that separate ownership model).
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
     $proc.WaitForExit()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
     $parsed = $null
     if ($stdout -and $stdout.Trim().StartsWith('{')) {
         try { $parsed = $stdout | ConvertFrom-Json -ErrorAction Stop } catch { $parsed = $null }

@@ -114,6 +114,44 @@ Assert ($r.Json.backend_stderr -like '*simulated broken install*') 'doctor (brok
 Assert ($r.ExitCode -eq 1) 'doctor (broken version) -- exit code 1'
 Remove-Item Env:ELWINDUI_FAKE_WINAPP_VERSION_FAIL -ErrorAction SilentlyContinue
 
+# T3 (large-stderr deadlock regression) -- Invoke-WinApp must drain the winapp backend's stdout
+# and stderr concurrently. A fake backend that writes >= 256 KiB to stderr before exiting would
+# deadlock a sequential stdout-then-stderr ReadToEnd() implementation (blocked filling stderr's
+# OS pipe buffer while still waiting for stdout EOF). Uses a small bounded process helper, not
+# Invoke-Driver's unbounded `&` call, so a regression here fails within a timeout instead of
+# hanging the whole test suite.
+$BoundedPwshPath = (Get-Process -Id $PID).Path
+$largeStderrPsi = New-Object System.Diagnostics.ProcessStartInfo
+$largeStderrPsi.FileName = $BoundedPwshPath
+foreach ($a in @('-NoProfile', '-File', $Driver, 'search', '--pid', '999', '--query', 'FAKE_LARGE_STDERR')) {
+    $largeStderrPsi.ArgumentList.Add($a)
+}
+$largeStderrPsi.UseShellExecute = $false
+$largeStderrPsi.CreateNoWindow = $true
+$largeStderrPsi.RedirectStandardOutput = $true
+$largeStderrPsi.RedirectStandardError = $true
+
+$largeStderrProc = [System.Diagnostics.Process]::Start($largeStderrPsi)
+$largeStdoutTask = $largeStderrProc.StandardOutput.ReadToEndAsync()
+$largeStderrTask = $largeStderrProc.StandardError.ReadToEndAsync()
+$largeEofReached = $largeStdoutTask.Wait(15000)
+Assert $largeEofReached 'T3 -- large-stderr regression: driver stdout reaches EOF within the bounded timeout'
+if ($largeEofReached) {
+    $largeStderrProc.WaitForExit(5000) | Out-Null
+    $largeStdout = $largeStdoutTask.Result
+    [void]$largeStderrTask.Result
+    $largeJson = $null
+    try { $largeJson = $largeStdout.Trim() | ConvertFrom-Json -ErrorAction Stop } catch { $largeJson = $null }
+    Assert-OneJsonObject @{ StdOut = $largeStdout; Json = $largeJson } 'T3 -- large-stderr regression'
+    Assert ($largeJson.success -eq $false) 'T3 -- large-stderr regression: success:false'
+    Assert ($largeJson.category -eq 'target_error') 'T3 -- large-stderr regression: category:target_error (element_not_found token)'
+    Assert ($largeJson.backend_exit_code -eq 1) 'T3 -- large-stderr regression: backend exit code preserved (1)'
+    Assert ($largeJson.backend_stderr -like '*EEEE*') 'T3 -- large-stderr regression: full backend stderr preserved in the normalized result'
+}
+else {
+    if (-not $largeStderrProc.HasExited) { Stop-Process -Id $largeStderrProc.Id -Force -ErrorAction SilentlyContinue }
+}
+
 Remove-Item Env:ELWINDUI_WINAPP_PATH -ErrorAction SilentlyContinue
 
 # T9 -- launch --arg list semantics regression: repeated occurrences preserved in order, and a

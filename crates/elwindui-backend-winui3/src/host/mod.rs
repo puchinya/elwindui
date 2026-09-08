@@ -22,6 +22,7 @@ use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 use crate::bindings::Microsoft::UI::Xaml::Input::{
     CharacterReceivedRoutedEventArgs, KeyEventHandler, PointerEventHandler, PointerRoutedEventArgs,
 };
+use crate::bindings::Microsoft::UI::Xaml::Media::CompositionTarget;
 use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, SizeChangedEventHandler, UIElement};
 use crate::render::composition::{
     CompositionClipSpec, CompositionPrimitive, CompositionRenderer, DesiredCompositionIsland,
@@ -32,12 +33,15 @@ use elwindui_core::input::{
     FocusState, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent, RawKeyEventKind,
     RawPointerEvent, RawPointerEventKind, RawTextInputEvent,
 };
-use elwindui_core::ui::{CoordinateHost, FocusHost, PointerGestureHost, UIElementExt};
+use elwindui_core::ui::{
+    AnimationFrameHost, AnimationRuntime, CoordinateHost, FocusHost, PointerGestureHost,
+    UIElementExt,
+};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-use windows::Foundation::TypedEventHandler;
-use windows::core::Interface;
+use windows::Foundation::{EventHandler, TypedEventHandler};
+use windows::core::{IInspectable, Interface};
 
 /// The single reusable "reflect an `Rc<dyn elwindui_core::ui::UIElement>` into real XAML
 /// elements" host — the WinUI3 counterpart of `elwindui-backend-appkit`'s `TreeHostView`. A
@@ -101,6 +105,92 @@ impl RelayoutCycleState {
     }
 }
 
+/// WinUI's display-aligned frame source for one hosted tree.
+///
+/// `CompositionTarget.Rendering` is a process-wide XAML event. The generated WinRT delegate is
+/// `Send`, while the hosted tree is intentionally UI-thread-local and uses `Rc`; the delegate
+/// therefore captures only this state object's stable address. The `TreeHostPanel` owns the
+/// `Rc`, unregisters the event before clearing the host, and drops the delegate after revocation.
+/// The callback itself only runs on the XAML UI thread, so no Core animation state is touched from
+/// a worker thread.
+struct WinUI3RenderingState {
+    host: RefCell<Weak<WinUI3RelayoutHost>>,
+    token: Cell<Option<i64>>,
+    handler: RefCell<Option<EventHandler<IInspectable>>>,
+}
+
+impl WinUI3RenderingState {
+    fn set_host(&self, host: Weak<WinUI3RelayoutHost>) {
+        self.stop();
+        *self.host.borrow_mut() = host;
+    }
+
+    fn clear_host(&self) {
+        self.stop();
+        *self.host.borrow_mut() = Weak::new();
+    }
+
+    fn ensure_started(self: &Rc<Self>) {
+        if self.token.get().is_some() {
+            return;
+        }
+        let state_address = Rc::as_ptr(self) as usize;
+        let handler = EventHandler::<IInspectable>::new(move |_, _| {
+            // SAFETY: `TreeHostPanel` unregisters the static event before its last strong
+            // reference to this state is released. The delegate cannot run after that point.
+            let state = unsafe { &*(state_address as *const WinUI3RenderingState) };
+            state.on_rendering();
+            Ok(())
+        });
+        match CompositionTarget::Rendering(&handler) {
+            Ok(token) => {
+                *self.handler.borrow_mut() = Some(handler);
+                self.token.set(Some(token));
+            }
+            Err(error) => {
+                if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+                    eprintln!(
+                        "[elwindui-winui3] CompositionTarget.Rendering registration failed: {error:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn on_rendering(&self) {
+        let Some(host) = self.host.borrow().upgrade() else {
+            self.stop();
+            return;
+        };
+        let Some(runtime) = host.animation_runtime.upgrade() else {
+            self.stop();
+            return;
+        };
+        if runtime.tick_now() {
+            host.flush_interactive_relayout();
+        } else {
+            self.stop();
+        }
+    }
+
+    fn stop(&self) {
+        if let Some(token) = self.token.take() {
+            let _ = CompositionTarget::RemoveRendering(token);
+        }
+        self.handler.borrow_mut().take();
+    }
+}
+
+impl Default for WinUI3RenderingState {
+    fn default() -> Self {
+        Self {
+            host: RefCell::new(Weak::new()),
+            token: Cell::new(None),
+            handler: RefCell::new(None),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TreeHostPanel {
     canvas: Canvas,
@@ -144,6 +234,8 @@ pub struct TreeHostPanel {
         Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
     /// Keeps every FFI callback registered by this host alive for exactly this host's lifetime.
     callback_owner: UiCallbackRegistryOwner,
+    animation_runtime: Rc<AnimationRuntime>,
+    rendering: Rc<WinUI3RenderingState>,
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostPanel` — wraps a *weak* reference back to the
@@ -196,6 +288,8 @@ pub(crate) struct WinUI3RelayoutHost {
     /// Not related to any `DispatcherQueueHandler`: `request_relayout` runs everything
     /// synchronously on the calling thread, it never posts a handler anywhere.
     weak_self: RefCell<Weak<WinUI3RelayoutHost>>,
+    animation_runtime: Weak<AnimationRuntime>,
+    rendering: Weak<WinUI3RenderingState>,
 }
 
 impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
@@ -336,6 +430,21 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
     }
 }
 
+impl AnimationFrameHost for WinUI3RelayoutHost {
+    fn animation_runtime(&self) -> Rc<AnimationRuntime> {
+        self.animation_runtime
+            .upgrade()
+            .unwrap_or_else(AnimationRuntime::new)
+    }
+
+    fn request_animation_frame(&self) {
+        let Some(rendering) = self.rendering.upgrade() else {
+            return;
+        };
+        rendering.ensure_started();
+    }
+}
+
 /// `elwindui_core::ui::FocusHost` for `TreeHostPanel` — the `FocusHost` counterpart to
 /// `WinUI3RelayoutHost`, same weak-back-reference shape (a strong one would create the same
 /// `tree` -> `focus_host` -> panel reference cycle `WinUI3RelayoutHost`'s own doc comment
@@ -355,6 +464,24 @@ impl FocusHost for WinUI3FocusHost {
                 .set_focus(target, FocusState::Programmatic),
             None => false,
         }
+    }
+
+    fn clear_focus_in_subtree(&self, subtree: &Rc<dyn elwindui_core::ui::UIElementExt>) -> bool {
+        let Some(keyboard) = self.keyboard.upgrade() else {
+            return false;
+        };
+        let Some(focused) = keyboard.focus.focused() else {
+            return false;
+        };
+        let mut current = Some(focused);
+        while let Some(element) = current {
+            if Rc::ptr_eq(&element, subtree) {
+                keyboard.focus.clear_focus();
+                return true;
+            }
+            current = element.visual_parent();
+        }
+        false
     }
 }
 
@@ -414,6 +541,8 @@ impl TreeHostPanel {
             active: Rc::new(Cell::new(true)),
             active_popup: Rc::new(RefCell::new(None)),
             callback_owner: UiCallbackRegistryOwner::default(),
+            animation_runtime: AnimationRuntime::new(),
+            rendering: Rc::new(WinUI3RenderingState::default()),
         };
         // WinUI3's `Control.IsTabStop` gate. Once the WinRT event projection is restored this
         // allows the host to receive OS keyboard focus, mirroring AppKit's TreeHostView.
@@ -1139,6 +1268,7 @@ impl TreeHostPanel {
             return;
         }
 
+        self.rendering.stop();
         if self.pointer.cancel() {
             let _ = self.canvas.ReleasePointerCaptures();
         }
@@ -1183,9 +1313,14 @@ impl TreeHostPanel {
             relayout_cycle: Rc::downgrade(&self.relayout_cycle),
             pending: Cell::new(false),
             weak_self: RefCell::new(Weak::<WinUI3RelayoutHost>::new()),
+            animation_runtime: Rc::downgrade(&self.animation_runtime),
+            rendering: Rc::downgrade(&self.rendering),
         });
         *host.weak_self.borrow_mut() = Rc::downgrade(&host);
-        tree.as_ui_element().set_invalidate_host(Some(host));
+        self.rendering.set_host(Rc::downgrade(&host));
+        tree.as_ui_element()
+            .set_invalidate_host(Some(Rc::clone(&host)));
+        tree.as_ui_element().set_animation_frame_host(Some(host));
         tree.as_ui_element()
             .set_coordinate_host(Some(Rc::new(WinUI3CoordinateHost {
                 canvas: self
@@ -1237,6 +1372,7 @@ impl TreeHostPanel {
     }
 
     fn cancel_and_unregister_current_tree(&self) {
+        self.rendering.clear_host();
         let old_tree = self.tree.borrow().clone();
         if let Some(old_tree) = old_tree {
             if self.pointer.cancel_for_subtree(&old_tree) {
@@ -1245,6 +1381,7 @@ impl TreeHostPanel {
             old_tree.set_invalidate_host(None);
             old_tree.set_coordinate_host(None);
             old_tree.set_pointer_gesture_host(None);
+            old_tree.set_animation_frame_host(None);
             old_tree.set_focus_host(None);
         }
     }
@@ -1415,28 +1552,48 @@ impl TreeHostPanel {
         fn collect_commands<'a>(
             group: &'a elwindui_core::graphics::RenderGroup,
             origin: elwindui_core::base::Point,
+            parent_transform: elwindui_core::base::AffineTransform,
+            parent_opacity: f32,
+            parent_input_enabled: bool,
             out: &mut Vec<(
                 u64,
                 usize,
                 &'a elwindui_core::graphics::RenderCommand,
                 elwindui_core::base::Point,
+                elwindui_core::base::AffineTransform,
+                f32,
+                bool,
             )>,
         ) {
             let origin = elwindui_core::base::Point {
                 x: origin.x + group.offset.x,
                 y: origin.y + group.offset.y,
             };
+            let transform = parent_transform.concat(&group.transform);
+            let opacity = parent_opacity * group.opacity;
+            let input_enabled = parent_input_enabled && group.input_enabled;
             for (index, command) in group.commands.iter().enumerate() {
-                out.push((group.id, index, command, origin));
+                out.push((
+                    group.id,
+                    index,
+                    command,
+                    origin,
+                    transform,
+                    opacity,
+                    input_enabled,
+                ));
             }
             for child in &group.children {
-                collect_commands(child, origin, out);
+                collect_commands(child, origin, transform, opacity, input_enabled, out);
             }
         }
         let mut commands = Vec::new();
         collect_commands(
             &render_tree.root,
             elwindui_core::base::Point { x: 0.0, y: 0.0 },
+            elwindui_core::base::AffineTransform::identity(),
+            1.0,
+            true,
             &mut commands,
         );
         let mut native_wanted: Vec<(NativeChildKey, RenderedNativeChild)> = Vec::new();
@@ -1461,7 +1618,20 @@ impl TreeHostPanel {
 
         // Composition handles every custom-drawn node. XAML controls and text remain normal
         // children of the host Canvas and are reconciled in place afterward.
-        for (group_id, command_index, command, origin) in commands {
+        for (
+            group_id,
+            command_index,
+            command,
+            origin,
+            group_transform,
+            group_opacity,
+            group_input_enabled,
+        ) in commands
+        {
+            transforms.clear();
+            transforms.push(group_transform);
+            opacities.clear();
+            opacities.push(group_opacity);
             match command {
                 elwindui_core::graphics::RenderCommand::PushTransform { transform } => {
                     let next = transforms
@@ -1804,6 +1974,8 @@ impl TreeHostPanel {
                             style: style.clone(),
                             foreground: foreground.clone(),
                             alignment: *alignment,
+                            transform,
+                            opacity,
                         },
                     ));
                 }
@@ -1819,6 +1991,9 @@ impl TreeHostPanel {
                                     width: rect.width,
                                     height: rect.height,
                                 },
+                                transform,
+                                opacity,
+                                input_enabled: group_input_enabled,
                             },
                         ));
                     }

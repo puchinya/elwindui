@@ -56,6 +56,13 @@ pub trait RelayoutHost {
     fn flush_interactive_relayout(&self) {}
 }
 
+/// Backend capability for delivering a coalesced frame to a hosted animation runtime. The
+/// runtime is backend-neutral; this trait supplies only ownership and wake-up.
+pub trait AnimationFrameHost {
+    fn animation_runtime(&self) -> Rc<AnimationRuntime>;
+    fn request_animation_frame(&self);
+}
+
 /// Backend-neutral coordinate conversion supplied by the native host that owns a Visual tree.
 /// Screen coordinates use top-left/Y-down logical desktop units on every platform. Implementors
 /// return `None` when native conversion is unavailable; callers must never estimate a result from
@@ -91,6 +98,9 @@ pub trait FocusHost {
     /// the framework's own input handling (`KeyboardDispatcher`/a future click-to-focus wiring).
     /// Returns `false` if `target` isn't a tab stop (`UIElementExt::is_tab_stop`).
     fn request_focus(&self, target: &Rc<dyn UIElementExt>) -> bool;
+
+    /// Clears focus only when the currently focused element belongs to `subtree`.
+    fn clear_focus_in_subtree(&self, subtree: &Rc<dyn UIElementExt>) -> bool;
 }
 
 /// The fields every `UIElement` carries (WinUI3's `FrameworkElement` base class, via composition
@@ -131,6 +141,9 @@ pub trait FocusHost {
 #[prop(horizontal_alignment: Option<crate::layout::HorizontalAlignment>)]
 #[prop(vertical_alignment: Option<crate::layout::VerticalAlignment>)]
 #[prop(visibility: Option<crate::layout::Visibility>)]
+#[prop(opacity: Option<f32>)]
+#[prop(visual_transform: Option<crate::ui::VisualTransform>)]
+#[prop(transform_origin: Option<crate::ui::UnitPoint>)]
 #[prop(width: Option<f32>)]
 #[prop(height: Option<f32>)]
 #[prop(min_width: Option<f32>)]
@@ -162,11 +175,22 @@ pub struct UIElement {
     /// Stable identity of this Visual's retained RenderGroup. Never reused within a process.
     pub render_group_id: u64,
     pub margin: Cell<f32>,
+    pub presentation_margin: Cell<f32>,
     pub horizontal_alignment: Cell<HorizontalAlignment>,
     pub vertical_alignment: Cell<VerticalAlignment>,
     /// WinUI3's `UIElement.Visibility` — `Visible` (default) or `Collapsed`. See `Visibility`'s own
     /// doc comment for how `Collapsed` is handled by the layout/render/hit-test traversals.
     pub visibility: Cell<Visibility>,
+    pub visual_participation: Cell<VisualParticipation>,
+    /// Target opacity. The current presentation is retained separately so a hosted animation can
+    /// advance it without changing the public target getter.
+    pub opacity: Cell<f32>,
+    pub presentation_opacity: Cell<f32>,
+    pub transition_opacity: Cell<f32>,
+    pub visual_transform: Cell<VisualTransform>,
+    pub presentation_visual_transform: Cell<VisualTransform>,
+    pub transition_visual_transform: Cell<VisualTransform>,
+    pub transform_origin: Cell<UnitPoint>,
     /// WinUI3's `UIElement.IsHitTestVisible` — `true` (default) means normal hit-testing;
     /// `false` excludes this element *and its entire subtree* from `hit_test` while leaving
     /// rendering/layout untouched (unlike `Visibility::Collapsed`, which affects layout too). See
@@ -180,11 +204,17 @@ pub struct UIElement {
     /// `UIElement::measure`/`arrange` (`crate::layout::apply_size_constraints`), the same way
     /// margin/alignment already are.
     pub width: Cell<Option<f32>>,
+    pub presentation_width: Cell<Option<f32>>,
     pub height: Cell<Option<f32>>,
+    pub presentation_height: Cell<Option<f32>>,
     pub min_width: Cell<Option<f32>>,
+    pub presentation_min_width: Cell<Option<f32>>,
     pub min_height: Cell<Option<f32>>,
+    pub presentation_min_height: Cell<Option<f32>>,
     pub max_width: Cell<Option<f32>>,
+    pub presentation_max_width: Cell<Option<f32>>,
     pub max_height: Cell<Option<f32>>,
+    pub presentation_max_height: Cell<Option<f32>>,
     pub context_menu: RefCell<Option<Rc<dyn MenuExt>>>,
     pub context_menu_presentation: Cell<ContextMenuPresentation>,
     pub context_popup: RefCell<Option<ViewFactory>>,
@@ -255,6 +285,7 @@ pub struct UIElement {
     /// Pointer-gesture cancellation counterpart to `coordinate_host`, installed only on a hosted
     /// root and discovered by descendants through the Visual-parent chain.
     pub pointer_gesture_host: RefCell<Option<Rc<dyn PointerGestureHost>>>,
+    pub animation_frame_host: RefCell<Option<Rc<dyn AnimationFrameHost>>>,
     /// WinUI3's `Control.IsTabStop` — whether this element participates in `FocusTracker`'s tab
     /// order at all. `false` by default; a `NativeControl<H>`-backed leaf (`Button`/`TextArea`/
     /// `TabView`) sets this `true` in its own `new()` (mirrors `Button::new()`'s `on_click` wiring),
@@ -294,17 +325,44 @@ impl std::fmt::Debug for UIElement {
         f.debug_struct("UIElement")
             .field("render_group_id", &self.render_group_id)
             .field("margin", &self.margin.get())
+            .field("presentation_margin", &self.presentation_margin.get())
             .field("horizontal_alignment", &self.horizontal_alignment.get())
             .field("vertical_alignment", &self.vertical_alignment.get())
             .field("visibility", &self.visibility.get())
+            .field("visual_participation", &self.visual_participation.get())
+            .field("opacity", &self.opacity.get())
+            .field("presentation_opacity", &self.presentation_opacity.get())
+            .field("transition_opacity", &self.transition_opacity.get())
+            .field("visual_transform", &self.visual_transform.get())
+            .field(
+                "presentation_visual_transform",
+                &self.presentation_visual_transform.get(),
+            )
+            .field(
+                "transition_visual_transform",
+                &self.transition_visual_transform.get(),
+            )
+            .field("transform_origin", &self.transform_origin.get())
             .field("hit_test_visible", &self.hit_test_visible.get())
             .field("clip_to_bounds", &self.clip_to_bounds.get())
             .field("width", &self.width.get())
+            .field("presentation_width", &self.presentation_width.get())
             .field("height", &self.height.get())
+            .field("presentation_height", &self.presentation_height.get())
             .field("min_width", &self.min_width.get())
+            .field("presentation_min_width", &self.presentation_min_width.get())
             .field("min_height", &self.min_height.get())
+            .field(
+                "presentation_min_height",
+                &self.presentation_min_height.get(),
+            )
             .field("max_width", &self.max_width.get())
+            .field("presentation_max_width", &self.presentation_max_width.get())
             .field("max_height", &self.max_height.get())
+            .field(
+                "presentation_max_height",
+                &self.presentation_max_height.get(),
+            )
             .field("measured_size", &self.measured_size.get())
             .field("arranged_width", &self.arranged_width.get())
             .field("arranged_height", &self.arranged_height.get())
@@ -338,6 +396,10 @@ impl std::fmt::Debug for UIElement {
             .field("visual_children_len", &self.visual_collection.len())
             .field("invalidate_host", &self.invalidate_host.borrow().is_some())
             .field("coordinate_host", &self.coordinate_host.borrow().is_some())
+            .field(
+                "animation_frame_host",
+                &self.animation_frame_host.borrow().is_some(),
+            )
             .field("tab_stop", &self.tab_stop.get())
             .field("focus_order", &self.focus_order.get())
             .field("focus_state", &self.focus_state.get())
@@ -376,17 +438,32 @@ impl UIElement {
         UIElement {
             render_group_id: NEXT_RENDER_GROUP_ID.fetch_add(1, Ordering::Relaxed),
             margin: Cell::new(0.0),
+            presentation_margin: Cell::new(0.0),
             horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
             vertical_alignment: Cell::new(VerticalAlignment::Stretch),
             visibility: Cell::new(Visibility::Visible),
+            visual_participation: Cell::new(VisualParticipation::Active),
+            opacity: Cell::new(1.0),
+            presentation_opacity: Cell::new(1.0),
+            transition_opacity: Cell::new(1.0),
+            visual_transform: Cell::new(VisualTransform::IDENTITY),
+            presentation_visual_transform: Cell::new(VisualTransform::IDENTITY),
+            transition_visual_transform: Cell::new(VisualTransform::IDENTITY),
+            transform_origin: Cell::new(UnitPoint::CENTER),
             hit_test_visible: Cell::new(true),
             clip_to_bounds: Cell::new(None),
             width: Cell::new(None),
+            presentation_width: Cell::new(None),
             height: Cell::new(None),
+            presentation_height: Cell::new(None),
             min_width: Cell::new(None),
+            presentation_min_width: Cell::new(None),
             min_height: Cell::new(None),
+            presentation_min_height: Cell::new(None),
             max_width: Cell::new(None),
+            presentation_max_width: Cell::new(None),
             max_height: Cell::new(None),
+            presentation_max_height: Cell::new(None),
             measured_size: Cell::new(None),
             arranged_width: Cell::new(None),
             arranged_height: Cell::new(None),
@@ -399,6 +476,7 @@ impl UIElement {
             invalidate_host: RefCell::new(None),
             coordinate_host: RefCell::new(None),
             pointer_gesture_host: RefCell::new(None),
+            animation_frame_host: RefCell::new(None),
             tab_stop: Cell::new(false),
             focus_order: Cell::new(None),
             focus_state: Cell::new(FocusState::Unfocused),
@@ -417,6 +495,10 @@ impl UIElement {
     fn margin(&self) -> f32 {
         self.as_ui_element().margin.get()
     }
+    #[doc(hidden)]
+    fn presentation_margin(&self) -> f32 {
+        self.as_ui_element().presentation_margin.get()
+    }
     fn horizontal_alignment(&self) -> HorizontalAlignment {
         self.as_ui_element().horizontal_alignment.get()
     }
@@ -426,6 +508,31 @@ impl UIElement {
     /// WinUI3's `UIElement.Visibility` — see `Visibility`'s own doc comment.
     fn visibility(&self) -> Visibility {
         self.as_ui_element().visibility.get()
+    }
+    /// Returns whether this node is still an active logical Visual or is retained only for exit
+    /// rendering. Exiting nodes are never eligible for layout or input.
+    fn visual_participation(&self) -> VisualParticipation {
+        self.as_ui_element().visual_participation.get()
+    }
+    fn opacity(&self) -> f32 {
+        self.as_ui_element().opacity.get()
+    }
+    fn visual_transform(&self) -> VisualTransform {
+        self.as_ui_element().visual_transform.get()
+    }
+    fn transform_origin(&self) -> UnitPoint {
+        self.as_ui_element().transform_origin.get()
+    }
+    fn presentation_opacity(&self) -> f32 {
+        let base = self.as_ui_element();
+        base.presentation_opacity.get() * base.transition_opacity.get()
+    }
+    fn presentation_visual_transform(&self) -> VisualTransform {
+        let base = self.as_ui_element();
+        compose_visual_transform(
+            base.presentation_visual_transform.get(),
+            base.transition_visual_transform.get(),
+        )
     }
     /// The single source of truth for whether this element takes part in measure/arrange/
     /// rendering/hit-testing at all. Every one of `measure`/`arrange`/`build_render_group`/
@@ -445,6 +552,17 @@ impl UIElement {
     /// isn't laid out at all while its host is inactive, and nothing here needs to model that.
     fn participates_in_layout(&self) -> bool {
         self.visibility() == Visibility::Visible
+            && self.visual_participation() == VisualParticipation::Active
+    }
+    /// Exiting nodes retain their last arranged geometry and remain renderable until their
+    /// transition completion calls [`finish_exit`].
+    #[doc(hidden)]
+    fn participates_in_render(&self) -> bool {
+        self.visibility() == Visibility::Visible
+            && matches!(
+                self.visual_participation(),
+                VisualParticipation::Active | VisualParticipation::Exiting
+            )
     }
     /// WinUI3's `UIElement.IsHitTestVisible` — see `UIElement::hit_test_visible`'s own doc comment.
     fn hit_test_visible(&self) -> bool {
@@ -482,6 +600,30 @@ impl UIElement {
     fn max_height(&self) -> Option<f32> {
         self.as_ui_element().max_height.get()
     }
+    #[doc(hidden)]
+    fn presentation_width(&self) -> Option<f32> {
+        self.as_ui_element().presentation_width.get()
+    }
+    #[doc(hidden)]
+    fn presentation_height(&self) -> Option<f32> {
+        self.as_ui_element().presentation_height.get()
+    }
+    #[doc(hidden)]
+    fn presentation_min_width(&self) -> Option<f32> {
+        self.as_ui_element().presentation_min_width.get()
+    }
+    #[doc(hidden)]
+    fn presentation_min_height(&self) -> Option<f32> {
+        self.as_ui_element().presentation_min_height.get()
+    }
+    #[doc(hidden)]
+    fn presentation_max_width(&self) -> Option<f32> {
+        self.as_ui_element().presentation_max_width.get()
+    }
+    #[doc(hidden)]
+    fn presentation_max_height(&self) -> Option<f32> {
+        self.as_ui_element().presentation_max_height.get()
+    }
     /// WinUI3's `UIElement.DesiredSize` — the result of the most recent `measure` pass, or `None`
     /// if it hasn't run since construction or the last `invalidate_measure`. See
     /// `UIElement::measured_size`'s own doc comment.
@@ -505,7 +647,26 @@ impl UIElement {
     /// methods) so they're reachable generically through `dyn UIElement`/any bound on this trait,
     /// not only through the concrete backing struct.
     fn set_margin(&self, margin: f32) {
-        self.as_ui_element().margin.set(margin);
+        let base = self.as_ui_element();
+        base.margin.set(margin);
+        let transaction = current_transaction();
+        if transaction
+            .animation
+            .filter(|animation| !transaction.disables_animations && !animation.is_immediate())
+            .is_some_and(|animation| {
+                schedule_scalar_animation(
+                    base,
+                    AnimationChannel::Margin,
+                    margin,
+                    animation,
+                    InvalidationKind::Measure,
+                    apply_margin,
+                )
+            })
+        {
+            return;
+        }
+        base.presentation_margin.set(margin);
         self.invalidate_measure();
     }
     fn set_horizontal_alignment(&self, alignment: HorizontalAlignment) {
@@ -519,6 +680,49 @@ impl UIElement {
     fn set_visibility(&self, visibility: Visibility) {
         self.as_ui_element().visibility.set(visibility);
         self.invalidate_measure();
+    }
+    fn set_opacity(&self, opacity: f32) {
+        assert!(opacity.is_finite(), "UIElement opacity must be finite");
+        let base = self.as_ui_element();
+        base.opacity.set(opacity);
+        let transaction = current_transaction();
+        if let Some(animation) = transaction
+            .animation
+            .filter(|animation| !transaction.disables_animations && !animation.is_immediate())
+        {
+            if schedule_scalar_animation(
+                base,
+                AnimationChannel::Opacity,
+                opacity,
+                animation,
+                InvalidationKind::Render,
+                apply_opacity,
+            ) {
+                return;
+            }
+        }
+        base.presentation_opacity.set(opacity);
+        self.invalidate_render();
+    }
+    fn set_visual_transform(&self, transform: VisualTransform) {
+        let base = self.as_ui_element();
+        base.visual_transform.set(transform);
+        let transaction = current_transaction();
+        if let Some(animation) = transaction
+            .animation
+            .filter(|animation| !transaction.disables_animations && !animation.is_immediate())
+        {
+            if schedule_transform_animation(base, transform, animation) {
+                return;
+            }
+        }
+        base.presentation_visual_transform.set(transform);
+        self.invalidate_render();
+    }
+    fn set_transform_origin(&self, origin: UnitPoint) {
+        let base = self.as_ui_element();
+        base.transform_origin.set(origin);
+        self.invalidate_render();
     }
     /// See `UIElement::hit_test_visible`'s own doc comment. Hit-testing only — no layout/render
     /// effect, so unlike most other setters here this doesn't invalidate anything.
@@ -540,27 +744,135 @@ impl UIElement {
     // `build_component_optional_setters`) apply to all of them uniformly, with no per-field
     // Option-wrapping decision needed anywhere in codegen.
     fn set_width(&self, width: f32) {
-        self.as_ui_element().width.set(Some(width));
+        let base = self.as_ui_element();
+        base.width.set(Some(width));
+        let transaction = current_transaction();
+        if let Some(animation) = transaction
+            .animation
+            .filter(|animation| !transaction.disables_animations && !animation.is_immediate())
+        {
+            if schedule_scalar_animation(
+                base,
+                AnimationChannel::Width,
+                width,
+                animation,
+                InvalidationKind::Measure,
+                apply_width,
+            ) {
+                return;
+            }
+        }
+        base.presentation_width.set(Some(width));
         self.invalidate_measure();
     }
     fn set_height(&self, height: f32) {
-        self.as_ui_element().height.set(Some(height));
+        let base = self.as_ui_element();
+        base.height.set(Some(height));
+        let transaction = current_transaction();
+        if let Some(animation) = transaction
+            .animation
+            .filter(|animation| !transaction.disables_animations && !animation.is_immediate())
+        {
+            if schedule_scalar_animation(
+                base,
+                AnimationChannel::Height,
+                height,
+                animation,
+                InvalidationKind::Measure,
+                apply_height,
+            ) {
+                return;
+            }
+        }
+        base.presentation_height.set(Some(height));
         self.invalidate_measure();
     }
     fn set_min_width(&self, min_width: f32) {
-        self.as_ui_element().min_width.set(Some(min_width));
+        let base = self.as_ui_element();
+        base.min_width.set(Some(min_width));
+        let transaction = current_transaction();
+        if let Some(animation) = transaction
+            .animation
+            .filter(|animation| !transaction.disables_animations && !animation.is_immediate())
+        {
+            if schedule_scalar_animation(
+                base,
+                AnimationChannel::MinWidth,
+                min_width,
+                animation,
+                InvalidationKind::Measure,
+                apply_min_width,
+            ) {
+                return;
+            }
+        }
+        base.presentation_min_width.set(Some(min_width));
         self.invalidate_measure();
     }
     fn set_min_height(&self, min_height: f32) {
-        self.as_ui_element().min_height.set(Some(min_height));
+        let base = self.as_ui_element();
+        base.min_height.set(Some(min_height));
+        let transaction = current_transaction();
+        if let Some(animation) = transaction
+            .animation
+            .filter(|animation| !transaction.disables_animations && !animation.is_immediate())
+        {
+            if schedule_scalar_animation(
+                base,
+                AnimationChannel::MinHeight,
+                min_height,
+                animation,
+                InvalidationKind::Measure,
+                apply_min_height,
+            ) {
+                return;
+            }
+        }
+        base.presentation_min_height.set(Some(min_height));
         self.invalidate_measure();
     }
     fn set_max_width(&self, max_width: f32) {
-        self.as_ui_element().max_width.set(Some(max_width));
+        let base = self.as_ui_element();
+        base.max_width.set(Some(max_width));
+        let transaction = current_transaction();
+        if let Some(animation) = transaction
+            .animation
+            .filter(|animation| !transaction.disables_animations && !animation.is_immediate())
+        {
+            if schedule_scalar_animation(
+                base,
+                AnimationChannel::MaxWidth,
+                max_width,
+                animation,
+                InvalidationKind::Measure,
+                apply_max_width,
+            ) {
+                return;
+            }
+        }
+        base.presentation_max_width.set(Some(max_width));
         self.invalidate_measure();
     }
     fn set_max_height(&self, max_height: f32) {
-        self.as_ui_element().max_height.set(Some(max_height));
+        let base = self.as_ui_element();
+        base.max_height.set(Some(max_height));
+        let transaction = current_transaction();
+        if let Some(animation) = transaction
+            .animation
+            .filter(|animation| !transaction.disables_animations && !animation.is_immediate())
+        {
+            if schedule_scalar_animation(
+                base,
+                AnimationChannel::MaxHeight,
+                max_height,
+                animation,
+                InvalidationKind::Measure,
+                apply_max_height,
+            ) {
+                return;
+            }
+        }
+        base.presentation_max_height.set(Some(max_height));
         self.invalidate_measure();
     }
     fn context_menu(&self) -> Option<Rc<dyn MenuExt>> {
@@ -805,6 +1117,10 @@ impl UIElement {
     fn set_pointer_gesture_host(&self, host: Option<Rc<dyn PointerGestureHost>>) {
         *self.as_ui_element().pointer_gesture_host.borrow_mut() = host;
     }
+    /// Registers the frame/runtime capability on a hosted root.
+    fn set_animation_frame_host(&self, host: Option<Rc<dyn AnimationFrameHost>>) {
+        *self.as_ui_element().animation_frame_host.borrow_mut() = host;
+    }
     /// Flushes the owning host's pending interactive arrange, if the backend supports it.
     fn flush_interactive_relayout(&self) {
         flush_interactive_relayout(self.as_ui_element());
@@ -914,6 +1230,7 @@ impl UIElement {
         *self.as_ui_element().invalidate_host.borrow_mut() = None;
         *self.as_ui_element().coordinate_host.borrow_mut() = None;
         *self.as_ui_element().pointer_gesture_host.borrow_mut() = None;
+        *self.as_ui_element().animation_frame_host.borrow_mut() = None;
         *self.as_ui_element().focus_host.borrow_mut() = None;
         *self.as_ui_element().environment.borrow_mut() = None;
     }
@@ -936,6 +1253,11 @@ impl UIElement {
             None => false,
         }
     }
+    /// Clears the hosted focus only when this element owns the currently-focused subtree.
+    fn clear_focus_in_subtree(&self) -> bool {
+        let subtree = self.as_ui_element().visual_collection.owner_rc();
+        subtree.is_some_and(|subtree| clear_focus_in_subtree(&subtree))
+    }
     /// WinUI3's `UIElement.Measure(Size availableSize)` — computes this element's own desired size
     /// (margin-inclusive) against `available`, recursing into children as `measure_override` (still
     /// freely overridable, unlike this method) needs them, and caches the result in
@@ -951,9 +1273,12 @@ impl UIElement {
             }
         } else {
             let _ = self.apply_template();
-            let inner_available = constrain(self, shrink_by_margin(available, self.margin()));
+            let inner_available = constrain(
+                self,
+                shrink_by_margin(available, self.presentation_margin()),
+            );
             let desired = constrain(self, self.measure_override(inner_available));
-            grow_by_margin(desired, self.margin())
+            grow_by_margin(desired, self.presentation_margin())
         };
         self.as_ui_element().measured_size.set(Some(result));
     }
@@ -989,8 +1314,9 @@ impl UIElement {
             });
         }
         let desired_with_margin = self.measured_size().unwrap_or_default();
-        let mut slot = shrink_rect_by_margin(final_rect, self.margin());
-        let desired_without_margin = shrink_by_margin(desired_with_margin, self.margin());
+        let mut slot = shrink_rect_by_margin(final_rect, self.presentation_margin());
+        let desired_without_margin =
+            shrink_by_margin(desired_with_margin, self.presentation_margin());
         // WinUI3/WPF: an explicit `Width`/`Height` wins over `Stretch` — `Stretch` only fills the
         // slot when that axis was never set at all (`align_within`'s own "fills the slot" rule).
         // Shrinking the slot itself to the explicit size here (rather than teaching `align_within`
@@ -998,10 +1324,10 @@ impl UIElement {
         // pure size-in/rect-out math with no widget knowledge — the same way real WPF's own
         // `FrameworkElement.ArrangeCore` consults `this.Width`/`this.Height` directly, right where
         // `this` is available, rather than threading an "is explicit" flag into a separate helper.
-        if self.width().is_some() {
+        if self.presentation_width().is_some() {
             slot.width = slot.width.min(desired_without_margin.width);
         }
-        if self.height().is_some() {
+        if self.presentation_height().is_some() {
             slot.height = slot.height.min(desired_without_margin.height);
         }
         let own_rect = align_within(
@@ -1081,6 +1407,334 @@ pub(crate) fn request_relayout(base: &UIElement, kind: InvalidationKind) {
     }
 }
 
+fn schedule_scalar_animation(
+    base: &UIElement,
+    channel: AnimationChannel,
+    target: f32,
+    animation: Animation,
+    kind: InvalidationKind,
+    apply: fn(&UIElement, f32),
+) -> bool {
+    let Some(owner) = base.visual_collection.owner_rc() else {
+        return false;
+    };
+    if owner
+        .effective_environment()
+        .get::<crate::environment::ReduceMotionEnvironment>()
+    {
+        return false;
+    }
+    let Some(host) = animation_frame_host(base) else {
+        return false;
+    };
+    let runtime = host.animation_runtime();
+    let weak = Rc::downgrade(&owner);
+    runtime.animate(
+        owner.render_group_id(),
+        channel,
+        AnimatedValue::Scalar(match channel {
+            AnimationChannel::Opacity => base.presentation_opacity.get(),
+            AnimationChannel::Margin => base.presentation_margin.get(),
+            AnimationChannel::Width => base.presentation_width.get().unwrap_or(target),
+            AnimationChannel::Height => base.presentation_height.get().unwrap_or(target),
+            AnimationChannel::MinWidth => base.presentation_min_width.get().unwrap_or(target),
+            AnimationChannel::MinHeight => base.presentation_min_height.get().unwrap_or(target),
+            AnimationChannel::MaxWidth => base.presentation_max_width.get().unwrap_or(target),
+            AnimationChannel::MaxHeight => base.presentation_max_height.get().unwrap_or(target),
+            AnimationChannel::VisualTransform | AnimationChannel::TransitionVisualTransform => {
+                unreachable!("scalar channel required")
+            }
+            AnimationChannel::TransitionOpacity => base.transition_opacity.get(),
+        }),
+        AnimatedValue::Scalar(target),
+        animation,
+        Box::new(move |value| {
+            let AnimatedValue::Scalar(value) = value else {
+                return;
+            };
+            if let Some(owner) = weak.upgrade() {
+                let base = owner.as_ui_element();
+                apply(base, value);
+                request_relayout(base, kind);
+            }
+        }),
+    );
+    if runtime.take_frame_request() {
+        host.request_animation_frame();
+    }
+    true
+}
+
+fn schedule_transform_animation(
+    base: &UIElement,
+    target: VisualTransform,
+    animation: Animation,
+) -> bool {
+    let Some(owner) = base.visual_collection.owner_rc() else {
+        return false;
+    };
+    if owner
+        .effective_environment()
+        .get::<crate::environment::ReduceMotionEnvironment>()
+    {
+        return false;
+    }
+    let Some(host) = animation_frame_host(base) else {
+        return false;
+    };
+    let runtime = host.animation_runtime();
+    let weak = Rc::downgrade(&owner);
+    runtime.animate(
+        owner.render_group_id(),
+        AnimationChannel::VisualTransform,
+        AnimatedValue::Transform(base.presentation_visual_transform.get()),
+        AnimatedValue::Transform(target),
+        animation,
+        Box::new(move |value| {
+            let AnimatedValue::Transform(value) = value else {
+                return;
+            };
+            if let Some(owner) = weak.upgrade() {
+                let base = owner.as_ui_element();
+                base.presentation_visual_transform.set(value);
+                request_relayout(base, InvalidationKind::Render);
+            }
+        }),
+    );
+    if runtime.take_frame_request() {
+        host.request_animation_frame();
+    }
+    true
+}
+
+fn transition_channel_count(opacity: f32, transform: VisualTransform) -> usize {
+    usize::from((opacity - 1.0).abs() > f32::EPSILON)
+        + usize::from(transform != VisualTransform::IDENTITY)
+}
+
+/// Starts an insertion transition after the node has been inserted into its retained Visual
+/// parent. The logical target remains unchanged; only presentation state is driven by the runtime.
+pub fn start_enter_transition(
+    node: &Rc<dyn UIElementExt>,
+    transition: &Transition,
+    animation: Animation,
+) -> bool {
+    let base = node.as_ui_element();
+    let (start_opacity, start_transform) = transition.effect(true);
+    let channels = transition_channel_count(start_opacity, start_transform);
+    if channels == 0 || animation.is_immediate() {
+        base.transition_opacity.set(1.0);
+        base.transition_visual_transform
+            .set(VisualTransform::IDENTITY);
+        node.invalidate_render();
+        return true;
+    }
+    if base
+        .effective_environment()
+        .get::<crate::environment::ReduceMotionEnvironment>()
+    {
+        base.transition_opacity.set(1.0);
+        base.transition_visual_transform
+            .set(VisualTransform::IDENTITY);
+        node.invalidate_render();
+        return true;
+    }
+    let Some(host) = animation_frame_host(base) else {
+        base.transition_opacity.set(1.0);
+        base.transition_visual_transform
+            .set(VisualTransform::IDENTITY);
+        node.invalidate_render();
+        return true;
+    };
+    base.transition_opacity.set(start_opacity);
+    base.transition_visual_transform.set(start_transform);
+    node.invalidate_render();
+    let pending = Rc::new(Cell::new(channels));
+    let weak = Rc::downgrade(node);
+    let runtime = host.animation_runtime();
+    if (start_opacity - 1.0).abs() > f32::EPSILON {
+        let pending = Rc::clone(&pending);
+        let weak = weak.clone();
+        runtime.animate_with_completion(
+            node.render_group_id(),
+            AnimationChannel::TransitionOpacity,
+            AnimatedValue::Scalar(start_opacity),
+            AnimatedValue::Scalar(1.0),
+            animation,
+            Box::new(move |value, finished| {
+                if let Some(node) = weak.upgrade() {
+                    node.as_ui_element().transition_opacity.set(match value {
+                        AnimatedValue::Scalar(value) => value,
+                        _ => return,
+                    });
+                    node.invalidate_render();
+                }
+                if finished {
+                    pending.set(pending.get().saturating_sub(1));
+                }
+            }),
+        );
+    }
+    if start_transform != VisualTransform::IDENTITY {
+        let pending = Rc::clone(&pending);
+        let weak = weak.clone();
+        runtime.animate_with_completion(
+            node.render_group_id(),
+            AnimationChannel::TransitionVisualTransform,
+            AnimatedValue::Transform(start_transform),
+            AnimatedValue::Transform(VisualTransform::IDENTITY),
+            animation,
+            Box::new(move |value, finished| {
+                if let Some(node) = weak.upgrade() {
+                    node.as_ui_element()
+                        .transition_visual_transform
+                        .set(match value {
+                            AnimatedValue::Transform(value) => value,
+                            _ => return,
+                        });
+                    node.invalidate_render();
+                }
+                if finished {
+                    pending.set(pending.get().saturating_sub(1));
+                }
+            }),
+        );
+    }
+    if runtime.take_frame_request() {
+        host.request_animation_frame();
+    }
+    true
+}
+
+/// Begins an exit transition and retains the node in the Visual tree until all presentation
+/// channels finish. The caller must have already removed the node from its logical collection.
+pub fn start_exit_transition(
+    node: &Rc<dyn UIElementExt>,
+    transition: &Transition,
+    animation: Animation,
+) -> bool {
+    if !begin_exit(node) {
+        return false;
+    }
+    let base = node.as_ui_element();
+    let (target_opacity, target_transform) = transition.effect(false);
+    let channels = transition_channel_count(target_opacity, target_transform);
+    if channels == 0 || animation.is_immediate() {
+        base.transition_opacity.set(target_opacity);
+        base.transition_visual_transform.set(target_transform);
+        finish_exit(node);
+        return true;
+    }
+    if base
+        .effective_environment()
+        .get::<crate::environment::ReduceMotionEnvironment>()
+    {
+        base.transition_opacity.set(target_opacity);
+        base.transition_visual_transform.set(target_transform);
+        finish_exit(node);
+        return true;
+    }
+    let Some(host) = animation_frame_host(base) else {
+        base.transition_opacity.set(target_opacity);
+        base.transition_visual_transform.set(target_transform);
+        finish_exit(node);
+        return true;
+    };
+    let pending = Rc::new(Cell::new(channels));
+    let weak = Rc::downgrade(node);
+    let runtime = host.animation_runtime();
+    if (target_opacity - 1.0).abs() > f32::EPSILON {
+        let pending = Rc::clone(&pending);
+        let weak = weak.clone();
+        runtime.animate_with_completion(
+            node.render_group_id(),
+            AnimationChannel::TransitionOpacity,
+            AnimatedValue::Scalar(base.transition_opacity.get()),
+            AnimatedValue::Scalar(target_opacity),
+            animation,
+            Box::new(move |value, finished| {
+                if let Some(node) = weak.upgrade() {
+                    node.as_ui_element().transition_opacity.set(match value {
+                        AnimatedValue::Scalar(value) => value,
+                        _ => return,
+                    });
+                    node.invalidate_render();
+                    if finished && pending.get() == 1 {
+                        finish_exit(&node);
+                    }
+                }
+                if finished {
+                    pending.set(pending.get().saturating_sub(1));
+                }
+            }),
+        );
+    }
+    if target_transform != VisualTransform::IDENTITY {
+        let pending = Rc::clone(&pending);
+        let weak = weak.clone();
+        runtime.animate_with_completion(
+            node.render_group_id(),
+            AnimationChannel::TransitionVisualTransform,
+            AnimatedValue::Transform(base.transition_visual_transform.get()),
+            AnimatedValue::Transform(target_transform),
+            animation,
+            Box::new(move |value, finished| {
+                if let Some(node) = weak.upgrade() {
+                    node.as_ui_element()
+                        .transition_visual_transform
+                        .set(match value {
+                            AnimatedValue::Transform(value) => value,
+                            _ => return,
+                        });
+                    node.invalidate_render();
+                    if finished && pending.get() == 1 {
+                        finish_exit(&node);
+                    }
+                }
+                if finished {
+                    pending.set(pending.get().saturating_sub(1));
+                }
+            }),
+        );
+    }
+    if runtime.take_frame_request() {
+        host.request_animation_frame();
+    }
+    true
+}
+
+fn apply_opacity(base: &UIElement, value: f32) {
+    base.presentation_opacity.set(value);
+}
+
+fn apply_margin(base: &UIElement, value: f32) {
+    base.presentation_margin.set(value);
+}
+
+fn apply_width(base: &UIElement, value: f32) {
+    base.presentation_width.set(Some(value));
+}
+
+fn apply_height(base: &UIElement, value: f32) {
+    base.presentation_height.set(Some(value));
+}
+
+fn apply_min_width(base: &UIElement, value: f32) {
+    base.presentation_min_width.set(Some(value));
+}
+
+fn apply_min_height(base: &UIElement, value: f32) {
+    base.presentation_min_height.set(Some(value));
+}
+
+fn apply_max_width(base: &UIElement, value: f32) {
+    base.presentation_max_width.set(Some(value));
+}
+
+fn apply_max_height(base: &UIElement, value: f32) {
+    base.presentation_max_height.set(Some(value));
+}
+
 pub(crate) fn flush_interactive_relayout(base: &UIElement) {
     // Explicitly typed (issue #239): rust-analyzer, unlike rustc, cannot infer `current`'s type
     // from this chain alone before the `element.visual_parent()` call inside the loop below.
@@ -1120,6 +1774,16 @@ pub(crate) fn request_focus(target: &Rc<dyn UIElementExt>) -> bool {
         Some(host) => host.request_focus(target),
         None => false,
     }
+}
+
+pub(crate) fn clear_focus_in_subtree(subtree: &Rc<dyn UIElementExt>) -> bool {
+    let mut current = Some(Rc::clone(subtree));
+    let mut host = subtree.as_ui_element().focus_host.borrow().clone();
+    while let Some(element) = current {
+        host = element.as_ui_element().focus_host.borrow().clone().or(host);
+        current = element.visual_parent();
+    }
+    host.is_some_and(|host| host.clear_focus_in_subtree(subtree))
 }
 
 /// Finds the nearest coordinate host registered on `base`'s Visual ancestry.
@@ -1162,6 +1826,26 @@ fn pointer_gesture_host(base: &UIElement) -> Option<Rc<dyn PointerGestureHost>> 
     host
 }
 
+/// Finds the animation frame/runtime capability registered on the hosted tree root.
+fn animation_frame_host(base: &UIElement) -> Option<Rc<dyn AnimationFrameHost>> {
+    let mut current: Option<Rc<dyn UIElementExt>> = base
+        .visual_parent
+        .borrow()
+        .as_ref()
+        .and_then(|weak| weak.upgrade());
+    let mut host = base.animation_frame_host.borrow().clone();
+    while let Some(element) = current {
+        host = element
+            .as_ui_element()
+            .animation_frame_host
+            .borrow()
+            .clone()
+            .or(host);
+        current = element.visual_parent();
+    }
+    host
+}
+
 /// Lifecycle state of a UI component during its creation, mount, unmount traversal, and teardown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ComponentLifecycleState {
@@ -1172,6 +1856,18 @@ pub enum ComponentLifecycleState {
     Unmounted,
 }
 
+/// Whether a Visual remains renderable after its logical owner has removed it.
+///
+/// `Exiting` is deliberately orthogonal to [`ComponentLifecycleState`]: an exiting element is no
+/// longer laid out, hit-testable, focusable, shortcut-active, or logically owned, but it remains in
+/// the Visual collection until its transition completion removes and unmounts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VisualParticipation {
+    #[default]
+    Active,
+    Exiting,
+}
+
 /// Recursively unmounts every descendant in the Visual tree rooted at `node` in child-first order,
 /// invokes each node's unmount hooks (including generated Component lifecycle teardown, `on_unmount`,
 /// and subscription cancellations), and detaches visual collections.
@@ -1180,6 +1876,49 @@ pub fn unmount_subtree(node: &Rc<dyn UIElementExt>) {
         host.cancel_pointer_gesture_in_subtree(node);
     }
     unmount_subtree_inner(node);
+}
+
+/// Moves a still-rendered child to the terminal state of an exit transition.
+///
+/// The caller is responsible for removing the child from its logical collection first. The
+/// Visual parent edge is intentionally retained while the transition is running, then this helper
+/// removes that edge and performs the normal exactly-once unmount traversal.
+pub fn begin_exit(node: &Rc<dyn UIElementExt>) -> bool {
+    let base = node.as_ui_element();
+    if base.visual_participation.get() == VisualParticipation::Exiting {
+        return false;
+    }
+    if let Some(host) = pointer_gesture_host(base) {
+        host.cancel_pointer_gesture_in_subtree(node);
+    }
+    node.clear_focus_in_subtree();
+    base.visual_participation.set(VisualParticipation::Exiting);
+    if let Some(parent) = node.visual_parent() {
+        parent.as_ui_element().visual_collection.begin_exit(node);
+    }
+    node.invalidate_render();
+    true
+}
+
+/// Completes an exit transition, removing the retained Visual and unmounting it once.
+pub fn finish_exit(node: &Rc<dyn UIElementExt>) -> bool {
+    if node.as_ui_element().visual_participation.get() != VisualParticipation::Exiting {
+        return false;
+    }
+    node.as_ui_element().transition_opacity.set(1.0);
+    node.as_ui_element()
+        .transition_visual_transform
+        .set(VisualTransform::IDENTITY);
+    if let Some(parent) = node.visual_parent() {
+        parent.as_ui_element().visual_collection.finish_exit(node);
+    } else {
+        *node.as_ui_element().visual_parent.borrow_mut() = None;
+    }
+    node.as_ui_element()
+        .visual_participation
+        .set(VisualParticipation::Active);
+    unmount_subtree(node);
+    true
 }
 
 fn unmount_subtree_inner(node: &Rc<dyn UIElementExt>) {
@@ -1197,7 +1936,38 @@ fn unmount_subtree_inner(node: &Rc<dyn UIElementExt>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base::Vector;
     use crate::ui::testsupport::*;
+
+    #[test]
+    fn transition_overlay_composes_with_base_presentation_without_changing_target_state() {
+        let leaf = native("leaf", size(10.0, 10.0));
+        let base = leaf.as_ui_element();
+        base.opacity.set(0.8);
+        base.presentation_opacity.set(0.6);
+        base.transition_opacity.set(0.5);
+        base.presentation_visual_transform.set(VisualTransform {
+            translation: Vector { x: 3.0, y: 4.0 },
+            scale: 2.0,
+            rotation: 0.0,
+        });
+        base.transition_visual_transform.set(VisualTransform {
+            translation: Vector { x: 5.0, y: 6.0 },
+            scale: 0.5,
+            rotation: 0.0,
+        });
+
+        assert_eq!(leaf.opacity(), 0.8);
+        assert_eq!(leaf.presentation_opacity(), 0.3);
+        assert_eq!(
+            leaf.presentation_visual_transform(),
+            VisualTransform {
+                translation: Vector { x: 13.0, y: 16.0 },
+                scale: 1.0,
+                rotation: 0.0,
+            }
+        );
+    }
 
     #[test]
     fn unmount_cancels_pointer_gesture_before_teardown_and_clears_host() {

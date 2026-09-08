@@ -4,7 +4,7 @@
 
 use crate::ast::{
     AssignmentKind, Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, FieldDef, FieldKind,
-    Item, Module, ViewAttribute, ViewExpr,
+    Item, Module, ViewAttribute, ViewExpr, ViewModifier,
 };
 use crate::codegen::{self, SymbolTable, strip_option, strip_rc_wrapper, strip_weak_wrapper};
 use std::collections::{HashMap, HashSet};
@@ -431,6 +431,7 @@ pub(crate) fn validate_classified(modules: &[Module]) -> Vec<ValidationDiagnosti
                                 &vm_fields,
                                 &table,
                                 None,
+                                false,
                                 &mut errors,
                             );
                             check_dynamic_child_hosts(
@@ -499,6 +500,7 @@ pub(crate) fn validate_classified(modules: &[Module]) -> Vec<ValidationDiagnosti
                                     &vm_fields,
                                     &table,
                                     c.base.as_deref(),
+                                    false,
                                     &mut errors,
                                 );
                                 check_dynamic_child_hosts(
@@ -1068,6 +1070,7 @@ fn check_binding_assignment_child(
     } else {
         let wrapper = ElementNode {
             type_path: String::new(),
+            modifiers: Vec::new(),
             attributes: Vec::new(),
             attached: Vec::new(),
             attribute_shortcuts: Vec::new(),
@@ -1309,11 +1312,21 @@ fn check_vm_references(
     vm_fields: &HashMap<&str, &str>,
     table: &SymbolTable,
     exempt_root_type: Option<&str>,
+    dynamic_modifier_context: bool,
     errors: &mut ValidationErrors,
 ) {
     if exempt_root_type != Some(node.type_path.as_str()) {
         check_not_abstract(node, from, component_name, table, errors);
     }
+    check_view_modifiers(
+        node,
+        from,
+        component_name,
+        vm_fields,
+        table,
+        dynamic_modifier_context,
+        errors,
+    );
     for attribute in &node.attributes {
         if matches!(attribute.value, ViewExpr::DeferredView(_)) {
             check_deferred_view_assignment(node, attribute, from, component_name, table, errors);
@@ -1328,7 +1341,100 @@ fn check_vm_references(
         );
     }
     for child in &node.children {
-        check_child_vm_references(child, from, component_name, vm_fields, table, errors);
+        check_child_vm_references(child, from, component_name, vm_fields, table, false, errors);
+    }
+}
+
+fn check_view_modifiers(
+    node: &ElementNode,
+    from: &Module,
+    component_name: &str,
+    vm_fields: &HashMap<&str, &str>,
+    table: &SymbolTable,
+    dynamic_modifier_context: bool,
+    errors: &mut ValidationErrors,
+) {
+    for modifier in &node.modifiers {
+        match modifier {
+            ViewModifier::Animation {
+                animation, value, ..
+            } => {
+                if value.len() != 1 {
+                    errors.item_local(format!(
+                        "{component_name}: `#[animation]` requires exactly one bare trigger field"
+                    ));
+                }
+                check_modifier_expr(animation, from, component_name, vm_fields, table, errors);
+            }
+            ViewModifier::Transition { transition, .. } => {
+                if !dynamic_modifier_context {
+                    errors.item_local(format!(
+                        "{component_name}: `#[transition]` is only supported on a literal child inside if/match/for"
+                    ));
+                }
+                let bare_type = node
+                    .type_path
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(node.type_path.as_str());
+                if matches!(
+                    bare_type,
+                    "Window" | "Menu" | "MenuBar" | "MenuItem" | "MenuBarItem"
+                ) {
+                    errors.item_local(format!(
+                        "{component_name}: `#[transition]` is not supported on `{}`",
+                        node.type_path
+                    ));
+                }
+                if let Some(info) = table.resolve(from, &node.type_path)
+                    && info.host_composition_base.is_some()
+                {
+                    errors.registry_dependent(format!(
+                        "{component_name}: `#[transition]` requires a UIElement child, but `{}` is a host-composition type",
+                        node.type_path
+                    ));
+                }
+                if let Some(info) = table.resolve(from, &node.type_path)
+                    && !info.is_native
+                    && !info.is_virtual_builtin
+                    && info.composed_shape.is_none()
+                    && info.host_composition_base.is_none()
+                {
+                    errors.registry_dependent(format!(
+                        "{component_name}: `#[transition]` requires a UIElement child, but `{}` is not a UIElement",
+                        node.type_path
+                    ));
+                }
+                check_modifier_expr(transition, from, component_name, vm_fields, table, errors);
+            }
+        }
+    }
+}
+
+/// Modifier expressions are ordinary Rust constructor/method expressions. Bare paths still use
+/// the normal dependency check, while nested DSL elements, deferred views, and closures are not
+/// valid modifier values.
+fn check_modifier_expr(
+    expr: &ViewExpr,
+    from: &Module,
+    component_name: &str,
+    vm_fields: &HashMap<&str, &str>,
+    table: &SymbolTable,
+    errors: &mut ValidationErrors,
+) {
+    match expr {
+        ViewExpr::Path(_) => check_vm_expr(expr, from, component_name, vm_fields, table, errors),
+        ViewExpr::TFluent(_, args) => {
+            for (_, arg) in args {
+                check_modifier_expr(arg, from, component_name, vm_fields, table, errors);
+            }
+        }
+        ViewExpr::Closure { .. } | ViewExpr::Element(_) | ViewExpr::DeferredView(_) => {
+            errors.item_local(format!(
+                "{component_name}: animation/transition modifier values must be Rust expressions or paths"
+            ));
+        }
+        ViewExpr::Expr(_) => {}
     }
 }
 
@@ -1394,6 +1500,7 @@ fn check_child_vm_references(
     component_name: &str,
     vm_fields: &HashMap<&str, &str>,
     table: &SymbolTable,
+    dynamic_modifier_context: bool,
     errors: &mut ValidationErrors,
 ) {
     match child {
@@ -1404,6 +1511,7 @@ fn check_child_vm_references(
             vm_fields,
             table,
             None,
+            dynamic_modifier_context,
             errors,
         ),
         ChildEntry::Ref(_) => {}
@@ -1414,7 +1522,15 @@ fn check_child_vm_references(
         } => {
             check_vm_expr(condition, from, component_name, vm_fields, table, errors);
             for child in then_branch.iter().chain(else_branch) {
-                check_child_vm_references(child, from, component_name, vm_fields, table, errors);
+                check_child_vm_references(
+                    child,
+                    from,
+                    component_name,
+                    vm_fields,
+                    table,
+                    true,
+                    errors,
+                );
             }
         }
         ChildEntry::Match { value, arms } => {
@@ -1427,6 +1543,7 @@ fn check_child_vm_references(
                         component_name,
                         vm_fields,
                         table,
+                        true,
                         errors,
                     );
                 }
@@ -1437,7 +1554,15 @@ fn check_child_vm_references(
         } => {
             check_vm_expr(collection, from, component_name, vm_fields, table, errors);
             for child in body {
-                check_child_vm_references(child, from, component_name, vm_fields, table, errors);
+                check_child_vm_references(
+                    child,
+                    from,
+                    component_name,
+                    vm_fields,
+                    table,
+                    true,
+                    errors,
+                );
             }
         }
     }
@@ -1539,6 +1664,7 @@ fn check_vm_expr(
                     vm_fields,
                     table,
                     None,
+                    false,
                     errors,
                 );
             }
@@ -1551,6 +1677,7 @@ fn check_vm_expr(
                         vm_fields,
                         table,
                         None,
+                        false,
                         errors,
                     );
                 }
@@ -2260,6 +2387,7 @@ fn check_element_value(
                 vm_fields,
                 table,
                 None,
+                false,
                 errors,
             );
         }

@@ -34,7 +34,7 @@
 //! established by the time `construct()` returns (via `#[class]`'s `__self_weak`, see
 //! `UIElement::construct`) — well before any child is ever added.
 
-use crate::base::{CornerRadius, Point, Rect, Size};
+use crate::base::{AffineTransform, CornerRadius, Point, Rect, Size};
 #[cfg(test)]
 use crate::graphics::Color;
 #[cfg(test)]
@@ -66,6 +66,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 //
 // The submodules deliberately open with `use super::*;` rather than repeating this file's import
 // block, which is what let the original single-file `ui.rs` be split as a pure code move.
+pub mod animation;
 mod element;
 
 mod view_factory;
@@ -88,6 +89,7 @@ mod testsupport;
 // `elwindui::ui::__elwindui_macros_of_Window`. Naming only the types here would strand those
 // aliases in the submodule and break every inheriting user component — the same constraint
 // `elwindui-backend-appkit`'s `native_ui/mod.rs` documents for its own split.
+pub use animation::*;
 pub use collections::*;
 pub use controls::*;
 pub use element::*;

@@ -118,13 +118,19 @@ pub(crate) struct GroupCacheKey {
 /// two in sync. One struct, one lookup, no coupling to maintain.
 pub(crate) struct GroupCacheEntry {
     key: GroupCacheKey,
-    /// `(identity, owner_id, local_rect)` for every native control this group's commands placed —
+    /// `(identity, owner_id, local_rect, transform, opacity)` for every native control this group's commands placed —
     /// `local_rect` is that control's `visible_local` rect (relative to this group's own absolute
     /// origin, already clip-intersected) as of the pass that last rebuilt this entry. Kept (rather
     /// than just `identity`) so a cache-hit pass can still re-derive each control's *current*
     /// absolute frame from this group's freshly recomputed `origin` — see `replay_group`'s
     /// unconditional native-control resync step, right after the `stale`/cache-hit branch.
-    native_controls: Vec<(usize, u64, elwindui_core::base::Rect)>,
+    native_controls: Vec<(
+        usize,
+        u64,
+        elwindui_core::base::Rect,
+        elwindui_core::base::AffineTransform,
+        f32,
+    )>,
     image_ids: Vec<ImageId>,
     vector_image_ids: Vec<VectorImageId>,
     /// Per-command `CommandKind`, in the same order as `RenderGroup::commands`, captured only
@@ -212,6 +218,14 @@ pub(crate) trait NativeIslandHost {
     /// Attaches a freshly created `container` (and its own inner `nsview`) into the real view
     /// hierarchy. Called exactly once per identity, right after `island` returns `is_new == true`.
     fn attach_island(&self, container: &NSView, nsview: &NSView);
+    fn project(
+        &self,
+        identity: usize,
+        container: &NSView,
+        transform: elwindui_core::base::AffineTransform,
+        opacity: f32,
+        input_enabled: bool,
+    );
 }
 
 /// Returns the raster and vector resources a group's command list can resolve. The result is
@@ -443,6 +457,50 @@ pub(crate) fn replay_group(
     new_native_order: &mut Vec<usize>,
     state: &mut ReplayState,
 ) {
+    replay_group_with_input(
+        native,
+        root_layer,
+        group,
+        origin,
+        inherited_clip,
+        transform,
+        opacity,
+        true,
+        scale,
+        live_native_controls,
+        live_group_ids,
+        live_image_ids,
+        live_vector_image_ids,
+        new_group_order,
+        new_native_order,
+        state,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replay_group_with_input(
+    native: &dyn NativeIslandHost,
+    root_layer: &Retained<CALayer>,
+    group: &RenderGroup,
+    origin: elwindui_core::base::Point,
+    inherited_clip: Option<elwindui_core::base::Rect>,
+    transform: elwindui_core::base::AffineTransform,
+    opacity: f32,
+    input_enabled: bool,
+    scale: CGFloat,
+    live_native_controls: &mut HashSet<usize>,
+    live_group_ids: &mut HashSet<u64>,
+    live_image_ids: &mut HashSet<ImageId>,
+    live_vector_image_ids: &mut HashSet<VectorImageId>,
+    new_group_order: &mut Vec<u64>,
+    new_native_order: &mut Vec<usize>,
+    state: &mut ReplayState,
+) {
+    // Core retains each Visual's local presentation separately. Compose it here so parent
+    // animation transforms self-drawn commands and descendants without rewriting leaf geometry.
+    let transform = transform.concat(&group.transform);
+    let opacity = opacity * group.opacity;
+    let input_enabled = input_enabled && group.input_enabled;
     let origin = elwindui_core::base::Point {
         x: origin.x + group.offset.x,
         y: origin.y + group.offset.y,
@@ -599,6 +657,7 @@ pub(crate) fn replay_group(
                         leaf_clip,
                         transform,
                         opacity,
+                        input_enabled,
                         origin,
                         live_native_controls,
                         new_native_order,
@@ -644,7 +703,7 @@ pub(crate) fn replay_group(
     // stale (e.g. a `Button` sitting in a row whose *ancestor* spacing changed, but whose own
     // local offset within that row didn't) freezes at its last-applied screen position forever.
     if let Some(entry) = state.group_cache.get(&group.id) {
-        for &(identity, owner_id, local_rect) in &entry.native_controls {
+        for &(identity, owner_id, local_rect, transform, opacity) in &entry.native_controls {
             let (container, _is_new) = native.island(identity, owner_id);
             container.setFrame(NSRect::new(
                 objc2_foundation::NSPoint::new(
@@ -653,11 +712,12 @@ pub(crate) fn replay_group(
                 ),
                 objc2_foundation::NSSize::new(local_rect.width as f64, local_rect.height as f64),
             ));
+            native.project(identity, &container, transform, opacity, input_enabled);
         }
     }
 
     for child in &group.children {
-        replay_group(
+        replay_group_with_input(
             native,
             root_layer,
             child,
@@ -665,6 +725,7 @@ pub(crate) fn replay_group(
             effective_clip,
             transform,
             opacity,
+            input_enabled,
             scale,
             live_native_controls,
             live_group_ids,
@@ -694,6 +755,7 @@ pub(crate) fn replay_commands(
     clip: Option<elwindui_core::base::Rect>,
     transform: elwindui_core::base::AffineTransform,
     opacity: f32,
+    input_enabled: bool,
     // The owning group's own absolute origin (its `container`'s `position` — see `replay_group`'s
     // own doc comment) — `origin` above is local to this replay (always `Point::ZERO` when this
     // is the group's own top-level call, per `replay_group`). Used *only* by the `NativeControl`
@@ -707,7 +769,13 @@ pub(crate) fn replay_commands(
     // own `Push*` recursion) placed — collected here rather than re-derived from
     // `live_native_controls`'s before/after diff so the owning `GroupCacheEntry` can keep each
     // control's local rect around for `replay_group`'s unconditional per-pass resync step.
-    native_control_rects: &mut Vec<(usize, u64, elwindui_core::base::Rect)>,
+    native_control_rects: &mut Vec<(
+        usize,
+        u64,
+        elwindui_core::base::Rect,
+        elwindui_core::base::AffineTransform,
+        f32,
+    )>,
     image_cache: &mut HashMap<ImageId, CFRetained<CGImage>>,
     vector_raster_cache: &mut HashMap<VectorImageId, (u32, u32, u8, CFRetained<CGImage>)>,
 ) -> usize {
@@ -752,6 +820,7 @@ pub(crate) fn replay_commands(
                     new_clip,
                     transform,
                     opacity,
+                    input_enabled,
                     group_origin,
                     live_native_controls,
                     new_native_order,
@@ -770,6 +839,7 @@ pub(crate) fn replay_commands(
                     clip,
                     transform.concat(pushed),
                     opacity,
+                    input_enabled,
                     group_origin,
                     live_native_controls,
                     new_native_order,
@@ -788,6 +858,7 @@ pub(crate) fn replay_commands(
                     clip,
                     transform,
                     opacity * *pushed,
+                    input_enabled,
                     group_origin,
                     live_native_controls,
                     new_native_order,
@@ -826,7 +897,7 @@ pub(crate) fn replay_commands(
                     idx += 1;
                     continue;
                 }
-                native_control_rects.push((identity, *owner_id, visible_local));
+                native_control_rects.push((identity, *owner_id, visible_local, transform, opacity));
                 let visible_rect = elwindui_core::base::Rect {
                     x: group_origin.x + visible_local.x,
                     y: group_origin.y + visible_local.y,
@@ -844,6 +915,7 @@ pub(crate) fn replay_commands(
                     ),
                 ));
                 container.setClipsToBounds(true);
+                native.project(identity, &container, transform, opacity, input_enabled);
                 let nsview = view.as_nsview();
                 if is_new {
                     crate::render::stats::bump(|s| s.subview_added += 1);
@@ -1198,6 +1270,17 @@ mod tests {
         fn attach_island(&self, _container: &NSView, _nsview: &NSView) {
             unreachable!("test tree must not contain a RenderCommand::NativeControl")
         }
+
+        fn project(
+            &self,
+            _identity: usize,
+            _container: &NSView,
+            _transform: AffineTransform,
+            _opacity: f32,
+            _input_enabled: bool,
+        ) {
+            unreachable!("test tree must not contain a RenderCommand::NativeControl")
+        }
     }
 
     fn solid_fill_rect_group(id: u64) -> RenderGroup {
@@ -1286,6 +1369,8 @@ mod tests {
                         width: 0.0,
                         height: 0.0,
                     },
+                    AffineTransform::identity(),
+                    1.0,
                 ),
                 (
                     23,
@@ -1296,6 +1381,8 @@ mod tests {
                         width: 0.0,
                         height: 0.0,
                     },
+                    AffineTransform::identity(),
+                    1.0,
                 ),
             ],
             image_ids: Vec::new(),

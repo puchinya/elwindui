@@ -905,3 +905,9 @@ pub enum IconSource {
 - [DSL Specification](dsl_spec.md) - ElwindUI DSL の構文・バインディングルール
 - [Graphics Specification](graphics_spec.md) - `Color`, `Brush`, `Path`, `BitmapImage`, `IconSource` などの描画仕様
 - [Platform Specification](platform_spec.md) - OSサービス（ファイルダイアログ等）の仕様
+## Animation and transition reference
+
+`UIElement` common `opacity`, `visual_transform`, and `transform_origin`,
+presentation-aware layout/render/hit behavior, and Active versus Exiting
+participation are specified in [`animation_spec.md`](animation_spec.md).
+This document does not redefine those animation semantics.

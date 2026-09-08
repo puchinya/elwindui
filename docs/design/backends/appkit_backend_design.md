@@ -41,3 +41,20 @@ AppKit `TabView` keeps a custom embedded tab strip rather than `NSTabView`, beca
 Render groups replay into Core Graphics/layers with balanced clip, transform, and opacity state. Layer/image resources are owned by the corresponding render node and pruned when reconciliation removes or deactivates it.
 
 Memory measurement reports are Issue evidence, not durable architecture. Durable cache ownership decisions belong here; current measured results belong in backend status.
+
+## Animation projection
+
+The host's existing native-island container is the transform and input boundary
+for a `NativeControl`. Core supplies presentation transform and effective
+opacity; AppKit applies them to the island without changing the common
+animation model or permanently layer-backing every native control. Paint/native
+Z-order reconciliation remains the existing traversal order.
+
+During exit, the island remains visible for rendering but suppresses pointer,
+default-action, accessibility, and focus participation. Suppression is
+synchronous; if the native suppression operation fails, the host removes the
+island immediately rather than leaving an interactive outgoing control.
+
+CVDisplayLink is only a frame source. Its callback schedules a main-thread host
+tick and never mutates Core UI state off the main thread. The link is stopped
+and released when the per-host runtime becomes idle or the host tears down.

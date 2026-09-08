@@ -321,6 +321,7 @@ fn main() {
         "Microsoft.UI.Xaml.Input.Pointer".to_owned(),
         "Microsoft.UI.Xaml.Input.PointerRoutedEventArgs".to_owned(),
         "Microsoft.UI.Xaml.Media.Brush".to_owned(),
+        "Microsoft.UI.Xaml.Media.CompositionTarget".to_owned(),
         "Microsoft.UI.Xaml.Media.LoadedImageSurface".to_owned(),
         "Microsoft.UI.Xaml.Media.LoadedImageSourceLoadCompletedEventArgs".to_owned(),
         "Microsoft.UI.Xaml.Media.LoadedImageSourceLoadStatus".to_owned(),

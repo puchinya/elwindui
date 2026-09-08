@@ -14,21 +14,25 @@ use elwindui_core::input::{
 };
 use elwindui_core::ui::popup::PopupSurfaceHandle;
 use elwindui_core::ui::{
-    ContextMenuPresentation, ContextMenuService, ContextRequest, CoordinateHost, FocusHost,
-    InvalidationKind, PointerGestureHost, RelayoutHost, ResolvedContextDefinition, UIElementExt,
-    layout_root,
+    AnimationFrameHost, AnimationRuntime, ContextMenuPresentation, ContextMenuService,
+    ContextRequest, CoordinateHost, FocusHost, InvalidationKind, PointerGestureHost, RelayoutHost,
+    ResolvedContextDefinition, UIElementExt, layout_root,
 };
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplicationDidResignActiveNotification, NSEvent, NSMenu, NSScreen, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidResignKeyNotification,
+    NSAccessibility, NSApplicationDidResignActiveNotification, NSEvent, NSMenu, NSScreen,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidResignKeyNotification,
 };
+use objc2_core_video::{CVDisplayLink, CVOptionFlags, CVReturn, CVTimeStamp};
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
+use std::ptr::NonNull;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 mod event;
 mod replay;
@@ -52,6 +56,10 @@ pub struct TreeHostIvars {
     /// element does this native container belong to" without a second registry of its own; see
     /// `resolve_native_owner_id`.
     pub(crate) native_owner_ids: RefCell<HashMap<usize, u64>>,
+    /// Native islands whose owning Core Visual is currently not eligible for input/focus. They
+    /// remain visible during an exit transition, while `hitTest:` routes their mouse events back
+    /// to this host so Core's presentation-aware hit test can choose the active tree instead.
+    pub(crate) suppressed_native_ids: RefCell<HashSet<usize>>,
     /// Everything a replay pass reads or writes besides the live `CALayer`/`NSView` tree itself
     /// (per-group container cache, image/vector-raster caches) — see `replay::ReplayState`'s own
     /// doc comment. Held as a single `RefCell` so a pass takes one borrow across its whole
@@ -126,6 +134,61 @@ pub struct TreeHostIvars {
     pub(crate) active: Cell<bool>,
     /// Retained handle to any currently active custom popup or context menu surface.
     pub(crate) active_popup: RefCell<Option<Rc<dyn PopupSurfaceHandle>>>,
+    pub(crate) animation_runtime: Rc<AnimationRuntime>,
+    pub(crate) display_link: RefCell<Option<Retained<CVDisplayLink>>>,
+    pub(crate) display_link_state: Box<AppKitDisplayLinkState>,
+}
+
+/// Cross-thread display-link state. The callback never touches AppKit/Core UI state: it only
+/// coalesces one main-queue wake-up and transfers a retained host pointer to that queue.
+pub(crate) struct AppKitDisplayLinkState {
+    pub(crate) host: AtomicUsize,
+    pub(crate) frame_queued: AtomicBool,
+}
+
+unsafe extern "C-unwind" fn appkit_display_link_callback(
+    _display_link: NonNull<CVDisplayLink>,
+    _now: NonNull<CVTimeStamp>,
+    _output_time: NonNull<CVTimeStamp>,
+    _flags: CVOptionFlags,
+    _flags_out: NonNull<CVOptionFlags>,
+    user_info: *mut c_void,
+) -> CVReturn {
+    if user_info.is_null() {
+        return 0;
+    }
+    let state = unsafe { &*(user_info.cast::<AppKitDisplayLinkState>()) };
+    if state.frame_queued.swap(true, Ordering::AcqRel) {
+        return 0;
+    }
+    let host = state.host.load(Ordering::Acquire);
+    if host == 0 {
+        state.frame_queued.store(false, Ordering::Release);
+        return 0;
+    }
+    let Some(retained) = (unsafe { Retained::<TreeHostView>::retain(host as *mut TreeHostView) })
+    else {
+        state.frame_queued.store(false, Ordering::Release);
+        return 0;
+    };
+    let retained = Retained::into_raw(retained) as usize;
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        let Some(view) =
+            (unsafe { Retained::<TreeHostView>::from_raw(retained as *mut TreeHostView) })
+        else {
+            return;
+        };
+        view.ivars()
+            .display_link_state
+            .frame_queued
+            .store(false, Ordering::Release);
+        if view.ivars().animation_runtime.is_idle() {
+            view.stop_animation_display_link();
+        } else {
+            view.setNeedsLayout(true);
+        }
+    });
+    0
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostView` — wraps a *weak* reference back to the view
@@ -167,6 +230,24 @@ impl RelayoutHost for AppKitRelayoutHost {
     }
 }
 
+pub(crate) struct AppKitAnimationFrameHost(objc2::rc::Weak<TreeHostView>);
+
+impl AnimationFrameHost for AppKitAnimationFrameHost {
+    fn animation_runtime(&self) -> Rc<AnimationRuntime> {
+        self.0
+            .load()
+            .map(|view| Rc::clone(&view.ivars().animation_runtime))
+            .unwrap_or_else(AnimationRuntime::new)
+    }
+
+    fn request_animation_frame(&self) {
+        if let Some(view) = self.0.load() {
+            view.start_animation_display_link();
+            view.setNeedsLayout(true);
+        }
+    }
+}
+
 /// `elwindui_core::ui::FocusHost` for `TreeHostView` — the `FocusHost` counterpart to
 /// `AppKitRelayoutHost`, same weak-back-reference shape. Delegates straight to
 /// `TreeHostIvars::keyboard.focus`, the single source of truth for this view's own hosted tree.
@@ -182,6 +263,24 @@ impl FocusHost for AppKitFocusHost {
                 .set_focus(target, FocusState::Programmatic),
             None => false,
         }
+    }
+
+    fn clear_focus_in_subtree(&self, subtree: &Rc<dyn UIElementExt>) -> bool {
+        let Some(view) = self.0.load() else {
+            return false;
+        };
+        let Some(focused) = view.ivars().keyboard.focus.focused() else {
+            return false;
+        };
+        let mut current = Some(focused);
+        while let Some(element) = current {
+            if Rc::ptr_eq(&element, subtree) {
+                view.ivars().keyboard.focus.clear_focus();
+                return true;
+            }
+            current = element.visual_parent();
+        }
+        false
     }
 }
 
@@ -254,6 +353,23 @@ define_class!(
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
             true
+        }
+
+        /// An exiting native island remains in the AppKit subview tree for visual continuity, but
+        /// it must not win AppKit's native hit-test. Returning the host itself lets the ordinary
+        /// Core pointer path run; Core excludes `VisualParticipation::Exiting` from its target
+        /// chain while still rendering the outgoing island above the replacement.
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, point: NSPoint) -> *mut NSView {
+            let hit: *mut NSView = unsafe { msg_send![super(self), hitTest: point] };
+            if hit.is_null() {
+                return hit;
+            }
+            if self.is_suppressed_native_descendant(unsafe { &*hit }) {
+                self as *const TreeHostView as *mut NSView
+            } else {
+                hit
+            }
         }
 
         /// Fires when this view's backing store resolution changes — most commonly a window
@@ -464,6 +580,11 @@ fn is_pointer_cancel_key(key: Option<Key>) -> bool {
 
 impl Drop for TreeHostView {
     fn drop(&mut self) {
+        self.ivars()
+            .display_link_state
+            .host
+            .store(0, Ordering::Release);
+        self.stop_animation_display_link();
         unsafe {
             NSNotificationCenter::defaultCenter().removeObserver(self as &AnyObject);
         }
@@ -471,6 +592,28 @@ impl Drop for TreeHostView {
 }
 
 impl TreeHostView {
+    fn is_suppressed_native_descendant(&self, view: &NSView) -> bool {
+        let suppressed = self.ivars().suppressed_native_ids.borrow();
+        let containers = self.ivars().native_containers.borrow();
+        let mut current = Some(view.retain());
+        while let Some(candidate) = current {
+            if containers.iter().any(|(identity, container)| {
+                suppressed.contains(identity)
+                    && std::ptr::eq(Retained::as_ptr(container), Retained::as_ptr(&candidate))
+            }) {
+                return true;
+            }
+            if std::ptr::eq(
+                Retained::as_ptr(&candidate),
+                self as *const TreeHostView as *const NSView,
+            ) {
+                break;
+            }
+            current = unsafe { candidate.superview() };
+        }
+        false
+    }
+
     fn menu_for_event_inner(&self, event: &NSEvent) -> *mut NSMenu {
         let Some(tree) = self.ivars().tree.borrow().clone() else {
             return std::ptr::null_mut();
@@ -614,6 +757,7 @@ impl TreeHostView {
             render_tree: RefCell::new(None),
             native_containers: RefCell::new(HashMap::new()),
             native_owner_ids: RefCell::new(HashMap::new()),
+            suppressed_native_ids: RefCell::new(HashSet::new()),
             replay_state: RefCell::new(ReplayState::default()),
             weak_self: RefCell::new(objc2::rc::Weak::default()),
             pointer: PointerDispatcher::new(),
@@ -627,10 +771,20 @@ impl TreeHostView {
             last_layout_size: Cell::new(objc2_foundation::NSSize::new(-1.0, -1.0)),
             active: Cell::new(true),
             active_popup: RefCell::new(None),
+            animation_runtime: AnimationRuntime::new(),
+            display_link: RefCell::new(None),
+            display_link_state: Box::new(AppKitDisplayLinkState {
+                host: AtomicUsize::new(0),
+                frame_queued: AtomicBool::new(false),
+            }),
         };
         let this = Self::alloc(m).set_ivars(ivars);
         let this: Retained<Self> =
             unsafe { msg_send![super(this), initWithFrame: NSRect::default()] };
+        this.ivars()
+            .display_link_state
+            .host
+            .store(Retained::as_ptr(&this) as usize, Ordering::Release);
         *this.ivars().weak_self.borrow_mut() = objc2::rc::Weak::from_retained(&this);
         let notifications = NSNotificationCenter::defaultCenter();
         unsafe {
@@ -648,6 +802,41 @@ impl TreeHostView {
             );
         }
         this
+    }
+
+    /// Lazily creates and starts the host's display link. CVDisplayLink's callback runs on its
+    /// private thread and only posts a coalesced main-thread layout wake-up; all Core/UI and
+    /// AppKit mutation remains on the main thread.
+    #[allow(deprecated)]
+    fn start_animation_display_link(&self) {
+        if self.ivars().display_link.borrow().is_none() {
+            let mut raw = std::ptr::null_mut();
+            let status =
+                unsafe { CVDisplayLink::create_with_active_cg_displays(NonNull::from(&mut raw)) };
+            if status != 0 || raw.is_null() {
+                return;
+            }
+            let Some(link) = (unsafe { Retained::<CVDisplayLink>::from_raw(raw) }) else {
+                return;
+            };
+            let state = self.ivars().display_link_state.as_ref() as *const _ as *mut c_void;
+            let _ = unsafe { link.set_output_callback(Some(appkit_display_link_callback), state) };
+            *self.ivars().display_link.borrow_mut() = Some(link);
+        }
+        if let Some(link) = self.ivars().display_link.borrow().as_ref() {
+            let _ = link.start();
+        }
+    }
+
+    #[allow(deprecated)]
+    fn stop_animation_display_link(&self) {
+        if let Some(link) = self.ivars().display_link.borrow().as_ref() {
+            let _ = link.stop();
+        }
+        self.ivars()
+            .display_link_state
+            .frame_queued
+            .store(false, Ordering::Release);
     }
 
     /// Converts `event`'s own position/modifiers/timestamp and feeds it, together with `kind`, to
@@ -749,6 +938,7 @@ impl TreeHostView {
         }
         self.ivars().native_containers.borrow_mut().clear();
         self.ivars().native_owner_ids.borrow_mut().clear();
+        self.ivars().suppressed_native_ids.borrow_mut().clear();
         *self.ivars().replay_state.borrow_mut() = ReplayState::default();
         let weak_self = self.ivars().weak_self.borrow().clone();
         tree.as_ui_element()
@@ -757,6 +947,8 @@ impl TreeHostView {
             .set_coordinate_host(Some(Rc::new(AppKitCoordinateHost(weak_self.clone()))));
         tree.as_ui_element()
             .set_pointer_gesture_host(Some(Rc::new(AppKitPointerGestureHost(weak_self.clone()))));
+        tree.as_ui_element()
+            .set_animation_frame_host(Some(Rc::new(AppKitAnimationFrameHost(weak_self.clone()))));
         tree.as_ui_element()
             .set_focus_host(Some(Rc::new(AppKitFocusHost(weak_self))));
         self.ivars().keyboard.focus.clear_focus();
@@ -776,6 +968,7 @@ impl TreeHostView {
         }
         self.ivars().native_containers.borrow_mut().clear();
         self.ivars().native_owner_ids.borrow_mut().clear();
+        self.ivars().suppressed_native_ids.borrow_mut().clear();
         *self.ivars().replay_state.borrow_mut() = ReplayState::default();
         self.ivars().keyboard.focus.clear_focus();
         self.ivars().keyboard.shortcuts().clear();
@@ -790,6 +983,7 @@ impl TreeHostView {
             old_tree.set_invalidate_host(None);
             old_tree.set_coordinate_host(None);
             old_tree.set_pointer_gesture_host(None);
+            old_tree.set_animation_frame_host(None);
             old_tree.set_focus_host(None);
         }
     }
@@ -864,6 +1058,7 @@ impl TreeHostView {
                 .set(objc2_foundation::NSSize::new(-1.0, -1.0));
             self.relayout();
         } else {
+            self.stop_animation_display_link();
             self.ivars().pointer.cancel();
             // `relayout_inner`'s own GC (the `retain` calls below) only runs during a relayout
             // pass, which a suppressed host by definition no longer gets — so every currently-
@@ -876,6 +1071,7 @@ impl TreeHostView {
                 container.removeFromSuperview();
             }
             self.ivars().native_owner_ids.borrow_mut().clear();
+            self.ivars().suppressed_native_ids.borrow_mut().clear();
             *self.ivars().render_tree.borrow_mut() = None;
             *self.ivars().replay_state.borrow_mut() = ReplayState::default();
         }
@@ -914,6 +1110,13 @@ impl TreeHostView {
 
     fn relayout_inner(&self) {
         use elwindui_core::base::Size;
+
+        let animation_active = self.ivars().animation_runtime.tick_now();
+        if animation_active {
+            self.start_animation_display_link();
+        } else {
+            self.stop_animation_display_link();
+        }
 
         // A suppressed host (`set_active(false)` — e.g. a `TabView`'s non-selected tab) does no
         // measure/arrange/render work at all, including for a pass `layout()` triggered for
@@ -1111,6 +1314,10 @@ impl TreeHostView {
             .native_owner_ids
             .borrow_mut()
             .retain(|identity, _| live_native_controls.contains(identity));
+        self.ivars()
+            .suppressed_native_ids
+            .borrow_mut()
+            .retain(|identity| live_native_controls.contains(identity));
         // A repainted `RenderGroup` container whose *order* moved above (`group_order_changed`)
         // just moved back to the front of `root_layer`'s sublayers (see the Z-order repair comment
         // above). A native leaf's own island, though, is only ever `host.addSubview`ed once, the
@@ -1222,9 +1429,104 @@ impl NativeIslandHost for TreeHostView {
         self.addSubview(container);
         container.addSubview(nsview);
     }
+
+    fn project(
+        &self,
+        identity: usize,
+        container: &NSView,
+        transform: elwindui_core::base::AffineTransform,
+        opacity: f32,
+        input_enabled: bool,
+    ) {
+        if input_enabled {
+            self.ivars()
+                .suppressed_native_ids
+                .borrow_mut()
+                .remove(&identity);
+        } else {
+            self.ivars()
+                .suppressed_native_ids
+                .borrow_mut()
+                .insert(identity);
+            if !self.clear_native_focus_if_needed(identity) {
+                // AppKit refused both the host and nil as the new first responder. Do not leave
+                // a focused outgoing island interactive: detach its native subtree immediately;
+                // Core still owns the outgoing Visual until its idempotent transition completion.
+                container.removeFromSuperview();
+            }
+        }
+        container.setAccessibilityHidden(!input_enabled);
+        let needs_layer = transform != elwindui_core::base::AffineTransform::IDENTITY
+            || (opacity - 1.0).abs() > f32::EPSILON;
+        if needs_layer {
+            if container.layer().is_none() {
+                container.setWantsLayer(true);
+            }
+            if let Some(layer) = container.layer() {
+                layer.setAnchorPoint(objc2_core_foundation::CGPoint::new(0.0, 0.0));
+                layer.setAffineTransform(objc2_core_foundation::CGAffineTransform {
+                    a: transform.m11 as f64,
+                    b: transform.m12 as f64,
+                    c: transform.m21 as f64,
+                    d: transform.m22 as f64,
+                    tx: transform.dx as f64,
+                    ty: transform.dy as f64,
+                });
+                layer.setOpacity(opacity);
+            }
+        } else if let Some(layer) = container.layer() {
+            layer.setAffineTransform(objc2_core_foundation::CGAffineTransform {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                tx: 0.0,
+                ty: 0.0,
+            });
+            layer.setOpacity(1.0);
+            container.setWantsLayer(false);
+        }
+    }
 }
 
 impl TreeHostView {
+    fn clear_native_focus_if_needed(&self, identity: usize) -> bool {
+        let Some(window) = self.window() else {
+            return true;
+        };
+        let Some(responder) = window.firstResponder() else {
+            return true;
+        };
+        let Ok(responder) = responder.downcast::<NSView>() else {
+            return true;
+        };
+        let Some(container) = self
+            .ivars()
+            .native_containers
+            .borrow()
+            .get(&identity)
+            .cloned()
+        else {
+            return true;
+        };
+        if !is_descendant_or_same(&responder, &container) {
+            return true;
+        }
+        let _ = window.makeFirstResponder(Some(self));
+        let still_focused = window
+            .firstResponder()
+            .and_then(|responder| responder.downcast::<NSView>().ok())
+            .is_some_and(|responder| is_descendant_or_same(&responder, &container));
+        if still_focused {
+            let _ = window.makeFirstResponder(None);
+            return !window
+                .firstResponder()
+                .and_then(|responder| responder.downcast::<NSView>().ok())
+                .is_some_and(|responder| is_descendant_or_same(&responder, &container));
+        }
+        true
+    }
+
     /// Populates `render::stats::RenderStats`'s memory fields (`image_cache_bytes`/
     /// `vector_raster_cache_bytes`/`process_footprint_bytes`/`process_resident_bytes`) from this
     /// host's current caches and the process's own task VM counters. Called from `relayout_inner`
@@ -1252,6 +1554,17 @@ impl TreeHostView {
             s.process_resident_bytes = process_memory.resident_bytes;
         });
     }
+}
+
+fn is_descendant_or_same(view: &NSView, ancestor: &NSView) -> bool {
+    let mut current = Some(view.retain());
+    while let Some(candidate) = current {
+        if std::ptr::eq(&*candidate, ancestor) {
+            return true;
+        }
+        current = unsafe { candidate.superview() };
+    }
+    false
 }
 
 /// PR #165 rereview remediation round 2, A6/T25 (Layer 2): closes `slot`'s own active custom

@@ -342,3 +342,20 @@ Language Serverはparserとvalidationを再利用できるが、document lifecyc
   Generated control flow must satisfy normal rustc warning-free compilation
   without lint suppression; rust-analyzer-only shadow bodies remain analysis-only
   and may use diverging placeholders.
+
+## Animation and transition metadata
+
+The animation modifier is stored as AST metadata on the authored dynamic
+region, with a stable scope ID, a bare trigger-field identity, and the parsed
+animation expression. It is not lowered as a fake ordinary UI property.
+Planning gives each scope a trigger cache and dependent expression set. A
+refresh enters the matching transaction only for that scope and its dynamic
+region; nested scopes use the innermost transaction and do not refresh
+unrelated siblings twice.
+
+Transition metadata is retained on a literal dynamic `UIElement` child and is
+validated against resolved content capability and the host collection type.
+Lowering emits insertion/removal transition descriptors consumed by Core's
+collection lifecycle. Static children and non-visual/list semantic entries are
+diagnostics, not runtime fallbacks. Rust-analyzer shadow generation preserves
+the same metadata shape without introducing a second runtime lowering path.

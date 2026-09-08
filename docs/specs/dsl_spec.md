@@ -1359,7 +1359,20 @@ impl SaveButton {}
 13. `store`/`viewmodel`フィールドへの`#[param]`側からの直接参照 → エラー(`docs/design/runtime/state_management_design.md`、`docs/agents/codegen.md`参照。store/viewmodelはViewのリアクティブ属性式または明示的な`<=>`から参照する)
 14. `NavigationHost`内の`match route { ... }` がRoute enumの全メンバーを網羅していない(`_ =>`なし) → エラー(7章の網羅性検査と同じ仕組み、`docs/specs/ui_spec.md`参照)
 15. (欠番 — `native!` / `target::backend()` 構文の廃止に伴い不要)
-16. `Transition`/`KeyframeAnimation`(`docs/specs/ui_spec.md`参照)で存在しないイージング関数名、または範囲外のキーフレーム位置(`0.0..=1.0`外)が指定されている → エラー
+16. `#[animation(animation = ..., value = ...)]` は `animation_spec.md` が定義する AST メタデータとして検証し、`value` は許可された bare trigger field のみ受理する。`#[transition(...)]` は dynamic UIElement child の supported visual collection に限り受理し、static/non-UIElement collection entry はエラー。未実装の `KeyframeAnimation` 構文は受理しない → エラー
+
+## Animation and transition modifiers
+
+`#[animation(animation = Animation::..., value = field)]` は通常の UI
+property ではなく、依存式を囲む scoped transaction metadata である。
+初期 mount は暗黙に animation せず、nested scope は innermost scope を
+優先し、無関係な sibling を再評価・animation しない。
+
+`#[transition(...)]` は `if`、`match`、`for` が所有する literal
+`UIElement` child にだけ付与できる。parser、AST、validator、planner、
+codegen はこの metadata を保持し、fake ordinary property に変換しない。
+具体的な control 名ではなく resolved content capability と
+`UIElementCollection` host で検証する。
 17. `Effect`(`docs/specs/ui_spec.md`参照)のパラメータが対応バックエンドでサポートされない組み合わせ(例:GTK4未対応のエフェクト種別)である場合 → 警告(該当バックエンドではフォールバック描画に切り替わる旨を明示)
 18. (欠番 — アクションはRustの`impl`ブロックの`fn`として自動検出されるため、対応する型検査が存在しない)
 19. `viewmodel`定義内に`view`ブロック、またはビルトイン要素(`Row`/`Text`等)への直接参照が存在する → エラー(`docs/design/runtime/state_management_design.md`参照。ViewModelは表示ロジックを持たず、MVVMのV/VM分離を静的に強制する)

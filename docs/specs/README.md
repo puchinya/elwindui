@@ -14,5 +14,6 @@
 | DockingControl, layout model, placement, and snapshots | [`docking_spec.md`](docking_spec.md) |
 | File dialog等のOS service | [`platform_spec.md`](platform_spec.md) |
 | `#[class]` の公開contract | [`macro_class_spec.md`](macro_class_spec.md) |
+| Animation, transition, presentation, and reduced motion | [`animation_spec.md`](animation_spec.md) |
 
 実装状況は [`../status/README.md`](../status/README.md)、内部方式は [`../design/README.md`](../design/README.md) を参照する。

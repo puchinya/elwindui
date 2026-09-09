@@ -272,9 +272,18 @@ impl FocusHost for AppKitFocusHost {
         let Some(focused) = view.ivars().keyboard.focus.focused() else {
             return false;
         };
+        let focused_owner_id = focused.render_group_id();
         let mut current = Some(focused);
         while let Some(element) = current {
             if Rc::ptr_eq(&element, subtree) {
+                // A native control has two focus owners: Core's logical FocusTracker and
+                // AppKit's window first responder. Exit transitions can reach `finish_exit` from
+                // the animation tick before the next render pass has projected
+                // `input_enabled = false`, so clearing only the former can leave an NSTextField
+                // first responder while its Visual is being unmounted. Resign the native
+                // responder first; `makeFirstResponder:` may synchronously bridge back into
+                // `FocusTracker`, so the explicit clear below remains idempotent.
+                view.clear_native_focus_for_owner(focused_owner_id);
                 view.ivars().keyboard.focus.clear_focus();
                 return true;
             }
@@ -1490,6 +1499,22 @@ impl NativeIslandHost for TreeHostView {
 }
 
 impl TreeHostView {
+    /// Resigns AppKit focus for the native island owned by `owner_id`, if that owner is currently
+    /// the window's first-responder subtree. Logical focus teardown must call this before an exit
+    /// transition unmounts the element; waiting for the next render projection is too late when
+    /// the animation runtime completes during the beginning of a relayout pass.
+    fn clear_native_focus_for_owner(&self, owner_id: u64) -> bool {
+        let identity =
+            self.ivars()
+                .native_owner_ids
+                .borrow()
+                .iter()
+                .find_map(|(identity, current_owner)| {
+                    (*current_owner == owner_id).then_some(*identity)
+                });
+        identity.is_none_or(|identity| self.clear_native_focus_if_needed(identity))
+    }
+
     fn clear_native_focus_if_needed(&self, identity: usize) -> bool {
         let Some(window) = self.window() else {
             return true;

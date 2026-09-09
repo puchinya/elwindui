@@ -1,6 +1,6 @@
 # Backend status
 
-Snapshot: 2026-09-06. Durable backend architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-09-10. Durable backend architecture is indexed in [`../design/README.md`](../design/README.md).
 
 ## Support matrix
 
@@ -22,7 +22,9 @@ Snapshot: 2026-09-06. Durable backend architecture is indexed in [`../design/REA
 ## WinUI 3 current state
 
 - Window content-host sizing, retained layout, native controls, graphics, text/environment, and the established input/lifecycle paths are implemented. Window-level sizing is the content-host viewport authority for first show and native resize.
-- Pointer/capture-loss and coordinate-topology rows remain pending real-mouse verification in [#224](https://github.com/puchinya/elwindui/issues/224). The current verification host cannot deliver the required real OS mouse input reliably.
+- Issue #236's dedicated `TreeHostPanel` input-surface architecture (permanent transparent hit-test `Rectangle`, exact root-Canvas/input-surface source classification, native-child rejection including a real `Button`) is implemented and covered by hosted live-XAML structural tests (`crate::host::live_input_surface_tests`).
+- Real-OS-pointer acceptance for Issue #236 (`tests/e2e/self-drawn-pointer-input.md`, scenarios SDP-01..SDP-05) was attempted through the [#242](https://github.com/puchinya/elwindui/issues/242) `windows-ui-driver` and is **BLOCKED**, not FAIL: a control test showed a real point-click (`SendInput`) does not register against a genuine native WinUI3 `Button` either (only UIA `invoke` did), while the same real click/keyboard input against a classic Win32 window (Notepad) worked correctly and landed exactly on target (confirmed via `GetCursorPos`) — this verification host's current session cannot deliver real synthetic pointer input into any WinUI3/XAML-Islands window, which is a host/session limitation of this verification environment, not evidence of a #236 regression. Evidence: `.agent-state/issues/236/e2e/0be1f74c76b8/`.
+- Pointer/capture-loss and coordinate-topology rows remain pending real-mouse verification in [#224](https://github.com/puchinya/elwindui/issues/224). The current verification host still cannot deliver required real OS mouse input into a WinUI3 window reliably.
 - Popup teardown, native light-dismiss ordering, close interception, and newer Menu/icon paths are implemented or code-reviewed, but this macOS development environment cannot compile or execute the Windows-only backend; runtime verification remains in [#157](https://github.com/puchinya/elwindui/issues/157).
 - SVG offscreen effect-graph work, full cross-backend parity audit, and the remaining native styling/effect gaps are incomplete.
 - The Windows App Runtime registration limitation observed in the current sandbox is an environment constraint, not evidence of a product regression; Windows acceptance must run on a normal Windows host.

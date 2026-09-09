@@ -1,6 +1,6 @@
 # Tooling status
 
-Snapshot: 2026-09-07. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-09-10. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
 
 ## Current capability matrix
 
@@ -29,10 +29,18 @@ command catalog is [`../../tools/windows-ui-driver/README.md`](../../tools/windo
 the architecture is [`../design/tools/windows_ui_driver_design.md`](../design/tools/windows_ui_driver_design.md),
 and the operational procedure is [`../agents/winui3-e2e.md`](../agents/winui3-e2e.md).
 
-The Windows UI driver and deterministic adapter-contract tests are implemented. Durable product
-E2E scenarios are intentionally deferred to the shared [`tests/e2e/`](../../tests/e2e/README.md)
-suite so AppKit and WinUI3 can consume common case definitions; no permanent Windows product E2E
-coverage is claimed yet.
+The Windows UI driver and deterministic adapter-contract tests are implemented. `tests/e2e/`
+now holds its first durable shared scenario, [`self-drawn-pointer-input.md`](../../tests/e2e/self-drawn-pointer-input.md)
+(Issue #236) — AppKit and WinUI3 consume the same case definitions.
+
+A real-host run of that scenario's WinUI3 side (five sub-cases, `point-click`/`drag` against
+`custom-controls-demo`/`docking-demo`/`controls-demo`) is currently BLOCKED, not a coverage claim:
+this verification session's real synthetic pointer input (`SendInput`) does not register against
+any WinUI3 window at all, including a plain native `Button` used as a control case, while the same
+mechanism works correctly against a classic Win32 window (Notepad) and UIA `invoke` works correctly
+against the same WinUI3 `Button`. This is a limitation of the current verification host/session for
+WinUI3 real-input delivery specifically, not a driver defect proven elsewhere or a claim of Windows
+product E2E coverage.
 
 A genuine host-level `SetForegroundWindow`/`CreateProcess` handle-inheritance issue was found and
 fixed during this driver's own development: a launched long-lived GUI process could keep a caller's

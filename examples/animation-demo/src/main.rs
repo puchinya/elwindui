@@ -131,7 +131,7 @@ struct AnimationDemoWindow {
                     on_click: vm.reset
                 }
             }
-            #[animation(animation = Animation::ease_in_out(Duration::from_millis(320)), value = expanded)]
+            #[animation(animation = Animation::ease_in_out(Duration::from_millis(720)), value = expanded)]
             TextBlock {
                 text: "Scoped implicit self-drawn presentation"
                 width: expanded_width

@@ -2835,5 +2835,19 @@ pub(crate) mod live_input_surface_tests {
             ),
             "an unrelated XAML element must not be accepted as a self-drawn pointer source"
         );
+
+        // A real NativeControl (e.g. `Button`) must be rejected too, not just an inert render-only
+        // element like the `TextBlock` above -- this is the mixed-tree case `dispatch_pointer_routed`
+        // relies on to avoid forwarding a native control's own gesture into Core as well.
+        let native_button = crate::bindings::Microsoft::UI::Xaml::Controls::Button::new()
+            .expect("native Button::new");
+        assert!(
+            !TreeHostPanel::is_self_drawn_pointer_source(
+                panel.canvas(),
+                &panel.input_surface,
+                &native_button
+            ),
+            "a real native control (Button) must not be accepted as a self-drawn pointer source"
+        );
     }
 }

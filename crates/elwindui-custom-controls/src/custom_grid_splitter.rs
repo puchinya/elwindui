@@ -432,7 +432,10 @@ impl CustomGridSplitter {
     }
 
     fn apply_tracks(&self, session: &ResizeSession, tracks: Vec<GridLength>) -> bool {
-        let Some(grid) = session.grid.upgrade() else {
+        // Explicitly typed (rust-analyzer E0282, see issue #239): rust-analyzer, unlike rustc,
+        // cannot infer `grid`'s type from this `upgrade()` alone before the `.as_any()` call below.
+        let grid: Option<Rc<dyn UIElementExt>> = session.grid.upgrade();
+        let Some(grid) = grid else {
             return false;
         };
         let Some(grid) = grid.as_any().downcast_ref::<Grid>() else {
@@ -662,7 +665,9 @@ impl CustomGridSplitter {
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_pressed",
             Box::new(move |event, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+                // Explicitly typed (rust-analyzer E0282, see issue #239).
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.pointer_pressed(*event);
                 }
             }),
@@ -672,7 +677,9 @@ impl CustomGridSplitter {
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_moved",
             Box::new(move |event, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+                // Explicitly typed (rust-analyzer E0282, see issue #239).
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.pointer_moved(*event);
                 }
             }),
@@ -682,7 +689,9 @@ impl CustomGridSplitter {
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
             Box::new(move |event, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+                // Explicitly typed (rust-analyzer E0282, see issue #239).
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.pointer_released(*event);
                 }
             }),
@@ -692,7 +701,9 @@ impl CustomGridSplitter {
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_canceled",
             Box::new(move |_, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+                // Explicitly typed (rust-analyzer E0282, see issue #239).
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.pointer_canceled();
                 }
             }),
@@ -702,7 +713,9 @@ impl CustomGridSplitter {
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_entered",
             Box::new(move |_, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+                // Explicitly typed (rust-analyzer E0282, see issue #239).
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.set_pointer_over(true);
                     splitter.sync_visual(false);
                 }
@@ -713,7 +726,9 @@ impl CustomGridSplitter {
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_exited",
             Box::new(move |_, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+                // Explicitly typed (rust-analyzer E0282, see issue #239).
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.set_pointer_over(false);
                     splitter.sync_visual(false);
                 }
@@ -724,7 +739,9 @@ impl CustomGridSplitter {
         self.register_routed_handler::<()>(
             "on_got_focus",
             Box::new(move |_, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+                // Explicitly typed (rust-analyzer E0282, see issue #239).
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.set_focused(true);
                     splitter.sync_visual(false);
                 }
@@ -735,7 +752,9 @@ impl CustomGridSplitter {
         self.register_routed_handler::<()>(
             "on_lost_focus",
             Box::new(move |_, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+                // Explicitly typed (rust-analyzer E0282, see issue #239).
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.set_focused(false);
                     splitter.sync_visual(false);
                 }
@@ -746,7 +765,9 @@ impl CustomGridSplitter {
         self.register_routed_handler::<KeyEventArgs>(
             "on_key_down",
             Box::new(move |event, routed| {
-                if let Some(splitter) = weak_self.upgrade() {
+                // Explicitly typed (rust-analyzer E0282, see issue #239).
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     if splitter.key_down(*event) {
                         routed.handled.set(true);
                     }

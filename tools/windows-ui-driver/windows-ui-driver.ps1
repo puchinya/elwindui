@@ -769,11 +769,39 @@ function Cmd-CaptureWindow {
 
 function Cmd-PointClick {
     $target = Get-TargetArgs -TargetPid (Get-Arg 'pid') -Hwnd (Get-Arg 'hwnd')
+    $selector = Get-Arg 'selector'
+    $hasX = $Args2.ContainsKey('x')
+    $hasY = $Args2.ContainsKey('y')
+    $button = Get-Arg 'button' 'left'
+
+    if ($selector -and ($hasX -or $hasY)) {
+        Emit-UsageError '--selector cannot be combined with --x/--y'
+    }
+    if (-not $selector) {
+        if ($hasX -xor $hasY) {
+            Emit-UsageError 'point-click requires both --x and --y when not using --selector'
+        }
+        if (-not $hasX -and -not $hasY) {
+            Emit-UsageError 'point-click requires either --selector or both --x and --y'
+        }
+    }
+
+    if ($selector) {
+        # Selector mode: the selector only locates the point -- the actual action is still real
+        # mouse injection through winapp's dedicated `ui click` verb, never UIA InvokePattern
+        # (Issue #236 delta contract Section 3.1). Preferred whenever the target has a stable UIA
+        # selector; see README's "UIA vs. real input" section.
+        $baseArgs = @('ui', 'click', $selector) + $target
+        if ($button -eq 'right') { $baseArgs += '--right' }
+        Invoke-UiaCommand -BaseArgs $baseArgs
+        return
+    }
+
     $x = Require-Arg 'x'
     $y = Require-Arg 'y'
-    $button = Get-Arg 'button' 'left'
-    # winapp has no raw-coordinate click verb; a zero-distance real-mouse drag at the same point
-    # is the documented-equivalent primitive (see design doc Section 4 / contract Section 2.11).
+    # Coordinate mode: winapp has no raw-coordinate click verb; a zero-distance real-mouse drag at
+    # the same point is the documented-equivalent compatibility primitive (see design doc Section 4
+    # / contract Section 3.1) for targets that cannot be stably addressed via UIA.
     $baseArgs = @('ui', 'drag', "$x,$y", "$x,$y") + $target
     if ($button -eq 'right') { $baseArgs += '--right' }
     $r = Invoke-WinApp -BackendArgs ($baseArgs + '--json')

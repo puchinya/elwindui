@@ -59,6 +59,10 @@ in host context.
   test the intended behavior; they need no foreground and run headless. Reserve real input
   (`point-click`, `drag`, `send-keys`) for what actually requires it (see the driver
   [`README.md`](../../tools/windows-ui-driver/README.md)'s "UIA vs. real input" section).
+- For a real mouse click, pick `point-click`'s mode by whether the target has a stable UIA
+  selector: `point-click --selector <selector>` when it does (the selector only locates the point;
+  the click is still real input through `winapp ui click`, never `invoke`), `point-click --x/--y`
+  when it does not. A real drag always uses `drag`, regardless of selector availability.
 - Use one controlled retry at most, only after restoring foreground, target identity, geometry, and
   the expected precondition. After a second abnormal result, classify a behavior mismatch as FAIL,
   a host/session/security/foreground condition as BLOCKED, and an unexecuted case as NOT RUN.

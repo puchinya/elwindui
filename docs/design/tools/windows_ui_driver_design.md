@@ -71,6 +71,15 @@ focus behavior that depends on real key/mouse delivery. WinUI 3 real-key E2E alw
 send-keys ... --via send-input`; `PostMessage`-style keystroke injection is never an accepted
 substitute for windowless XAML controls.
 
+`point-click` has two mutually exclusive target modes, both real mouse input, neither UIA
+`InvokePattern`. When a real mouse click is required and the target has a stable UIA selector, the
+adapter delegates to `winapp`'s dedicated `ui click` command (selector mode) — the selector only
+locates the point; the click itself is still real `SendInput`. Raw-coordinate `point-click` (`--x`/
+`--y`) remains a compatibility primitive implemented through `winapp`'s real-input `ui drag`
+endpoint at zero distance, because `winapp` 0.6.1 exposes no raw-coordinate click verb; it exists
+for targets that cannot be stably addressed in UIA. The two modes are mutually exclusive and never
+silently substitute for each other.
+
 ## 5. Error and result classification boundary
 
 The adapter distinguishes four error categories: `tool_error` (missing/broken external tool),

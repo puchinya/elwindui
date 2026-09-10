@@ -33,6 +33,31 @@ if ($joined -match 'FAKE_SUCCESS') {
     exit 0
 }
 
+if ($joined -match 'FAKE_SELECTOR_CLICK') {
+    # Regression fixture for windows-ui-driver.ps1's selector-mode `point-click` (Issue #236
+    # delta contract Section 4.1/4.2): proves the driver actually invokes `ui click`, not a
+    # zero-distance `ui drag`, for this mode. Checked positionally ($FakeArgs[1], the verb right
+    # after 'ui'), not via the case-insensitive `-match` used for scenario selection above, since
+    # the selector text itself contains the substring "CLICK".
+    $verb = if ($FakeArgs.Count -ge 2) { $FakeArgs[1] } else { $null }
+    if ($verb -ne 'click') {
+        Write-Output (@{ success = $false; verb = $verb; error = "FAKE_SELECTOR_CLICK must route through 'ui click', not '$verb'" } | ConvertTo-Json -Compress)
+        exit 1
+    }
+    $right = [bool]($FakeArgs -contains '--right')
+    Write-Output (@{ success = $true; verb = 'click'; right = $right } | ConvertTo-Json -Compress)
+    exit 0
+}
+
+if ($joined -match 'drag 100,200 100,200') {
+    # Regression fixture for windows-ui-driver.ps1's coordinate-mode `point-click` (Issue #236
+    # delta contract Section 4.1): proves the pre-existing zero-distance-drag compatibility route
+    # is unchanged by adding selector mode.
+    $verb = if ($FakeArgs.Count -ge 2) { $FakeArgs[1] } else { $null }
+    Write-Output (@{ success = $true; verb = $verb; from = '100,200'; to = '100,200' } | ConvertTo-Json -Compress)
+    exit 0
+}
+
 if ($joined -match 'FAKE_NO_INTERACTIVE_DESKTOP') {
     $body = '{"success":false,"error":{"code":"no_interactive_desktop","message":"the session desktop is locked or non-interactive"}}'
     [Console]::Error.WriteLine($body)

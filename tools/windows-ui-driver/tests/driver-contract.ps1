@@ -152,6 +152,52 @@ else {
     if (-not $largeStderrProc.HasExited) { Stop-Process -Id $largeStderrProc.Id -Force -ErrorAction SilentlyContinue }
 }
 
+# DPC-01 -- point-click selector mode routes through winapp's dedicated `ui click`, never a
+# zero-distance `ui drag` substitute (Issue #236 delta contract Section 3.1/4.1).
+$r = Invoke-Driver @('point-click', '--pid', '999', '--selector', 'FAKE_SELECTOR_CLICK')
+Assert-OneJsonObject $r 'point-click (selector mode)'
+Assert ($r.Json.success -eq $true) 'point-click (selector mode) -- success:true'
+Assert ($r.Json.backend.verb -eq 'click') 'point-click (selector mode) -- routes through ui click, not ui drag'
+Assert ($r.ExitCode -eq 0) 'point-click (selector mode) -- exit code 0'
+
+# DPC-02 -- selector mode --button right passes --right through to `ui click`.
+$r = Invoke-Driver @('point-click', '--pid', '999', '--selector', 'FAKE_SELECTOR_CLICK', '--button', 'right')
+Assert-OneJsonObject $r 'point-click (selector mode, right button)'
+Assert ($r.Json.success -eq $true) 'point-click (selector mode, right button) -- success:true'
+Assert ($r.Json.backend.right -eq $true) 'point-click (selector mode, right button) -- backend received --right'
+
+# DPC-03 -- coordinate mode is unchanged by adding selector mode: still routes through a
+# zero-distance `ui drag` at the same point.
+$r = Invoke-Driver @('point-click', '--pid', '999', '--x', '100', '--y', '200')
+Assert-OneJsonObject $r 'point-click (coordinate mode)'
+Assert ($r.Json.success -eq $true) 'point-click (coordinate mode) -- success:true'
+Assert ($r.Json.backend.verb -eq 'drag') 'point-click (coordinate mode) -- still routes through ui drag'
+Assert ($r.Json.point.x -eq 100 -and $r.Json.point.y -eq 200) 'point-click (coordinate mode) -- result preserves x/y'
+
+# DPC-04 -- --selector combined with --x/--y fails closed as usage_error.
+$r = Invoke-Driver @('point-click', '--pid', '999', '--selector', 'X', '--x', '1', '--y', '2')
+Assert-OneJsonObject $r 'point-click (selector + coordinates)'
+Assert ($r.Json.success -eq $false) 'point-click (selector + coordinates) -- success:false'
+Assert ($r.Json.category -eq 'usage_error') 'point-click (selector + coordinates) -- category:usage_error'
+Assert ($r.ExitCode -eq 1) 'point-click (selector + coordinates) -- exit code 1'
+
+# DPC-05 -- an incomplete coordinate pair (only --x or only --y), with no --selector, fails closed.
+$r = Invoke-Driver @('point-click', '--pid', '999', '--x', '1')
+Assert-OneJsonObject $r 'point-click (missing --y)'
+Assert ($r.Json.success -eq $false) 'point-click (missing --y) -- success:false'
+Assert ($r.Json.category -eq 'usage_error') 'point-click (missing --y) -- category:usage_error'
+
+$r = Invoke-Driver @('point-click', '--pid', '999', '--y', '2')
+Assert-OneJsonObject $r 'point-click (missing --x)'
+Assert ($r.Json.success -eq $false) 'point-click (missing --x) -- success:false'
+Assert ($r.Json.category -eq 'usage_error') 'point-click (missing --x) -- category:usage_error'
+
+# DPC-06 -- neither --selector nor a coordinate pair fails closed rather than defaulting silently.
+$r = Invoke-Driver @('point-click', '--pid', '999')
+Assert-OneJsonObject $r 'point-click (no target)'
+Assert ($r.Json.success -eq $false) 'point-click (no target) -- success:false'
+Assert ($r.Json.category -eq 'usage_error') 'point-click (no target) -- category:usage_error'
+
 Remove-Item Env:ELWINDUI_WINAPP_PATH -ErrorAction SilentlyContinue
 
 # T9 -- launch --arg list semantics regression: repeated occurrences preserved in order, and a

@@ -48,6 +48,7 @@ pwsh -NoProfile -File $D list-windows --pid <pid>
 pwsh -NoProfile -File $D focus-window --hwnd <hwnd> --timeout 3
 pwsh -NoProfile -File $D search --hwnd <hwnd> --query "Ocean"
 pwsh -NoProfile -File $D invoke --hwnd <hwnd> --selector <selector-from-search>
+pwsh -NoProfile -File $D point-click --hwnd <hwnd> --selector <selector-from-search>
 pwsh -NoProfile -File $D point-click --hwnd <hwnd> --x <screen-x> --y <screen-y>
 pwsh -NoProfile -File $D drag --hwnd <hwnd> --from-x <x1> --from-y <y1> --to-x <x2> --to-y <y2>
 pwsh -NoProfile -File $D capture-window --hwnd <hwnd> --output shot.png
@@ -69,8 +70,17 @@ application's state actually changed -- verify that separately (`search`/`get-va
 Use a UIA pattern command (`invoke`, `get-value`/`set-focus`, `wait-for`) whenever it tests the
 intended behavior -- it works headless and needs no foreground. Use real input (`point-click`,
 `drag`, `send-keys`) only when the behavior itself requires it: self-drawn controls, pointer
-routing, drag/drop, splitters, right-click/context requests, or keyboard routing. Real-input
-commands bring their target to the foreground themselves as part of delivering input (and fail
+routing, drag/drop, splitters, right-click/context requests, or keyboard routing.
+
+`point-click` has two mutually exclusive forms, both real mouse input -- never a substitute for
+UIA `invoke`. `--selector <selector-from-search>` is preferred whenever the target has a stable
+UIA selector: the selector only locates the point, and the click itself still goes through
+`winapp`'s dedicated `ui click` real-input command. `--x <screen-x> --y <screen-y>` is a
+compatibility primitive (a zero-distance real-mouse `drag`) for targets that cannot be stably
+addressed in UIA. Do not combine `--selector` with `--x`/`--y`, and do not pass only one of
+`--x`/`--y`.
+
+Real-input commands bring their target to the foreground themselves as part of delivering input (and fail
 fast, classified `environment_blocker`, if they can't) -- do not call `focus-window` first as a
 matter of course; it uses a plain `SetForegroundWindow`, which is subject to Windows' anti-focus-
 stealing restriction when called from a non-interactive/background process and was observed to

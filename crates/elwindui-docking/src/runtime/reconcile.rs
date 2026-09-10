@@ -2119,7 +2119,11 @@ impl RuntimeRealization {
                     return;
                 }
                 let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
-                if let (Some(owner), Some(start_grid)) = (owner, start_grid.upgrade()) {
+                // Explicitly typed (rust-analyzer E0282, see issue #239): rust-analyzer, unlike
+                // rustc, cannot infer `start_grid`'s type from this tuple pattern alone before the
+                // `.clone()` call below.
+                let start_grid: Option<Rc<Grid>> = start_grid.upgrade();
+                if let (Some(owner), Some(start_grid)) = (owner, start_grid) {
                     owner.handle_splitter_started(
                         start_address.clone(),
                         boundary,

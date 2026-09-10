@@ -35,10 +35,11 @@ Do not add permanent product E2E cases under `tools/`.
 
 ## Current state
 
-No durable case is defined here yet. `tools/windows-ui-driver/tests/theme-demo-e2e.ps1` (a
-Windows-only, product-specific smoke script) was removed rather than kept as a placeholder --
-future durable cases are designed so AppKit and WinUI3 can consume the same scenario definition,
-which a Windows-only script cannot represent. See
-[`docs/agents/winui3-e2e.md`](../../docs/agents/winui3-e2e.md) and
-[`docs/agents/appkit-e2e.md`](../../docs/agents/appkit-e2e.md) for the platform tester procedures a
-future case here will be executed through.
+[`self-drawn-pointer-input.md`](self-drawn-pointer-input.md) is the first durable shared product
+scenario definition here: self-drawn ElwindUI content (tab selection, grid-splitter drag, docking
+drag) and a genuine native control both respond correctly to real OS pointer input. WinUI3 is
+currently required for it (Issue #236's regression origin); AppKit already satisfies the same
+semantics per existing status evidence and can consume this same definition through
+[`docs/agents/appkit-e2e.md`](../../docs/agents/appkit-e2e.md) when a native run there is
+scheduled. See [`docs/agents/winui3-e2e.md`](../../docs/agents/winui3-e2e.md) for the WinUI3
+tester procedure.

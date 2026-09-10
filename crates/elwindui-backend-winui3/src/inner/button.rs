@@ -437,6 +437,8 @@ mod hosted_xaml_regression_tests {
                     create_flyout_snapshots_icon_onto_a_distinct_realization();
                 crate::inner::menu::live_menu_item_icon_tests::
                     failed_icon_conversion_does_not_remove_the_action();
+                crate::host::live_input_surface_tests::
+                    live_input_surface_creation_persistence_viewport_and_source_classification();
 
                 crate::app::reset_window_lifecycle_test_state();
                 let lifecycle_window = InnerWindow::new();

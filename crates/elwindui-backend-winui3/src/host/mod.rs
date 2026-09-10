@@ -1244,6 +1244,11 @@ impl TreeHostPanel {
             eprintln!("[elwindui-winui3] TreeHostPanel active={active}");
         }
         if active {
+            // Issue #236 delta: restore root-Canvas native hit testing before the relayout that
+            // follows, so a reactivated host is immediately clickable again -- the permanent
+            // `input_surface` itself is untouched (never recreated, never resized here, own
+            // `IsHitTestVisible` never changed) and keeps its identity/z-order across this toggle.
+            let _ = self.canvas.SetIsHitTestVisible(true);
             self.force_relayout();
             return;
         }
@@ -1251,6 +1256,14 @@ impl TreeHostPanel {
         if self.pointer.cancel() {
             let _ = self.canvas.ReleasePointerCaptures();
         }
+        // Issue #236 delta: an inactive TreeHostPanel (e.g. a non-selected TabView content host)
+        // must not keep participating in native hit testing merely because its permanent
+        // `input_surface` remains attached -- disable hit testing at the root Canvas itself,
+        // after pointer cancellation/capture release above and before the render/native-child
+        // suspension below. This does not touch `input_surface`'s own `IsHitTestVisible`, which
+        // stays `true`: host participation is gated at the root, not by mutating the permanent
+        // surface invariant.
+        let _ = self.canvas.SetIsHitTestVisible(false);
         self.keyboard.as_ref().focus.clear_focus();
         let _ = self
             .composition
@@ -2848,6 +2861,72 @@ pub(crate) mod live_input_surface_tests {
                 &native_button
             ),
             "a real native control (Button) must not be accepted as a self-drawn pointer source"
+        );
+
+        // HOST-01/02/03 (Issue #236 delta): an inactive host must disable native hit testing at
+        // the root Canvas -- not by touching the permanent input surface's own attachment,
+        // z-order, or IsHitTestVisible -- and reactivation must restore it before relayout.
+        let canvas_ui: UIElement = panel
+            .canvas()
+            .clone()
+            .cast()
+            .expect("Canvas is a UIElement");
+        assert!(
+            canvas_ui
+                .IsHitTestVisible()
+                .expect("Canvas.IsHitTestVisible (initial)"),
+            "HOST-01: an active host's root Canvas must participate in native hit testing"
+        );
+
+        panel.set_active(false);
+        assert!(
+            !canvas_ui
+                .IsHitTestVisible()
+                .expect("Canvas.IsHitTestVisible (inactive)"),
+            "HOST-02: an inactive host's root Canvas must not participate in native hit testing"
+        );
+        assert!(
+            children
+                .IndexOf(&surface_ui, &mut found_index)
+                .expect("Children.IndexOf"),
+            "HOST-02: the input surface must remain attached while the host is inactive"
+        );
+        assert_eq!(
+            found_index, 0,
+            "HOST-02: the input surface must remain the z-bottom child while the host is inactive"
+        );
+        assert!(
+            surface_ui.IsHitTestVisible().expect("IsHitTestVisible"),
+            "HOST-02: the input surface's own IsHitTestVisible must remain true -- only the root \
+             Canvas gates hit testing"
+        );
+
+        panel.set_active(true);
+        assert!(
+            canvas_ui
+                .IsHitTestVisible()
+                .expect("Canvas.IsHitTestVisible (reactivated)"),
+            "HOST-03: reactivating the host must restore root-Canvas native hit testing"
+        );
+        assert!(
+            children
+                .IndexOf(&surface_ui, &mut found_index)
+                .expect("Children.IndexOf"),
+            "HOST-03: the input surface must remain attached after reactivation"
+        );
+        assert_eq!(
+            found_index, 0,
+            "HOST-03: the input surface must remain the z-bottom child after reactivation"
+        );
+        assert_eq!(
+            panel.input_surface.Width().expect("Rectangle.Width"),
+            320.0,
+            "HOST-03: relayout after reactivation must still produce correct sizing"
+        );
+        assert_eq!(
+            panel.input_surface.Height().expect("Rectangle.Height"),
+            180.0,
+            "HOST-03: relayout after reactivation must still produce correct sizing"
         );
     }
 }

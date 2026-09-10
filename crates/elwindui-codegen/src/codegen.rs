@@ -5393,6 +5393,7 @@ fn generate_view(
         closure_param: None,
         own_fields,
         mutable_own_fields: HashSet::new(),
+        property_dependencies: own_dependents_of.clone(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
         // A component-declared `template: template_view!(|alias: Self| { ... })` is compiled as
@@ -8903,6 +8904,12 @@ struct ViewCtx {
     /// `emit_virtual_construction`'s `get_attr`/`get_attr_string` recognize an already-`Option<T>`
     /// own field forwarded as-is, so it isn't double-wrapped in another `Some(..)`.
     own_fields: std::collections::HashMap<String, String>,
+    /// Direct dependencies between this component's own reactive fields.  This lets an implicit
+    /// `#[animation(value = source)]` scope remain active when the view attribute reads a computed
+    /// field that is synchronously recomputed from `source`; otherwise the computed field's
+    /// follow-up notification would resync the same attribute outside the animation transaction
+    /// and snap it straight to its target.
+    property_dependencies: std::collections::HashMap<String, Vec<String>>,
     /// The subset of `own_fields` that's Cell/RefCell-backed (`generate_view`'s
     /// `mutable_required_names` — a required, non-`#[param]` own field, still needing to be read
     /// through its Cell/RefCell in `WithSelf` mode instead of the bare `self.<name>` every other
@@ -8973,6 +8980,7 @@ impl ViewCtx {
             closure_param: Some(param.to_string()),
             own_fields: self.own_fields.clone(),
             mutable_own_fields: self.mutable_own_fields.clone(),
+            property_dependencies: self.property_dependencies.clone(),
             bindable_owners: self.bindable_owners.clone(),
             weak_bindable_owners: self.weak_bindable_owners.clone(),
             default_template_parent: self.default_template_parent,
@@ -9153,6 +9161,7 @@ pub(crate) fn lower_template_body(
         closure_param: None,
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
+        property_dependencies: HashMap::new(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
         default_template_parent: false,
@@ -16908,7 +16917,14 @@ fn emit_resync(
             node.modifiers.iter().find_map(|modifier| match modifier {
                 ViewModifier::Animation {
                     animation, value, ..
-                } if value.len() == 1 && value[0] == property => Some(animation),
+                } if value.len() == 1
+                    && (value[0] == property
+                        || ctx.property_dependencies.get(&value[0]).is_some_and(
+                            |dependents| dependents.iter().any(|dependent| dependent == property),
+                        )) =>
+                {
+                    Some(animation)
+                }
                 _ => None,
             })
         }
@@ -17586,6 +17602,7 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
         closure_param: None,
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
+        property_dependencies: HashMap::new(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
         default_template_parent: false,
@@ -20959,6 +20976,63 @@ struct NotepadWindow {
         assert!(rendered.contains("Rc :: downgrade"), "{rendered}");
         assert!(rendered.contains("retain"), "{rendered}");
         assert!(rendered.contains("Rc :: ptr_eq"), "{rendered}");
+    }
+
+    #[test]
+    fn implicit_animation_scopes_a_computed_dependent_resync() {
+        let src = r#"
+            struct AnimatedComputedHost {
+                #[state(default = false)]
+                expanded: bool,
+
+                #[computed(expr = if expanded { 440.0 } else { 180.0 })]
+                expanded_width: f32,
+
+                body: view! {
+                    VerticalLayout {
+                        #[animation(
+                            animation = Animation::ease_in_out(Duration::from_millis(250)),
+                            value = expanded
+                        )]
+                        TextBlock {
+                            text: "animated"
+                            width: expanded_width
+                        }
+                    }
+                },
+            }
+        "#;
+        let module = crate::test_module(&[(None, src, None)])
+            .expect("computed animation source should parse");
+        let table = build_symbol_table_with_builtins(std::slice::from_ref(&module));
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("implicit_animation_computed_dependency", &generated);
+        let rendered = generated.to_string();
+
+        let expanded_start = rendered
+            .find("fn __resync_expanded")
+            .expect("the animation trigger should have a resync method");
+        let expanded_end = rendered[expanded_start + 1..]
+            .find("fn __")
+            .map(|offset| expanded_start + 1 + offset)
+            .unwrap_or(rendered.len());
+        assert!(
+            rendered[expanded_start..expanded_end].contains("with_animation"),
+            "trigger resync should be animated: {rendered}"
+        );
+
+        let computed_start = rendered
+            .find("fn __resync_expanded_width")
+            .expect("the computed dependency should have a resync method");
+        let computed_end = rendered[computed_start + 1..]
+            .find("fn __")
+            .map(|offset| computed_start + 1 + offset)
+            .unwrap_or(rendered.len());
+        let computed_method = &rendered[computed_start..computed_end];
+        assert!(
+            computed_method.contains("with_animation") && computed_method.contains("set_width"),
+            "computed follow-up resync must stay inside the implicit animation scope: {rendered}"
+        );
     }
 
     #[test]

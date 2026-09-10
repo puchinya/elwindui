@@ -279,9 +279,13 @@ impl CustomGridSplitter {
             match self.resize_direction() {
                 GridResizeDirection::Columns => {
                     element.width.set(Some(6.0));
+                    element.presentation_width.set(Some(6.0));
                     element.height.set(None);
+                    element.presentation_height.set(None);
                     element.min_width.set(None);
+                    element.presentation_min_width.set(None);
                     element.min_height.set(Some(6.0));
+                    element.presentation_min_height.set(Some(6.0));
                     element
                         .horizontal_alignment
                         .set(HorizontalAlignment::Stretch);
@@ -289,9 +293,13 @@ impl CustomGridSplitter {
                 }
                 GridResizeDirection::Rows => {
                     element.width.set(None);
+                    element.presentation_width.set(None);
                     element.height.set(Some(6.0));
+                    element.presentation_height.set(Some(6.0));
                     element.min_width.set(Some(6.0));
+                    element.presentation_min_width.set(Some(6.0));
                     element.min_height.set(None);
+                    element.presentation_min_height.set(None);
                     element
                         .horizontal_alignment
                         .set(HorizontalAlignment::Stretch);
@@ -299,15 +307,20 @@ impl CustomGridSplitter {
                 }
                 GridResizeDirection::Auto => {
                     element.width.set(Some(6.0));
+                    element.presentation_width.set(Some(6.0));
                     element.height.set(Some(6.0));
+                    element.presentation_height.set(Some(6.0));
                     element.min_width.set(None);
+                    element.presentation_min_width.set(None);
                     element.min_height.set(None);
+                    element.presentation_min_height.set(None);
                     element
                         .horizontal_alignment
                         .set(HorizontalAlignment::Center);
                     element.vertical_alignment.set(VerticalAlignment::Center);
                 }
             }
+            self.invalidate_measure();
         }
         rectangle.set_fill_render_only(Some(self.visual_fill()));
     }

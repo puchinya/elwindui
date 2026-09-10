@@ -1467,7 +1467,7 @@ impl NativeIslandHost for TreeHostView {
                 container.removeFromSuperview();
             }
         }
-        container.setAccessibilityHidden(!input_enabled);
+        set_accessibility_hidden_recursively(container, !input_enabled);
         let needs_layer = transform != elwindui_core::base::AffineTransform::IDENTITY
             || (opacity - 1.0).abs() > f32::EPSILON;
         if needs_layer {
@@ -1498,6 +1498,16 @@ impl NativeIslandHost for TreeHostView {
             layer.setOpacity(1.0);
             container.setWantsLayer(false);
         }
+    }
+}
+
+/// AppKit does not reliably propagate an accessibility-hidden state from a generic island host to
+/// the native control it contains. Keep the actual native subtree out of AX while an exiting
+/// island remains visually attached, and restore it before the island becomes interactive again.
+fn set_accessibility_hidden_recursively(view: &NSView, hidden: bool) {
+    view.setAccessibilityHidden(hidden);
+    for child in view.subviews().iter() {
+        set_accessibility_hidden_recursively(&child, hidden);
     }
 }
 

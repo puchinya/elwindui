@@ -143,7 +143,7 @@ struct AnimationDemoWindow {
             if vm.show_native {
                 #[transition(Transition::asymmetric(
                     Transition::opacity().combined(Transition::offset(elwindui::core::base::Vector { x: 28.0, y: 0.0 })),
-                    Transition::scale(0.92),
+                    Transition::opacity().combined(Transition::scale(0.92)),
                 ))]
                 TextBox {
                     placeholder: "Focus me, then remove this control"

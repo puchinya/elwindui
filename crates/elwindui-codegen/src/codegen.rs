@@ -7034,6 +7034,22 @@ fn generate_view(
                             #trait_use
                             let #binding = &self.base;
                             #(#setters)*
+                            // A host-composition Window is not itself a UIElement, so its
+                            // generated mount cannot use the ordinary component root
+                            // `set_environment_context` path. Attach the mounted Environment to
+                            // the Window's content root after the content setter has installed it;
+                            // descendants inherit the same live context through their visual tree.
+                            if let Some(content) =
+                                <Self as elwindui::core::ui::WindowExt>::content_element(self)
+                            {
+                                elwindui::core::ui::UIElementExt::set_environment_context(
+                                    &*content,
+                                    self.__mount_environment
+                                        .get()
+                                        .expect("host Window content environment: component is not yet mounted")
+                                        .clone(),
+                                );
+                            }
                         });
                     }
                     // External (no local `TypeInfo`) — same construction shape
@@ -22114,6 +22130,19 @@ struct NotepadWindow {
             !generated_str.contains("std :: rc :: Rc :: clone (self)")
                 && !generated_str.contains("std :: rc :: Rc :: clone (& self)"),
             "the close-request handler must never capture a strong Rc<Self>: {generated_str}"
+        );
+
+        let build_view_body = generated_method_body(&generated, "__build_view");
+        let content_pos = build_view_body
+            .find("set_content")
+            .expect("host Window __build_view should install its content");
+        let environment_pos = build_view_body
+            .find("UIElementExt :: set_environment_context")
+            .expect("host Window content should receive its mounted Environment");
+        assert!(
+            content_pos < environment_pos,
+            "the mounted Environment must be attached after the Window content exists: \
+             {build_view_body}"
         );
 
         // `unmount_override` clears the handler before forwarding to the backend.

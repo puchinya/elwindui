@@ -40,7 +40,10 @@ Every scenario batch reports one of `PASS` / `FAIL` / `NOT RUN` / `BLOCKED`:
 
 For self-drawn UI, use UIA only to locate stable rendered text/native geometry and to observe
 postconditions; the action under test itself (a tab click, a splitter/tab drag, a native control
-click) must always be real mouse input, never a UIA `invoke` substituted for it.
+click) must always be real mouse input, never a UIA `invoke` substituted for it. When the target
+has a stable UIA selector, prefer the WinUI3 driver's `point-click --selector` form (the selector
+only locates the point; the click itself is still real input through `winapp ui click`, not
+`invoke`) over raw `--x`/`--y` coordinates.
 
 ## SDP-01 — CustomTabView real-pointer selection
 
@@ -52,8 +55,9 @@ status text are discoverable.
 Precondition: the visible status text is the initial
 `Selected tab: Overview · click a header, close affordance, or divider to exercise callbacks`.
 
-Action: a real point-click at the center of the exact `Inspector` header's current bounds
-(recomputed immediately before the click).
+Action: a real point-click on the exact `Inspector` header, preferring `point-click --selector`
+against its stable UIA selector (falling back to `--x`/`--y` at its current bounds' center,
+recomputed immediately before the click, only if no stable selector is available).
 
 Expected postcondition:
 
@@ -93,7 +97,9 @@ Setup: fresh launch; wait for the exact-name header elements `Document A` and `D
 
 Precondition: `Document A editor` is the visible selected document content.
 
-Action: a real point-click at the center of the exact `Document B` header's current bounds.
+Action: a real point-click on the exact `Document B` header, preferring `point-click --selector`
+against its stable UIA selector (falling back to `--x`/`--y` at its current bounds' center only if
+no stable selector is available).
 
 Expected postcondition:
 
@@ -136,7 +142,9 @@ acceptance criterion.
 Setup: navigate to the tab whose header is exactly `Button`; confirm that page is visible; confirm
 its event log is initially empty.
 
-Action: exactly one real mouse click on the native button whose text is exactly `Normal`.
+Action: exactly one real mouse click on the native button whose text is exactly `Normal`,
+preferring `point-click --selector` against its stable UIA selector (falling back to `--x`/`--y`
+at its current bounds' center only if no stable selector is available).
 
 Expected postcondition: the event log contains exactly one appended line, `Normal clicked` — never
 two lines from one gesture.

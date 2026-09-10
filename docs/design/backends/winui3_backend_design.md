@@ -26,6 +26,8 @@ The root Canvas owns all self-drawn pointer handlers and native pointer capture;
 
 `WinUI3CoordinateHost` weakly references the Canvas and promotes the existing `ContentCoordinateConverter`/rasterization-scale path for both root-to-screen and screen-to-root conversion, including transforms between Canvas and XamlRoot content.
 
+Suspending a `TreeHostPanel` (Issue #236 delta) disables native hit testing at the root Canvas so an inactive retained host (e.g. a non-selected `TabView` content host) cannot keep stealing pointer input merely because its permanent `input_surface` remains attached; the input surface itself remains attached, at its z-bottom index, and locally hit-test-visible throughout — only the root Canvas's own participation is gated. Reactivation restores Canvas hit testing before the following relayout, reusing the same input surface identity rather than recreating it.
+
 ## Rendering
 
 Win2D handles retained primitive replay for paths, images, gradients, brushes, clipping, opacity, strokes, and supported blend operations. Composition resources and image caches are owned by the render group or host that created them and are released on removal/deactivation.

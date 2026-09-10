@@ -380,7 +380,10 @@ impl AnimationRuntime {
         animation: Animation,
         callback: Box<dyn Fn(AnimatedValue, bool)>,
     ) {
-        let now = *self.now.borrow();
+        // A host can be idle between layout passes, so the deterministic clock may lag behind
+        // real time when a new animation is requested. Keep explicit test timestamps authoritative
+        // when they are ahead, but do not start an idle animation from a stale zero/old timestamp.
+        let now = (*self.now.borrow()).max(self.epoch.elapsed());
         let key = (owner_id, channel);
         let (start, velocity) = self
             .channels
@@ -760,5 +763,30 @@ mod tests {
         assert!(!runtime.tick(Duration::from_millis(10)));
         assert!(!runtime.tick(Duration::from_millis(11)));
         assert_eq!(completions.borrow().as_slice(), &[true]);
+    }
+
+    #[test]
+    fn runtime_starts_idle_animation_from_current_wall_clock() {
+        let runtime = AnimationRuntime::new();
+        let values = Rc::new(RefCell::new(Vec::new()));
+        let observed = Rc::clone(&values);
+
+        runtime.tick(Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(40));
+        runtime.animate(
+            3,
+            AnimationChannel::Width,
+            AnimatedValue::Scalar(0.0),
+            AnimatedValue::Scalar(1.0),
+            Animation::linear(Duration::from_millis(10)),
+            Box::new(move |value| {
+                if let AnimatedValue::Scalar(value) = value {
+                    observed.borrow_mut().push(value);
+                }
+            }),
+        );
+
+        assert!(runtime.tick_now());
+        assert!(values.borrow().last().copied().unwrap_or(1.0) < 1.0);
     }
 }

@@ -131,7 +131,7 @@ struct AnimationDemoWindow {
                     on_click: vm.reset
                 }
             }
-            #[animation(animation = Animation::ease_in_out(Duration::from_millis(6000)), value = expanded)]
+            #[animation(animation = Animation::ease_in_out(Duration::from_millis(12000)), value = expanded)]
             TextBlock {
                 text: "Scoped implicit self-drawn presentation"
                 width: expanded_width
@@ -141,7 +141,10 @@ struct AnimationDemoWindow {
                 TextBlock { text: "Dynamic self-drawn child: insertion and removal are animated" }
             }
             if vm.show_native {
-                #[transition(Transition::opacity().combined(Transition::offset(elwindui::core::base::Vector { x: 28.0, y: 0.0 })))]
+                #[transition(Transition::asymmetric(
+                    Transition::opacity().combined(Transition::offset(elwindui::core::base::Vector { x: 28.0, y: 0.0 })),
+                    Transition::scale(0.92),
+                ))]
                 TextBox {
                     placeholder: "Focus me, then remove this control"
                     on_got_focus: vm.native_got_focus

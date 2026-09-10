@@ -380,10 +380,7 @@ impl AnimationRuntime {
         animation: Animation,
         callback: Box<dyn Fn(AnimatedValue, bool)>,
     ) {
-        // A host can be idle between layout passes, so the deterministic clock may lag behind
-        // real time when a new animation is requested. Keep explicit test timestamps authoritative
-        // when they are ahead, but do not start an idle animation from a stale zero/old timestamp.
-        let now = (*self.now.borrow()).max(self.epoch.elapsed());
+        let now = *self.now.borrow();
         let key = (owner_id, channel);
         let (start, velocity) = self
             .channels
@@ -451,6 +448,14 @@ impl AnimationRuntime {
 
     pub fn tick_now(&self) -> bool {
         self.tick(self.epoch.elapsed())
+    }
+
+    /// Synchronizes the explicit clock with the host's monotonic wall clock without sampling any
+    /// channels. Hosts call this immediately before starting a new animation after an idle gap.
+    pub fn sync_now(&self) {
+        let wall_clock = self.epoch.elapsed();
+        let mut now = self.now.borrow_mut();
+        *now = (*now).max(wall_clock);
     }
 
     pub fn take_frame_request(&self) -> bool {
@@ -773,6 +778,7 @@ mod tests {
 
         runtime.tick(Duration::ZERO);
         std::thread::sleep(Duration::from_millis(40));
+        runtime.sync_now();
         runtime.animate(
             3,
             AnimationChannel::Width,
@@ -786,7 +792,7 @@ mod tests {
             }),
         );
 
-        assert!(runtime.tick_now());
+        assert!(runtime.tick(Duration::from_millis(40)));
         assert!(values.borrow().last().copied().unwrap_or(1.0) < 1.0);
     }
 }

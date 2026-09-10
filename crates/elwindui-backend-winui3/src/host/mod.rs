@@ -432,9 +432,12 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
 
 impl AnimationFrameHost for WinUI3RelayoutHost {
     fn animation_runtime(&self) -> Rc<AnimationRuntime> {
-        self.animation_runtime
+        let runtime = self
+            .animation_runtime
             .upgrade()
-            .unwrap_or_else(AnimationRuntime::new)
+            .unwrap_or_else(AnimationRuntime::new);
+        runtime.sync_now();
+        runtime
     }
 
     fn request_animation_frame(&self) {

@@ -234,10 +234,13 @@ pub(crate) struct AppKitAnimationFrameHost(objc2::rc::Weak<TreeHostView>);
 
 impl AnimationFrameHost for AppKitAnimationFrameHost {
     fn animation_runtime(&self) -> Rc<AnimationRuntime> {
-        self.0
+        let runtime = self
+            .0
             .load()
             .map(|view| Rc::clone(&view.ivars().animation_runtime))
-            .unwrap_or_else(AnimationRuntime::new)
+            .unwrap_or_else(AnimationRuntime::new);
+        runtime.sync_now();
+        runtime
     }
 
     fn request_animation_frame(&self) {

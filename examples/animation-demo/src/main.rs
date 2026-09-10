@@ -45,7 +45,7 @@ mod animation_demo_view_model {
 
         fn toggle_native(&self) {
             elwindui::core::ui::with_animation(
-                Animation::ease_out(Duration::from_millis(6000)),
+                Animation::ease_out(Duration::from_millis(12000)),
                 || {
                     show_native = !show_native;
                 },
@@ -96,7 +96,7 @@ struct AnimationDemoWindow {
     #[state(default = false)]
     expanded: bool,
 
-    #[computed(expr = if expanded { 440.0 } else { 180.0 })]
+    #[computed(expr = if expanded { 440.0 } else { 140.0 })]
     expanded_width: f32,
 
     body: view! {
@@ -131,7 +131,7 @@ struct AnimationDemoWindow {
                     on_click: vm.reset
                 }
             }
-            #[animation(animation = Animation::ease_in_out(Duration::from_millis(12000)), value = expanded)]
+            #[animation(animation = Animation::ease_in_out(Duration::from_millis(20000)), value = expanded)]
             TextBlock {
                 text: "Scoped implicit self-drawn presentation"
                 width: expanded_width

@@ -8539,6 +8539,23 @@ fn generate_view(
                 }
             }
         });
+        // A generated Window composition is not itself a UIElement, so the ordinary root-element
+        // environment attachment cannot reach its content tree. Attach the exact live mount
+        // context after the generated content has been built on every Window mount path; this is
+        // required for dynamic children to observe later application-environment changes such as
+        // ReduceMotionEnvironment during an exit transition.
+        let host_environment_attach = is_host_composition.then(|| {
+            quote! {
+                if let Some(content) =
+                    <Self as elwindui::core::ui::WindowExt>::content_element(self)
+                {
+                    elwindui::core::ui::UIElementExt::set_environment_context(
+                        &*content,
+                        environment.clone(),
+                    );
+                }
+            }
+        });
         let lifecycle_state_helper = is_composed.then(|| {
             mark_inherent(quote! {
                 #[doc(hidden)]
@@ -8660,6 +8677,7 @@ fn generate_view(
                     #mount_set_env
                     #mount_override_call
                     <Self as #target_ext>::__build_view(self);
+                    #host_environment_attach
                 }
 
                 // View-construction statements, split out of `on_constructed` so this component's

@@ -1897,6 +1897,7 @@ pub fn begin_exit(node: &Rc<dyn UIElementExt>) -> bool {
         parent.as_ui_element().visual_collection.begin_exit(node);
     }
     node.invalidate_render();
+    flush_interactive_relayout(node.as_ui_element());
     true
 }
 

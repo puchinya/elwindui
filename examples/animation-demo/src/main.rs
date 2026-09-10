@@ -45,7 +45,7 @@ mod animation_demo_view_model {
 
         fn toggle_native(&self) {
             elwindui::core::ui::with_animation(
-                Animation::ease_out(Duration::from_millis(12000)),
+                Animation::ease_out(Duration::from_millis(20000)),
                 || {
                     show_native = !show_native;
                 },

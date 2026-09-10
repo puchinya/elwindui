@@ -72,6 +72,7 @@ objc2-app-kit = { version = "0.3", features = [
     # `NSAccessibility` feature does not gate `setAccessibilityLabel`/the button's protocol
     # conformance in objc2-app-kit 0.3.2 — that lives behind `NSAccessibilityProtocols`.
     "NSAccessibilityProtocols",
+    "NSAccessibilityConstants",
     "objc2-quartz-core",
     # Font model support (see crates/elwindui-backend-appkit/src/render/text.rs). Deliberately no
     # `objc2-core-text` dependency: `NSFontDescriptor`'s traits dictionary (weight/width/symbolic

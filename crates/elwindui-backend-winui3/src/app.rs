@@ -236,13 +236,21 @@ mod window_lifecycle_tests {
                 "T12: a never-shown, never-retained window must drop normally"
             );
 
-            // T1: a shown Window survives the caller's own Rc dropping.
-            let window = crate::native_ui::Window::new();
-            let weak = std::rc::Rc::downgrade(&window);
-            window.show();
-            drop(window);
+            // T1: Window A survives the caller's own Rc dropping — the *only* remaining strong
+            // reference from here on is the application registry's own, never a test-local one.
+            // PR #257 review remediation (A1): every subsequent operation on A goes through a
+            // freshly-upgraded, explicitly scoped temporary `Rc` that is dropped again before the
+            // next assertion — an earlier revision of this test kept a `let window = weak.upgrade()
+            // ...` binding alive across `hide()`/`show()`/`close()` and all the way to the final
+            // `weak.upgrade().is_none()` assertion, which that local binding alone would have made
+            // pass trivially (upgrade succeeds whenever *any* strong Rc exists, application-owned
+            // or not) regardless of whether `app::WINDOWS` was doing anything at all.
+            let window_a = crate::native_ui::Window::new();
+            let weak_a = std::rc::Rc::downgrade(&window_a);
+            window_a.show();
+            drop(window_a);
             assert!(
-                weak.upgrade().is_some(),
+                weak_a.upgrade().is_some(),
                 "T1: the final owner must still be alive after the caller's own Rc drops"
             );
             assert_eq!(
@@ -251,54 +259,72 @@ mod window_lifecycle_tests {
                 "T1: exactly one retained window"
             );
 
-            // T3: hide() then show() must retain exactly once, not twice.
-            let window = weak.upgrade().expect("T1 already proved this upgrades");
-            window.hide();
-            window.show();
+            // T3: hide() then show() must retain exactly once, not twice. The temporary upgrade
+            // is scoped and dropped again immediately after use.
+            {
+                let window_a = weak_a.upgrade().expect("A retained");
+                window_a.hide();
+                window_a.show();
+            }
             assert_eq!(
                 retained_window_count_for_test(),
                 1,
                 "T3: hide() then show() must not create a second retention entry"
             );
+            assert!(
+                weak_a.upgrade().is_some(),
+                "T3: A must remain alive after the temporary upgrade used for hide()/show() drops"
+            );
 
-            // T4: a second, independent Window.
+            // T4: a second, independent Window — its own caller-side Rc is dropped too, so both
+            // Windows are proven alive by the application registry alone, not by any test-local
+            // strong reference.
             let window_b = crate::native_ui::Window::new();
             let weak_b = std::rc::Rc::downgrade(&window_b);
             window_b.show();
+            drop(window_b);
             assert_eq!(
                 retained_window_count_for_test(),
                 2,
                 "T4: two shown windows must both be retained"
             );
+            assert!(weak_a.upgrade().is_some(), "T4: A must still be alive");
+            assert!(weak_b.upgrade().is_some(), "T4: B must still be alive");
 
-            // T4/T2: closing the first releases only the first.
-            window.close();
+            // T4/T2: closing A (through another scoped temporary upgrade) releases only A.
+            {
+                let window_a = weak_a.upgrade().expect("A retained");
+                window_a.close();
+            }
             assert_eq!(
                 release_window_call_count_for_test(),
                 1,
-                "T2: release_window must be called exactly once for the first window"
+                "T2: release_window must be called exactly once for A"
             );
             assert_eq!(
                 retained_window_count_for_test(),
                 1,
-                "T4: the second window must remain retained after the first closes"
+                "T4: B must remain retained after A closes"
             );
             assert!(
-                weak.upgrade().is_none(),
-                "T2: the first window's owner must actually have dropped"
+                weak_a.upgrade().is_none(),
+                "T2: A's owner must actually have dropped now that its temporary upgrade is gone too"
             );
             assert!(
                 weak_b.upgrade().is_some(),
-                "T4: the second window must remain alive while the first is gone"
+                "T4: B must remain alive while A is gone"
             );
 
-            // T4/T2: closing the second releases it too and empties the registry. WinUI3's
+            // T4/T2: closing B releases it too and empties the registry. WinUI3's
             // exit-on-empty-registry call (`release_window`) is not independently observable from
             // inside this same synchronous startup closure — `Application::Exit()` only takes
             // effect once this closure returns control to the native message loop — but this whole
             // `run()` call itself returning after this test function ends is the proof the loop
             // did in fact stop once the registry emptied.
-            window_b.close();
+            {
+                let window_b = weak_b.upgrade().expect("B retained");
+                window_b.close();
+            }
             assert_eq!(
                 release_window_call_count_for_test(),
                 2,
@@ -311,7 +337,7 @@ mod window_lifecycle_tests {
             );
             assert!(
                 weak_b.upgrade().is_none(),
-                "T2: the second window's owner must have dropped"
+                "T2: B's owner must have dropped now that its temporary upgrade is gone too"
             );
         });
     }

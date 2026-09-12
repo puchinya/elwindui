@@ -249,6 +249,16 @@ fn main() {
         "Microsoft.UI.Xaml.Media.Imaging.BitmapImage".to_owned(),
         "Microsoft.UI.Xaml.Media.Imaging.BitmapSource".to_owned(),
         "Microsoft.UI.Xaml.Media.GeneralTransform".to_owned(),
+<<<<<<< HEAD
+=======
+        // Animation projection (`host/replay.rs`'s `RenderTransform`/`SetRenderTransform`):
+        // `FrameworkElement.RenderTransform` is typed `Transform` (the abstract base); the
+        // concrete transform actually constructed and assigned is `CompositeTransform`. Neither
+        // was previously in this filter, so `windows-bindgen` never generated `Transform`,
+        // `CompositeTransform`, or `FrameworkElement::SetRenderTransform`/`RenderTransform`
+        // itself — this crate had never actually been built on a real Windows host since that
+        // code was added; see this file's own "Unverified" precedent below for `FontFamily`/etc.
+>>>>>>> 235775f (fix(winui3): add missing Transform bindings, fix RelayoutHost scope; merge lifetime tests)
         "Microsoft.UI.Xaml.Media.Transform".to_owned(),
         "Microsoft.UI.Xaml.Media.CompositeTransform".to_owned(),
         "Microsoft.UI.Xaml.Controls.Primitives.Popup".to_owned(),

@@ -505,21 +505,24 @@ mod hosted_xaml_regression_tests {
                     failed_icon_conversion_does_not_remove_the_action();
 
                 crate::app::reset_window_lifecycle_test_state();
-                // Issue #254: `InnerWindow::new` now takes the final owner's `Weak<dyn
-                // WindowExt>` (obtained from `__self_weak` at `Window::construct()` time in real
-                // usage). This test exercises `InnerWindow`'s own show/hide/close <-> registry
-                // wiring directly, so a standalone bare `Window` serves purely as a valid,
-                // kept-alive owner for that Weak to upgrade against.
+                // Issue #254: `InnerWindow` stores only the final owner's `Weak<dyn WindowExt>`;
+                // the application registry becomes the strong lifetime authority after show().
                 let lifecycle_owner: Rc<dyn elwindui_core::ui::WindowExt> =
                     crate::native_ui::Window::new();
-                let lifecycle_window = InnerWindow::new(Rc::downgrade(&lifecycle_owner));
+                let weak_owner_a = Rc::downgrade(&lifecycle_owner);
+                let lifecycle_window = InnerWindow::new(weak_owner_a.clone());
 
                 lifecycle_window.show();
+                drop(lifecycle_owner);
                 assert!(
                     lifecycle_window.is_visible_for_test(),
                     "show() must make the AppWindow visible"
                 );
                 assert_eq!(crate::app::retained_window_count_for_test(), 1);
+                assert!(
+                    weak_owner_a.upgrade().is_some(),
+                    "the application registry must keep A alive after the caller drops its Rc"
+                );
 
                 lifecycle_window.hide();
                 assert!(
@@ -615,8 +618,37 @@ mod hosted_xaml_regression_tests {
                             use elwindui_core::ui::TextBlockExt;
                             let probe = elwindui_core::ui::TextBlock::new();
                             lifecycle_window_for_burst.set_content(probe.clone());
-                            let sibling_window = Rc::new(InnerWindow::new());
+                            let sibling_owner: Rc<dyn elwindui_core::ui::WindowExt> =
+                                crate::native_ui::Window::new();
+                            let weak_owner_b = Rc::downgrade(&sibling_owner);
+                            let sibling_window = InnerWindow::new(weak_owner_b.clone());
                             sibling_window.show();
+                            drop(sibling_owner);
+                            assert_eq!(
+                                crate::app::retained_window_count_for_test(),
+                                2,
+                                "a second shown window must be retained independently"
+                            );
+                            assert!(weak_owner_a.upgrade().is_some(), "A must still be alive");
+                            assert!(weak_owner_b.upgrade().is_some(), "B must still be alive");
+
+                            // T12: a never-shown Window creates no registry entry and cannot
+                            // release either retained sibling.
+                            let owner_c: Rc<dyn elwindui_core::ui::WindowExt> =
+                                crate::native_ui::Window::new();
+                            let weak_owner_c = Rc::downgrade(&owner_c);
+                            let lifecycle_window_c = InnerWindow::new(weak_owner_c.clone());
+                            assert_eq!(crate::app::retained_window_count_for_test(), 2);
+                            let releases_before_c =
+                                crate::app::release_window_call_count_for_test();
+                            lifecycle_window_c.close();
+                            assert_eq!(
+                                crate::app::release_window_call_count_for_test(),
+                                releases_before_c,
+                                "closing a never-shown Window must not release another Window"
+                            );
+                            drop(owner_c);
+                            assert!(weak_owner_c.upgrade().is_none());
                             let sibling_probe = elwindui_core::ui::TextBlock::new();
                             sibling_window.set_content(sibling_probe.clone());
 
@@ -644,6 +676,8 @@ mod hosted_xaml_regression_tests {
                                 sibling_probe.set_text("sibling probe 500");
 
                                 let sibling_window_for_close = sibling_window.clone();
+                                let weak_owner_a_for_close = weak_owner_a.clone();
+                                let weak_owner_b_for_close = weak_owner_b.clone();
                                 let lifecycle_window_for_close = lifecycle_window_for_500.clone();
                                 enqueue_test_callback(Rc::new(move || {
                                     RELAYOUT_PASS_COUNT_AFTER_500.with(|slot| {
@@ -651,6 +685,20 @@ mod hosted_xaml_regression_tests {
                                             Some(crate::host::relayout_static_pass_count_for_test())
                                     });
                                     sibling_window_for_close.close();
+                                    drop(sibling_window_for_close);
+                                    assert_eq!(
+                                        crate::app::retained_window_count_for_test(),
+                                        1,
+                                        "closing B must release only B while A remains retained"
+                                    );
+                                    assert!(
+                                        weak_owner_b_for_close.upgrade().is_none(),
+                                        "B's owner must drop after its registry entry is released"
+                                    );
+                                    assert!(
+                                        weak_owner_a_for_close.upgrade().is_some(),
+                                        "A must remain alive while B is closed"
+                                    );
                                     lifecycle_window_for_close.close();
                                     LIFECYCLE_VISIBLE_AFTER_CLOSE.with(|slot| {
                                         *slot.borrow_mut() =

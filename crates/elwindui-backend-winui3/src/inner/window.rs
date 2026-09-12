@@ -8,7 +8,7 @@ use crate::ffi::{
     UiCallbackRegistryOwner, invoke_ui_bool_event_callback, invoke_ui_bounds_event_callback,
     invoke_ui_size_event_callback,
 };
-use crate::host::TreeHostPanel;
+use crate::host::TreeHost;
 use elwindui_core::base::Rect;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -23,9 +23,9 @@ use windows::core::Interface;
 /// (ongoing resize), so there is exactly one sizing authority rather than two independently
 /// computed ones. A non-positive width or negative height is treated as "not yet a real viewport"
 /// (e.g. a transient pre-activation `Bounds` of `0x0`) and left unapplied rather than promoted
-/// into a permanent `0x0` viewport for `TreeHostPanel::relayout_static`.
+/// into a permanent `0x0` viewport for `TreeHost::relayout_static`.
 fn apply_window_viewport(
-    content_host: &TreeHostPanel,
+    content_host: &TreeHost,
     menu_wrapper: &RefCell<Option<Canvas>>,
     top_inset: &Cell<f64>,
     width: f64,
@@ -83,11 +83,16 @@ pub(crate) fn should_veto_native_close(handler_result: bool) -> bool {
 }
 
 pub(crate) struct InnerWindow {
+    /// Issue #254: `Weak` only — the application-layer registry (`crate::app::WINDOWS`) is the
+    /// strong lifetime authority for the final owner once `show()` has retained it; this must
+    /// never become a strong reference, or the owner/`InnerWindow`/native-window chain would form
+    /// a cycle no drop could ever break.
+    owner: Weak<dyn elwindui_core::ui::WindowExt>,
     xaml: XamlWindow,
     /// Issue #225: `Rc`-wrapped so the `Window.SizeChanged` handler registered in `new()` can hold
-    /// only a `Weak<TreeHostPanel>` — never a strong back-reference to this `InnerWindow`/`Window`,
+    /// only a `Weak<TreeHost>` — never a strong back-reference to this `InnerWindow`/`Window`,
     /// which the native `Window` itself owns the handler's lifetime alongside.
-    content_host: Rc<TreeHostPanel>,
+    content_host: Rc<TreeHost>,
     /// Issue #225: the current menu-bar wrapping `Canvas` (`set_menu_bar`), if any — `None` for
     /// the plain no-menu-bar case. Shared with the `Window.SizeChanged` handler via `Rc` so a
     /// menu bar set after construction is still picked up by the one already-registered handler.
@@ -122,9 +127,9 @@ pub(crate) struct InnerWindow {
 }
 
 impl InnerWindow {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(owner: Weak<dyn elwindui_core::ui::WindowExt>) -> Self {
         let xaml = XamlWindow::new().expect("Window::new");
-        let content_host = Rc::new(TreeHostPanel::new());
+        let content_host = Rc::new(TreeHost::new());
         let _ = xaml.SetContent(&content_host.as_element());
         let menu_wrapper: Rc<RefCell<Option<Canvas>>> = Rc::new(RefCell::new(None));
         let top_inset = Rc::new(Cell::new(0.0f64));
@@ -139,9 +144,9 @@ impl InnerWindow {
         // PR #227's original version, this goes through `callback_owner.register_size` (not the
         // raw `register_ui_size_event_callback`) so the id is tracked and removed when
         // `callback_owner` — moved into `self` below — drops with this `InnerWindow`; previously
-        // the TLS entry (and its captured `menu_wrapper`/`top_inset`/`Weak<TreeHostPanel>` state)
+        // the TLS entry (and its captured `menu_wrapper`/`top_inset`/`Weak<TreeHost>` state)
         // outlived the `Window` indefinitely. The `Rc`-capturing logic below (upgrading
-        // `Weak<TreeHostPanel>`, reading `menu_wrapper`/`top_inset`) lives in the plain Rust
+        // `Weak<TreeHost>`, reading `menu_wrapper`/`top_inset`) lives in the plain Rust
         // closure handed to `register_size` — never a strong reference back to this
         // `InnerWindow`/`Window`, so it safely no-ops once the content host has actually been
         // dropped, rather than keeping it (or, transitively, this Window) alive.
@@ -173,6 +178,7 @@ impl InnerWindow {
         }
 
         let inner = Self {
+            owner,
             xaml,
             content_host,
             menu_wrapper,
@@ -332,7 +338,7 @@ impl InnerWindow {
         }
     }
 
-    /// Replaces the window's whole content tree — see `TreeHostPanel` for how an `Rc<dyn
+    /// Replaces the window's whole content tree — see `TreeHost` for how an `Rc<dyn
     /// UIElement>` (layouts/shapes/text mixed freely with native controls, at any nesting depth)
     /// gets reflected into real XAML elements.
     pub(crate) fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElementExt>) {
@@ -376,7 +382,7 @@ impl InnerWindow {
     /// the crate's module doc comment), so this uses a plain `Canvas`-less stack: a small dedicated
     /// host `Grid` with two rows would be the idiomatic XAML way to do this; simplified here to
     /// stacking two elements inside a fresh outer `Canvas` sized/positioned manually, mirroring
-    /// `TreeHostPanel`'s own "don't trust native auto-layout, position everything explicitly"
+    /// `TreeHost`'s own "don't trust native auto-layout, position everything explicitly"
     /// approach.
     ///
     /// Issue #225: a plain `Canvas`'s children do not stretch to fill it the way `Window.Content`
@@ -404,7 +410,10 @@ impl InnerWindow {
         self.sync_content_host_to_window_bounds();
     }
 
-    /// Shows the window and retains its native wrapper until WinUI reports that it closed.
+    /// Shows the window and, on the first call, hands the final Window owner to
+    /// `crate::app::retain_window` so the application layer becomes its strong lifetime authority
+    /// until native close is observed (Issue #254). `retained` is set only after retention
+    /// actually succeeds.
     pub(crate) fn show(&self) {
         self.apply_always_on_top();
         // Issue #162 §3.22: `AppWindow` is guaranteed to exist by this point (this same method's
@@ -412,8 +421,12 @@ impl InnerWindow {
         // in case `new()`'s own best-effort attempt ran too early.
         self.try_register_closing_handler();
         self.try_register_bounds_changed_handler();
-        if !self.retained.replace(true) {
-            crate::app::retain_window(&self.xaml);
+        if !self.retained.get() {
+            let owner = self.owner.upgrade().expect(
+                "InnerWindow::show: internal invariant violated - final Window owner was already dropped before its first show()",
+            );
+            crate::app::retain_window(owner, &self.xaml);
+            self.retained.set(true);
         }
         let _ = self.xaml.Activate();
         // Issue #225: `Window.Bounds` is commonly already valid immediately after `Activate()` —

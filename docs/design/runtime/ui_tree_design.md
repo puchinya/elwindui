@@ -20,6 +20,11 @@ UI nodes are shared handles because a node is referenced by its owner, parent tr
 
 Logical and visual child enumeration remains centralized on the element abstraction. Containers must not maintain a second unsynchronized public child list.
 
+A top-level `Window`'s own lifetime authority is a distinct, backend-specific concern layered
+underneath this tree — not a logical/visual parent edge. See
+[`component_lifecycle_design.md`](component_lifecycle_design.md) §4j for the cross-backend
+application-layer Window retention invariant (Issue #254).
+
 `Control` は公開 logical children collection を持たない。template-enabled presentationでは
 componentの型レベル`template: template_view!(|alias: Self| { ... })`が生成した単一のVisual template rootを
 private storageでstrong保持する。

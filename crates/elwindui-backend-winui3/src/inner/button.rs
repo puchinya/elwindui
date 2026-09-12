@@ -439,7 +439,14 @@ mod hosted_xaml_regression_tests {
                     failed_icon_conversion_does_not_remove_the_action();
 
                 crate::app::reset_window_lifecycle_test_state();
-                let lifecycle_window = InnerWindow::new();
+                // Issue #254: `InnerWindow::new` now takes the final owner's `Weak<dyn
+                // WindowExt>` (obtained from `__self_weak` at `Window::construct()` time in real
+                // usage). This test exercises `InnerWindow`'s own show/hide/close <-> registry
+                // wiring directly, so a standalone bare `Window` serves purely as a valid,
+                // kept-alive owner for that Weak to upgrade against.
+                let lifecycle_owner: Rc<dyn elwindui_core::ui::WindowExt> =
+                    crate::native_ui::Window::new();
+                let lifecycle_window = InnerWindow::new(Rc::downgrade(&lifecycle_owner));
 
                 lifecycle_window.show();
                 assert!(

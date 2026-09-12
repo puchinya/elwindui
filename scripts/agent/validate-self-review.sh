@@ -81,9 +81,9 @@ if not isinstance(issue_body, str):
     fail(f"Issue #{issue_number} has no readable body")
 
 heading_re = re.compile(
-    r"^(#{1,6})[ \t]+(?:[0-9]+[.)][ \t]+)?Reviewer Checklist[ \t]*#*[ \t]*$"
+    r"^(?:(#{1,6})[ \t]+(?:[0-9]+[.)][ \t]+)?|[0-9]+[.)][ \t]+)Reviewer Checklist[ \t]*#*[ \t]*$"
 )
-generic_heading_re = re.compile(r"^(#{1,6})(?:[ \t]+.*)?$")
+generic_heading_re = re.compile(r"^(#{1,6})(?:[ \t]+.*)?$|^[0-9]+[.)][ \t]+.*$")
 checkbox_re = re.compile(r"^[ \t]*[-*][ \t]+\[[ xX]\][ \t]+(.+?)\s*$")
 empty_checkbox_re = re.compile(r"^[ \t]*[-*][ \t]+\[[ xX]\][ \t]*$")
 canonical_begin = "ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN"
@@ -115,14 +115,16 @@ def extract_checklist(text: str, source: str) -> list[str]:
         if not match:
             continue
         found = True
-        level = len(match.group(1))
+        level = len(match.group(1)) if match.group(1) else 0
         section_items: list[str] = []
         for candidate_index in range(index + 1, len(lines)):
             candidate = lines[candidate_index]
             if not visible[candidate_index]:
                 continue
             next_heading = generic_heading_re.fullmatch(candidate)
-            if next_heading and len(next_heading.group(1)) <= level:
+            if next_heading and (
+                not next_heading.group(1) or len(next_heading.group(1)) <= level
+            ):
                 break
             if empty_checkbox_re.fullmatch(candidate):
                 fail(f"{source} Reviewer Checklist has an empty checkbox item", "empty-checklist")

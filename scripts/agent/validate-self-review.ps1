@@ -94,10 +94,10 @@ function Has-StructuredEvidence([string] $Text) {
 function Extract-Checklist([string] $Text, [string] $Source) {
     $normalized = $Text -replace "`r`n", "`n" -replace "`r", "`n"
     $lines = $normalized -split "`n"
-    $headingPattern = '^(#{1,6})[ \t]+(?:[0-9]+[.)][ \t]+)?Reviewer Checklist[ \t]*#*[ \t]*$'
-    $genericHeadingPattern = '^(#{1,6})(?:[ \t]+.*)?$'
-$checkboxPattern = '^[ \t]*[-*][ \t]+\[[ xX]\][ \t]+(.+?)\s*$'
-$emptyCheckboxPattern = '^[ \t]*[-*][ \t]+\[[ xX]\][ \t]*$'
+    $headingPattern = '^(?:(#{1,6})[ \t]+(?:[0-9]+[.)][ \t]+)?|[0-9]+[.)][ \t]+)Reviewer Checklist[ \t]*#*[ \t]*$'
+    $genericHeadingPattern = '^(#{1,6})(?:[ \t]+.*)?$|^[0-9]+[.)][ \t]+.*$'
+    $checkboxPattern = '^[ \t]*[-*][ \t]+\[[ xX]\][ \t]+(.+?)\s*$'
+    $emptyCheckboxPattern = '^[ \t]*[-*][ \t]+\[[ xX]\][ \t]*$'
     $visible = [System.Collections.Generic.List[bool]]::new()
     $fenced = $false
     foreach ($line in $lines) {
@@ -126,7 +126,7 @@ $emptyCheckboxPattern = '^[ \t]*[-*][ \t]+\[[ xX]\][ \t]*$'
                 continue
             }
             $nextHeading = [regex]::Match($candidate, $genericHeadingPattern)
-            if ($nextHeading.Success -and $nextHeading.Groups[1].Value.Length -le $level) {
+            if ($nextHeading.Success -and (($nextHeading.Groups[1].Value.Length -eq 0) -or ($nextHeading.Groups[1].Value.Length -le $level)) ) {
                 break
             }
             if ([regex]::IsMatch($candidate, $emptyCheckboxPattern)) {

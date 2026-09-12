@@ -35,7 +35,7 @@ use elwindui_core::input::{
 };
 use elwindui_core::ui::{
     AnimationFrameHost, AnimationRuntime, CoordinateHost, FocusHost, PointerGestureHost,
-    UIElementExt,
+    RelayoutHost, UIElementExt,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -1322,7 +1322,7 @@ impl TreeHost {
         *host.weak_self.borrow_mut() = Rc::downgrade(&host);
         self.rendering.set_host(Rc::downgrade(&host));
         tree.as_ui_element()
-            .set_invalidate_host(Some(Rc::clone(&host)));
+            .set_invalidate_host(Some(Rc::clone(&host) as Rc<dyn RelayoutHost>));
         tree.as_ui_element().set_animation_frame_host(Some(host));
         tree.as_ui_element()
             .set_coordinate_host(Some(Rc::new(WinUI3CoordinateHost {

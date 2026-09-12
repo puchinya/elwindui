@@ -1,23 +1,41 @@
 # AppKit Native E2E Tester Guide
 
-This is the durable procedure for native AppKit GUI acceptance. It is separate from
-[`appkit.md`](appkit.md), so a fresh clone contains the complete tester workflow and its fixed
-instruction example. Raw GUI logs remain Issue-scoped evidence; the small reviewer-facing result
-set belongs under `docs/issues/<issue>-<slug>/evidence/`.
+This guide defines the durable AppKit tester procedure and fixed tester instruction-sheet format.
+It is separate from [`appkit.md`](appkit.md), so a fresh clone contains the complete tester
+workflow. Any command snippet in this guide is a non-authoritative mechanics illustration, not a
+fixed product instruction example -- durable product cases originate under
+[`tests/e2e/`](../../tests/e2e/README.md). Raw GUI logs remain Issue-scoped evidence under the
+owning Issue's immutable `.agent-state` run directory; commit only a small reviewer-facing evidence
+subset when the owning Issue/workflow explicitly requires it.
 
-## Codex routing and tester ownership
+## Codex and Claude Code routing and tester ownership
 
-This rule applies to Codex only. For every AppKit E2E request, the Codex main agent must assign
-the real GUI execution to one bounded sub-agent before invoking the driver itself. Use the
-`elwindui-appkit-e2e-tester` skill so the role is visibly a tester. The standard Codex E2E
-sub-agent is `gpt-5.6-luna` with standard reasoning effort (`medium`). Claude Code uses its own
-sub-agent mechanism and is not changed by this rule.
+This tester routing is provider-neutral (see also `docs/agents/winui3-e2e.md`'s own copy of this
+policy for WinUI3): both providers use the same bounded tester contract, evidence obligations,
+retry rules, and PASS/FAIL/NOT RUN/BLOCKED semantics. Only the selected tester model and
+provider-specific sub-agent mechanism differ:
+
+```text
+Codex:        GPT-5.6 Luna, standard reasoning effort (medium)
+Claude Code:  Claude Haiku 4.5, normal/default reasoning configuration
+              (do not enable extended thinking for routine E2E execution)
+```
+
+For every AppKit E2E request, the main agent must assign the real GUI execution to one bounded
+sub-agent before invoking the driver itself, using its own provider's sub-agent mechanism (Codex:
+the `elwindui-appkit-e2e-tester` skill, so the role is visibly a tester).
 
 The assigned tester owns the complete case and must not delegate again, commit, push, or change
 Issue/PR state unless explicitly assigned. The main agent reviews the source diff, evidence, and
 PASS/FAIL/NOT RUN/BLOCKED classification before updating GitHub. This routing gate still applies
 after context compaction and when a GUI process is already running. If no suitable sub-agent or
 GUI-capable execution path is available, report BLOCKED rather than falling back to the main task.
+
+## Durable case ownership
+
+When executing a permanent repository E2E scenario, the scenario must originate under
+[`tests/e2e/`](../../tests/e2e/README.md). Do not create AppKit-only permanent product scenarios
+under `tools/macos-ui-driver/` or `docs/agents/`.
 
 ## Stable driver artifact and rebuild policy
 
@@ -47,11 +65,13 @@ BLOCKED until it is re-established. Never use a refresh sidecar for unrelated wo
 
 - Run every driver invocation outside the Codex workspace-write sandbox.
 - Run `doctor` once and require `success:true`, `accessibility:true`, and `screen_recording:true`.
-- Launch the already-built demo once and reuse one healthy PID for compatible cases.
+- Launch the already-built target application/example once and reuse one healthy PID for
+  compatible cases.
 - Batch deterministic observations such as `list-windows`; do not relaunch or capture redundant
   images.
-- Use one tester, one checked-in binary, one doctor, one demo launch, and one PID for a compatible
-  batch. Refresh window IDs and geometry after floating create/close, move, resize, and restore.
+- Use one tester, one checked-in binary, one doctor, one target launch, and one PID for a
+  compatible batch. Refresh window IDs and geometry after floating create/close, move, resize, and
+  restore.
 - Use one controlled retry at most, only after restoring foreground, target identity, geometry, and
   the expected precondition. After a second abnormal result, classify behavior mismatch as FAIL,
   host permission/session failure as BLOCKED, and an unexecuted case as NOT RUN.
@@ -104,75 +124,59 @@ screen_x = current_window.x + case_local_x
 screen_y = current_window.y + case_local_y
 ```
 
-For example, if the current MAIN origin is `<main-x>,<main-y>`, the stable Document A tab offset
-`(80,127)` becomes `TAB_A_X=$((MAIN_X+80))` and `TAB_A_Y=$((MAIN_Y+127))`. Do not reuse a stale
-origin after moving or resizing a window.
+`case_local_x`/`case_local_y` are supplied by the selected durable case under `tests/e2e/`, not by
+this guide -- for example, if the current window origin is `<window-x>,<window-y>` and the case
+defines a target offset `<case-local-x>,<case-local-y>`, compute
+`TARGET_X=$((WINDOW_X+CASE_LOCAL_X))` and `TARGET_Y=$((WINDOW_Y+CASE_LOCAL_Y))`. Do not reuse a
+stale origin after moving or resizing a window.
 
 ## Immutable evidence and session metadata
 
 Every run uses a new directory and never overwrites earlier evidence:
 
 ```zsh
-ISSUE=220
+ISSUE=<owning-issue-number>
+CASE_ID=<case-id>
 HEAD_SHORT="$(git rev-parse --short=12 HEAD)"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN="$ROOT/.agent-state/issues/$ISSUE/e2e/$HEAD_SHORT/$RUN_ID"
-CASE="$RUN/snapshot"
+CASE="$RUN/$CASE_ID"
 mkdir -p "$CASE"
 ```
 
 Record `HEAD`, `origin/master`, driver SHA-256, source fingerprint and freshness result, macOS
-version, architecture, `doctor` output, and demo SHA-256 in the run directory. Raw logs go under
-that run directory. Commit only the small selected result set under
-`docs/issues/220-docking-ux-parity/evidence/`; do not commit `.agent-state` or full logs.
+version, architecture, `doctor` output, and target application/example SHA-256 in the run
+directory. Raw logs remain
+under the owning Issue's immutable `.agent-state` run directory; commit only a small
+reviewer-facing evidence subset when the owning Issue/workflow explicitly requires it -- do not
+invent a universal committed-evidence directory, and do not commit full `.agent-state` logs.
 
-Native evidence is invalidated only by effective changes to the AppKit backend, Core layout/input/
-host, Custom Controls used by the case, Docking, `docking-demo`, driver source, or checked-in
-driver binary. Unrelated WinUI3 and documentation changes do not invalidate it.
+Native evidence is invalidated by effective changes to: the selected durable case definition or
+its declared dependencies; AppKit/backend/core behavior relevant to that case; the target
+example/application used by that case; or `macos-ui-driver` source or the checked-in driver
+binary. Unrelated WinUI3-only or documentation-only changes do not invalidate AppKit evidence
+unless the selected case explicitly depends on them.
 
-## Copy/paste example: PR #221 Snapshot and menu lifetime
+## Executing a durable case
 
-This is a complete fixed instruction sheet. Replace only placeholders explicitly marked as values
-read from the immediately preceding command, such as `<PID>` and `<window-id>`. Do not redesign
-the sequence in the tester.
+1. Select the durable case from [`tests/e2e/`](../../tests/e2e/README.md).
+2. The main agent resolves that case into the fixed five-section tester instruction sheet.
+3. The tester executes it through `macos-ui-driver`.
+4. Evidence is stored under the owning Issue's immutable run directory.
+5. The tester reports PASS / FAIL / NOT RUN / BLOCKED.
+6. The tester does not modify the durable case definition during execution.
 
-### Scope and prohibitions
-
-Run exactly these two cases:
-
-1. Native floating bounds A -> B -> restored C using Save/Restore.
-2. Main-thread native menu wrapper lifetime after dropping the caller's `Rc`.
-
-Own both cases to completion. Do not delegate again, commit, push, or update Issue/PR state.
-
-### Fixed setup
+The following is a non-authoritative command illustration of driver mechanics, not a durable
+product E2E test case:
 
 ```zsh
-set -e
 ROOT="$(git rev-parse --show-toplevel)"
 BIN="$ROOT/tools/macos-ui-driver/bin/macos-ui-driver"
-APP="$ROOT/target/debug/docking-demo"
-ISSUE=220
-HEAD_SHORT="$(git rev-parse --short=12 HEAD)"
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-RUN="$ROOT/.agent-state/issues/$ISSUE/e2e/$HEAD_SHORT/$RUN_ID"
-CASE="$RUN/snapshot"
-mkdir -p "$CASE"
-
-"$ROOT/tools/macos-ui-driver/verify-e2e-binary.sh" \
-  >"$CASE/verify-binary.stdout" 2>"$CASE/verify-binary.stderr"
-"$BIN" doctor >"$CASE/doctor.stdout" 2>"$CASE/doctor.stderr"
-"$BIN" launch --path "$APP" --wait-window-timeout 5 \
-  >"$CASE/launch.stdout" 2>"$CASE/launch.stderr"
-# Read PID once from launch.stdout and reuse it for every compatible step.
-PID=<PID-from-launch.stdout>
-"$BIN" list-windows --pid "$PID" >"$CASE/setup-windows.stdout" 2>"$CASE/setup-windows.stderr"
-MAIN=<window-id-for-title-ElwindUI-Docking-Demo>
-MAIN_X=<x-from-setup-windows.stdout>
-MAIN_Y=<y-from-setup-windows.stdout>
-TAB_A_X=$((MAIN_X+80))
-TAB_A_Y=$((MAIN_Y+127))
-
+"$ROOT/tools/macos-ui-driver/verify-e2e-binary.sh"
+"$BIN" doctor
+"$BIN" launch --path "$ROOT/target/debug/<example>" --wait-window-timeout 5
+# Read PID once from launch's own output and reuse it for every compatible step.
+"$BIN" list-windows --pid "$PID"
 run_focused() {
   local target="$1" focus_stdout="$2" focus_stderr="$3" action_stdout="$4" action_stderr="$5"
   shift 5
@@ -180,113 +184,15 @@ run_focused() {
     >"$focus_stdout" 2>"$focus_stderr" || return
   "$BIN" "$@" >"$action_stdout" 2>"$action_stderr"
 }
-
-if ! run_focused "$MAIN" "$CASE/main-focus.stdout" "$CASE/main-focus.stderr" \
-    "$CASE/open-menu.stdout" "$CASE/open-menu.stderr" \
-    point-click --pid "$PID" --window-id "$MAIN" --x "$TAB_A_X" --y "$TAB_A_Y" --button right; then
-  exit 1
-fi
+"$BIN" terminate --pid "$PID" --timeout 5
 ```
-
-Required setup result: freshness is `SYNCED` (or the explicitly documented baseline exception),
-`doctor` has `success:true`, `accessibility:true`, and `screen_recording:true`, and launch has a
-live PID plus a `window` object. If any requirement fails, stop as BLOCKED with both streams.
-
-### Exact actions: Snapshot native bounds
-
-1. After the setup block opens the menu, select Float through Accessibility in the same shell
-   invocation as its focus check:
-
-   ```zsh
-   run_focused "$MAIN" "$CASE/float-focus.stdout" "$CASE/float-focus.stderr" \
-     "$CASE/float.stdout" "$CASE/float.stderr" \
-     click --pid "$PID" --window-title 'ElwindUI Docking Demo' --title 'Float' --via ax-press
-   ```
-
-2. List windows, set FLOAT to the window titled `Document A`, then focus/capture it atomically:
-
-   ```zsh
-   "$BIN" list-windows --pid "$PID" >"$CASE/a-windows.stdout" 2>"$CASE/a-windows.stderr"
-   FLOAT=<window-id-titled-Document-A>
-   run_focused "$FLOAT" "$CASE/a-focus.stdout" "$CASE/a-focus.stderr" \
-     "$CASE/a-capture.stdout" "$CASE/a-capture.stderr" \
-     capture-window --window-id "$FLOAT" --out "$CASE/snapshot-bounds-a.png"
-   ```
-
-   Record A as `(x,y,width,height)` from `a-windows.stdout`.
-
-3. Focus MAIN and invoke Save through Accessibility in one shell invocation:
-
-   ```zsh
-   run_focused "$MAIN" "$CASE/save-focus.stdout" "$CASE/save-focus.stderr" \
-     "$CASE/save.stdout" "$CASE/save.stderr" \
-     click --pid "$PID" --window-title 'ElwindUI Docking Demo' --title 'Save snapshot' --via ax-press
-   ```
-
-4. Move FLOAT using its current bounds plus case-local offsets, then focus/resize and list B:
-
-   ```zsh
-   FLOAT_X=<x-from-a-windows.stdout>
-   FLOAT_Y=<y-from-a-windows.stdout>
-   MOVE_X=$((FLOAT_X+400))
-   MOVE_Y=$((FLOAT_Y+240))
-   "$BIN" focus-window --pid "$PID" --window-id "$FLOAT" --timeout 5 \
-     >"$CASE/move-focus.stdout" 2>"$CASE/move-focus.stderr"
-   osascript -e "tell application \"System Events\" to tell process \"docking-demo\" to set position of window \"Document A\" to {$MOVE_X, $MOVE_Y}" \
-     >"$CASE/move.stdout" 2>"$CASE/move.stderr"
-   run_focused "$FLOAT" "$CASE/resize-focus.stdout" "$CASE/resize-focus.stderr" \
-     "$CASE/resize.stdout" "$CASE/resize.stderr" \
-     resize --pid "$PID" --window-id "$FLOAT" --delta-width -120 --delta-height -80 \
-       --steps 30 --duration 1.0 --timeout 2.0
-   "$BIN" list-windows --pid "$PID" >"$CASE/b-windows.stdout" 2>"$CASE/b-windows.stderr"
-   run_focused "$FLOAT" "$CASE/b-focus.stdout" "$CASE/b-focus.stderr" \
-     "$CASE/b-capture.stdout" "$CASE/b-capture.stderr" \
-     capture-window --window-id "$FLOAT" --out "$CASE/snapshot-bounds-b.png"
-   ```
-
-   `resize.stdout` must contain `success:true` and `changed:true`; otherwise report NOT RUN with
-   both resize streams. Record B from `b-windows.stdout`.
-
-5. Focus MAIN and invoke Restore, list C, and capture C atomically:
-
-   ```zsh
-   run_focused "$MAIN" "$CASE/restore-focus.stdout" "$CASE/restore-focus.stderr" \
-     "$CASE/restore.stdout" "$CASE/restore.stderr" \
-     click --pid "$PID" --window-title 'ElwindUI Docking Demo' --title 'Restore snapshot' --via ax-press
-   "$BIN" list-windows --pid "$PID" >"$CASE/c-windows.stdout" 2>"$CASE/c-windows.stderr"
-   run_focused "$FLOAT" "$CASE/c-focus.stdout" "$CASE/c-focus.stderr" \
-     "$CASE/c-capture.stdout" "$CASE/c-capture.stderr" \
-     capture-window --window-id "$FLOAT" --out "$CASE/snapshot-bounds-c.png"
-   ```
-
-   Record C from `c-windows.stdout`. PASS requires every C component within 2 points of A and at
-   least one C component different from B. Do not report PASS without A/B/C values and all three
-   capture paths.
-
-### Exact actions: menu wrapper lifetime
-
-Run the example after compiling only if it is missing or stale:
-
-```zsh
-cargo build -q -p elwindui-backend-appkit --example menu_lifetime_runtime \
-  >"$CASE/menu-lifetime-build.stdout" 2>"$CASE/menu-lifetime-build.stderr"
-"$ROOT/target/debug/examples/menu_lifetime_runtime" \
-  >"$CASE/menu-lifetime-runtime.stdout" 2>"$CASE/menu-lifetime-runtime.stderr"
-```
-
-PASS requires runtime stdout containing `native_item_retained=true` and `callback_count=1`, with
-empty runtime stderr. Build diagnostics belong to the build log and do not replace the runtime
-stderr check. Any panic, missing token, or non-empty runtime stderr is FAIL.
-
-### Expected results, report, and cleanup
 
 Use only PASS, FAIL, NOT RUN, or BLOCKED. Report one compact table containing case, status,
-PID/window IDs, numeric evidence, and immutable run/log/image paths. Finish with:
+PID/window IDs, numeric evidence, and immutable run/log/image paths. The process must terminate
+without force under normal conditions. The tester must not update Issue/PR state; the main agent
+consumes the report and performs the GitHub workflow.
 
-```zsh
-"$BIN" terminate --pid "$PID" --timeout 5 \
-  >"$RUN/terminate.stdout" 2>"$RUN/terminate.stderr"
-```
-
-The process must terminate without force. The tester must not update Issue/PR state; the main
-agent consumes the report and performs the GitHub workflow.
+Historical evidence from prior durable AppKit cases (e.g. PR #221 / Issue #220's floating-bounds
+and menu-lifetime verification) remains under `docs/issues/220-docking-ux-parity/evidence/` and
+`.agent-state/issues/220/`; it is retained as historical record, not as a current permanent case
+definition -- current durable case definitions originate from `tests/e2e/`.

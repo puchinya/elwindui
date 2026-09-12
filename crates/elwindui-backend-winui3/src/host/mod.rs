@@ -1078,7 +1078,38 @@ impl TreeHostPanel {
         args: &PointerRoutedEventArgs,
         kind: RawPointerEventKind,
     ) -> bool {
-        if !Self::pointer_originates_from_canvas(canvas, input_surface, args) {
+        let accepted = Self::pointer_originates_from_canvas(canvas, input_surface, args);
+        let diagnostics_enabled = std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some();
+        let diagnostics_log_path = std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS_LOG");
+        if diagnostics_enabled || diagnostics_log_path.is_some() {
+            let source_kind = args.OriginalSource().ok().map(|source| {
+                if source.cast::<Canvas>().is_ok() {
+                    "Canvas"
+                } else if source.cast::<Rectangle>().is_ok() {
+                    "Rectangle"
+                } else {
+                    "other"
+                }
+            });
+            let line = format!(
+                "[elwindui-winui3] PointerRouted kind={kind:?} original_source={source_kind:?} accepted={accepted}"
+            );
+            if diagnostics_enabled {
+                eprintln!("{line}");
+            }
+            // A launched GUI process's own stdio is not always captured by the caller (e.g. the
+            // repository's windows-ui-driver deliberately never redirects a launched target's
+            // stdout/stderr — see windows-ui-driver.ps1's Cmd-Launch comment) -- a file path sidesteps
+            // that entirely for E2E diagnosis.
+            if let Some(path) = diagnostics_log_path {
+                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+                {
+                    use std::io::Write;
+                    let _ = writeln!(file, "{line}");
+                }
+            }
+        }
+        if !accepted {
             return false;
         }
         let tree_storage: Option<Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>> =

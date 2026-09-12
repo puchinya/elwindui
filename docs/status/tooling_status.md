@@ -34,13 +34,18 @@ now holds its first durable shared scenario, [`self-drawn-pointer-input.md`](../
 (Issue #236) — AppKit and WinUI3 consume the same case definitions.
 
 A real-host run of that scenario's WinUI3 side (five sub-cases, `point-click`/`drag` against
-`custom-controls-demo`/`docking-demo`/`controls-demo`) is currently BLOCKED, not a coverage claim:
-this verification session's real synthetic pointer input (`SendInput`) does not register against
-any WinUI3 window at all, including a plain native `Button` used as a control case, while the same
-mechanism works correctly against a classic Win32 window (Notepad) and UIA `invoke` works correctly
-against the same WinUI3 `Button`. This is a limitation of the current verification host/session for
-WinUI3 real-input delivery specifically, not a driver defect proven elsewhere or a claim of Windows
-product E2E coverage.
+`custom-controls-demo`/`docking-demo`/`controls-demo`) is currently BLOCKED for the self-drawn
+sub-cases, not a coverage claim. A genuine (non-zero-distance) real `drag` over verified-blank
+self-drawn `Canvas` area in `controls-demo` is proven to deliver a complete, correctly-accepted
+pointer sequence, ruling out both an earlier "no WinUI3 window receives real input" claim and a
+later "self-drawn controls need an invokable UIA `AutomationPeer`" hypothesis (both retired). The
+narrower, still-unresolved finding is that `custom-controls-demo`'s window specifically receives
+zero client-area pointer routing under every real-input variant tried, despite confirmed-correct
+foreground/hwnd targeting and despite that same window's OS-native title-bar chrome demonstrably
+receiving real input. The leading unverified lead is `windows-ui-driver`/`winapp`'s coordinate
+handling for this window's size/position in this environment's display geometry, not a
+`windows-ui-driver` protocol defect or an Issue #236 product defect; see
+`docs/issues/236-treehostpanel-input-surface/evidence/README.md` for the full trail.
 
 A genuine host-level `SetForegroundWindow`/`CreateProcess` handle-inheritance issue was found and
 fixed during this driver's own development: a launched long-lived GUI process could keep a caller's

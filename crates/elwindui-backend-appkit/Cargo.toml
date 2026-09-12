@@ -72,6 +72,7 @@ objc2-app-kit = { version = "0.3", features = [
     # `NSAccessibility` feature does not gate `setAccessibilityLabel`/the button's protocol
     # conformance in objc2-app-kit 0.3.2 — that lives behind `NSAccessibilityProtocols`.
     "NSAccessibilityProtocols",
+    "NSAccessibilityConstants",
     "objc2-quartz-core",
     # Font model support (see crates/elwindui-backend-appkit/src/render/text.rs). Deliberately no
     # `objc2-core-text` dependency: `NSFontDescriptor`'s traits dictionary (weight/width/symbolic
@@ -85,6 +86,7 @@ objc2-app-kit = { version = "0.3", features = [
 objc2-quartz-core = { version = "0.3.2", features = ["CALayer", "CAShapeLayer", "CATextLayer", "CAGradientLayer", "CATransaction"] }
 objc2-core-graphics = { version = "0.3.2", features = ["CGPath", "CGColor", "CGColorSpace", "CGGeometry", "CGAffineTransform", "CGGradient", "CGImage", "CGDataProvider", "CGBitmapContext", "CGContext"] }
 objc2-core-foundation = "0.3.2"
+objc2-core-video = { version = "0.3.2", features = ["CVBase", "CVDisplayLink", "CVReturn"] }
 objc2-core-image = { version = "0.3.2", features = ["CIFilter", "CIImage", "CIContext", "CIVector", "CIColor"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]

@@ -22,8 +22,8 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
-use objc2_core_image::{CIContext, CIFilter};
-use objc2_foundation::NSString;
+use objc2_core_image::{CIContext, CIContextOption, CIFilter, kCIContextUseSoftwareRenderer};
+use objc2_foundation::{NSDictionary, NSNumber, NSString};
 use objc2_quartz_core::CALayer;
 use std::collections::HashMap;
 
@@ -52,7 +52,17 @@ thread_local! {
     /// and reuse for the app's lifetime, not per render. `thread_local!` (rather than proving
     /// `Retained<CIContext>` is `Send`/`Sync`, which it generally isn't for an arbitrary
     /// Objective-C object) is sufficient since every caller here already runs on the main thread.
-    static SHARED_CI_CONTEXT: Retained<CIContext> = unsafe { CIContext::context() };
+    static SHARED_CI_CONTEXT: Retained<CIContext> = {
+        // `+[CIContext context]` can return nil on a host without an available GPU/Core Image
+        // device (notably headless test processes). Requesting the software renderer keeps the
+        // filter path usable in that environment while retaining the one-context-per-thread
+        // lifetime required by Core Image.
+        let software_renderer = NSNumber::new_bool(true);
+        let options: Retained<NSDictionary<CIContextOption, AnyObject>> = unsafe {
+            NSDictionary::from_slices(&[kCIContextUseSoftwareRenderer], &[&software_renderer])
+        };
+        unsafe { CIContext::contextWithOptions(Some(&options)) }
+    };
 }
 
 /// A vector feature with no reasonable mapping onto this backend's native APIs — reported once

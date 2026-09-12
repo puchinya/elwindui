@@ -6,7 +6,7 @@
 use crate::ast::{
     AssignmentKind, Attr, ChildEntry, ClosureBody, ComponentDef, DeferredViewExpr, ElementNode,
     EnumDef, FieldDef, FieldKind, Initializer, Item, MethodDef, Module, ShortcutScope, StoreDef,
-    ViewAttribute, ViewBody, ViewDef, ViewExpr, ViewModelDef,
+    ViewAttribute, ViewBody, ViewDef, ViewExpr, ViewModelDef, ViewModifier,
 };
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident, quote};
@@ -3077,6 +3077,7 @@ pub(crate) fn resolve_view_root_element(
     if is_composed {
         return Some(ElementNode {
             type_path: base.expect("is_composed implies a base").to_string(),
+            modifiers: Vec::new(),
             attributes: body.attributes.clone(),
             attached: body.attached.clone(),
             attribute_shortcuts: body.attribute_shortcuts.clone(),
@@ -5392,6 +5393,7 @@ fn generate_view(
         closure_param: None,
         own_fields,
         mutable_own_fields: HashSet::new(),
+        property_dependencies: own_dependents_of.clone(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
         // A component-declared `template: template_view!(|alias: Self| { ... })` is compiled as
@@ -7032,6 +7034,22 @@ fn generate_view(
                             #trait_use
                             let #binding = &self.base;
                             #(#setters)*
+                            // A host-composition Window is not itself a UIElement, so its
+                            // generated mount cannot use the ordinary component root
+                            // `set_environment_context` path. Attach the mounted Environment to
+                            // the Window's content root after the content setter has installed it;
+                            // descendants inherit the same live context through their visual tree.
+                            if let Some(content) =
+                                <Self as elwindui::core::ui::WindowExt>::content_element(self)
+                            {
+                                elwindui::core::ui::UIElementExt::set_environment_context(
+                                    &*content,
+                                    self.__mount_environment
+                                        .get()
+                                        .expect("host Window content environment: component is not yet mounted")
+                                        .clone(),
+                                );
+                            }
                         });
                     }
                     // External (no local `TypeInfo`) — same construction shape
@@ -8521,6 +8539,23 @@ fn generate_view(
                 }
             }
         });
+        // A generated Window composition is not itself a UIElement, so the ordinary root-element
+        // environment attachment cannot reach its content tree. Attach the exact live mount
+        // context after the generated content has been built on every Window mount path; this is
+        // required for dynamic children to observe later application-environment changes such as
+        // ReduceMotionEnvironment during an exit transition.
+        let host_environment_attach = is_host_composition.then(|| {
+            quote! {
+                if let Some(content) =
+                    <Self as elwindui::core::ui::WindowExt>::content_element(self)
+                {
+                    elwindui::core::ui::UIElementExt::set_environment_context(
+                        &*content,
+                        environment.clone(),
+                    );
+                }
+            }
+        });
         let lifecycle_state_helper = is_composed.then(|| {
             mark_inherent(quote! {
                 #[doc(hidden)]
@@ -8642,6 +8677,7 @@ fn generate_view(
                     #mount_set_env
                     #mount_override_call
                     <Self as #target_ext>::__build_view(self);
+                    #host_environment_attach
                 }
 
                 // View-construction statements, split out of `on_constructed` so this component's
@@ -8902,6 +8938,12 @@ struct ViewCtx {
     /// `emit_virtual_construction`'s `get_attr`/`get_attr_string` recognize an already-`Option<T>`
     /// own field forwarded as-is, so it isn't double-wrapped in another `Some(..)`.
     own_fields: std::collections::HashMap<String, String>,
+    /// Direct dependencies between this component's own reactive fields.  This lets an implicit
+    /// `#[animation(value = source)]` scope remain active when the view attribute reads a computed
+    /// field that is synchronously recomputed from `source`; otherwise the computed field's
+    /// follow-up notification would resync the same attribute outside the animation transaction
+    /// and snap it straight to its target.
+    property_dependencies: std::collections::HashMap<String, Vec<String>>,
     /// The subset of `own_fields` that's Cell/RefCell-backed (`generate_view`'s
     /// `mutable_required_names` — a required, non-`#[param]` own field, still needing to be read
     /// through its Cell/RefCell in `WithSelf` mode instead of the bare `self.<name>` every other
@@ -8972,6 +9014,7 @@ impl ViewCtx {
             closure_param: Some(param.to_string()),
             own_fields: self.own_fields.clone(),
             mutable_own_fields: self.mutable_own_fields.clone(),
+            property_dependencies: self.property_dependencies.clone(),
             bindable_owners: self.bindable_owners.clone(),
             weak_bindable_owners: self.weak_bindable_owners.clone(),
             default_template_parent: self.default_template_parent,
@@ -9152,6 +9195,7 @@ pub(crate) fn lower_template_body(
         closure_param: None,
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
+        property_dependencies: HashMap::new(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
         default_template_parent: false,
@@ -9763,6 +9807,7 @@ fn template_expr_has_deferred_views(expr: &ViewExpr) -> bool {
 struct PlannedNode {
     binding: syn::Ident,
     type_path: String,
+    modifiers: Vec<ViewModifier>,
     attributes: Vec<ViewAttribute>,
     /// Bindings of the element's *bare* nested children (`Type { ... }` written directly inside
     /// `{}`, not as `name: value`). Used to fill a resolved shape's `children`-named `#[param]`
@@ -10150,6 +10195,7 @@ fn plan_environment_scope(
     out.push(PlannedNode {
         binding: binding.clone(),
         type_path: ENVIRONMENT_SCOPE_MARKER.to_string(),
+        modifiers: Vec::new(),
         attributes: elem.attributes.clone(),
         attached: elem.attached.clone(),
         attribute_shortcuts: HashMap::new(),
@@ -10345,6 +10391,7 @@ fn plan_element_in_scope(
     out.push(PlannedNode {
         binding: binding.clone(),
         type_path: node.type_path.clone(),
+        modifiers: node.modifiers.clone(),
         attributes,
         attached: node.attached.clone(),
         attribute_shortcuts: node
@@ -10400,16 +10447,38 @@ fn emit_for_renderer(
     let children = roots.iter().map(|(binding, ty)| {
         dynamic_child_binding(quote! { #binding }, ty, item_trait, from, table)
     });
+    let transition = plan.iter().find_map(|node| {
+        node.modifiers.iter().find_map(|modifier| match modifier {
+            ViewModifier::Transition { transition, .. } => Some(transition),
+            ViewModifier::Animation { .. } => None,
+        })
+    });
+    let transition = transition.map(|transition| {
+        let receiver = closure_ctx.semantic_receiver();
+        emit_expr(transition, &closure_ctx, &EmitMode::WithSelf(receiver))
+    });
+    let dynamic_item = if let Some(transition) = transition {
+        quote! {
+            elwindui::core::ui::DynamicChild::with_children(
+                vec![#(#children),*],
+                __dynamic_item_subscriptions,
+            ).with_transition(#transition)
+        }
+    } else {
+        quote! {
+            elwindui::core::ui::DynamicChild::with_children(
+                vec![#(#children),*],
+                __dynamic_item_subscriptions,
+            )
+        }
+    };
     quote! {
         |#param_ident: &_| {
             #construct
             #wiring
             let mut __dynamic_item_subscriptions = Vec::new();
             #subscriptions
-            elwindui::core::ui::DynamicChild::with_children(
-                vec![#(#children),*],
-                __dynamic_item_subscriptions,
-            )
+            #dynamic_item
         }
     }
 }
@@ -11212,6 +11281,32 @@ pub(crate) fn dynamic_child_binding(
     }
 }
 
+fn dynamic_child_record_with_modifiers(
+    binding: TokenStream,
+    child_type: &str,
+    item_trait: &ItemTraitTokens,
+    from: &Module,
+    table: &SymbolTable,
+    modifiers: &[ViewModifier],
+    ctx: &ViewCtx,
+) -> TokenStream {
+    let child = dynamic_child_binding(binding, child_type, item_trait, from, table);
+    let Some(transition) = modifiers.iter().find_map(|modifier| match modifier {
+        ViewModifier::Transition { transition, .. } => Some(transition),
+        ViewModifier::Animation { .. } => None,
+    }) else {
+        return quote! { elwindui::core::ui::DynamicChild::new(#child) };
+    };
+    let receiver = ctx.semantic_receiver();
+    let transition = emit_expr(transition, ctx, &EmitMode::WithSelf(receiver));
+    quote! {
+        {
+            let __elwindui_dynamic_child = elwindui::core::ui::DynamicChild::new(#child);
+            __elwindui_dynamic_child.with_transition(#transition)
+        }
+    }
+}
+
 /// Phase 2: the construction-time value for a scalar `#[content(...)]` field whose sole bare child
 /// is a dynamic (`if`/`match`) region — `marker_binding` names that region's own
 /// `DYNAMIC_CHILD_SLOT_MARKER` `PlannedNode`, found in `plan`. Evaluates the region's own
@@ -11662,11 +11757,27 @@ fn emit_dynamic_node_refresh(
             let (else_leaves, else_nested) = partition_branch_bindings(else_bindings);
             let then_children = then_leaves.iter().map(|(child, ty)| {
                 let value = lazy_leaf_or_field_value(then_lazy.as_deref(), child, ctx, from, table);
-                dynamic_child_binding(value, ty, item_ext, from, table)
+                let modifiers = then_lazy
+                    .as_deref()
+                    .and_then(|leaves| leaves.iter().find(|node| node.binding == *child))
+                    .or_else(|| plan.iter().find(|node| node.binding == *child))
+                    .map(|node| node.modifiers.as_slice())
+                    .unwrap_or(&[]);
+                dynamic_child_record_with_modifiers(
+                    value, ty, item_ext, from, table, modifiers, ctx,
+                )
             });
             let else_children = else_leaves.iter().map(|(child, ty)| {
                 let value = lazy_leaf_or_field_value(else_lazy.as_deref(), child, ctx, from, table);
-                dynamic_child_binding(value, ty, item_ext, from, table)
+                let modifiers = else_lazy
+                    .as_deref()
+                    .and_then(|leaves| leaves.iter().find(|node| node.binding == *child))
+                    .or_else(|| plan.iter().find(|node| node.binding == *child))
+                    .map(|node| node.modifiers.as_slice())
+                    .unwrap_or(&[]);
+                dynamic_child_record_with_modifiers(
+                    value, ty, item_ext, from, table, modifiers, ctx,
+                )
             });
             let refresh_nested = |bindings: &[&syn::Ident]| -> TokenStream {
                 bindings
@@ -11693,11 +11804,11 @@ fn emit_dynamic_node_refresh(
             quote! {
                 if #condition {
                     #clear_else
-                    #slot.replace_children(#host_ref, #start, vec![#(#then_children),*]);
+                    #slot.replace_dynamic_children(#host_ref, #start, vec![#(#then_children),*]);
                     #refresh_then
                 } else {
                     #clear_then
-                    #slot.replace_children(#host_ref, #start, vec![#(#else_children),*]);
+                    #slot.replace_dynamic_children(#host_ref, #start, vec![#(#else_children),*]);
                     #refresh_else
                 }
             }
@@ -11720,7 +11831,15 @@ fn emit_dynamic_node_refresh(
                     let leaf_children = leaves.iter().map(|(child, ty)| {
                         let value =
                             lazy_leaf_or_field_value(lazy.as_deref(), child, ctx, from, table);
-                        dynamic_child_binding(value, ty, item_ext, from, table)
+                        let modifiers = lazy
+                            .as_deref()
+                            .and_then(|leaves| leaves.iter().find(|node| node.binding == *child))
+                            .or_else(|| plan.iter().find(|node| node.binding == *child))
+                            .map(|node| node.modifiers.as_slice())
+                            .unwrap_or(&[]);
+                        dynamic_child_record_with_modifiers(
+                            value, ty, item_ext, from, table, modifiers, ctx,
+                        )
                     });
                     let clear_other_arms: TokenStream = arms
                         .iter()
@@ -11744,7 +11863,7 @@ fn emit_dynamic_node_refresh(
                     quote! {
                         #pattern => {
                             #clear_other_arms
-                            #slot.replace_children(#host_ref, #start, vec![#(#leaf_children),*]);
+                            #slot.replace_dynamic_children(#host_ref, #start, vec![#(#leaf_children),*]);
                             #refresh_nested
                         }
                     }
@@ -12090,6 +12209,7 @@ fn plan_dynamic_entry(
             out.push(PlannedNode {
                 binding: binding.clone(),
                 type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
+                modifiers: Vec::new(),
                 attributes: Vec::new(),
                 attached: Vec::new(),
                 attribute_shortcuts: HashMap::new(),
@@ -12159,6 +12279,7 @@ fn plan_dynamic_entry(
             out.push(PlannedNode {
                 binding: binding.clone(),
                 type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
+                modifiers: Vec::new(),
                 attributes: Vec::new(),
                 attached: Vec::new(),
                 attribute_shortcuts: HashMap::new(),
@@ -12189,6 +12310,7 @@ fn plan_dynamic_entry(
             let parent = PlannedNode {
                 binding: format_ident!("__for_parent"),
                 type_path: parent_type_path.to_string(),
+                modifiers: Vec::new(),
                 attributes: Vec::new(),
                 attached: Vec::new(),
                 attribute_shortcuts: HashMap::new(),
@@ -12208,6 +12330,7 @@ fn plan_dynamic_entry(
             out.push(PlannedNode {
                 binding: node_binding.clone(),
                 type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
+                modifiers: Vec::new(),
                 attributes: Vec::new(),
                 attached: Vec::new(),
                 attribute_shortcuts: HashMap::new(),
@@ -16808,7 +16931,54 @@ fn emit_resync(
     out: &mut TokenStream,
     self_is_node: bool,
 ) {
-    emit_resync_with_receiver(node, ctx, from, table, filter, out, self_is_node, None);
+    let mut inner = TokenStream::new();
+    emit_resync_with_receiver(
+        node,
+        ctx,
+        from,
+        table,
+        filter,
+        &mut inner,
+        self_is_node,
+        None,
+    );
+    if inner.is_empty() {
+        return;
+    }
+
+    let animation = match filter {
+        ResyncFilter::Property(owner, property) if owner.is_empty() => {
+            node.modifiers.iter().find_map(|modifier| match modifier {
+                ViewModifier::Animation {
+                    animation, value, ..
+                } if value.len() == 1
+                    && (value[0] == property
+                        || ctx.property_dependencies.get(&value[0]).is_some_and(
+                            |dependents| dependents.iter().any(|dependent| dependent == property),
+                        )) =>
+                {
+                    Some(animation)
+                }
+                _ => None,
+            })
+        }
+        _ => None,
+    };
+    if let Some(animation) = animation {
+        let self_mode = if ctx.is_template_storage() {
+            EmitMode::WithSelf(quote! { this })
+        } else {
+            EmitMode::WithSelf(quote! { self })
+        };
+        let animation = emit_expr(animation, ctx, &self_mode);
+        out.extend(quote! {
+            elwindui::core::ui::with_animation(#animation, || {
+                #inner
+            });
+        });
+    } else {
+        out.extend(inner);
+    }
 }
 
 // Same as `emit_resync`, but for a node that isn't reachable as `self`/`self.#binding` at all —
@@ -17466,6 +17636,7 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
         closure_param: None,
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
+        property_dependencies: HashMap::new(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
         default_template_parent: false,
@@ -19694,7 +19865,10 @@ struct NotepadWindow {
 
                     body: view! {
                         VerticalLayout {
-                            for item in vm.items { ItemView { item: item } }
+                            for item in vm.items {
+                                #[transition(Transition::opacity())]
+                                ItemView { item: item }
+                            }
                         }
                     },
                 }
@@ -19707,6 +19881,7 @@ struct NotepadWindow {
         let rendered = generated.to_string();
         assert!(rendered.contains("replace_rc_items"));
         assert!(rendered.contains("item . clone"));
+        assert!(rendered.contains("with_transition"));
     }
 
     // --- Issue #58: bind-owner-only dynamic region conditions must still resync -----------------
@@ -20838,6 +21013,63 @@ struct NotepadWindow {
     }
 
     #[test]
+    fn implicit_animation_scopes_a_computed_dependent_resync() {
+        let src = r#"
+            struct AnimatedComputedHost {
+                #[state(default = false)]
+                expanded: bool,
+
+                #[computed(expr = if expanded { 440.0 } else { 180.0 })]
+                expanded_width: f32,
+
+                body: view! {
+                    VerticalLayout {
+                        #[animation(
+                            animation = Animation::ease_in_out(Duration::from_millis(250)),
+                            value = expanded
+                        )]
+                        TextBlock {
+                            text: "animated"
+                            width: expanded_width
+                        }
+                    }
+                },
+            }
+        "#;
+        let module = crate::test_module(&[(None, src, None)])
+            .expect("computed animation source should parse");
+        let table = build_symbol_table_with_builtins(std::slice::from_ref(&module));
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("implicit_animation_computed_dependency", &generated);
+        let rendered = generated.to_string();
+
+        let expanded_start = rendered
+            .find("fn __resync_expanded")
+            .expect("the animation trigger should have a resync method");
+        let expanded_end = rendered[expanded_start + 1..]
+            .find("fn __")
+            .map(|offset| expanded_start + 1 + offset)
+            .unwrap_or(rendered.len());
+        assert!(
+            rendered[expanded_start..expanded_end].contains("with_animation"),
+            "trigger resync should be animated: {rendered}"
+        );
+
+        let computed_start = rendered
+            .find("fn __resync_expanded_width")
+            .expect("the computed dependency should have a resync method");
+        let computed_end = rendered[computed_start + 1..]
+            .find("fn __")
+            .map(|offset| computed_start + 1 + offset)
+            .unwrap_or(rendered.len());
+        let computed_method = &rendered[computed_start..computed_end];
+        assert!(
+            computed_method.contains("with_animation") && computed_method.contains("set_width"),
+            "computed follow-up resync must stay inside the implicit animation scope: {rendered}"
+        );
+    }
+
+    #[test]
     fn normal_assignment_never_generates_reverse_wiring() {
         let src = r#"
             struct Search {
@@ -21916,6 +22148,19 @@ struct NotepadWindow {
             !generated_str.contains("std :: rc :: Rc :: clone (self)")
                 && !generated_str.contains("std :: rc :: Rc :: clone (& self)"),
             "the close-request handler must never capture a strong Rc<Self>: {generated_str}"
+        );
+
+        let build_view_body = generated_method_body(&generated, "__build_view");
+        let content_pos = build_view_body
+            .find("set_content")
+            .expect("host Window __build_view should install its content");
+        let environment_pos = build_view_body
+            .find("UIElementExt :: set_environment_context")
+            .expect("host Window content should receive its mounted Environment");
+        assert!(
+            content_pos < environment_pos,
+            "the mounted Environment must be attached after the Window content exists: \
+             {build_view_body}"
         );
 
         // `unmount_override` clears the handler before forwarding to the backend.

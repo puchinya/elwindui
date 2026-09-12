@@ -14,21 +14,29 @@ use elwindui_core::input::{
 };
 use elwindui_core::ui::popup::PopupSurfaceHandle;
 use elwindui_core::ui::{
-    ContextMenuPresentation, ContextMenuService, ContextRequest, CoordinateHost, FocusHost,
-    InvalidationKind, PointerGestureHost, RelayoutHost, ResolvedContextDefinition, UIElementExt,
-    layout_root,
+    AnimationFrameHost, AnimationRuntime, ContextMenuPresentation, ContextMenuService,
+    ContextRequest, CoordinateHost, FocusHost, InvalidationKind, PointerGestureHost, RelayoutHost,
+    ResolvedContextDefinition, UIElementExt, layout_root,
 };
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplicationDidResignActiveNotification, NSEvent, NSMenu, NSScreen, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidResignKeyNotification,
+    NSAccessibilityGroupRole, NSAccessibilityLayoutChangedNotification,
+    NSAccessibilityPostNotification, NSApplicationDidResignActiveNotification, NSEvent, NSMenu,
+    NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSWindowDidResignKeyNotification,
 };
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect};
+use objc2_core_video::{CVDisplayLink, CVOptionFlags, CVReturn, CVTimeStamp};
+use objc2_foundation::{
+    NSArray, NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect,
+};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
+use std::ptr::NonNull;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 mod event;
 mod replay;
@@ -45,13 +53,17 @@ pub struct TreeHostIvars {
     pub(crate) render_tree: RefCell<Option<elwindui_core::graphics::RenderTree>>,
     /// Native compositor islands, keyed by `AnyView` identity. They must survive ordinary
     /// relayouts so the first responder is not detached from the view hierarchy.
-    pub(crate) native_containers: RefCell<HashMap<usize, Retained<NSView>>>,
+    pub(crate) native_containers: RefCell<HashMap<usize, Retained<NativeIslandView>>>,
     /// `AnyView` identity -> the owning `UIElement`'s `render_group_id`
     /// (`RenderCommand::NativeControl::owner_id`) — populated/pruned in lockstep with
     /// `native_containers`. Lets `ElwinduiWindow::makeFirstResponder:` resolve "which elwindui
     /// element does this native container belong to" without a second registry of its own; see
     /// `resolve_native_owner_id`.
     pub(crate) native_owner_ids: RefCell<HashMap<usize, u64>>,
+    /// Native islands whose owning Core Visual is currently not eligible for input/focus. They
+    /// remain visible during an exit transition, while `hitTest:` routes their mouse events back
+    /// to this host so Core's presentation-aware hit test can choose the active tree instead.
+    pub(crate) suppressed_native_ids: RefCell<HashSet<usize>>,
     /// Everything a replay pass reads or writes besides the live `CALayer`/`NSView` tree itself
     /// (per-group container cache, image/vector-raster caches) — see `replay::ReplayState`'s own
     /// doc comment. Held as a single `RefCell` so a pass takes one borrow across its whole
@@ -126,6 +138,61 @@ pub struct TreeHostIvars {
     pub(crate) active: Cell<bool>,
     /// Retained handle to any currently active custom popup or context menu surface.
     pub(crate) active_popup: RefCell<Option<Rc<dyn PopupSurfaceHandle>>>,
+    pub(crate) animation_runtime: Rc<AnimationRuntime>,
+    pub(crate) display_link: RefCell<Option<Retained<CVDisplayLink>>>,
+    pub(crate) display_link_state: Box<AppKitDisplayLinkState>,
+}
+
+/// Cross-thread display-link state. The callback never touches AppKit/Core UI state: it only
+/// coalesces one main-queue wake-up and transfers a retained host pointer to that queue.
+pub(crate) struct AppKitDisplayLinkState {
+    pub(crate) host: AtomicUsize,
+    pub(crate) frame_queued: AtomicBool,
+}
+
+unsafe extern "C-unwind" fn appkit_display_link_callback(
+    _display_link: NonNull<CVDisplayLink>,
+    _now: NonNull<CVTimeStamp>,
+    _output_time: NonNull<CVTimeStamp>,
+    _flags: CVOptionFlags,
+    _flags_out: NonNull<CVOptionFlags>,
+    user_info: *mut c_void,
+) -> CVReturn {
+    if user_info.is_null() {
+        return 0;
+    }
+    let state = unsafe { &*(user_info.cast::<AppKitDisplayLinkState>()) };
+    if state.frame_queued.swap(true, Ordering::AcqRel) {
+        return 0;
+    }
+    let host = state.host.load(Ordering::Acquire);
+    if host == 0 {
+        state.frame_queued.store(false, Ordering::Release);
+        return 0;
+    }
+    let Some(retained) = (unsafe { Retained::<TreeHostView>::retain(host as *mut TreeHostView) })
+    else {
+        state.frame_queued.store(false, Ordering::Release);
+        return 0;
+    };
+    let retained = Retained::into_raw(retained) as usize;
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        let Some(view) =
+            (unsafe { Retained::<TreeHostView>::from_raw(retained as *mut TreeHostView) })
+        else {
+            return;
+        };
+        view.ivars()
+            .display_link_state
+            .frame_queued
+            .store(false, Ordering::Release);
+        if view.ivars().animation_runtime.is_idle() {
+            view.stop_animation_display_link();
+        } else {
+            view.setNeedsLayout(true);
+        }
+    });
+    0
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostView` — wraps a *weak* reference back to the view
@@ -167,6 +234,27 @@ impl RelayoutHost for AppKitRelayoutHost {
     }
 }
 
+pub(crate) struct AppKitAnimationFrameHost(objc2::rc::Weak<TreeHostView>);
+
+impl AnimationFrameHost for AppKitAnimationFrameHost {
+    fn animation_runtime(&self) -> Rc<AnimationRuntime> {
+        let runtime = self
+            .0
+            .load()
+            .map(|view| Rc::clone(&view.ivars().animation_runtime))
+            .unwrap_or_else(AnimationRuntime::new);
+        runtime.sync_now();
+        runtime
+    }
+
+    fn request_animation_frame(&self) {
+        if let Some(view) = self.0.load() {
+            view.start_animation_display_link();
+            view.setNeedsLayout(true);
+        }
+    }
+}
+
 /// `elwindui_core::ui::FocusHost` for `TreeHostView` — the `FocusHost` counterpart to
 /// `AppKitRelayoutHost`, same weak-back-reference shape. Delegates straight to
 /// `TreeHostIvars::keyboard.focus`, the single source of truth for this view's own hosted tree.
@@ -182,6 +270,33 @@ impl FocusHost for AppKitFocusHost {
                 .set_focus(target, FocusState::Programmatic),
             None => false,
         }
+    }
+
+    fn clear_focus_in_subtree(&self, subtree: &Rc<dyn UIElementExt>) -> bool {
+        let Some(view) = self.0.load() else {
+            return false;
+        };
+        let Some(focused) = view.ivars().keyboard.focus.focused() else {
+            return false;
+        };
+        let focused_owner_id = focused.render_group_id();
+        let mut current = Some(focused);
+        while let Some(element) = current {
+            if Rc::ptr_eq(&element, subtree) {
+                // A native control has two focus owners: Core's logical FocusTracker and
+                // AppKit's window first responder. Exit transitions can reach `finish_exit` from
+                // the animation tick before the next render pass has projected
+                // `input_enabled = false`, so clearing only the former can leave an NSTextField
+                // first responder while its Visual is being unmounted. Resign the native
+                // responder first; `makeFirstResponder:` may synchronously bridge back into
+                // `FocusTracker`, so the explicit clear below remains idempotent.
+                view.clear_native_focus_for_owner(focused_owner_id);
+                view.ivars().keyboard.focus.clear_focus();
+                return true;
+            }
+            current = element.visual_parent();
+        }
+        false
     }
 }
 
@@ -222,6 +337,104 @@ fn core_screen_to_appkit(point: Point, primary_height: f64) -> NSPoint {
     NSPoint::new(point.x as f64, primary_height - point.y as f64)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeIslandAccessibilityState {
+    Active,
+    Exiting,
+}
+
+pub(crate) struct NativeIslandIvars {
+    accessibility_state: Cell<NativeIslandAccessibilityState>,
+}
+
+// The AppKit-owned accessibility boundary for one `NativeControl` island.
+//
+// This view stays an unignored `AXGroup` for its complete lifetime. While active, AppKit remains
+// responsible for projecting the native leaf's normal accessibility semantics. During an exit,
+// only this boundary's child relationships are emptied, so the outgoing native view can remain
+// attached for its visual transition without remaining reachable through AX.
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[ivars = NativeIslandIvars]
+    pub(crate) struct NativeIslandView;
+
+    unsafe impl NSObjectProtocol for NativeIslandView {}
+
+    impl NativeIslandView {
+        #[unsafe(method_id(accessibilityChildren))]
+        fn accessibility_children(&self) -> Option<Retained<NSArray>> {
+            if self.ivars().accessibility_state.get() == NativeIslandAccessibilityState::Exiting {
+                Some(NSArray::from_slice(&[]))
+            } else {
+                unsafe { msg_send![super(self), accessibilityChildren] }
+            }
+        }
+
+        #[unsafe(method_id(accessibilityVisibleChildren))]
+        fn accessibility_visible_children(&self) -> Option<Retained<NSArray>> {
+            if self.ivars().accessibility_state.get() == NativeIslandAccessibilityState::Exiting {
+                Some(NSArray::from_slice(&[]))
+            } else {
+                unsafe { msg_send![super(self), accessibilityVisibleChildren] }
+            }
+        }
+
+        #[unsafe(method_id(accessibilityChildrenInNavigationOrder))]
+        fn accessibility_children_in_navigation_order(&self) -> Option<Retained<NSArray>> {
+            if self.ivars().accessibility_state.get() == NativeIslandAccessibilityState::Exiting {
+                Some(NSArray::from_slice(&[]))
+            } else {
+                unsafe { msg_send![super(self), accessibilityChildrenInNavigationOrder] }
+            }
+        }
+
+        #[unsafe(method_id(accessibilityHitTest:))]
+        fn accessibility_hit_test(&self, point: NSPoint) -> Option<Retained<AnyObject>> {
+            if self.ivars().accessibility_state.get() == NativeIslandAccessibilityState::Exiting {
+                None
+            } else {
+                unsafe { msg_send![super(self), accessibilityHitTest: point] }
+            }
+        }
+    }
+);
+
+impl NativeIslandView {
+    fn set_accessibility_state(&self, state: NativeIslandAccessibilityState) {
+        let previous = self.ivars().accessibility_state.replace(state);
+        if previous == state {
+            return;
+        }
+        if state == NativeIslandAccessibilityState::Exiting {
+            // The getter state is already Exiting before this advisory notification reaches an
+            // AX client. Correctness does not depend on the client consuming the notice.
+            unsafe {
+                NSAccessibilityPostNotification(
+                    self as &AnyObject,
+                    NSAccessibilityLayoutChangedNotification,
+                );
+            }
+        }
+    }
+
+    pub(crate) fn new() -> Retained<Self> {
+        let ivars = NativeIslandIvars {
+            accessibility_state: Cell::new(NativeIslandAccessibilityState::Active),
+        };
+        let this = Self::alloc(mtm()).set_ivars(ivars);
+        let this: Retained<Self> =
+            unsafe { msg_send![super(this), initWithFrame: NSRect::default()] };
+        // Keep the same AX boundary for Active and Exiting. The native child remains the source of
+        // its own label, role, value, and actions while Active.
+        unsafe {
+            let _: () = msg_send![&*this, setAccessibilityElement: true];
+            let _: () = msg_send![&*this, setAccessibilityRole: NSAccessibilityGroupRole];
+        }
+        this
+    }
+}
+
 define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind = objc2::MainThreadOnly]
@@ -254,6 +467,23 @@ define_class!(
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
             true
+        }
+
+        /// An exiting native island remains in the AppKit subview tree for visual continuity, but
+        /// it must not win AppKit's native hit-test. Returning the host itself lets the ordinary
+        /// Core pointer path run; Core excludes `VisualParticipation::Exiting` from its target
+        /// chain while still rendering the outgoing island above the replacement.
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, point: NSPoint) -> *mut NSView {
+            let hit: *mut NSView = unsafe { msg_send![super(self), hitTest: point] };
+            if hit.is_null() {
+                return hit;
+            }
+            if self.is_suppressed_native_descendant(unsafe { &*hit }) {
+                self as *const TreeHostView as *mut NSView
+            } else {
+                hit
+            }
         }
 
         /// Fires when this view's backing store resolution changes — most commonly a window
@@ -464,6 +694,11 @@ fn is_pointer_cancel_key(key: Option<Key>) -> bool {
 
 impl Drop for TreeHostView {
     fn drop(&mut self) {
+        self.ivars()
+            .display_link_state
+            .host
+            .store(0, Ordering::Release);
+        self.stop_animation_display_link();
         unsafe {
             NSNotificationCenter::defaultCenter().removeObserver(self as &AnyObject);
         }
@@ -471,6 +706,31 @@ impl Drop for TreeHostView {
 }
 
 impl TreeHostView {
+    fn is_suppressed_native_descendant(&self, view: &NSView) -> bool {
+        let suppressed = self.ivars().suppressed_native_ids.borrow();
+        let containers = self.ivars().native_containers.borrow();
+        let mut current = Some(view.retain());
+        while let Some(candidate) = current {
+            if containers.iter().any(|(identity, container)| {
+                suppressed.contains(identity)
+                    && std::ptr::eq(
+                        Retained::as_ptr(container).cast::<NSView>(),
+                        Retained::as_ptr(&candidate),
+                    )
+            }) {
+                return true;
+            }
+            if std::ptr::eq(
+                Retained::as_ptr(&candidate),
+                self as *const TreeHostView as *const NSView,
+            ) {
+                break;
+            }
+            current = unsafe { candidate.superview() };
+        }
+        false
+    }
+
     fn menu_for_event_inner(&self, event: &NSEvent) -> *mut NSMenu {
         let Some(tree) = self.ivars().tree.borrow().clone() else {
             return std::ptr::null_mut();
@@ -614,6 +874,7 @@ impl TreeHostView {
             render_tree: RefCell::new(None),
             native_containers: RefCell::new(HashMap::new()),
             native_owner_ids: RefCell::new(HashMap::new()),
+            suppressed_native_ids: RefCell::new(HashSet::new()),
             replay_state: RefCell::new(ReplayState::default()),
             weak_self: RefCell::new(objc2::rc::Weak::default()),
             pointer: PointerDispatcher::new(),
@@ -627,10 +888,20 @@ impl TreeHostView {
             last_layout_size: Cell::new(objc2_foundation::NSSize::new(-1.0, -1.0)),
             active: Cell::new(true),
             active_popup: RefCell::new(None),
+            animation_runtime: AnimationRuntime::new(),
+            display_link: RefCell::new(None),
+            display_link_state: Box::new(AppKitDisplayLinkState {
+                host: AtomicUsize::new(0),
+                frame_queued: AtomicBool::new(false),
+            }),
         };
         let this = Self::alloc(m).set_ivars(ivars);
         let this: Retained<Self> =
             unsafe { msg_send![super(this), initWithFrame: NSRect::default()] };
+        this.ivars()
+            .display_link_state
+            .host
+            .store(Retained::as_ptr(&this) as usize, Ordering::Release);
         *this.ivars().weak_self.borrow_mut() = objc2::rc::Weak::from_retained(&this);
         let notifications = NSNotificationCenter::defaultCenter();
         unsafe {
@@ -648,6 +919,41 @@ impl TreeHostView {
             );
         }
         this
+    }
+
+    /// Lazily creates and starts the host's display link. CVDisplayLink's callback runs on its
+    /// private thread and only posts a coalesced main-thread layout wake-up; all Core/UI and
+    /// AppKit mutation remains on the main thread.
+    #[allow(deprecated)]
+    fn start_animation_display_link(&self) {
+        if self.ivars().display_link.borrow().is_none() {
+            let mut raw = std::ptr::null_mut();
+            let status =
+                unsafe { CVDisplayLink::create_with_active_cg_displays(NonNull::from(&mut raw)) };
+            if status != 0 || raw.is_null() {
+                return;
+            }
+            let Some(link) = (unsafe { Retained::<CVDisplayLink>::from_raw(raw) }) else {
+                return;
+            };
+            let state = self.ivars().display_link_state.as_ref() as *const _ as *mut c_void;
+            let _ = unsafe { link.set_output_callback(Some(appkit_display_link_callback), state) };
+            *self.ivars().display_link.borrow_mut() = Some(link);
+        }
+        if let Some(link) = self.ivars().display_link.borrow().as_ref() {
+            let _ = link.start();
+        }
+    }
+
+    #[allow(deprecated)]
+    fn stop_animation_display_link(&self) {
+        if let Some(link) = self.ivars().display_link.borrow().as_ref() {
+            let _ = link.stop();
+        }
+        self.ivars()
+            .display_link_state
+            .frame_queued
+            .store(false, Ordering::Release);
     }
 
     /// Converts `event`'s own position/modifiers/timestamp and feeds it, together with `kind`, to
@@ -749,6 +1055,7 @@ impl TreeHostView {
         }
         self.ivars().native_containers.borrow_mut().clear();
         self.ivars().native_owner_ids.borrow_mut().clear();
+        self.ivars().suppressed_native_ids.borrow_mut().clear();
         *self.ivars().replay_state.borrow_mut() = ReplayState::default();
         let weak_self = self.ivars().weak_self.borrow().clone();
         tree.as_ui_element()
@@ -757,6 +1064,8 @@ impl TreeHostView {
             .set_coordinate_host(Some(Rc::new(AppKitCoordinateHost(weak_self.clone()))));
         tree.as_ui_element()
             .set_pointer_gesture_host(Some(Rc::new(AppKitPointerGestureHost(weak_self.clone()))));
+        tree.as_ui_element()
+            .set_animation_frame_host(Some(Rc::new(AppKitAnimationFrameHost(weak_self.clone()))));
         tree.as_ui_element()
             .set_focus_host(Some(Rc::new(AppKitFocusHost(weak_self))));
         self.ivars().keyboard.focus.clear_focus();
@@ -776,6 +1085,7 @@ impl TreeHostView {
         }
         self.ivars().native_containers.borrow_mut().clear();
         self.ivars().native_owner_ids.borrow_mut().clear();
+        self.ivars().suppressed_native_ids.borrow_mut().clear();
         *self.ivars().replay_state.borrow_mut() = ReplayState::default();
         self.ivars().keyboard.focus.clear_focus();
         self.ivars().keyboard.shortcuts().clear();
@@ -790,6 +1100,7 @@ impl TreeHostView {
             old_tree.set_invalidate_host(None);
             old_tree.set_coordinate_host(None);
             old_tree.set_pointer_gesture_host(None);
+            old_tree.set_animation_frame_host(None);
             old_tree.set_focus_host(None);
         }
     }
@@ -864,6 +1175,7 @@ impl TreeHostView {
                 .set(objc2_foundation::NSSize::new(-1.0, -1.0));
             self.relayout();
         } else {
+            self.stop_animation_display_link();
             self.ivars().pointer.cancel();
             // `relayout_inner`'s own GC (the `retain` calls below) only runs during a relayout
             // pass, which a suppressed host by definition no longer gets — so every currently-
@@ -876,6 +1188,7 @@ impl TreeHostView {
                 container.removeFromSuperview();
             }
             self.ivars().native_owner_ids.borrow_mut().clear();
+            self.ivars().suppressed_native_ids.borrow_mut().clear();
             *self.ivars().render_tree.borrow_mut() = None;
             *self.ivars().replay_state.borrow_mut() = ReplayState::default();
         }
@@ -914,6 +1227,13 @@ impl TreeHostView {
 
     fn relayout_inner(&self) {
         use elwindui_core::base::Size;
+
+        let animation_active = self.ivars().animation_runtime.tick_now();
+        if animation_active {
+            self.start_animation_display_link();
+        } else {
+            self.stop_animation_display_link();
+        }
 
         // A suppressed host (`set_active(false)` — e.g. a `TabView`'s non-selected tab) does no
         // measure/arrange/render work at all, including for a pass `layout()` triggered for
@@ -1111,6 +1431,10 @@ impl TreeHostView {
             .native_owner_ids
             .borrow_mut()
             .retain(|identity, _| live_native_controls.contains(identity));
+        self.ivars()
+            .suppressed_native_ids
+            .borrow_mut()
+            .retain(|identity| live_native_controls.contains(identity));
         // A repainted `RenderGroup` container whose *order* moved above (`group_order_changed`)
         // just moved back to the front of `root_layer`'s sublayers (see the Z-order repair comment
         // above). A native leaf's own island, though, is only ever `host.addSubview`ed once, the
@@ -1190,7 +1514,7 @@ impl TreeHostView {
             .native_containers
             .borrow()
             .iter()
-            .find(|(_, v)| std::ptr::eq(&***v, container))
+            .find(|(_, v)| std::ptr::eq(v.as_ref() as &NSView, container))
             .map(|(identity, _)| *identity)?;
         self.ivars()
             .native_owner_ids
@@ -1206,15 +1530,15 @@ impl NativeIslandHost for TreeHostView {
     fn island(&self, identity: usize, owner_id: u64) -> (Retained<NSView>, bool) {
         let mut containers = self.ivars().native_containers.borrow_mut();
         if let Some(container) = containers.get(&identity) {
-            (container.clone(), false)
+            (Retained::into_super(container.clone()), false)
         } else {
-            let container = NSView::new(mtm());
+            let container = NativeIslandView::new();
             containers.insert(identity, container.clone());
             self.ivars()
                 .native_owner_ids
                 .borrow_mut()
                 .insert(identity, owner_id);
-            (container, true)
+            (Retained::into_super(container), true)
         }
     }
 
@@ -1222,9 +1546,124 @@ impl NativeIslandHost for TreeHostView {
         self.addSubview(container);
         container.addSubview(nsview);
     }
+
+    fn project(
+        &self,
+        identity: usize,
+        container: &NSView,
+        transform: elwindui_core::base::AffineTransform,
+        opacity: f32,
+        input_enabled: bool,
+    ) {
+        let island = container
+            .downcast_ref::<NativeIslandView>()
+            .expect("native island container must be a NativeIslandView");
+        if input_enabled {
+            island.set_accessibility_state(NativeIslandAccessibilityState::Active);
+            self.ivars()
+                .suppressed_native_ids
+                .borrow_mut()
+                .remove(&identity);
+        } else {
+            self.ivars()
+                .suppressed_native_ids
+                .borrow_mut()
+                .insert(identity);
+            if !self.clear_native_focus_if_needed(identity) {
+                // AppKit refused both the host and nil as the new first responder. Do not leave
+                // a focused outgoing island interactive: detach its native subtree immediately;
+                // Core still owns the outgoing Visual until its idempotent transition completion.
+                container.removeFromSuperview();
+            }
+            island.set_accessibility_state(NativeIslandAccessibilityState::Exiting);
+        }
+        let needs_layer = transform != elwindui_core::base::AffineTransform::IDENTITY
+            || (opacity - 1.0).abs() > f32::EPSILON;
+        if needs_layer {
+            if container.layer().is_none() {
+                container.setWantsLayer(true);
+            }
+            if let Some(layer) = container.layer() {
+                layer.setAnchorPoint(objc2_core_foundation::CGPoint::new(0.0, 0.0));
+                layer.setAffineTransform(objc2_core_foundation::CGAffineTransform {
+                    a: transform.m11 as f64,
+                    b: transform.m12 as f64,
+                    c: transform.m21 as f64,
+                    d: transform.m22 as f64,
+                    tx: transform.dx as f64,
+                    ty: transform.dy as f64,
+                });
+                layer.setOpacity(opacity);
+            }
+        } else if let Some(layer) = container.layer() {
+            layer.setAffineTransform(objc2_core_foundation::CGAffineTransform {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                tx: 0.0,
+                ty: 0.0,
+            });
+            layer.setOpacity(1.0);
+            container.setWantsLayer(false);
+        }
+    }
 }
 
 impl TreeHostView {
+    /// Resigns AppKit focus for the native island owned by `owner_id`, if that owner is currently
+    /// the window's first-responder subtree. Logical focus teardown must call this before an exit
+    /// transition unmounts the element; waiting for the next render projection is too late when
+    /// the animation runtime completes during the beginning of a relayout pass.
+    fn clear_native_focus_for_owner(&self, owner_id: u64) -> bool {
+        let identity =
+            self.ivars()
+                .native_owner_ids
+                .borrow()
+                .iter()
+                .find_map(|(identity, current_owner)| {
+                    (*current_owner == owner_id).then_some(*identity)
+                });
+        identity.is_none_or(|identity| self.clear_native_focus_if_needed(identity))
+    }
+
+    fn clear_native_focus_if_needed(&self, identity: usize) -> bool {
+        let Some(window) = self.window() else {
+            return true;
+        };
+        let Some(responder) = window.firstResponder() else {
+            return true;
+        };
+        let Ok(responder) = responder.downcast::<NSView>() else {
+            return true;
+        };
+        let Some(container) = self
+            .ivars()
+            .native_containers
+            .borrow()
+            .get(&identity)
+            .cloned()
+        else {
+            return true;
+        };
+        if !is_descendant_or_same(&responder, &container) {
+            return true;
+        }
+        let _ = window.makeFirstResponder(Some(self));
+        let still_focused = window
+            .firstResponder()
+            .and_then(|responder| responder.downcast::<NSView>().ok())
+            .is_some_and(|responder| is_descendant_or_same(&responder, &container));
+        if still_focused {
+            let _ = window.makeFirstResponder(None);
+            return !window
+                .firstResponder()
+                .and_then(|responder| responder.downcast::<NSView>().ok())
+                .is_some_and(|responder| is_descendant_or_same(&responder, &container));
+        }
+        true
+    }
+
     /// Populates `render::stats::RenderStats`'s memory fields (`image_cache_bytes`/
     /// `vector_raster_cache_bytes`/`process_footprint_bytes`/`process_resident_bytes`) from this
     /// host's current caches and the process's own task VM counters. Called from `relayout_inner`
@@ -1252,6 +1691,17 @@ impl TreeHostView {
             s.process_resident_bytes = process_memory.resident_bytes;
         });
     }
+}
+
+fn is_descendant_or_same(view: &NSView, ancestor: &NSView) -> bool {
+    let mut current = Some(view.retain());
+    while let Some(candidate) = current {
+        if std::ptr::eq(&*candidate, ancestor) {
+            return true;
+        }
+        current = unsafe { candidate.superview() };
+    }
+    false
 }
 
 /// PR #165 rereview remediation round 2, A6/T25 (Layer 2): closes `slot`'s own active custom

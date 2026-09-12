@@ -35,3 +35,15 @@ Native XAML children and Win2D/Composition islands are reconciled from the same 
 Theme adapters set or clear dependency properties, apply `RequestedTheme`, and observe `ActualThemeChanged`. Text measurement uses a scratch XAML `TextBlock` with the same conversions used by rendered text. `PlatformDefault` uses ClearValue-equivalent behavior.
 
 Windows environment setup and troubleshooting commands belong in [`../../agents/winui3.md`](../../agents/winui3.md); support and verification belong in [`../../status/backend_status.md`](../../status/backend_status.md).
+
+## Animation projection
+
+`CompositionTarget.Rendering` is the frame source only. The Core presentation
+transform (uniform scale, rotation, translation, and origin) and effective
+opacity are projected to native XAML children, preserving the common/native
+input boundary. Exiting children suppress pointer, focus, and default
+activation while remaining visible until Core completes the transition.
+
+The Rendering event token is revoked when the runtime becomes idle and during
+host teardown. Projection failure follows the Core safe-cleanup path and cannot
+retain an interactive outgoing native child.

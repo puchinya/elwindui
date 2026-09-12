@@ -8,7 +8,8 @@ use super::*;
 use crate::ffi::{AnyView, UiCallbackRegistryOwner};
 use crate::render::xaml_text_alignment;
 
-use crate::bindings::Microsoft::UI::Xaml::Controls::{Canvas, TextBlock};
+use crate::bindings::Microsoft::UI::Xaml::Controls::{Canvas, Control, TextBlock};
+use crate::bindings::Microsoft::UI::Xaml::Media::{CompositeTransform, Transform};
 use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, RoutedEventHandler, UIElement};
 use crate::render::composition::IslandId;
 use elwindui_core::input::{FocusState, KeyboardDispatcher};
@@ -74,6 +75,46 @@ pub(crate) type NativeChildKey = (u64, usize);
 
 pub(crate) type NativeChildMap = HashMap<NativeChildKey, NativeChildElement>;
 
+/// Projects the same presentation state used by the Composition island onto a XAML child.
+/// `AffineTransform` is currently produced by Core from uniform scale/rotation/translation, so
+/// the decomposition below is lossless for the public visual-transform surface. The matrix is
+/// intentionally projected after arrange: layout remains target-state geometry and the native
+/// island receives only the presentation transform and opacity.
+fn apply_visual_projection(
+    element: &FrameworkElement,
+    transform: elwindui_core::base::AffineTransform,
+    opacity: f32,
+    input_enabled: bool,
+) {
+    if let Ok(ui) = element.clone().cast::<UIElement>() {
+        let _ = ui.SetIsHitTestVisible(input_enabled);
+    }
+    if let Ok(control) = element.clone().cast::<Control>() {
+        let _ = control.SetIsTabStop(input_enabled);
+    }
+    let _ = element.SetOpacity(opacity.clamp(0.0, 1.0) as f64);
+    if transform == elwindui_core::base::AffineTransform::IDENTITY {
+        let _ = element.SetRenderTransform(None);
+        return;
+    }
+
+    let scale_x = (transform.m11 * transform.m11 + transform.m12 * transform.m12).sqrt();
+    let scale_y = (transform.m21 * transform.m21 + transform.m22 * transform.m22).sqrt();
+    let rotation = transform.m12.atan2(transform.m11).to_degrees();
+    let Ok(composite) = CompositeTransform::new() else {
+        return;
+    };
+    let _ = composite.SetScaleX(scale_x as f64);
+    let _ = composite.SetScaleY(scale_y as f64);
+    let _ = composite.SetRotation(rotation as f64);
+    let _ = composite.SetTranslateX(transform.dx as f64);
+    let _ = composite.SetTranslateY(transform.dy as f64);
+    let Ok(composite): windows::core::Result<Transform> = composite.cast() else {
+        return;
+    };
+    let _ = element.SetRenderTransform(Some(&composite));
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum RenderLayerKey {
     Composition(IslandId),
@@ -112,6 +153,8 @@ pub(crate) fn reconcile_native_children(
                     style,
                     foreground,
                     alignment,
+                    transform,
+                    opacity,
                 },
             ) => {
                 let _ = text_block.SetText(&HSTRING::from(content.as_str()));
@@ -133,17 +176,22 @@ pub(crate) fn reconcile_native_children(
                 let _ = fe.SetHeight(rect.height as f64);
                 let _ = Canvas::SetLeft(&fe, rect.x as f64);
                 let _ = Canvas::SetTop(&fe, rect.y as f64);
+                apply_visual_projection(&fe, transform, opacity, false);
             }
             (
                 Some(NativeChildElement::Native(state)),
                 RenderedNativeChild::Native {
                     view: new_view,
                     rect,
+                    transform,
+                    opacity,
+                    input_enabled,
                 },
             ) => {
                 let _ = new_view; // same underlying handle identity as `view` — see the key match above
                 let mut view = state.view.clone();
                 view.arrange(rect);
+                apply_visual_projection(&view.as_element(), transform, opacity, input_enabled);
             }
             (_, wanted_child) => {
                 // Either genuinely new (no `existing` entry) or the command's *kind* changed at
@@ -156,6 +204,8 @@ pub(crate) fn reconcile_native_children(
                         style,
                         foreground,
                         alignment,
+                        transform,
+                        opacity,
                     } => {
                         let text_block = TextBlock::new().expect("TextBlock::new");
                         // This XAML child is a paint projection of a self-drawn ElwindUI node,
@@ -179,11 +229,24 @@ pub(crate) fn reconcile_native_children(
                         let _ = fe.SetHeight(rect.height as f64);
                         let _ = Canvas::SetLeft(&fe, rect.x as f64);
                         let _ = Canvas::SetTop(&fe, rect.y as f64);
+                        apply_visual_projection(&fe, transform, opacity, false);
                         NativeChildElement::Text(text_block)
                     }
-                    RenderedNativeChild::Native { view, rect } => {
+                    RenderedNativeChild::Native {
+                        view,
+                        rect,
+                        transform,
+                        opacity,
+                        input_enabled,
+                    } => {
                         let mut view = view;
                         view.arrange(rect);
+                        apply_visual_projection(
+                            &view.as_element(),
+                            transform,
+                            opacity,
+                            input_enabled,
+                        );
                         // Wired exactly once, right here (this whole match arm only runs for a
                         // genuinely new native child — an existing one takes the sibling arm above,
                         // which only calls `view.arrange(rect)`), mirroring
@@ -296,9 +359,14 @@ pub(crate) enum RenderedNativeChild {
         style: elwindui_core::graphics::ComputedTextStyle,
         foreground: Option<elwindui_core::graphics::Brush>,
         alignment: elwindui_core::graphics::TextAlignment,
+        transform: elwindui_core::base::AffineTransform,
+        opacity: f32,
     },
     Native {
         view: AnyView,
         rect: elwindui_core::base::Rect,
+        transform: elwindui_core::base::AffineTransform,
+        opacity: f32,
+        input_enabled: bool,
     },
 }

@@ -1,6 +1,6 @@
 # ElwindUI implementation status
 
-Snapshot: 2026-09-06. Desired behavior is defined by [`../specs/README.md`](../specs/README.md); durable architecture is defined by [`../design/README.md`](../design/README.md).
+Snapshot: 2026-09-09. Desired behavior is defined by [`../specs/README.md`](../specs/README.md); durable architecture is defined by [`../design/README.md`](../design/README.md).
 
 Legend: ✅ implemented, 🚧 partial, ⬜ not implemented.
 
@@ -12,11 +12,12 @@ Legend: ✅ implemented, 🚧 partial, ⬜ not implemented.
 | ControlTemplate | 🚧 | Explicit-target and component-default `template_view!`, typed parent/environment capabilities, first-application selection, shared ordinary/template planning, deferred views, bindings, dynamic regions, ownership, cleanup, and `ContentPresenter` logical/visual separation are implemented. Runtime re-template, per-instance templates, `TemplatePart`, and `VisualState` remain out of scope ([#83](https://github.com/puchinya/elwindui/issues/83)). |
 | Component properties and bindings | ✅ | `param`, `prop`, `state`, `computed`, `bindable`, `Once`, `OneWay`, and `TwoWay` generated storage, notification, dependency refresh, and lifecycle paths are implemented and exercised by examples/tests. |
 | Dynamic regions and lifecycle | ✅ | `if`, `match`, and `for` reconciliation, stable `Rc` item identity where supported, child-first unmount, subscription cleanup, and environment-listener cleanup are implemented. |
+| Animation and transitions | 🚧 | Core target/presentation animation, transactions, springs, transform-aware hit testing, dynamic insertion/removal transitions, AppKit `CVDisplayLink`, and the `animation-demo` harness are implemented. AppKit compilation/runtime evidence is available; WinUI 3 compilation and runtime evidence remains platform-dependent, and GTK4 is unverified. |
 | Store and async computed | 🚧 | Store singletons, async-computed loading/ready/failed state, supersede semantics, and the background runtime are implemented. Bare `TypeName.field` store references inside `view!` and the related validation rules remain unimplemented ([#82](https://github.com/puchinya/elwindui/issues/82)). |
 | Context menu and popup surface | 🚧 | Native/custom context menus, deferred `ViewFactory` popup content, popup-scoped environment, light dismiss, and teardown ordering are implemented. AppKit is verified; WinUI 3 runtime verification remains in the platform backlog ([#157](https://github.com/puchinya/elwindui/issues/157)). |
 | Theme and environment | ✅ | `EnvironmentKey`, mount-time environment resolution, `EnvironmentScope`, cross-crate keys, semantic brushes, live resynchronization, and `PlatformDefault` clearing are implemented. Automatic native-control default appearance remains intentionally outside this surface. |
 | Graphics and retained rendering | 🚧 | Colors, brushes, gradients, paths, raster images, retained tree reconciliation, and both primary backend rendering paths are implemented. SVG effects use documented fallbacks, and canvas/image snapshot assertions remain unimplemented. |
-| Samples | ✅ | `control-template-demo`, `controls-demo`, `font-demo`, `graphics-demo`, `inheritance-demo`, `mascot-demo`, `notepad`, `theme-demo`, and `viewmodel-attr-demo` exercise the implemented public surface. Samples are supplementary evidence, not normative contracts. |
+| Samples | ✅ | `animation-demo`, `control-template-demo`, `controls-demo`, `font-demo`, `graphics-demo`, `inheritance-demo`, `mascot-demo`, `notepad`, `theme-demo`, and `viewmodel-attr-demo` exercise the implemented public surface. Samples are supplementary evidence, not normative contracts. |
 
 ## External generated-component DSL
 

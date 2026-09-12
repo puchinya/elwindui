@@ -1,5 +1,5 @@
 use super::command::RenderCommand;
-use crate::base::{Point, Rect, Size};
+use crate::base::{AffineTransform, Point, Rect, Size};
 use crate::ui::UIElementExt;
 use std::collections::HashMap;
 use std::rc::Weak;
@@ -17,6 +17,15 @@ pub struct RenderGroup {
     /// `CALayer` cache for the consumer).
     pub generation: u64,
     pub offset: Point,
+    /// Presentation transform in this Visual's local coordinate space. Backends compose this
+    /// with the parent transform during replay instead of baking parent animation into leaves.
+    pub transform: AffineTransform,
+    /// Presentation opacity for this Visual. Parent opacity is composed by replay recursion.
+    pub opacity: f32,
+    /// Whether this group and its descendants are eligible for native input/focus projection.
+    /// Exiting groups remain renderable, but their native islands must be interaction-suppressed
+    /// until the exit transition completes.
+    pub input_enabled: bool,
     /// The arranged local extent. It is retained separately from `clip`: an unclipped Visual can
     /// still need to re-record its local commands when only its size changes. `pub` (not
     /// `pub(crate)`) so a backend can classify this group's own on-screen extent against an
@@ -35,6 +44,9 @@ impl RenderGroup {
             is_dirty: true,
             generation: 0,
             offset,
+            transform: AffineTransform::IDENTITY,
+            opacity: 1.0,
+            input_enabled: true,
             size: Size::default(),
             clip,
             commands: Vec::new(),

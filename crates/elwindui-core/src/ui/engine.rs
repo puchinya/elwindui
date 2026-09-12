@@ -19,15 +19,15 @@ use super::*;
 /// `dyn UIElement`) without an unsized coercion.
 pub(crate) fn constrain<T: UIElementExt + ?Sized>(elem: &T, size: Size) -> Size {
     let overridden = Size {
-        width: elem.width().unwrap_or(size.width),
-        height: elem.height().unwrap_or(size.height),
+        width: elem.presentation_width().unwrap_or(size.width),
+        height: elem.presentation_height().unwrap_or(size.height),
     };
     apply_size_constraints(
         overridden,
-        elem.min_width(),
-        elem.max_width(),
-        elem.min_height(),
-        elem.max_height(),
+        elem.presentation_min_width(),
+        elem.presentation_max_width(),
+        elem.presentation_min_height(),
+        elem.presentation_max_height(),
     )
 }
 
@@ -85,7 +85,7 @@ pub(crate) fn build_render_group<H: Clone + 'static>(
     group_paths: &mut HashMap<u64, Vec<usize>>,
     visual_index: &mut HashMap<u64, Weak<dyn UIElementExt>>,
 ) -> Option<RenderGroup> {
-    if !elem.participates_in_layout() {
+    if !elem.participates_in_render() {
         return None;
     }
     let size = Size {
@@ -101,6 +101,13 @@ pub(crate) fn build_render_group<H: Clone + 'static>(
     let id = elem.render_group_id();
     let mut group = RenderGroup::new(id, offset, clip);
     group.size = size;
+    group.transform = local_transform(
+        elem.presentation_visual_transform(),
+        elem.transform_origin(),
+        size,
+    );
+    group.opacity = elem.presentation_opacity();
+    group.input_enabled = elem.participates_in_layout() && elem.hit_test_visible();
     record_group_commands::<H>(elem, &mut group);
     group.generation += 1;
     group_paths.insert(id, path.clone());
@@ -173,10 +180,26 @@ pub(crate) fn reconcile_render_group<H: Clone + 'static>(
         width: size.width,
         height: size.height,
     });
-    if group.offset != offset || group.size != size || group.clip != clip {
+    let transform = local_transform(
+        elem.presentation_visual_transform(),
+        elem.transform_origin(),
+        size,
+    );
+    let opacity = elem.presentation_opacity();
+    let input_enabled = elem.participates_in_layout() && elem.hit_test_visible();
+    if group.offset != offset
+        || group.size != size
+        || group.clip != clip
+        || group.transform != transform
+        || group.opacity != opacity
+        || group.input_enabled != input_enabled
+    {
         group.offset = offset;
         group.size = size;
         group.clip = clip;
+        group.transform = transform;
+        group.opacity = opacity;
+        group.input_enabled = input_enabled;
         group.is_dirty = true;
     }
     group_paths.insert(group.id, path.clone());
@@ -189,7 +212,7 @@ pub(crate) fn reconcile_render_group<H: Clone + 'static>(
         .collect();
     let mut children = Vec::new();
     for child in elem.visual_children() {
-        if !child.participates_in_layout() {
+        if !child.participates_in_render() {
             continue;
         }
         let child_offset = child.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
@@ -265,7 +288,7 @@ impl RenderTree {
         let offset = root.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
         self.group_paths.clear();
         self.visual_index.clear();
-        if root.participates_in_layout() {
+        if root.participates_in_render() {
             reconcile_render_group::<H>(
                 root,
                 &mut self.root,
@@ -296,22 +319,27 @@ pub(crate) fn rect_contains(rect: Rect, at: Point) -> bool {
     at.x >= rect.x && at.x <= rect.x + rect.width && at.y >= rect.y && at.y <= rect.y + rect.height
 }
 
-/// Intersection of two absolute-coordinate rects — `Rect`'s `width`/`height` go negative (never
-/// clamped to 0) when they don't overlap at all, which `rect_contains` already correctly treats as
-/// "contains nothing" (`at.x <= rect.x + rect.width` can't hold for any real `at.x` once `width` is
-/// negative). Used by `hit_test_at` to fold each `clip_to_bounds`-opted-in ancestor's own rect into
-/// the effective clip a point must fall within to reach its descendants at all.
-pub(crate) fn intersect_rect(a: Rect, b: Rect) -> Rect {
-    let x = a.x.max(b.x);
-    let y = a.y.max(b.y);
-    let right = (a.x + a.width).min(b.x + b.width);
-    let bottom = (a.y + a.height).min(b.y + b.height);
-    Rect {
-        x,
-        y,
-        width: right - x,
-        height: bottom - y,
-    }
+#[derive(Clone, Copy)]
+struct HitTestClip {
+    local_to_root: AffineTransform,
+    size: Size,
+}
+
+fn point_in_local_bounds(local_to_root: AffineTransform, size: Size, at: Point) -> bool {
+    local_to_root
+        .invert()
+        .map(|inverse| {
+            rect_contains(
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: size.width,
+                    height: size.height,
+                },
+                inverse.transform_point(at),
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Re-runs the same read-only traversal `collect_render_items` (above) does, without needing to
@@ -339,11 +367,11 @@ pub(crate) fn intersect_rect(a: Rect, b: Rect) -> Rect {
 /// See `elwindui_core::input::PointerDispatcher`'s doc comment (modeled on WinUI3's routed events)
 /// — bubbling from the returned element is then just `dispatch_routed` following `visual_parent()`,
 /// no path/ancestor computation needed here.
-pub(crate) fn hit_test_at(
+fn hit_test_at(
     elem: &Rc<dyn UIElementExt>,
-    absolute_origin: Point,
+    local_to_root: AffineTransform,
     at: Point,
-    inherited_clip: Option<Rect>,
+    inherited_clips: &[HitTestClip],
 ) -> Option<Rc<dyn UIElementExt>> {
     // A non-participating element (and its whole subtree) is excluded from hit-testing, matching
     // `build_render_group`'s own treatment — see `UIElementExt::participates_in_layout`'s own doc
@@ -352,24 +380,33 @@ pub(crate) fn hit_test_at(
     if !elem.participates_in_layout() || !elem.hit_test_visible() {
         return None;
     }
-    let width = elem.arranged_width().unwrap_or(0.0);
-    let height = elem.arranged_height().unwrap_or(0.0);
-    let own_rect = Rect {
-        x: absolute_origin.x,
-        y: absolute_origin.y,
-        width,
-        height,
-    };
-    let own_clip = elem.clip_to_bounds().then_some(own_rect);
-    let effective_clip = match (inherited_clip, own_clip) {
-        (Some(a), Some(b)) => Some(intersect_rect(a, b)),
-        (Some(clip), None) | (None, Some(clip)) => Some(clip),
-        (None, None) => None,
-    };
-    if let Some(clip) = effective_clip {
-        if !rect_contains(clip, at) {
+    for clip in inherited_clips {
+        if !point_in_local_bounds(clip.local_to_root, clip.size, at) {
             return None;
         }
+    }
+
+    let size = Size {
+        width: elem.arranged_width().unwrap_or(0.0),
+        height: elem.arranged_height().unwrap_or(0.0),
+    };
+    // A singular transform is not hit-testable, and the same inverse is used for both the own
+    // bounds and descendant clip checks. RenderTree/backend replay uses the corresponding Core
+    // local_transform helper, so there is no matrix-coefficient approximation here.
+    let local_point = local_to_root.invert()?.transform_point(at);
+    let own_rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: size.width,
+        height: size.height,
+    };
+
+    let mut child_clips = inherited_clips.to_vec();
+    if elem.clip_to_bounds() {
+        child_clips.push(HitTestClip {
+            local_to_root,
+            size,
+        });
     }
 
     // Children are searched last-to-first: traversal order paints later children on top of
@@ -379,16 +416,23 @@ pub(crate) fn hit_test_at(
     // own doc comment).
     for child in elem.visual_children().iter().rev() {
         let offset = child.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-        let child_origin = Point {
-            x: absolute_origin.x + offset.x,
-            y: absolute_origin.y + offset.y,
+        let child_size = Size {
+            width: child.arranged_width().unwrap_or(0.0),
+            height: child.arranged_height().unwrap_or(0.0),
         };
-        if let Some(hit) = hit_test_at(child, child_origin, at, effective_clip) {
+        let child_layout = AffineTransform::translation(offset.x, offset.y);
+        let child_local = local_transform(
+            child.presentation_visual_transform(),
+            child.transform_origin(),
+            child_size,
+        );
+        let child_to_root = local_to_root.concat(&child_layout.concat(&child_local));
+        if let Some(hit) = hit_test_at(child, child_to_root, at, &child_clips) {
             return Some(hit);
         }
     }
 
-    if rect_contains(own_rect, at) && elem.hit_test_content() {
+    if rect_contains(own_rect, local_point) && elem.hit_test_content() {
         Some(Rc::clone(elem))
     } else {
         None
@@ -404,7 +448,17 @@ pub fn hit_test(root: &Rc<dyn UIElementExt>, at: Point) -> Option<Rc<dyn UIEleme
     // alignment against the original allotted rect) must be folded in here too, so hit-testing
     // agrees with `collect_render_items`'s rendered coordinates.
     let root_offset = root.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-    hit_test_at(root, root_offset, at, None)
+    let root_size = Size {
+        width: root.arranged_width().unwrap_or(0.0),
+        height: root.arranged_height().unwrap_or(0.0),
+    };
+    let root_to_parent = AffineTransform::translation(root_offset.x, root_offset.y);
+    let root_transform = root_to_parent.concat(&local_transform(
+        root.presentation_visual_transform(),
+        root.transform_origin(),
+        root_size,
+    ));
+    hit_test_at(root, root_transform, at, &[])
 }
 
 /// Invokes only `elem`'s own handlers registered under `name` (via
@@ -473,6 +527,7 @@ pub(crate) fn dispatch_direct<T: 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base::Vector;
     use crate::ui::testsupport::*;
 
     #[test]
@@ -1202,6 +1257,68 @@ mod tests {
         filled.as_ui_element().set_height(20.0);
         layout_tree::<FakeHandle>(&filled, size(100.0, 100.0));
         assert!(hit_test(&filled, Point { x: 5.0, y: 5.0 }).is_some());
+    }
+
+    #[test]
+    fn hit_test_uses_presentation_transform_and_keeps_zero_opacity_hit_testable() {
+        let leaf = native("leaf", size(20.0, 20.0));
+        leaf.as_ui_element()
+            .set_horizontal_alignment(HorizontalAlignment::Left);
+        leaf.as_ui_element()
+            .set_vertical_alignment(VerticalAlignment::Top);
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        leaf.as_ui_element()
+            .set_visual_transform(VisualTransform::new(Vector { x: 30.0, y: 0.0 }, 1.0, 0.0));
+        layout_tree::<FakeHandle>(&root, size(100.0, 100.0));
+
+        assert!(Rc::ptr_eq(
+            &hit_test(&root, Point { x: 35.0, y: 5.0 }).expect("translated leaf should be hit"),
+            &leaf
+        ));
+        assert!(hit_test(&root, Point { x: 5.0, y: 5.0 }).is_none());
+
+        leaf.as_ui_element().set_opacity(0.0);
+        assert!(hit_test(&root, Point { x: 35.0, y: 5.0 }).is_some());
+
+        leaf.as_ui_element()
+            .set_visual_transform(VisualTransform::new(Vector::default(), 0.0, 0.0));
+        assert!(hit_test(&root, Point { x: 5.0, y: 5.0 }).is_none());
+    }
+
+    #[test]
+    fn exiting_visual_is_rendered_but_not_laid_out_or_hit_tested() {
+        let leaf = native("leaf", size(20.0, 20.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        let _ = layout_tree::<FakeHandle>(&root, size(100.0, 100.0));
+        assert!(hit_test(&root, Point { x: 5.0, y: 5.0 }).is_some());
+
+        assert!(begin_exit(&leaf));
+        let visual_collection = root.as_ui_element().visual_collection.clone();
+        assert!(!visual_collection.remove(&leaf));
+        let replacement = native("replacement", size(20.0, 20.0));
+        visual_collection.insert(0, Rc::clone(&replacement));
+        let visual = root.visual_children();
+        assert_eq!(visual.len(), 2);
+        assert!(
+            Rc::ptr_eq(&visual[0], &leaf),
+            "outgoing child keeps its visual slot"
+        );
+        assert!(Rc::ptr_eq(&visual[1], &replacement));
+        let tree = layout_tree::<FakeHandle>(&root, size(100.0, 100.0));
+        assert_eq!(
+            leaf.arranged_width(),
+            Some(100.0),
+            "an exiting Visual retains its last arranged geometry for rendering"
+        );
+        let hit = hit_test(&root, Point { x: 5.0, y: 5.0 });
+        assert!(hit.is_some_and(|hit| !Rc::ptr_eq(&hit, &leaf)));
+        assert_eq!(tree.root.children.len(), 2, "exit node remains renderable");
+
+        assert!(finish_exit(&leaf));
+        let visual = root.visual_children();
+        assert_eq!(visual.len(), 1);
+        assert!(Rc::ptr_eq(&visual[0], &replacement));
+        assert!(!finish_exit(&leaf), "exit completion must be exactly once");
     }
 
     #[test]

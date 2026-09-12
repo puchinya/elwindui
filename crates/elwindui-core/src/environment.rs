@@ -30,6 +30,19 @@ pub trait EnvironmentKey: 'static {
     fn default_value() -> Self::Value;
 }
 
+/// Built-in accessibility preference consumed by the Core animation runtime. It defaults to
+/// `false`; applications may override it on a derived context to make common animations and
+/// transitions snap without adding an automatic platform bridge.
+pub struct ReduceMotionEnvironment;
+
+impl EnvironmentKey for ReduceMotionEnvironment {
+    type Value = bool;
+
+    fn default_value() -> Self::Value {
+        false
+    }
+}
+
 /// A reactive slot for one resolved `EnvironmentKey::Value`. Shared by `Rc` between every
 /// `EnvironmentContext` that has not overridden the key (`docs/design/runtime/theme_environment_design.md`).
 struct EnvironmentCell<T> {

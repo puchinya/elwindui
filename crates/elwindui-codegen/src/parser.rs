@@ -344,6 +344,7 @@ impl<'a> Parser<'a> {
 
         Ok(ElementNode {
             type_path,
+            modifiers: Vec::new(),
             attributes,
             attached,
             attribute_shortcuts,
@@ -390,11 +391,36 @@ impl<'a> Parser<'a> {
             // `parse_view_body_tail`). Must be immediately followed by a plain `ident: value`
             // attribute line; it annotates that specific attribute's value, not a child or attached
             // property.
+            let modifier_start = self.pos;
             let mut pending_shortcut = None;
             if self.peek_char() == Some('#') {
                 self.eat_char('#');
                 self.expect_char('[')?;
                 let attr_name = self.parse_ident()?;
+                if attr_name == "animation" || attr_name == "transition" {
+                    self.expect_char('(')?;
+                    let args = self.take_balanced_until(&[')'])?;
+                    self.expect_char(')')?;
+                    self.expect_char(']')?;
+                    let span = self.source_span(modifier_start, self.pos);
+                    let modifier = if attr_name == "animation" {
+                        self.parse_animation_modifier(&args, span)?
+                    } else {
+                        self.parse_transition_modifier(&args, span)?
+                    };
+                    self.skip_trivia();
+                    if !self.looks_like_element() {
+                        return Err(self.err(&format!(
+                            "#[{attr_name}(...)] must be immediately followed by a literal UIElement child"
+                        )));
+                    }
+                    let mut element = self.parse_element_node()?;
+                    element.modifiers.push(modifier);
+                    children.push(ChildEntry::Literal(element));
+                    self.skip_trivia();
+                    self.eat_char(',');
+                    continue;
+                }
                 if attr_name != "shortcut" {
                     return Err(self.err(&format!(
                         "unknown element attribute #[{attr_name}] (only #[shortcut(...)] is supported here)"
@@ -498,6 +524,55 @@ impl<'a> Parser<'a> {
         Ok((attributes, attached, attribute_shortcuts, children))
     }
 
+    fn parse_animation_modifier(
+        &self,
+        source: &str,
+        span: SourceSpan,
+    ) -> Result<ViewModifier, String> {
+        let mut animation = None;
+        let mut value = None;
+        for part in split_top_level(source, ',') {
+            let Some((name, rhs)) = part.split_once('=') else {
+                return Err("#[animation(...)] expects `animation = ...` and `value = ...`".into());
+            };
+            let name = name.trim();
+            let rhs = rhs.trim();
+            if rhs.is_empty() {
+                return Err(format!("#[animation] argument `{name}` cannot be empty"));
+            }
+            match name {
+                "animation" => animation = Some(parse_modifier_expr(rhs)?),
+                "value" => {
+                    let expr = parse_modifier_expr(rhs)?;
+                    let ViewExpr::Path(path) = expr else {
+                        return Err("#[animation] `value` must be a bare trigger field".into());
+                    };
+                    if path.len() != 1 {
+                        return Err("#[animation] `value` must be a bare trigger field".into());
+                    }
+                    value = Some(path);
+                }
+                other => return Err(format!("unknown #[animation] argument `{other}`")),
+            }
+        }
+        Ok(ViewModifier::Animation {
+            animation: animation.ok_or("#[animation] is missing `animation = ...`")?,
+            value: value.ok_or("#[animation] is missing `value = ...`")?,
+            span,
+        })
+    }
+
+    fn parse_transition_modifier(
+        &self,
+        source: &str,
+        span: SourceSpan,
+    ) -> Result<ViewModifier, String> {
+        Ok(ViewModifier::Transition {
+            transition: parse_modifier_expr(source.trim())?,
+            span,
+        })
+    }
+
     fn source_span(&self, start: usize, end: usize) -> SourceSpan {
         let prefix = &self.src[..start.min(self.src.len())];
         let line = prefix.matches('\n').count() + 1;
@@ -588,12 +663,41 @@ impl<'a> Parser<'a> {
             if self.peek_keyword("if") || self.peek_keyword("match") || self.peek_keyword("for") {
                 entries.push(self.parse_control_child()?);
             } else {
-                entries.push(ChildEntry::Literal(self.parse_element_node()?));
+                let mut modifiers = Vec::new();
+                while self.peek_char() == Some('#') {
+                    modifiers.push(self.parse_view_modifier()?);
+                    self.skip_trivia();
+                }
+                let mut element = self.parse_element_node()?;
+                element.modifiers.extend(modifiers);
+                entries.push(ChildEntry::Literal(element));
             }
             self.skip_trivia();
             self.eat_char(',');
         }
         Ok(entries)
+    }
+
+    fn parse_view_modifier(&mut self) -> Result<ViewModifier, String> {
+        let start = self.pos;
+        self.expect_char('#')?;
+        self.expect_char('[')?;
+        let name = self.parse_ident()?;
+        if name != "animation" && name != "transition" {
+            return Err(self.err(&format!(
+                "unknown child modifier #[{name}] (expected #[animation(...)] or #[transition(...)])"
+            )));
+        }
+        self.expect_char('(')?;
+        let args = self.take_balanced_until(&[')'])?;
+        self.expect_char(')')?;
+        self.expect_char(']')?;
+        let span = self.source_span(start, self.pos);
+        if name == "animation" {
+            self.parse_animation_modifier(&args, span)
+        } else {
+            self.parse_transition_modifier(&args, span)
+        }
     }
 
     fn parse_control_expr_until(&mut self, terminator: char) -> Result<ViewExpr, String> {
@@ -1347,6 +1451,50 @@ impl<'a> Parser<'a> {
     }
 }
 
+fn parse_modifier_expr(source: &str) -> Result<ViewExpr, String> {
+    let mut parser = Parser::new(source);
+    let expr = parser.parse_view_expr()?;
+    parser.skip_trivia();
+    if !parser.at_eof() {
+        return Err(format!(
+            "invalid animation/transition expression `{source}`"
+        ));
+    }
+    Ok(expr)
+}
+
+fn split_top_level(source: &str, separator: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, character) in source.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            c if c == separator && depth == 0 => {
+                parts.push(source[start..index].trim().to_string());
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(source[start..].trim().to_string());
+    parts.into_iter().filter(|part| !part.is_empty()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2009,6 +2157,38 @@ Button {
             ]
         );
         assert_eq!(*scope, ShortcutScope::Local);
+    }
+
+    #[test]
+    fn parses_animation_and_transition_modifiers_as_structural_metadata() {
+        let src = r#"
+VerticalLayout {
+    if expanded {
+        #[animation(animation = Animation::ease_in_out(Duration::from_millis(250)), value = expanded)]
+        #[transition(Transition::opacity().combined(Transition::scale(0.95)))]
+        TextBlock { text: "hello" }
+    }
+}
+"#;
+        let (_, _, _, _, root_body) = parse_view_body(src).expect("modifiers should parse");
+        let ChildEntry::Literal(root) = &root_body.children[0] else {
+            panic!("expected literal root");
+        };
+        let ChildEntry::If { then_branch, .. } = &root.children[0] else {
+            panic!("expected if region");
+        };
+        let ChildEntry::Literal(element) = &then_branch[0] else {
+            panic!("expected literal child");
+        };
+        assert_eq!(element.modifiers.len(), 2);
+        assert!(matches!(
+            element.modifiers[0],
+            ViewModifier::Animation { .. }
+        ));
+        assert!(matches!(
+            element.modifiers[1],
+            ViewModifier::Transition { .. }
+        ));
     }
 
     #[test]

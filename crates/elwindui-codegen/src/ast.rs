@@ -538,6 +538,10 @@ pub struct LetBinding {
 #[derive(Debug, Clone)]
 pub struct ElementNode {
     pub type_path: String,
+    /// Structural animation/transition metadata attached to a dynamic child. These modifiers are
+    /// intentionally separate from ordinary property assignments so planning/codegen can scope
+    /// them without pretending they are UIElement properties.
+    pub modifiers: Vec<ViewModifier>,
     pub attributes: Vec<ViewAttribute>,
     /// `Grid::row: 1` etc. — `(owner type name, attached field name, value)`. `owner` need not be
     /// (and isn't checked to be) an actual ancestor of this element anywhere in the tree — like
@@ -560,6 +564,19 @@ pub struct ElementNode {
     /// `codegen::emit_shortcut_registration`.
     pub attribute_shortcuts: Vec<(String, Vec<(Option<String>, String)>, ShortcutScope)>,
     pub children: Vec<ChildEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ViewModifier {
+    Animation {
+        animation: ViewExpr,
+        value: Vec<String>,
+        span: SourceSpan,
+    },
+    Transition {
+        transition: ViewExpr,
+        span: SourceSpan,
+    },
 }
 
 /// A byte range in the parser input for one DSL construct.

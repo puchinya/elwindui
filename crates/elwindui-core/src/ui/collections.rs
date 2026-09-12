@@ -15,6 +15,11 @@ use super::*;
 #[derive(Clone)]
 pub struct UIElementVisualCollection {
     storage: Rc<RefCell<Vec<Rc<dyn UIElementExt>>>>,
+    exiting: Rc<RefCell<Vec<Rc<dyn UIElementExt>>>>,
+    /// Stable painter order containing both active and exiting entries. Exiting children retain
+    /// their former slot; a replacement inserted at the same logical position is inserted after
+    /// that slot and therefore paints above the outgoing child.
+    order: Rc<RefCell<Vec<Rc<dyn UIElementExt>>>>,
     owner: Weak<dyn UIElementExt>,
 }
 
@@ -22,6 +27,8 @@ impl UIElementVisualCollection {
     pub fn new(owner: Weak<dyn UIElementExt>) -> Self {
         Self {
             storage: Rc::new(RefCell::new(Vec::new())),
+            exiting: Rc::new(RefCell::new(Vec::new())),
+            order: Rc::new(RefCell::new(Vec::new())),
             owner,
         }
     }
@@ -34,6 +41,7 @@ impl UIElementVisualCollection {
             owner.invalidate_measure();
         }
         self.storage.borrow_mut().push(child.clone());
+        self.order.borrow_mut().push(child.clone());
         if self.owner_rc().is_some() {
             child.run_mount_hooks();
         }
@@ -43,7 +51,23 @@ impl UIElementVisualCollection {
             *child.as_ui_element().visual_parent.borrow_mut() = Some(Rc::downgrade(&owner));
             owner.invalidate_measure();
         }
-        self.storage.borrow_mut().insert(index, child.clone());
+        let anchor = {
+            let storage = self.storage.borrow();
+            storage.get(index).cloned()
+        };
+        let insertion_index = index.min(self.storage.borrow().len());
+        self.storage
+            .borrow_mut()
+            .insert(insertion_index, child.clone());
+        let order_index = anchor
+            .and_then(|anchor| {
+                self.order
+                    .borrow()
+                    .iter()
+                    .position(|candidate| Rc::ptr_eq(candidate, &anchor))
+            })
+            .unwrap_or_else(|| self.order.borrow().len());
+        self.order.borrow_mut().insert(order_index, child.clone());
         if self.owner_rc().is_some() {
             child.run_mount_hooks();
         }
@@ -64,9 +88,25 @@ impl UIElementVisualCollection {
                 .map(|index| storage.remove(index))
         };
         let Some(removed) = removed else {
+            // An exit transition has already moved this child out of the active storage. The
+            // logical collection still calls this method while removing its own entry, but the
+            // retained Visual must keep its parent edge until `finish_exit`.
+            if self
+                .exiting
+                .borrow()
+                .iter()
+                .any(|candidate| Rc::ptr_eq(candidate, child))
+            {
+                if let Some(owner) = self.owner_rc() {
+                    owner.invalidate_measure();
+                }
+            }
             return false;
         };
         *removed.as_ui_element().visual_parent.borrow_mut() = None;
+        self.order
+            .borrow_mut()
+            .retain(|candidate| !Rc::ptr_eq(candidate, &removed));
         if let Some(owner) = self.owner_rc() {
             owner.invalidate_measure();
         }
@@ -75,6 +115,9 @@ impl UIElementVisualCollection {
     pub fn remove_at(&self, index: usize) -> Rc<dyn UIElementExt> {
         let child = self.storage.borrow_mut().remove(index);
         *child.as_ui_element().visual_parent.borrow_mut() = None;
+        self.order
+            .borrow_mut()
+            .retain(|candidate| !Rc::ptr_eq(candidate, &child));
         if let Some(owner) = self.owner_rc() {
             owner.invalidate_measure();
         }
@@ -85,18 +128,72 @@ impl UIElementVisualCollection {
         for child in children {
             *child.as_ui_element().visual_parent.borrow_mut() = None;
         }
+        let exiting = std::mem::take(&mut *self.exiting.borrow_mut());
+        for child in exiting {
+            *child.as_ui_element().visual_parent.borrow_mut() = None;
+        }
+        self.order.borrow_mut().clear();
         if let Some(owner) = self.owner_rc() {
             owner.invalidate_measure();
         }
     }
     pub fn len(&self) -> usize {
-        self.storage.borrow().len()
+        self.storage.borrow().len() + self.exiting.borrow().len()
     }
     pub fn is_empty(&self) -> bool {
-        self.storage.borrow().is_empty()
+        self.storage.borrow().is_empty() && self.exiting.borrow().is_empty()
     }
     pub fn to_vec(&self) -> Vec<Rc<dyn UIElementExt>> {
-        self.storage.borrow().clone()
+        self.order.borrow().clone()
+    }
+
+    /// Moves an active child to the retained Visual-only set without clearing its Visual parent.
+    /// The logical collection can then remove its own entry while layout and input immediately
+    /// exclude the child through `VisualParticipation::Exiting`; render traversal still sees it.
+    pub fn begin_exit(&self, child: &Rc<dyn UIElementExt>) -> bool {
+        let removed = {
+            let mut storage = self.storage.borrow_mut();
+            storage
+                .iter()
+                .position(|candidate| Rc::ptr_eq(candidate, child))
+                .map(|index| storage.remove(index))
+        };
+        let Some(removed) = removed else {
+            return self
+                .exiting
+                .borrow()
+                .iter()
+                .any(|candidate| Rc::ptr_eq(candidate, child));
+        };
+        self.exiting.borrow_mut().push(removed);
+        if let Some(owner) = self.owner_rc() {
+            owner.invalidate_measure();
+            owner.invalidate_render();
+        }
+        true
+    }
+
+    /// Removes a child retained only for an exit transition and clears its Visual parent edge.
+    pub fn finish_exit(&self, child: &Rc<dyn UIElementExt>) -> bool {
+        let removed = {
+            let mut exiting = self.exiting.borrow_mut();
+            exiting
+                .iter()
+                .position(|candidate| Rc::ptr_eq(candidate, child))
+                .map(|index| exiting.remove(index))
+        };
+        let Some(removed) = removed else {
+            return false;
+        };
+        self.order
+            .borrow_mut()
+            .retain(|candidate| !Rc::ptr_eq(candidate, &removed));
+        *removed.as_ui_element().visual_parent.borrow_mut() = None;
+        if let Some(owner) = self.owner_rc() {
+            owner.invalidate_measure();
+            owner.invalidate_render();
+        }
+        true
     }
 }
 
@@ -375,6 +472,7 @@ pub struct DynamicChild<T: ?Sized> {
     /// preserve the single-child API used by existing generated code.
     pub siblings: Vec<Rc<T>>,
     pub subscriptions: Vec<crate::reactive::Subscription>,
+    pub transition: Option<crate::ui::Transition>,
 }
 
 impl<T: ?Sized> DynamicChild<T> {
@@ -383,6 +481,7 @@ impl<T: ?Sized> DynamicChild<T> {
             child,
             siblings: Vec::new(),
             subscriptions: Vec::new(),
+            transition: None,
         }
     }
 
@@ -394,6 +493,7 @@ impl<T: ?Sized> DynamicChild<T> {
             child,
             siblings: Vec::new(),
             subscriptions,
+            transition: None,
         }
     }
 
@@ -409,7 +509,13 @@ impl<T: ?Sized> DynamicChild<T> {
             child,
             siblings: children.collect(),
             subscriptions,
+            transition: None,
         }
+    }
+
+    pub fn with_transition(mut self, transition: crate::ui::Transition) -> Self {
+        self.transition = Some(transition);
+        self
     }
 
     fn child_count(&self) -> usize {
@@ -500,6 +606,21 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
         );
     }
 
+    /// Replaces a dynamic range while preserving per-child transition metadata.
+    pub fn replace_dynamic_children<H: DynamicChildHost<T> + ?Sized>(
+        &self,
+        host: &H,
+        start: usize,
+        children: Vec<DynamicChild<T>>,
+    ) {
+        self.replace_at(
+            host,
+            start,
+            Vec::new(),
+            children.into_iter().map(Rc::new).collect(),
+        );
+    }
+
     /// Clears this slot and tears down any contained dynamic child subtrees.
     pub fn clear(&self) {
         let previous = std::mem::take(&mut *self.items.borrow_mut());
@@ -522,35 +643,57 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
             .items
             .borrow()
             .iter()
-            .flat_map(|item| item.children().cloned())
+            .flat_map(|item| {
+                item.children()
+                    .cloned()
+                    .map(|child| (child, item.transition.clone()))
+            })
             .collect();
         let next_children: Vec<_> = items
             .iter()
-            .flat_map(|item| item.children().cloned())
+            .flat_map(|item| {
+                item.children()
+                    .cloned()
+                    .map(|child| (child, item.transition.clone()))
+            })
             .collect();
         let host_changed = previous_children.len() != next_children.len()
             || previous_children
                 .iter()
                 .zip(next_children.iter())
-                .any(|(previous, next)| !Rc::ptr_eq(previous, next));
+                .any(|((previous, _), (next, _))| !Rc::ptr_eq(previous, next));
+        let transaction = current_transaction();
+        let transition_animation = transaction
+            .animation
+            .filter(|_| !transaction.disables_animations);
         let shared = previous_children.len().min(next_children.len());
         for index in 0..shared {
-            if !Rc::ptr_eq(&previous_children[index], &next_children[index]) {
-                teardown_dynamic_child(&previous_children[index]);
+            if !Rc::ptr_eq(&previous_children[index].0, &next_children[index].0) {
+                retire_dynamic_child(
+                    &previous_children[index].0,
+                    previous_children[index].1.as_ref(),
+                    transition_animation,
+                );
                 host.remove_at(start + index);
-                host.insert(start + index, Rc::clone(&next_children[index]));
+                host.insert(start + index, Rc::clone(&next_children[index].0));
+                activate_dynamic_child(
+                    &next_children[index].0,
+                    next_children[index].1.as_ref(),
+                    transition_animation,
+                );
             }
         }
-        for child in previous_children.iter().skip(next_children.len()) {
-            teardown_dynamic_child(child);
+        for (child, transition) in previous_children.iter().skip(next_children.len()) {
+            retire_dynamic_child(child, transition.as_ref(), transition_animation);
             host.remove_at(start + next_children.len());
         }
-        for (index, child) in next_children
+        for (index, (child, transition)) in next_children
             .iter()
             .enumerate()
             .skip(previous_children.len())
         {
             host.insert(start + index, Rc::clone(child));
+            activate_dynamic_child(child, transition.as_ref(), transition_animation);
         }
         {
             *self.keys.borrow_mut() = keys;
@@ -565,6 +708,41 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
 fn teardown_dynamic_child<T: ?Sized + 'static>(child: &Rc<T>) {
     if let Some(elem) = (child as &dyn Any).downcast_ref::<Rc<dyn UIElementExt>>() {
         unmount_subtree(elem);
+    }
+}
+
+fn retire_dynamic_child<T: ?Sized + 'static>(
+    child: &Rc<T>,
+    transition: Option<&crate::ui::Transition>,
+    animation: Option<crate::ui::Animation>,
+) {
+    let Some(child) = (child as &dyn Any)
+        .downcast_ref::<Rc<dyn UIElementExt>>()
+        .cloned()
+    else {
+        return;
+    };
+    if let (Some(transition), Some(animation)) = (transition, animation) {
+        if crate::ui::start_exit_transition(&child, transition, animation) {
+            return;
+        }
+    }
+    teardown_dynamic_child(&child);
+}
+
+fn activate_dynamic_child<T: ?Sized + 'static>(
+    child: &Rc<T>,
+    transition: Option<&crate::ui::Transition>,
+    animation: Option<crate::ui::Animation>,
+) {
+    let Some(child) = (child as &dyn Any)
+        .downcast_ref::<Rc<dyn UIElementExt>>()
+        .cloned()
+    else {
+        return;
+    };
+    if let (Some(transition), Some(animation)) = (transition, animation) {
+        crate::ui::start_enter_transition(&child, transition, animation);
     }
 }
 

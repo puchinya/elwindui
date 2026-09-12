@@ -1,10 +1,10 @@
-//! Synthetic AppKit accessibility projection for a `TreeHostView`.
+//! Synthetic AppKit accessibility projection for a `TreeHost`.
 //!
 //! The objects in this module are deliberately thin. They retain only a stable Core
 //! `AccessibilityId` and a weak host route; all public semantics, geometry, children, and action
 //! decisions come from the host's immutable `AccessibilitySnapshot`.
 
-use super::TreeHostView;
+use super::TreeHost;
 use elwindui_core::accessibility::{
     AccessibilityAction, AccessibilityHost, AccessibilityId, AccessibilityRole,
     AccessibilitySnapshot, AccessibilitySnapshotNode,
@@ -18,7 +18,7 @@ use objc2_foundation::{
     NSArray, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSValue,
 };
 
-pub(crate) struct AppKitAccessibilityHost(pub(crate) Weak<TreeHostView>);
+pub(crate) struct AppKitAccessibilityHost(pub(crate) Weak<TreeHost>);
 
 impl AccessibilityHost for AppKitAccessibilityHost {
     fn request_accessibility_update(&self) {
@@ -30,7 +30,7 @@ impl AccessibilityHost for AppKitAccessibilityHost {
 
 pub(crate) struct SyntheticAccessibilityElementIvars {
     pub(crate) id: AccessibilityId,
-    pub(crate) host: Weak<TreeHostView>,
+    pub(crate) host: Weak<TreeHost>,
 }
 
 define_class!(
@@ -201,7 +201,7 @@ define_class!(
 );
 
 impl SyntheticAccessibilityElement {
-    pub(crate) fn new(id: AccessibilityId, host: Weak<TreeHostView>) -> Retained<Self> {
+    pub(crate) fn new(id: AccessibilityId, host: Weak<TreeHost>) -> Retained<Self> {
         let this = <Self as MainThreadOnly>::alloc(super::mtm())
             .set_ivars(SyntheticAccessibilityElementIvars { id, host });
         unsafe { msg_send![super(this), init] }
@@ -289,7 +289,7 @@ fn child_ids(
 }
 
 pub(crate) fn children_for_host(
-    host: &TreeHostView,
+    host: &TreeHost,
     parent: Option<AccessibilityId>,
 ) -> Option<Retained<NSArray>> {
     let snapshot = host.ivars().accessibility_runtime.snapshot();
@@ -301,7 +301,7 @@ pub(crate) fn children_for_host(
     Some(NSArray::from_retained_slice(&children))
 }
 
-pub(crate) fn hit_test_host(host: &TreeHostView, point: NSPoint) -> Option<Retained<AnyObject>> {
+pub(crate) fn hit_test_host(host: &TreeHost, point: NSPoint) -> Option<Retained<AnyObject>> {
     let primary_height = NSScreen::screens(super::mtm())
         .firstObject()
         .or_else(|| NSScreen::mainScreen(super::mtm()))
@@ -404,7 +404,7 @@ mod tests {
     }
 }
 
-impl TreeHostView {
+impl TreeHost {
     pub(crate) fn accessibility_element_for(
         &self,
         id: AccessibilityId,

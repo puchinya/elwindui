@@ -69,7 +69,7 @@ pub mod application {
 ///
 /// This is intentionally hidden from the ordinary backend API. It exists so the focused
 /// `accessibility_active_host_regression` example can enter AppKit through `application::run`,
-/// which is the supported way to make `TreeHostView`'s `MainThreadOnly` contract executable.
+/// which is the supported way to make `TreeHost`'s `MainThreadOnly` contract executable.
 #[cfg(all(feature = "accessibility-regression", target_os = "macos"))]
 #[doc(hidden)]
 pub fn run_accessibility_active_host_regression() {
@@ -95,7 +95,7 @@ pub fn run_accessibility_active_host_regression() {
         let enabled_snapshot = actual_button_runtime.rebuild(&actual_button_node);
         assert!(!enabled_snapshot.roots[0].semantics.state.disabled);
 
-        let host = host::TreeHostView::new();
+        let host = host::TreeHost::new();
         let root = VerticalLayout::new();
         root.set_accessibility_role(AccessibilityRole::Button);
         root.set_accessibility_label("inactive-host-test");

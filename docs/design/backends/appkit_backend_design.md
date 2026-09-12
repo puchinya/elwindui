@@ -59,8 +59,8 @@ island immediately rather than leaving an interactive outgoing control.
 
 Each native island is a stable backend-owned `NativeIslandView` object for the
 whole Active -> Exiting -> removed lifetime. It remains the transform/input/native
-containment boundary, but it is not a public semantic child of `TreeHostView`.
-`TreeHostView` exposes cached synthetic `NSAccessibilityElement` objects keyed by
+containment boundary, but it is not a public semantic child of `TreeHost`.
+`TreeHost` exposes cached synthetic `NSAccessibilityElement` objects keyed by
 Core `AccessibilityId`; their children, order, role/name/value/state, bounds,
 focus, hit testing, and actions come only from the Core snapshot. The island
 returns no public accessibility children in both Active and Exiting states, so

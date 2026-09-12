@@ -62,7 +62,7 @@ retain an interactive outgoing native child.
 ## Accessibility projection
 
 WinUI accessibility is a projection of the Core semantic snapshot, not a read of
-native child control state. The actual `TreeHostPanel` backing element is a
+native child control state. The actual `TreeHost` backing element is a
 Canvas-compatible C++/WinRT XAML subclass whose `OnCreateAutomationPeer` returns
 the custom root peer. `GetChildrenCore` and virtual child peers read Core values
 through the narrow Rust C ABI; peers are cached by integer `AccessibilityId`.

@@ -92,7 +92,7 @@ objects remain safe but unqueryable.
 
 ## AppKit projection
 
-`TreeHostView` owns a cache of synthetic `NSAccessibilityElement` instances keyed by
+`TreeHost` owns a cache of synthetic `NSAccessibilityElement` instances keyed by
 `AccessibilityId`. The host exposes its Core snapshot as semantic children with stable parent,
 child, and navigation order. Each cached object reads role, label, value, hint, identifier,
 enabled/focus state, and root-to-screen frame from the snapshot at query time. Hit testing searches
@@ -105,7 +105,7 @@ synthetic host is active. Its raw inner native controls cannot appear as duplica
 
 ## WinUI 3 projection and C++ boundary
 
-The actual `TreeHostPanel` backing element is a Canvas-compatible C++/WinRT XAML subclass. Its
+The actual `TreeHost` backing element is a Canvas-compatible C++/WinRT XAML subclass. Its
 `OnCreateAutomationPeer` returns a root `FrameworkElementAutomationPeer` implementation whose
 `GetChildrenCore` reads only the Core snapshot through a narrow Rust C ABI. Virtual semantic child
 peers are cached by integer `AccessibilityId`; peer identity is not tied to native child identity.

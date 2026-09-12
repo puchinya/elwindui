@@ -175,7 +175,7 @@ mod hosted_xaml_regression_tests {
         Brush, CascadedTextStyle, Color, ComputedTextStyle, FontFamily, FontStretch, FontStyle,
         FontWeight, TextBackend, TextMeasureRequest, TextWrapping,
     };
-    use elwindui_core::ui::{UIElement, UIElementExt};
+    use elwindui_core::ui::{UIElement, UIElementExt, WindowExt};
     use std::cell::{Cell, RefCell};
     use std::rc::{Rc, Weak};
     use windows::Foundation::IPropertyValue;
@@ -546,6 +546,55 @@ mod hosted_xaml_regression_tests {
                     "re-showing must not retain the same native window twice"
                 );
 
+                // Exercise the real backend Window path as well as the scheduler host above:
+                // `Window::new()` wires `__self_weak` into its owned `InnerWindow`, so these
+                // caller-side Rc drops prove the application registry is the lifetime authority
+                // for the object actual callers construct.
+                let real_window_a = crate::native_ui::Window::new();
+                let weak_real_a = Rc::downgrade(&real_window_a);
+                real_window_a.show();
+                drop(real_window_a);
+                assert!(weak_real_a.upgrade().is_some());
+                assert_eq!(crate::app::retained_window_count_for_test(), 2);
+
+                let real_window_b = crate::native_ui::Window::new();
+                let weak_real_b = Rc::downgrade(&real_window_b);
+                real_window_b.show();
+                drop(real_window_b);
+                assert!(weak_real_a.upgrade().is_some());
+                assert!(weak_real_b.upgrade().is_some());
+                assert_eq!(crate::app::retained_window_count_for_test(), 3);
+
+                // A never-shown Window must not create or release a registry entry while the
+                // unrelated shown Windows remain alive.
+                let real_window_c = crate::native_ui::Window::new();
+                let weak_real_c = Rc::downgrade(&real_window_c);
+                let releases_before_real_c = crate::app::release_window_call_count_for_test();
+                assert_eq!(crate::app::retained_window_count_for_test(), 3);
+                real_window_c.close();
+                assert_eq!(
+                    crate::app::release_window_call_count_for_test(),
+                    releases_before_real_c
+                );
+                drop(real_window_c);
+                assert!(weak_real_c.upgrade().is_none());
+
+                // Closing one real Window releases only its own application entry.
+                {
+                    let real_window_a = weak_real_a.upgrade().expect("real Window A retained");
+                    real_window_a.close();
+                }
+                assert!(weak_real_a.upgrade().is_none());
+                assert!(weak_real_b.upgrade().is_some());
+                assert_eq!(crate::app::retained_window_count_for_test(), 2);
+                {
+                    let real_window_b = weak_real_b.upgrade().expect("real Window B retained");
+                    real_window_b.close();
+                }
+                assert!(weak_real_b.upgrade().is_none());
+                assert_eq!(crate::app::retained_window_count_for_test(), 1);
+                assert_eq!(crate::app::release_window_call_count_for_test(), 2);
+
                 // Scheduler-level Issue #261 regressions. The probe's first measure raises one
                 // same-host invalidation while the host is already in progress; the host must own
                 // that rerun through `run_coalesced`, without contaminating the next queued batch.
@@ -868,8 +917,8 @@ mod hosted_xaml_regression_tests {
             .with(|slot| *slot.borrow())
             .expect("release_window call count after close should have been recorded");
         assert_eq!(
-            release_call_count_after_close, 2,
-            "programmatic close() on both windows must reach release_window exactly once each"
+            release_call_count_after_close, 4,
+            "programmatic close() on every retained test window must release exactly once each"
         );
     }
 }

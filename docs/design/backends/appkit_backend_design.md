@@ -55,6 +55,19 @@ default-action, accessibility, and focus participation. Suppression is
 synchronous; if the native suppression operation fails, the host removes the
 island immediately rather than leaving an interactive outgoing control.
 
+Each native island is a stable backend-owned `NativeIslandView` object for the
+whole Active -> Exiting -> removed lifetime. It remains an unignored AppKit
+`AXGroup`; while Active, its accessibility children, visible children,
+navigation order, and hit testing delegate to AppKit's normal `NSView`
+projection. When Exiting, the island synchronously returns no accessibility
+children and no hit-test result, while remaining attached and visible for the
+visual transition. The backend stores this state on the island itself and
+posts a layout-changed notification after entering Exiting. Projection orders
+suppressed identity insertion, native focus clearing, state change, and the
+notification before applying the visual transform/opacity. Core retains the
+last arranged geometry for an Exiting Visual so the island can reach this
+boundary without being relaid out into a zero-sized slot.
+
 CVDisplayLink is only a frame source. Its callback schedules a main-thread host
 tick and never mutates Core UI state off the main thread. The link is stopped
 and released when the per-host runtime becomes idle or the host tears down.

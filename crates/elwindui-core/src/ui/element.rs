@@ -1293,6 +1293,13 @@ impl UIElement {
     /// itself for each one it has.
     fn arrange(&self, final_rect: Rect) {
         if !self.participates_in_layout() {
+            // An exiting Visual is no longer laid out, but its last arranged geometry is the
+            // baseline needed by render backends to keep its transition visible. Ordinary
+            // non-participating elements (for example `Visibility::Collapsed`) still clear their
+            // arranged geometry so they cannot accidentally occupy a stale render slot.
+            if self.visual_participation() == VisualParticipation::Exiting {
+                return;
+            }
             self.as_ui_element().arranged_width.set(Some(0.0));
             self.as_ui_element().arranged_height.set(Some(0.0));
             // `arranged_offset` is set too (unlike width/height, which the non-participating

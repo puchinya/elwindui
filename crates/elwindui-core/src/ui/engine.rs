@@ -1305,7 +1305,11 @@ mod tests {
         );
         assert!(Rc::ptr_eq(&visual[1], &replacement));
         let tree = layout_tree::<FakeHandle>(&root, size(100.0, 100.0));
-        assert_eq!(leaf.arranged_width(), Some(0.0));
+        assert_eq!(
+            leaf.arranged_width(),
+            Some(100.0),
+            "an exiting Visual retains its last arranged geometry for rendering"
+        );
         let hit = hit_test(&root, Point { x: 5.0, y: 5.0 });
         assert!(hit.is_some_and(|hit| !Rc::ptr_eq(&hit, &leaf)));
         assert_eq!(tree.root.children.len(), 2, "exit node remains renderable");

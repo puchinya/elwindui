@@ -22,9 +22,10 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSAccessibilityGroupRole, NSAccessibilityRole,
-    NSApplicationDidResignActiveNotification, NSEvent, NSMenu, NSScreen, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidResignKeyNotification,
+    NSAccessibilityGroupRole, NSAccessibilityLayoutChangedNotification,
+    NSAccessibilityPostNotification, NSApplicationDidResignActiveNotification, NSEvent, NSMenu,
+    NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSWindowDidResignKeyNotification,
 };
 use objc2_core_video::{CVDisplayLink, CVOptionFlags, CVReturn, CVTimeStamp};
 use objc2_foundation::{
@@ -52,17 +53,13 @@ pub struct TreeHostIvars {
     pub(crate) render_tree: RefCell<Option<elwindui_core::graphics::RenderTree>>,
     /// Native compositor islands, keyed by `AnyView` identity. They must survive ordinary
     /// relayouts so the first responder is not detached from the view hierarchy.
-    pub(crate) native_containers: RefCell<HashMap<usize, Retained<NSView>>>,
+    pub(crate) native_containers: RefCell<HashMap<usize, Retained<NativeIslandView>>>,
     /// `AnyView` identity -> the owning `UIElement`'s `render_group_id`
     /// (`RenderCommand::NativeControl::owner_id`) — populated/pruned in lockstep with
     /// `native_containers`. Lets `ElwinduiWindow::makeFirstResponder:` resolve "which elwindui
     /// element does this native container belong to" without a second registry of its own; see
     /// `resolve_native_owner_id`.
     pub(crate) native_owner_ids: RefCell<HashMap<usize, u64>>,
-    /// Original accessibility roles for native children temporarily removed from AX while their
-    /// visual island exits. Restoring the role before re-enabling the element preserves AppKit's
-    /// native role inference across a cached dynamic child being inserted again.
-    pub(crate) native_accessibility_roles: RefCell<HashMap<usize, Retained<NSAccessibilityRole>>>,
     /// Native islands whose owning Core Visual is currently not eligible for input/focus. They
     /// remain visible during an exit transition, while `hitTest:` routes their mouse events back
     /// to this host so Core's presentation-aware hit test can choose the active tree instead.
@@ -338,6 +335,104 @@ fn appkit_screen_to_core(point: NSPoint, primary_height: f64) -> Point {
 
 fn core_screen_to_appkit(point: Point, primary_height: f64) -> NSPoint {
     NSPoint::new(point.x as f64, primary_height - point.y as f64)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeIslandAccessibilityState {
+    Active,
+    Exiting,
+}
+
+pub(crate) struct NativeIslandIvars {
+    accessibility_state: Cell<NativeIslandAccessibilityState>,
+}
+
+// The AppKit-owned accessibility boundary for one `NativeControl` island.
+//
+// This view stays an unignored `AXGroup` for its complete lifetime. While active, AppKit remains
+// responsible for projecting the native leaf's normal accessibility semantics. During an exit,
+// only this boundary's child relationships are emptied, so the outgoing native view can remain
+// attached for its visual transition without remaining reachable through AX.
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[ivars = NativeIslandIvars]
+    pub(crate) struct NativeIslandView;
+
+    unsafe impl NSObjectProtocol for NativeIslandView {}
+
+    impl NativeIslandView {
+        #[unsafe(method_id(accessibilityChildren))]
+        fn accessibility_children(&self) -> Option<Retained<NSArray>> {
+            if self.ivars().accessibility_state.get() == NativeIslandAccessibilityState::Exiting {
+                Some(NSArray::from_slice(&[]))
+            } else {
+                unsafe { msg_send![super(self), accessibilityChildren] }
+            }
+        }
+
+        #[unsafe(method_id(accessibilityVisibleChildren))]
+        fn accessibility_visible_children(&self) -> Option<Retained<NSArray>> {
+            if self.ivars().accessibility_state.get() == NativeIslandAccessibilityState::Exiting {
+                Some(NSArray::from_slice(&[]))
+            } else {
+                unsafe { msg_send![super(self), accessibilityVisibleChildren] }
+            }
+        }
+
+        #[unsafe(method_id(accessibilityChildrenInNavigationOrder))]
+        fn accessibility_children_in_navigation_order(&self) -> Option<Retained<NSArray>> {
+            if self.ivars().accessibility_state.get() == NativeIslandAccessibilityState::Exiting {
+                Some(NSArray::from_slice(&[]))
+            } else {
+                unsafe { msg_send![super(self), accessibilityChildrenInNavigationOrder] }
+            }
+        }
+
+        #[unsafe(method_id(accessibilityHitTest:))]
+        fn accessibility_hit_test(&self, point: NSPoint) -> Option<Retained<AnyObject>> {
+            if self.ivars().accessibility_state.get() == NativeIslandAccessibilityState::Exiting {
+                None
+            } else {
+                unsafe { msg_send![super(self), accessibilityHitTest: point] }
+            }
+        }
+    }
+);
+
+impl NativeIslandView {
+    fn set_accessibility_state(&self, state: NativeIslandAccessibilityState) {
+        let previous = self.ivars().accessibility_state.replace(state);
+        if previous == state {
+            return;
+        }
+        if state == NativeIslandAccessibilityState::Exiting {
+            // The getter state is already Exiting before this advisory notification reaches an
+            // AX client. Correctness does not depend on the client consuming the notice.
+            unsafe {
+                NSAccessibilityPostNotification(
+                    self as &AnyObject,
+                    NSAccessibilityLayoutChangedNotification,
+                );
+            }
+        }
+    }
+
+    pub(crate) fn new() -> Retained<Self> {
+        let ivars = NativeIslandIvars {
+            accessibility_state: Cell::new(NativeIslandAccessibilityState::Active),
+        };
+        let this = Self::alloc(mtm()).set_ivars(ivars);
+        let this: Retained<Self> =
+            unsafe { msg_send![super(this), initWithFrame: NSRect::default()] };
+        // Keep the same AX boundary for Active and Exiting. The native child remains the source of
+        // its own label, role, value, and actions while Active.
+        unsafe {
+            let _: () = msg_send![&*this, setAccessibilityElement: true];
+            let _: () = msg_send![&*this, setAccessibilityRole: NSAccessibilityGroupRole];
+        }
+        this
+    }
 }
 
 define_class!(
@@ -618,7 +713,10 @@ impl TreeHostView {
         while let Some(candidate) = current {
             if containers.iter().any(|(identity, container)| {
                 suppressed.contains(identity)
-                    && std::ptr::eq(Retained::as_ptr(container), Retained::as_ptr(&candidate))
+                    && std::ptr::eq(
+                        Retained::as_ptr(container).cast::<NSView>(),
+                        Retained::as_ptr(&candidate),
+                    )
             }) {
                 return true;
             }
@@ -776,7 +874,6 @@ impl TreeHostView {
             render_tree: RefCell::new(None),
             native_containers: RefCell::new(HashMap::new()),
             native_owner_ids: RefCell::new(HashMap::new()),
-            native_accessibility_roles: RefCell::new(HashMap::new()),
             suppressed_native_ids: RefCell::new(HashSet::new()),
             replay_state: RefCell::new(ReplayState::default()),
             weak_self: RefCell::new(objc2::rc::Weak::default()),
@@ -958,7 +1055,6 @@ impl TreeHostView {
         }
         self.ivars().native_containers.borrow_mut().clear();
         self.ivars().native_owner_ids.borrow_mut().clear();
-        self.ivars().native_accessibility_roles.borrow_mut().clear();
         self.ivars().suppressed_native_ids.borrow_mut().clear();
         *self.ivars().replay_state.borrow_mut() = ReplayState::default();
         let weak_self = self.ivars().weak_self.borrow().clone();
@@ -989,7 +1085,6 @@ impl TreeHostView {
         }
         self.ivars().native_containers.borrow_mut().clear();
         self.ivars().native_owner_ids.borrow_mut().clear();
-        self.ivars().native_accessibility_roles.borrow_mut().clear();
         self.ivars().suppressed_native_ids.borrow_mut().clear();
         *self.ivars().replay_state.borrow_mut() = ReplayState::default();
         self.ivars().keyboard.focus.clear_focus();
@@ -1093,7 +1188,6 @@ impl TreeHostView {
                 container.removeFromSuperview();
             }
             self.ivars().native_owner_ids.borrow_mut().clear();
-            self.ivars().native_accessibility_roles.borrow_mut().clear();
             self.ivars().suppressed_native_ids.borrow_mut().clear();
             *self.ivars().render_tree.borrow_mut() = None;
             *self.ivars().replay_state.borrow_mut() = ReplayState::default();
@@ -1329,7 +1423,6 @@ impl TreeHostView {
                 if live_native_controls.contains(identity) {
                     true
                 } else {
-                    self.restore_accessibility_for_island(*identity, container);
                     container.removeFromSuperview();
                     false
                 }
@@ -1421,7 +1514,7 @@ impl TreeHostView {
             .native_containers
             .borrow()
             .iter()
-            .find(|(_, v)| std::ptr::eq(&***v, container))
+            .find(|(_, v)| std::ptr::eq(v.as_ref() as &NSView, container))
             .map(|(identity, _)| *identity)?;
         self.ivars()
             .native_owner_ids
@@ -1437,15 +1530,15 @@ impl NativeIslandHost for TreeHostView {
     fn island(&self, identity: usize, owner_id: u64) -> (Retained<NSView>, bool) {
         let mut containers = self.ivars().native_containers.borrow_mut();
         if let Some(container) = containers.get(&identity) {
-            (container.clone(), false)
+            (Retained::into_super(container.clone()), false)
         } else {
-            let container = NSView::new(mtm());
+            let container = NativeIslandView::new();
             containers.insert(identity, container.clone());
             self.ivars()
                 .native_owner_ids
                 .borrow_mut()
                 .insert(identity, owner_id);
-            (container, true)
+            (Retained::into_super(container), true)
         }
     }
 
@@ -1462,19 +1555,15 @@ impl NativeIslandHost for TreeHostView {
         opacity: f32,
         input_enabled: bool,
     ) {
-        let was_suppressed = self
-            .ivars()
-            .suppressed_native_ids
-            .borrow()
-            .contains(&identity);
+        let island = container
+            .downcast_ref::<NativeIslandView>()
+            .expect("native island container must be a NativeIslandView");
         if input_enabled {
+            island.set_accessibility_state(NativeIslandAccessibilityState::Active);
             self.ivars()
                 .suppressed_native_ids
                 .borrow_mut()
                 .remove(&identity);
-            if was_suppressed {
-                self.set_accessibility_hidden_for_island(identity, container, false);
-            }
         } else {
             self.ivars()
                 .suppressed_native_ids
@@ -1486,9 +1575,7 @@ impl NativeIslandHost for TreeHostView {
                 // Core still owns the outgoing Visual until its idempotent transition completion.
                 container.removeFromSuperview();
             }
-            if !was_suppressed {
-                self.set_accessibility_hidden_for_island(identity, container, true);
-            }
+            island.set_accessibility_state(NativeIslandAccessibilityState::Exiting);
         }
         let needs_layer = transform != elwindui_core::base::AffineTransform::IDENTITY
             || (opacity - 1.0).abs() > f32::EPSILON;
@@ -1523,70 +1610,7 @@ impl NativeIslandHost for TreeHostView {
     }
 }
 
-fn set_accessibility_hidden_descendants(view: &NSView, hidden: bool) {
-    view.setAccessibilityHidden(hidden);
-    for child in view.subviews().iter() {
-        set_accessibility_hidden_descendants(&child, hidden);
-    }
-}
-
 impl TreeHostView {
-    /// AppKit does not reliably propagate an accessibility-hidden state from a generic island host
-    /// to the native control it contains. Suppress only the island's direct native child while an
-    /// exiting island remains visually attached; preserve and restore its inferred AX role so a
-    /// cached dynamic child remains a normal native control when inserted again.
-    fn set_accessibility_hidden_for_island(
-        &self,
-        identity: usize,
-        container: &NSView,
-        hidden: bool,
-    ) {
-        container.setAccessibilityHidden(hidden);
-        if hidden {
-            let children = NSArray::<AnyObject>::from_slice(&[]);
-            unsafe { container.setAccessibilityChildren(Some(&children)) };
-            for child in container.subviews().iter() {
-                if let Some(role) = child.accessibilityRole() {
-                    self.ivars()
-                        .native_accessibility_roles
-                        .borrow_mut()
-                        .entry(identity)
-                        .or_insert(role);
-                }
-                // The checked-in AX driver walks raw kAXChildren and intentionally does not
-                // filter kAXHidden. AppKit re-infers a concrete AXTextField role for native
-                // controls when the role is cleared or set to AXUnknown. Use an explicit group
-                // role for the visually retained outgoing child so it stays out of role-based
-                // input queries while the empty island child list removes it from raw AX
-                // traversal.
-                child.setAccessibilityRole(Some(unsafe { NSAccessibilityGroupRole }));
-                child.setAccessibilityElement(false);
-                set_accessibility_hidden_descendants(&child, true);
-            }
-        } else {
-            self.restore_accessibility_for_island(identity, container);
-        }
-    }
-
-    fn restore_accessibility_for_island(&self, identity: usize, container: &NSView) {
-        let children: Vec<Retained<AnyObject>> =
-            container.subviews().iter().map(Into::into).collect();
-        let children = NSArray::<AnyObject>::from_retained_slice(&children);
-        unsafe { container.setAccessibilityChildren(Some(&children)) };
-        let role = self
-            .ivars()
-            .native_accessibility_roles
-            .borrow_mut()
-            .remove(&identity);
-        for child in container.subviews().iter() {
-            if let Some(role) = role.as_ref() {
-                child.setAccessibilityRole(Some(role));
-                child.setAccessibilityElement(true);
-            }
-            set_accessibility_hidden_descendants(&child, false);
-        }
-    }
-
     /// Resigns AppKit focus for the native island owned by `owner_id`, if that owner is currently
     /// the window's first-responder subtree. Logical focus teardown must call this before an exit
     /// transition unmounts the element; waiting for the next render projection is too late when

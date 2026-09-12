@@ -45,7 +45,9 @@ mod animation_demo_view_model {
 
         fn toggle_native(&self) {
             elwindui::core::ui::with_animation(
-                Animation::ease_out(Duration::from_millis(20000)),
+                // Keep the native exit long enough to capture, but short enough that the GUI E2E
+                // can exercise both the Exiting and completed states without a 20-second wait.
+                Animation::ease_out(Duration::from_millis(5000)),
                 || {
                     show_native = !show_native;
                 },
@@ -131,10 +133,19 @@ struct AnimationDemoWindow {
                     on_click: vm.reset
                 }
             }
-            #[animation(animation = Animation::ease_in_out(Duration::from_millis(20000)), value = expanded)]
+            #[animation(animation = Animation::ease_in_out(Duration::from_millis(5000)), value = expanded)]
             TextBlock {
                 text: "Scoped implicit self-drawn presentation"
                 width: expanded_width
+            }
+            // A solid marker makes the animated layout boundary directly observable in the
+            // AppKit screenshot E2E; measuring text glyphs would saturate at intrinsic text width
+            // before the animated container reaches its target.
+            #[animation(animation = Animation::ease_in_out(Duration::from_millis(5000)), value = expanded)]
+            Rectangle {
+                width: expanded_width
+                height: 8.0
+                fill: "#469ce8"
             }
             if vm.show_panel {
                 #[transition(Transition::opacity().combined(Transition::scale(0.92)))]

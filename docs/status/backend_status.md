@@ -1,6 +1,6 @@
 # Backend status
 
-Snapshot: 2026-09-06. Durable backend architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-09-12. Durable backend architecture is indexed in [`../design/README.md`](../design/README.md).
 
 ## Support matrix
 
@@ -14,6 +14,7 @@ Snapshot: 2026-09-06. Durable backend architecture is indexed in [`../design/REA
 ## AppKit current state
 
 - Core/native input, screen-coordinate conversion, pointer cancellation, retained rendering, Window lifecycle, transparency, popup/context-menu behavior, and semantic environment/brush paths are implemented.
+- Animation/transition projection uses the per-host Core runtime and stable AppKit native islands. Two clean-launch AppKit animation-demo E2E runs pass width interpolation, focused NativeControl exit visibility with recursive `AXTextField` suppression, completion removal, and Reduce Motion checks.
 - `ContextMenu`/`PopupSurface` uses child-window ownership, dynamic visible-frame placement, deferred `ViewFactory` content, popup-scoped environment, and synchronous subtree teardown before ElwindUI host detach. AppKit unit and focused runtime evidence cover the supported paths.
 - Native text widgets reduce unsupported gradient/image foreground brushes. TextArea character spacing does not cover every native text-storage path, and PasswordBox intentionally retains the system secure-font cascade.
 - SVG filters, blend modes, masks, image-brush fills, and pattern cases use documented simpler fallbacks where Core Image or native drawing cannot represent the requested effect.

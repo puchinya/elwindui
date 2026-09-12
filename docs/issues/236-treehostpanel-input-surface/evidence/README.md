@@ -3,16 +3,16 @@
 Windows: build 26100 (Windows App SDK / Windows 10-family). `winapp` version: `0.6.1`. This file
 was last updated against commit `9282b85980e8` (`feature/236-treehostpanel-input-surface`).
 
-## Result: BLOCKED, not PASS — self-drawn real-pointer scenarios still unverified, root cause narrowed to `custom-controls-demo` specifically
+## Result: BLOCKED, not PASS — real root cause confirmed as [#254](https://github.com/puchinya/elwindui/issues/254), independent of #236
 
 Scenario definitions: [`tests/e2e/self-drawn-pointer-input.md`](../../../../tests/e2e/self-drawn-pointer-input.md).
 
 | Scenario | Action type | Classification |
 |---|---|---|
-| SDP-01 — CustomTabView real-pointer selection | real `point-click` | BLOCKED |
-| SDP-02 — CustomGridSplitter real-pointer drag | real `drag` | NOT RUN (blocked upstream) |
-| SDP-03 — Docking real-pointer tab selection | real `point-click` | NOT RUN (blocked upstream) |
-| SDP-04 — Docking real-pointer tab drag/reorder | real `drag` | NOT RUN (blocked upstream) |
+| SDP-01 — CustomTabView real-pointer selection | real `point-click` | BLOCKED on [#254](https://github.com/puchinya/elwindui/issues/254) |
+| SDP-02 — CustomGridSplitter real-pointer drag | real `drag` | BLOCKED on #254 (same `custom-controls-demo` window) |
+| SDP-03 — Docking real-pointer tab selection | real `point-click` | NOT RUN (likely blocked upstream by #254 too — `docking-demo` not yet checked) |
+| SDP-04 — Docking real-pointer tab drag/reorder | real `drag` | NOT RUN (same as SDP-03) |
 | SDP-05 — NativeControl exactly-once | real `point-click` | Not re-verified this session; native-control real-click delivery is confirmed working generally (see below), but SDP-05's exact case was not rerun |
 
 ## Superseded earlier conclusion
@@ -91,22 +91,32 @@ input from this same driver/session unambiguously reaches this exact window at t
 failure is therefore specific to client-area (XAML content) pointer routing for this window/app,
 not "this window never receives input."
 
-## Leading hypothesis: `windows-ui-driver`/`winapp` coordinate handling for this window's size/position
+## Confirmed root cause: [#254](https://github.com/puchinya/elwindui/issues/254) — the top-level `Window` component is not retained after `main()`'s startup closure returns
 
-No product-code explanation survived scrutiny (window-creation/activation code is byte-for-byte
-equivalent between `controls-demo` and `custom-controls-demo` per a dedicated code review; no
-native overlay exists to swallow the event; `input_surface` is proven correct). The remaining lead
-is tooling-side: `monitor_bounds` reported by every launch in this environment
-(`{"left":0,"top":0,"right":1128,"bottom":685}`) is an unusual, narrow resolution consistent with a
-virtual machine/remote-desktop/CI-style display, and `custom-controls-demo`'s window
-(980×620, and cascading to different `left`/`top` per launch) is both larger and differently
-positioned than `controls-demo`'s (640×480). A plausible failure mode for a third-party input tool
-is normalizing absolute `SendInput` coordinates against the wrong virtual-screen bounds, which
-would be more likely to misfire for a larger/differently-positioned window without necessarily
-affecting a smaller, more centrally-placed one. This has **not** been directly verified — the
-concrete next check (not yet run) is logging `GetCursorPos` immediately before/after the injected
-drag to confirm the OS cursor actually lands inside `custom-controls-demo`'s reported client
-rectangle.
+`GetCursorPos` logged immediately before/after an injected drag confirmed the OS cursor lands at
+the exact intended pixel, inside `custom-controls-demo`'s reported client rectangle, with zero
+error — ruling out the coordinate-handling hypothesis above. No native-overlay or product-code
+explanation survived scrutiny either (window-creation/activation code is byte-for-byte equivalent
+between `controls-demo` and `custom-controls-demo`).
+
+The actual cause, found by adding thread-id/lifecycle logging to
+`crates/elwindui-backend-winui3/src/ffi.rs`'s callback registry and `TreeHostPanel::new()`: for
+`custom-controls-demo`, `UiCallbackRegistryOwnerInner::drop` fires **immediately at startup, before
+any input is ever sent** — removing the exact callback ids `TreeHostPanel::new()` had just
+registered for pointer/keyboard/context routing. `#[elwindui::main]`'s generated `main()` runs the
+user's whole body (`let window = SomeWindow::new(); window.show();`) as a single native
+`OnLaunched`-triggered closure; once that closure returns, native `Application::Start` owns the
+message loop independently, and `window` (the local `Rc<Self>`) is dropped unless something
+external holds another strong reference. `InnerWindow::show()`'s `retain_window()` only retains the
+**native** `Microsoft.UI.Xaml.Window` COM object, not the Rust-side component wrapper — so the
+native window (and its `Canvas`) survives and keeps receiving real OS input forever, while every
+native pointer-routed event resolves via `invoke_ui_pointer_event_callback` to an id no longer in
+the registry and is silently, permanently no-op'd. `controls-demo`'s window happens to survive
+(diagnostically confirmed: zero drops logged across its 18 `TreeHostPanel` instances) because its
+ViewModel-bound construction (`elwindui::new!(ControlsDemoWindow(vm: vm))`) incidentally keeps an
+external strong reference alive — not a documented guarantee. See #254 for the full analysis and
+fix tracking; this is an independent framework-level lifetime bug, not a defect in #236's
+`input_surface` fix.
 
 ## What is verified
 
@@ -119,19 +129,19 @@ rectangle.
 - **Real-host proof that Issue #236's fix itself works correctly**: a real OS drag over blank
   self-drawn `Canvas` area in `controls-demo` is accepted by `input_surface` and dispatched
   correctly (see positive control above).
-- `custom-controls-demo` specifically does not receive any client-area real input in this
-  environment, for a cause not yet isolated to product code, tooling, or environment with
-  certainty — tooling-side coordinate handling is the leading, unverified lead.
-- The AutomationPeer/invokability hypothesis from an earlier pass this session is retired.
+- `custom-controls-demo`'s window loses all Rust-side event routing at startup due to [#254](https://github.com/puchinya/elwindui/issues/254), an independent framework lifetime bug — SDP-01/02
+  never got a chance to exercise #236's fix at all. Real-host verification of those scenarios is
+  blocked on #254, not on any further work in #236.
+- The AutomationPeer/invokability and coordinate-handling hypotheses from earlier passes this
+  session are both retired.
 
 ## Illustrative screenshot
 
 `custom-controls-demo-blocked-state.png` (from the superseded `0be1f74c76b8` run, kept for
 continuity) — a full-screen capture of `custom-controls-demo` after repeated real-pointer click
 attempts against the "Inspector" tab header: the underline selection indicator remains under
-"Overview". The visible symptom is unchanged by this session's findings; the root-cause
-investigation has moved from the app's own code to `custom-controls-demo`'s window specifically,
-without a confirmed cause.
+"Overview". The visible symptom is fully explained by #254 (all Rust-side pointer routing for this
+window was already gone before any click was ever sent).
 
 ## Raw evidence
 

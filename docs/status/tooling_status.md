@@ -37,14 +37,15 @@ A real-host run of that scenario's WinUI3 side (five sub-cases, `point-click`/`d
 `custom-controls-demo`/`docking-demo`/`controls-demo`) is currently BLOCKED for the self-drawn
 sub-cases, not a coverage claim. A genuine (non-zero-distance) real `drag` over verified-blank
 self-drawn `Canvas` area in `controls-demo` is proven to deliver a complete, correctly-accepted
-pointer sequence, ruling out both an earlier "no WinUI3 window receives real input" claim and a
-later "self-drawn controls need an invokable UIA `AutomationPeer`" hypothesis (both retired). The
-narrower, still-unresolved finding is that `custom-controls-demo`'s window specifically receives
-zero client-area pointer routing under every real-input variant tried, despite confirmed-correct
-foreground/hwnd targeting and despite that same window's OS-native title-bar chrome demonstrably
-receiving real input. The leading unverified lead is `windows-ui-driver`/`winapp`'s coordinate
-handling for this window's size/position in this environment's display geometry, not a
-`windows-ui-driver` protocol defect or an Issue #236 product defect; see
+pointer sequence, ruling out an earlier "no WinUI3 window receives real input" claim, a later
+"self-drawn controls need an invokable UIA `AutomationPeer`" hypothesis, and a
+`windows-ui-driver`/`winapp` coordinate-handling hypothesis (all three retired — `GetCursorPos`
+confirmed pixel-exact landing). The actual, confirmed cause is
+[#254](https://github.com/puchinya/elwindui/issues/254): `custom-controls-demo`'s top-level
+`Window` component's Rust-side wrapper is dropped immediately at startup (the native window
+survives independently via `retain_window`, so it keeps rendering and receiving real OS input, but
+with no live callback registry left to deliver it to) — not a `windows-ui-driver` protocol defect
+or an Issue #236 product defect; see
 `docs/issues/236-treehostpanel-input-surface/evidence/README.md` for the full trail.
 
 A genuine host-level `SetForegroundWindow`/`CreateProcess` handle-inheritance issue was found and

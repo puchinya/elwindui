@@ -424,6 +424,20 @@ impl PointerGestureHost for WinUI3PointerGestureHost {
 
 impl TreeHostPanel {
     pub(crate) fn new() -> Self {
+        if let Some(path) = std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS_LOG") {
+            let line = format!(
+                "[elwindui-winui3] TreeHostPanel::new() thread={:?}",
+                std::thread::current().id()
+            );
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "{line}");
+            }
+        }
         let canvas = Canvas::new().expect("Canvas::new");
         let composition = CompositionRenderer::new(&canvas).expect("CompositionRenderer::new");
         // Issue #236: appended before any dynamic render/native child below, so it stays the
@@ -1102,7 +1116,10 @@ impl TreeHostPanel {
             // stdout/stderr — see windows-ui-driver.ps1's Cmd-Launch comment) -- a file path sidesteps
             // that entirely for E2E diagnosis.
             if let Some(path) = diagnostics_log_path {
-                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
                 {
                     use std::io::Write;
                     let _ = writeln!(file, "{line}");

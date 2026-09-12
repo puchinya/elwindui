@@ -96,7 +96,23 @@ fn remove_ui_callback(kind: UiCallbackKind, id: usize) {
 
 impl Drop for UiCallbackRegistryOwnerInner {
     fn drop(&mut self) {
-        for (kind, id) in self.registrations.get_mut().drain(..) {
+        let ids: Vec<(UiCallbackKind, usize)> = self.registrations.get_mut().drain(..).collect();
+        if let Some(path) = std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS_LOG") {
+            let id_list: Vec<usize> = ids.iter().map(|(_, id)| *id).collect();
+            let line = format!(
+                "[elwindui-winui3] UiCallbackRegistryOwnerInner::drop ids={id_list:?} thread={:?}",
+                std::thread::current().id()
+            );
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "{line}");
+            }
+        }
+        for (kind, id) in ids {
             remove_ui_callback(kind, id);
         }
     }
@@ -311,6 +327,20 @@ pub(crate) fn register_ui_pointer_event_callback(
     callback: Rc<dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs)>,
 ) -> usize {
     let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
+    if let Some(path) = std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS_LOG") {
+        let line = format!(
+            "[elwindui-winui3] register_ui_pointer_event_callback id={id} thread={:?}",
+            std::thread::current().id()
+        );
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{line}");
+        }
+    }
     UI_POINTER_EVENT_CALLBACKS.with(|callbacks| {
         callbacks.borrow_mut().insert(id, callback);
     });
@@ -323,6 +353,21 @@ pub(crate) fn invoke_ui_pointer_event_callback(
 ) {
     let callback =
         UI_POINTER_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
+    if let Some(path) = std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS_LOG") {
+        let line = format!(
+            "[elwindui-winui3] invoke_ui_pointer_event_callback id={id} thread={:?} found={}",
+            std::thread::current().id(),
+            callback.is_some()
+        );
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{line}");
+        }
+    }
     if let Some(callback) = callback {
         callback(args);
     }

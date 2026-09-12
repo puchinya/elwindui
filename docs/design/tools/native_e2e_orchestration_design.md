@@ -14,8 +14,12 @@ their self-tests remain under `tools/macos-ui-driver/` and `tools/windows-ui-dri
 
 The shared architecture applies to backend-neutral product cases. A case describes product
 behavior, setup, actions, observable postconditions, visual checkpoints when required, and
-cleanup. AppKit and WinUI3 adapters translate the shared plan into their own input, query, window,
-and capture operations; they do not own the product case or its acceptance meaning.
+cleanup. The shared runner is the only layer that consumes and interprets the backend-neutral
+compiled plan during execution. It selects the backend and translates each plan operation into
+calls to the selected platform driver's primitive command surface. AppKit and WinUI3 drivers do
+not consume or interpret the shared plan itself; they execute platform automation primitives and
+normalize adapter-specific mechanics, results, and errors. They do not parse durable-case or
+compiled-plan schemas, decide shared case sequencing, or own the shared product acceptance meaning.
 
 This is an internal tooling design. It does not require a `docs/specs/` change, a Rust API, a
 driver refactor, or a provider launcher/configuration change. No future capability described here
@@ -125,7 +129,22 @@ The future shared runner owns case loading, deterministic compilation, cache loo
 resolution, bounded execution, classification, and immutable evidence assembly. The AppKit and
 WinUI3 drivers own their platform primitives and adapter-specific error details. Driver
 `success: true` proves only that the requested driver operation executed; it does not prove a
-product postcondition.
+product postcondition. Drivers never infer product acceptance semantics from a shared plan, and
+their primitive behavior remains independently contract-testable without loading a durable case or
+shared-plan parser.
+
+If a future driver supports a multi-primitive request, the shared runner first translates the
+compiled plan into a platform-specific primitive batch and the driver executes that ordered batch.
+The driver still does not parse or interpret the backend-neutral case or compiled-plan schema. A
+driver-owned `run-plan <shared-plan>` shape is forbidden when it would make the driver a second
+shared-plan interpreter. Caching, vision checkpoints, result classification, and animation
+sequencing remain shared-runner concerns; only platform-specific primitive batching mechanics may
+belong to a driver.
+
+For a shared operation such as semantic invoke, the runner reads the backend-neutral operation,
+selects AppKit or WinUI3, and maps it to the corresponding AX or UIA primitive before invoking the
+driver. The driver executes that primitive; it does not reinterpret the operation or decide what
+product postcondition makes the case pass.
 
 The tester receives a fixed, case-scoped instruction sheet or prepared plan. The tester may make a
 bounded visual determination at an explicit checkpoint, but must not silently change the case,

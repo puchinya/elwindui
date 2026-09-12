@@ -145,6 +145,8 @@ Checkpointは新しいproduct decisionの正本ではない。再開後はIssue�
 | large logs/videos/dumps/image sets | CI artifact |
 | concise result and links | Issue or PR |
 
+GitHub MarkdownとIssue image evidenceについては、複数行の本文・comment・reviewを`--body-file`で送信し、sourceには実際の改行を入れる。\nは意図した改行の代用にせず、`--body`は本当に1行の本文だけに使う。Issue attachmentはimage evidence専用とし、必要なuploadは公開後に確認する。
+
 `.agent-state/` はgitignore対象である。secret、token、private data、不要なuser-specific pathを保存しない。raw measurementやdebugging historyを `docs/status` へ常設しない。
 
 正確な保存ruleは [`evidence.md`](../docs/agent-workflow/evidence.md) を参照する。

@@ -17,6 +17,10 @@ For a direct request, acceptance criteria must describe enough observable behavi
 
 Use `gh` for every GitHub Issue, label, milestone, comment, and Pull Request operation in this workflow. The root [`AGENTS.md`](../../AGENTS.md) is authoritative for GitHub tooling, task bootstrap order, and document synchronization.
 
+## GitHub Markdown transport
+
+For multiline Issue bodies and checkpoint/comments, create a UTF-8 Markdown source containing real newline characters and pass it with `--body-file` when supported. Use `--body` only for genuinely single-line status text. Never encode an intended Markdown line break as literal \n; a literal \n remains valid when the text itself is intended content.
+
 1. If the request does not already identify an owning Issue or Pull Request, perform only the minimal GitHub lookup required to determine whether an existing Issue or Pull Request already owns the request. Do not inspect implementation or specifications as a substitute for this bootstrap lookup.
 2. If this is a repository-changing task and no Issue owns the request, create one immediately with `gh issue create`, assign `phase:requirements`, and do so before agent-local planning, task-list creation, broad repository investigation, or any repository edit.
 3. For a Rust repository, derive the target milestone from the root `Cargo.toml`:

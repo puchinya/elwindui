@@ -9,8 +9,8 @@ use super::*;
 
 static NEXT_RENDER_GROUP_ID: AtomicU64 = AtomicU64::new(1);
 
-/// The backend-agnostic handle to whatever native host (`elwindui-backend-appkit`'s `TreeHostView`,
-/// `elwindui-backend-winui3`'s `TreeHostPanel`) currently owns a given tree — the thing
+/// The backend-agnostic handle to whatever native host (`elwindui-backend-appkit`'s `TreeHost`,
+/// `elwindui-backend-winui3`'s `TreeHost`) currently owns a given tree — the thing
 /// `UIElement::invalidate`/`invalidate_arrange`/`invalidate_measure` (see that trait) ultimately
 /// call to ask for a fresh `layout_root`/RenderTree reconciliation pass. Declared here (not a raw
 /// `Rc<dyn Fn()>`) so backends
@@ -272,8 +272,8 @@ pub struct UIElement {
     /// not alter the Logical tree.
     pub visual_collection: UIElementVisualCollection,
     /// Set only on whichever element a backend host currently owns as the root of a hosted tree
-    /// (`elwindui-backend-appkit`'s `TreeHostView::set_tree`/`elwindui-backend-winui3`'s
-    /// `TreeHostPanel::set_tree`) — `None` on every other element, including every one of that
+    /// (`elwindui-backend-appkit`'s `TreeHost::set_tree`/`elwindui-backend-winui3`'s
+    /// `TreeHost::set_tree`) — `None` on every other element, including every one of that
     /// root's own descendants. `UIElement::invalidate`/`invalidate_arrange`/`invalidate_measure`
     /// (see that trait) reach this by walking `parent()` up to the root, not by reading this field
     /// on `self` directly. See `RelayoutHost`'s own doc comment for why this is a trait object
@@ -545,7 +545,7 @@ impl UIElement {
     /// Currently equivalent to `visibility() == Visibility::Visible`, but kept as its own method
     /// (rather than inlining that comparison at each call site) so a future container-level
     /// participation signal — e.g. a hosted tree being temporarily deactivated by its own
-    /// `TreeHostView`/`TreeHostPanel` (docs/design/runtime/ui_tree_design.md) — has exactly one
+    /// `TreeHost` (docs/design/runtime/ui_tree_design.md) — has exactly one
     /// place to fold in, without hunting down every call site again. As of this writing no such
     /// second signal exists in this crate: TabView/ScrollView content lives in its own separately
     /// hosted tree rather than as `visual_children()` of the tab strip, so a hosted tree simply
@@ -1101,7 +1101,7 @@ impl UIElement {
             .cloned()
             .unwrap_or(default)
     }
-    /// Called by whatever backend host (`TreeHostView::set_tree`/`TreeHostPanel::set_tree`) is
+    /// Called by whatever backend host (`TreeHost::set_tree`/`TreeHost::set_tree`) is
     /// about to own this element as the root of a hosted tree — see `invalidate_host`'s own doc
     /// comment. `None` un-registers (e.g. a host discarding a tree it no longer owns).
     fn set_invalidate_host(&self, host: Option<Rc<dyn RelayoutHost>>) {

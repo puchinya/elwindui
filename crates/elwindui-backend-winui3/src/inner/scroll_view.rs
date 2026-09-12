@@ -3,17 +3,17 @@
 use crate::bindings::Microsoft::UI::Xaml::Controls::{ScrollMode, ScrollViewer};
 use crate::bindings::Microsoft::UI::Xaml::SizeChangedEventHandler;
 use crate::ffi::{AnyView, invoke_ui_event_callback, register_ui_event_callback};
-use crate::host::TreeHostPanel;
+use crate::host::TreeHost;
 use std::cell::Cell;
 use std::rc::Rc;
 
-/// Raw `ScrollViewer` + nested `TreeHostPanel` (`ElwinduiContentRoot`) — composed by
+/// Raw `ScrollViewer` + nested `TreeHost` (`ElwinduiContentRoot`) — composed by
 /// `native_ui::ScrollView`. See `elwindui_core::ui::ScrollView`'s own doc comment for the
 /// `ScrollView -> NativeScrollHost -> ElwinduiContentRoot -> content` structure this implements.
 /// Structurally mirrors `elwindui-backend-appkit::inner::InnerScrollView`; unverified on this
 /// machine (no Windows environment — see `docs/status/control_status.md`).
-/// `content_host` is a second, independent `TreeHostPanel` instance — the same nested-hosting
-/// pattern `InnerTabView::insert_tab`'s own per-tab `TreeHostPanel::new()` already establishes, not
+/// `content_host` is a second, independent `TreeHost` instance — the same nested-hosting
+/// pattern `InnerTabView::insert_tab`'s own per-tab `TreeHost::new()` already establishes, not
 /// a one-off special case. Unlike AppKit (where a plain `NSAutoresizingMaskOptions` bit keeps the
 /// cross axis tracking the clip view automatically, no notification/event wiring needed), WinUI3's
 /// `Canvas` has no autoresizing equivalent — its `Width`/`Height` must be pushed in explicitly,
@@ -22,20 +22,20 @@ use std::rc::Rc;
 pub(crate) struct InnerScrollView {
     handle: AnyView,
     scroll_viewer: ScrollViewer,
-    content_host: TreeHostPanel,
+    content_host: TreeHost,
     /// `(horizontal_scroll_enabled, vertical_scroll_enabled)` — see
     /// `elwindui_backend_appkit::inner::InnerScrollView::axes`'s own doc comment for the naming
-    /// rationale (same booleans `TreeHostPanel::unconstrained_axes` uses, phrased from the opposite
+    /// rationale (same booleans `TreeHost::unconstrained_axes` uses, phrased from the opposite
     /// perspective). `Rc<Cell<..>>`, not a plain `Cell<..>`, so the `SizeChanged` closure below can
     /// read the current value at fire time rather than a snapshot from construction — the same
-    /// reason `TreeHostPanel::unconstrained_axes` itself is `Rc`-wrapped.
+    /// reason `TreeHost::unconstrained_axes` itself is `Rc`-wrapped.
     axes: Rc<Cell<(bool, bool)>>,
 }
 
 impl InnerScrollView {
     pub(crate) fn new() -> Self {
         let scroll_viewer = ScrollViewer::new().expect("ScrollViewer::new");
-        let content_host = TreeHostPanel::new();
+        let content_host = TreeHost::new();
         let _ = scroll_viewer.SetContent(&content_host.as_element());
         let handle = AnyView::from(scroll_viewer.clone());
         // Vertical-only scrolling by default — matches `ScrollView`'s own `#[class]` declaration and its
@@ -123,7 +123,7 @@ impl InnerScrollView {
 /// force-relays-out. Shared by `InnerScrollView::new`'s `SizeChanged` handler and
 /// `InnerScrollView::apply_axes`, rather than duplicated between them.
 pub(crate) fn sync_scroll_view_cross_axis(
-    content_host: &TreeHostPanel,
+    content_host: &TreeHost,
     scroll_viewer: &ScrollViewer,
     (horizontal, vertical): (bool, bool),
 ) {

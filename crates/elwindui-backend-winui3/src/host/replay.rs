@@ -1,7 +1,7 @@
 //! Reconciling the native (non-drawn) children a render pass asks for against the XAML
 //! children actually parented under the host panel.
 //!
-//! Lives under `host` rather than `render` because it operates on `TreeHostPanel`'s own child
+//! Lives under `host` rather than `render` because it operates on `TreeHost`'s own child
 //! bookkeeping — it is this panel's rendering pass, not stateless translation.
 
 use super::*;
@@ -69,7 +69,7 @@ impl NativeChildElement {
 /// `commands`)` — stable across relayout passes for the common case of a UIElement's `render()`
 /// always emitting the same shape of commands, so a `Text`/`NativeControl` producer that's merely
 /// being updated in place (content, position, size) is told apart from one that's genuinely new or
-/// gone. Reused directly as `HashMap` keys by both `TreeHostPanel` (owns it) and `WinUI3RelayoutHost`
+/// gone. Reused directly as `HashMap` keys by both `TreeHost` (owns it) and `WinUI3RelayoutHost`
 /// (holds a `Weak` reference, same pattern as `tree`/`render_tree`).
 pub(crate) type NativeChildKey = (u64, usize);
 

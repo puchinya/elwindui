@@ -219,7 +219,7 @@ fn main() {
         "Microsoft.UI.Xaml.WindowEventArgs".to_owned(),
         // Issue #225: the top-level `Window`'s own `SizeChanged` (WinUI effective/logical pixels,
         // matching XAML layout units directly) is the authoritative content-host viewport signal —
-        // the root `TreeHostPanel` `Canvas`'s own `SizeChanged` does not reliably fire as a
+        // the root `TreeHost` `Canvas`'s own `SizeChanged` does not reliably fire as a
         // bootstrap signal for a plain `Window.Content` (see `docs/design/backends/
         // winui3_backend_design.md`, "Native hosting and layout").
         "Microsoft.UI.Xaml.WindowSizeChangedEventArgs".to_owned(),

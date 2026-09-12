@@ -72,7 +72,7 @@ pub struct TreeHostIvars {
     /// Set once, right after construction — lets `set_tree` hand out an `AppKitRelayoutHost`
     /// wrapping a weak reference back to this same view, without needing a `Retained<Self>` in
     /// hand at that point.
-    pub(crate) weak_self: RefCell<objc2::rc::Weak<TreeHostView>>,
+    pub(crate) weak_self: RefCell<objc2::rc::Weak<TreeHost>>,
     /// Turns this view's own raw `NSEvent`s into `elwindui_core::ui::hit_test`/`dispatch_routed`
     /// calls against `tree` — see `elwindui_core::input::PointerDispatcher`'s own doc comment.
     /// The current backend range recorded in `docs/status/backend_status.md`: self-drawn
@@ -170,15 +170,13 @@ unsafe extern "C-unwind" fn appkit_display_link_callback(
         state.frame_queued.store(false, Ordering::Release);
         return 0;
     }
-    let Some(retained) = (unsafe { Retained::<TreeHostView>::retain(host as *mut TreeHostView) })
-    else {
+    let Some(retained) = (unsafe { Retained::<TreeHost>::retain(host as *mut TreeHost) }) else {
         state.frame_queued.store(false, Ordering::Release);
         return 0;
     };
     let retained = Retained::into_raw(retained) as usize;
     dispatch2::DispatchQueue::main().exec_async(move || {
-        let Some(view) =
-            (unsafe { Retained::<TreeHostView>::from_raw(retained as *mut TreeHostView) })
+        let Some(view) = (unsafe { Retained::<TreeHost>::from_raw(retained as *mut TreeHost) })
         else {
             return;
         };
@@ -195,10 +193,10 @@ unsafe extern "C-unwind" fn appkit_display_link_callback(
     0
 }
 
-/// `elwindui_core::ui::RelayoutHost` for `TreeHostView` — wraps a *weak* reference back to the view
+/// `elwindui_core::ui::RelayoutHost` for `TreeHost` — wraps a *weak* reference back to the view
 /// (not the view itself) since a strong one would create a reference cycle. `request_relayout`
 /// silently does nothing if the view has since been deallocated (`load()` returns `None`).
-pub(crate) struct AppKitRelayoutHost(objc2::rc::Weak<TreeHostView>);
+pub(crate) struct AppKitRelayoutHost(objc2::rc::Weak<TreeHost>);
 
 impl RelayoutHost for AppKitRelayoutHost {
     fn request_relayout(&self, dirty_group_id: u64, kind: InvalidationKind) {
@@ -234,7 +232,7 @@ impl RelayoutHost for AppKitRelayoutHost {
     }
 }
 
-pub(crate) struct AppKitAnimationFrameHost(objc2::rc::Weak<TreeHostView>);
+pub(crate) struct AppKitAnimationFrameHost(objc2::rc::Weak<TreeHost>);
 
 impl AnimationFrameHost for AppKitAnimationFrameHost {
     fn animation_runtime(&self) -> Rc<AnimationRuntime> {
@@ -255,10 +253,10 @@ impl AnimationFrameHost for AppKitAnimationFrameHost {
     }
 }
 
-/// `elwindui_core::ui::FocusHost` for `TreeHostView` — the `FocusHost` counterpart to
+/// `elwindui_core::ui::FocusHost` for `TreeHost` — the `FocusHost` counterpart to
 /// `AppKitRelayoutHost`, same weak-back-reference shape. Delegates straight to
 /// `TreeHostIvars::keyboard.focus`, the single source of truth for this view's own hosted tree.
-pub(crate) struct AppKitFocusHost(objc2::rc::Weak<TreeHostView>);
+pub(crate) struct AppKitFocusHost(objc2::rc::Weak<TreeHost>);
 
 impl FocusHost for AppKitFocusHost {
     fn request_focus(&self, target: &Rc<dyn UIElementExt>) -> bool {
@@ -302,7 +300,7 @@ impl FocusHost for AppKitFocusHost {
 
 /// Pointer-cancellation bridge for one AppKit tree. The weak view reference prevents the hosted
 /// root's capability registration from retaining its native owner.
-pub(crate) struct AppKitPointerGestureHost(objc2::rc::Weak<TreeHostView>);
+pub(crate) struct AppKitPointerGestureHost(objc2::rc::Weak<TreeHost>);
 
 impl PointerGestureHost for AppKitPointerGestureHost {
     fn cancel_pointer_gesture_in_subtree(&self, subtree: &Rc<dyn UIElementExt>) -> bool {
@@ -314,7 +312,7 @@ impl PointerGestureHost for AppKitPointerGestureHost {
 
 /// Root/screen conversion for one hosted AppKit tree. The weak reference avoids the same host/tree
 /// cycle as `AppKitRelayoutHost` and `AppKitFocusHost`.
-pub(crate) struct AppKitCoordinateHost(objc2::rc::Weak<TreeHostView>);
+pub(crate) struct AppKitCoordinateHost(objc2::rc::Weak<TreeHost>);
 
 impl CoordinateHost for AppKitCoordinateHost {
     fn root_to_screen(&self, point: Point) -> Option<Point> {
@@ -439,11 +437,11 @@ define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind = objc2::MainThreadOnly]
     #[ivars = TreeHostIvars]
-    pub struct TreeHostView;
+    pub struct TreeHost;
 
-    unsafe impl NSObjectProtocol for TreeHostView {}
+    unsafe impl NSObjectProtocol for TreeHost {}
 
-    impl TreeHostView {
+    impl TreeHost {
         #[unsafe(method(layout))]
         fn layout(&self) {
             unsafe {
@@ -480,7 +478,7 @@ define_class!(
                 return hit;
             }
             if self.is_suppressed_native_descendant(unsafe { &*hit }) {
-                self as *const TreeHostView as *mut NSView
+                self as *const TreeHost as *mut NSView
             } else {
                 hit
             }
@@ -692,7 +690,7 @@ fn is_pointer_cancel_key(key: Option<Key>) -> bool {
     key == Some(Key::Escape)
 }
 
-impl Drop for TreeHostView {
+impl Drop for TreeHost {
     fn drop(&mut self) {
         self.ivars()
             .display_link_state
@@ -705,7 +703,7 @@ impl Drop for TreeHostView {
     }
 }
 
-impl TreeHostView {
+impl TreeHost {
     fn is_suppressed_native_descendant(&self, view: &NSView) -> bool {
         let suppressed = self.ivars().suppressed_native_ids.borrow();
         let containers = self.ivars().native_containers.borrow();
@@ -722,7 +720,7 @@ impl TreeHostView {
             }
             if std::ptr::eq(
                 Retained::as_ptr(&candidate),
-                self as *const TreeHostView as *const NSView,
+                self as *const TreeHost as *const NSView,
             ) {
                 break;
             }
@@ -1526,7 +1524,7 @@ impl TreeHostView {
 
 /// The real, production `NativeIslandHost` — see that trait's own doc comment for why the replay
 /// pass needs nothing else from a live view.
-impl NativeIslandHost for TreeHostView {
+impl NativeIslandHost for TreeHost {
     fn island(&self, identity: usize, owner_id: u64) -> (Retained<NSView>, bool) {
         let mut containers = self.ivars().native_containers.borrow_mut();
         if let Some(container) = containers.get(&identity) {
@@ -1610,7 +1608,7 @@ impl NativeIslandHost for TreeHostView {
     }
 }
 
-impl TreeHostView {
+impl TreeHost {
     /// Resigns AppKit focus for the native island owned by `owner_id`, if that owner is currently
     /// the window's first-responder subtree. Logical focus teardown must call this before an exit
     /// transition unmounts the element; waiting for the next render projection is too late when
@@ -1705,8 +1703,8 @@ fn is_descendant_or_same(view: &NSView, ancestor: &NSView) -> bool {
 }
 
 /// PR #165 rereview remediation round 2, A6/T25 (Layer 2): closes `slot`'s own active custom
-/// popup/context-menu surface, if any — extracted out of `TreeHostView::close_active_popup` as a
-/// free function over a bare `&RefCell<..>` (no `TreeHostView`/native host construction needed) so
+/// popup/context-menu surface, if any — extracted out of `TreeHost::close_active_popup` as a
+/// free function over a bare `&RefCell<..>` (no `TreeHost`/native host construction needed) so
 /// it is unit-testable without the main-thread-only native window/view construction every other
 /// AppKit backend test involving a real host needs. `take()`s the slot *before* calling `close()`
 /// so a reentrant close triggered from within `close()` itself (e.g. the popup's own `on_unmount`

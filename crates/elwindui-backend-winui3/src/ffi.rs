@@ -387,7 +387,7 @@ pub(crate) fn invoke_ui_f32_event_callback(id: usize, value: f32) {
 /// `UiCallbackRegistryOwner::register_size` (like `register_index`, above, wraps
 /// `register_ui_index_event_callback`) so the returned id is tracked and removed when the owning
 /// `Window`/`InnerWindow` drops; calling this directly, untracked, previously let the TLS entry
-/// (and its captured `menu_wrapper`/`top_inset`/`Weak<TreeHostPanel>` state) outlive the `Window`.
+/// (and its captured `menu_wrapper`/`top_inset`/`Weak<TreeHost>` state) outlive the `Window`.
 pub(crate) fn register_ui_size_event_callback(callback: Rc<dyn Fn(f64, f64)>) -> usize {
     let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
     UI_SIZE_EVENT_CALLBACKS.with(|callbacks| {
@@ -670,7 +670,7 @@ impl WinUiHandle for XamlTabView {
 
 /// Everything the generated code can pass as a `Window`/`NativeTabView` child.
 /// `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have no variant here —
-/// they're purely `elwindui_core::ui::UIElement` values (see `TreeHostPanel` below). An
+/// they're purely `elwindui_core::ui::UIElement` values (see `TreeHost` below). An
 /// `Rc<dyn WinUiHandle>` (not a closed `enum`) so adding a new native leaf never requires touching
 /// this type — see `WinUiHandle`'s own doc comment. Re-exported at the crate root (`lib.rs`) since
 /// `elwindui-codegen`'s generated code references `elwindui::backend::AnyView` directly.
@@ -774,7 +774,7 @@ impl AnyView {
     }
 
     /// Positions this native leaf — like `measure` above, a plain inherent method (elwindui-core's
-    /// generic layout code never calls either) — called directly by `TreeHostPanel`'s own render
+    /// generic layout code never calls either) — called directly by `TreeHost`'s own render
     /// loop below, after `layout_root` and RenderTree reconciliation have produced its native
     /// command. Unlike AppKit (where `arrange` calls `setFrame` directly),
     /// a `Canvas`'s children are still measured/arranged by the real XAML layout system on every

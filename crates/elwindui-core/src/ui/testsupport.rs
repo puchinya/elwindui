@@ -1190,7 +1190,7 @@ mod tests {
     }
 
     /// Verifies `content` stays reachable via `visual_children()` once set — the property a real
-    /// backend's nested `TreeHostView`/`TreeHostPanel` content host relies on for hit-testing/
+    /// backend's nested `TreeHost` content host relies on for hit-testing/
     /// tree-dump purposes (`docs/status/control_status.md`).
     #[test]
     fn fake_scroll_view_content_reachable_via_visual_children() {

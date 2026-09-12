@@ -5,7 +5,7 @@
 use crate::bindings::Microsoft::UI::Xaml::Controls::Primitives::Popup;
 use crate::bindings::Microsoft::UI::Xaml::FrameworkElement;
 use crate::ffi::{UiCallbackRegistryOwner, invoke_ui_event_callback};
-use crate::host::TreeHostPanel;
+use crate::host::TreeHost;
 use elwindui_core::ui::popup::{
     PopupDismissPolicy, PopupFocusPolicy, PopupHost, PopupRequest, PopupSurfaceHandle,
 };
@@ -17,7 +17,7 @@ use windows::core::Interface;
 /// Internal WinUI 3 representation of a standalone popup surface.
 pub(crate) struct InnerPopupSurface {
     popup: Popup,
-    content_host: TreeHostPanel,
+    content_host: TreeHost,
     // `RefCell<Option<..>>`, not a bare `Rc`: `close()`/`on_native_closed()` (via
     // `unmount_owned_content`) must release this surface's own strong reference to the popup
     // content root once teardown completes, not merely unmount it — see AppKit's
@@ -45,11 +45,11 @@ impl InnerPopupSurface {
         owner_canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
     ) -> Option<Rc<Self>> {
         // 1. Core screen -> WinUI local coordinate conversion.
-        let local = TreeHostPanel::screen_logical_to_xaml_local(owner_canvas, request.position)?;
+        let local = TreeHost::screen_logical_to_xaml_local(owner_canvas, request.position)?;
         // 2. Native Popup construction.
         let popup = Popup::new().ok()?;
         // 3. Empty content host only — no `set_tree` yet.
-        let content_host = TreeHostPanel::new();
+        let content_host = TreeHost::new();
 
         // 4. Casts (of the still-empty host's own Canvas, not of `request.content`).
         let canvas = content_host.canvas();
@@ -170,7 +170,7 @@ impl InnerPopupSurface {
     ///
     /// Teardown-before-detach, and — because this path controls the native close itself — before
     /// native visibility changes too: `unmount_subtree` (via `unmount_owned_content`) runs before
-    /// `SetIsOpen(false)` (visibility) and `TreeHostPanel::clear_tree()` (host tree/native resource
+    /// `SetIsOpen(false)` (visibility) and `TreeHost::clear_tree()` (host tree/native resource
     /// release), matching AppKit's ordering. Unlike AppKit, WinUI3's `clear_tree()` has no existing
     /// deferred-dispatch workaround, so everything here runs synchronously. `begin_close` marks the
     /// surface closed *before* `unmount_subtree` runs, so a reentrant `close()`/`on_native_closed()`
@@ -196,7 +196,7 @@ impl InnerPopupSurface {
     ///   be redundant at best and is not part of this surface's own close-initiation responsibility);
     /// - `on_unmount` on this path is *not* guaranteed to observe the native popup as still open —
     ///   only the portable invariant holds: `unmount_subtree` still runs exactly once, still before
-    ///   this surface's own `TreeHostPanel::clear_tree()` and content-ownership release.
+    ///   this surface's own `TreeHost::clear_tree()` and content-ownership release.
     ///
     /// This is the documented WinUI3-specific exception to `close()`'s stronger
     /// unmount-before-native-visibility-change ordering — see

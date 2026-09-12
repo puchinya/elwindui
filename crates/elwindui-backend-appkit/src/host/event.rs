@@ -1,5 +1,5 @@
 //! `NSEvent` -> `elwindui_core::input` translation. Pure value mapping; the dispatch itself
-//! lives on `TreeHostView` in this module's parent.
+//! lives on `TreeHost` in this module's parent.
 
 use elwindui_core::input::{Key, KeyModifiers};
 use objc2_app_kit::{NSEvent, NSEventModifierFlags};

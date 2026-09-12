@@ -1,18 +1,36 @@
 //! `elwindui::ui::TextArea`/`TextBox`/`PasswordBox` — the text-entry `*Ext` implementations.
 
-use super::NativeControl;
+use super::{NativeControl, base_accessibility_semantics};
 use crate::AnyView;
 use crate::inner::{InnerPasswordBox, InnerTextArea, InnerTextBox};
-use elwindui_core::ui::UIElementExt;
+use elwindui_core::accessibility::{
+    AccessibilityAction, AccessibilityActionKind, AccessibilityRole,
+};
+use elwindui_core::ui::{TextAreaExt, UIElementExt};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 #[elwindui_macros::class(struct_only = elwindui_core::ui::TextAreaExt, inherits = crate::NativeControl)]
 pub struct TextArea {
     inner: InnerTextArea,
+    on_change: RefCell<Option<Box<dyn Fn(String)>>>,
 }
 
 #[elwindui_macros::class]
 impl TextArea {
+    #[overrides]
+    fn perform_accessibility_action(&self, action: AccessibilityAction) -> bool {
+        match action {
+            AccessibilityAction::SetText(text) => {
+                self.set_text(&text);
+                self.notify_change(text);
+                true
+            }
+            AccessibilityAction::Focus => self.focus(),
+            _ => false,
+        }
+    }
+
     /// Overrides `NativeControl::measure_override`'s generic `fittingSize()`-based measurement —
     /// see `InnerTextArea::measure`'s own doc comment for why `TextArea` specifically can't share
     /// that path (its handle is an `NSScrollView`, whose `fittingSize()` doesn't reflect the
@@ -31,7 +49,7 @@ impl TextArea {
     /// `elwindui_core::ui::TextArea::set_text` is the model→widget half.
     #[inherent]
     pub fn set_on_text_change(&self, callback: Box<dyn Fn(String)>) {
-        self.inner.set_on_change(callback);
+        self.set_on_change(callback);
     }
 
     #[inherent]
@@ -41,9 +59,24 @@ impl TextArea {
 
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
+        let mut semantics = self
+            .base
+            .intrinsic_accessibility_semantics()
+            .unwrap_or_else(|| {
+                base_accessibility_semantics(
+                    AccessibilityRole::TextInput,
+                    &[
+                        AccessibilityActionKind::SetText,
+                        AccessibilityActionKind::Focus,
+                    ],
+                )
+            });
+        semantics.value = Some(text.to_string());
+        self.base.set_intrinsic_accessibility_semantics(semantics);
     }
     fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
-        self.inner.set_on_change(callback);
+        *self.on_change.borrow_mut() = Some(callback);
+        self.install_change_trampoline();
     }
 
     fn construct() -> Self {
@@ -52,13 +85,55 @@ impl TextArea {
         Self {
             base: NativeControl::construct(handle),
             inner,
+            on_change: RefCell::new(None),
         }
     }
 
     fn on_constructed(&self) {
+        let mut semantics = base_accessibility_semantics(
+            AccessibilityRole::TextInput,
+            &[
+                AccessibilityActionKind::SetText,
+                AccessibilityActionKind::Focus,
+            ],
+        );
+        semantics.value = Some(String::new());
+        self.base.set_intrinsic_accessibility_semantics(semantics);
         // WinUI3's `TextBox`/AppKit's `NSTextField` are tab stops by default — see
         // docs/design/runtime/input_focus_design.md.
         self.set_tab_stop(true);
+        self.install_change_trampoline();
+    }
+
+    #[inherent]
+    fn install_change_trampoline(&self) {
+        let owner: Rc<dyn UIElementExt> = self
+            .as_ui_element()
+            .visual_collection
+            .owner_rc()
+            .expect("TextArea must be Rc-constructed before installing its text callback");
+        let weak = Rc::downgrade(&owner);
+        self.inner.set_on_change(Box::new(move |text| {
+            let Some(owner) = weak.upgrade() else { return };
+            let this = owner
+                .as_any()
+                .downcast_ref::<TextArea>()
+                .expect("TextArea owner must downcast to TextArea");
+            this.set_text(&text);
+            this.notify_change(text);
+        }));
+    }
+
+    #[inherent]
+    fn notify_change(&self, text: String) {
+        let callback = self.on_change.borrow_mut().take();
+        if let Some(callback) = callback {
+            callback(text);
+            let mut slot = self.on_change.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(callback);
+            }
+        }
     }
 }
 
@@ -145,6 +220,11 @@ pub struct PasswordBox {
 
 #[elwindui_macros::class]
 impl PasswordBox {
+    #[overrides]
+    fn perform_accessibility_action(&self, action: AccessibilityAction) -> bool {
+        matches!(action, AccessibilityAction::Focus) && self.focus()
+    }
+
     /// `#[two_way] password` (`PasswordBox`'s `#[class]` declaration) — the change-back half of the
     /// binding; `elwindui_core::ui::PasswordBox::set_password` is the model→widget half.
     #[inherent]
@@ -183,6 +263,11 @@ impl PasswordBox {
     }
 
     fn on_constructed(&self) {
+        self.base
+            .set_intrinsic_accessibility_semantics(base_accessibility_semantics(
+                AccessibilityRole::SecureTextInput,
+                &[AccessibilityActionKind::Focus],
+            ));
         // AppKit's `NSSecureTextField`/WinUI3's `PasswordBox` are tab stops by default — see
         // docs/design/runtime/input_focus_design.md.
         self.set_tab_stop(true);

@@ -20,6 +20,15 @@
 // is re-exported explicitly here and lifted to the root by `lib.rs`'s `pub use native_ui::*`.
 pub use elwindui_core::ui::NativeControlExt;
 
+pub(crate) fn base_accessibility_semantics(
+    role: elwindui_core::accessibility::AccessibilityRole,
+    actions: &[elwindui_core::accessibility::AccessibilityActionKind],
+) -> elwindui_core::accessibility::AccessibilitySemantics {
+    let mut semantics = elwindui_core::accessibility::AccessibilitySemantics::new(role);
+    semantics.actions = actions.to_vec();
+    semantics
+}
+
 mod button;
 mod check_box;
 mod control;

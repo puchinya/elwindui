@@ -2,10 +2,13 @@
 //! item list from scratch on every `items` change (see `inner/dropdown.rs`'s own doc comment for
 //! why a full rebuild, not incremental diffing like `TabView`/`MenuBar`, is the right call here).
 
-use super::NativeControl;
 use super::dropdown_item::DropdownItem;
+use super::{NativeControl, base_accessibility_semantics};
 use crate::AnyView;
 use crate::inner::InnerDropdown;
+use elwindui_core::accessibility::{
+    AccessibilityAction, AccessibilityActionKind, AccessibilityRole,
+};
 use elwindui_core::ui::UIElementExt;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -19,6 +22,14 @@ pub struct Dropdown {
 
 #[elwindui_macros::class]
 impl Dropdown {
+    #[overrides]
+    fn perform_accessibility_action(&self, action: AccessibilityAction) -> bool {
+        match action {
+            AccessibilityAction::Focus => self.focus(),
+            _ => false,
+        }
+    }
+
     #[inherent]
     pub fn into_any_view(&self) -> AnyView {
         self.inner.handle()
@@ -27,6 +38,17 @@ impl Dropdown {
     fn set_selected_index(&self, selected_index: usize) {
         self.selected_index.set(selected_index);
         self.inner.set_selected_index(selected_index);
+        let mut semantics = self
+            .base
+            .intrinsic_accessibility_semantics()
+            .unwrap_or_else(|| {
+                base_accessibility_semantics(
+                    AccessibilityRole::ComboBox,
+                    &[AccessibilityActionKind::Focus],
+                )
+            });
+        semantics.value = Some(self.selected_value(selected_index));
+        self.base.set_intrinsic_accessibility_semantics(semantics);
     }
     fn set_on_change(&self, callback: Box<dyn Fn(usize)>) {
         self.inner.set_on_change(callback);
@@ -52,6 +74,11 @@ impl Dropdown {
     }
 
     fn on_constructed(&self) {
+        self.base
+            .set_intrinsic_accessibility_semantics(base_accessibility_semantics(
+                AccessibilityRole::ComboBox,
+                &[AccessibilityActionKind::Focus],
+            ));
         self.set_tab_stop(true);
     }
 
@@ -88,6 +115,26 @@ impl Dropdown {
         // the previously-set `selected_index` must be reapplied afterward or every `items` mutation
         // would silently drop the current selection back to none.
         self.inner.set_selected_index(self.selected_index.get());
+        let mut semantics = self
+            .base
+            .intrinsic_accessibility_semantics()
+            .unwrap_or_else(|| {
+                base_accessibility_semantics(
+                    AccessibilityRole::ComboBox,
+                    &[AccessibilityActionKind::Focus],
+                )
+            });
+        semantics.value = Some(self.selected_value(self.selected_index.get()));
+        self.base.set_intrinsic_accessibility_semantics(semantics);
+    }
+
+    #[inherent]
+    fn selected_value(&self, selected_index: usize) -> String {
+        self.children
+            .to_vec()
+            .get(selected_index)
+            .map(|item| downcast_dropdown_item(&**item).text())
+            .unwrap_or_else(|| selected_index.to_string())
     }
 }
 

@@ -54,6 +54,14 @@ elwindui::ui::<Type>
 | `hit_test_visible` | `Option<bool>` | OneWay | ヒットテスト判定の有効/無効 |
 | `tab_stop` | `Option<bool>` | OneWay | Tab キーフォーカス移動の対象に含まれるか |
 | `focus_order` | `Option<i32>` | OneWay | Tab キー移動時の明示的な優先度順序 |
+| `accessibility_role` | `Option<AccessibilityRole>` | OneWay | 明示的な意味役割。透明要素もsemantic nodeになる |
+| `accessibility_label` | `Option<String>` | OneWay | アクセシブルな名前 |
+| `accessibility_value` | `Option<String>` | OneWay | アクセシブルな値 |
+| `accessibility_hint` | `Option<String>` | OneWay | 操作方法の補足ヒント |
+| `accessibility_identifier` | `Option<String>` | OneWay | 自動化用の安定した識別子 |
+| `accessibility_hidden` | `Option<bool>` | OneWay | 要素と子孫をsemantic treeから除外するか |
+| `accessibility_children` | `Option<AccessibilityChildBehavior>` | OneWay | 子孫の `Automatic` / `Ignore` / `Contain` 方針 |
+| `on_accessibility_action` | `fn(AccessibilityAction)` | Direct | Coreで未処理のアクセシビリティ操作 |
 
 `NativeControl` を継承する全ての具象コントロールは、さらに以下の共通プロパティを持つ。
 
@@ -600,6 +608,9 @@ Grid {
 
 - `role` はボタンの操作の意味的強調を表し、プラットフォーム固有のアクセント/破壊的表現にマップされる。
 - `is_default` は Enter キーによる規定実行対象かを制御し、`role` とは独立している。
+- `Button` は Core semantic tree 上で `AccessibilityRole::Button` となり、`text` を名前として
+  公開する。`Activate` は通常の click path を一度だけ実行し、`Focus` は既存の Core focus
+  ownership を通る。共通契約は [`accessibility_spec.md`](accessibility_spec.md) に従う。
 
 #### Example
 
@@ -647,6 +658,9 @@ Button {
 |---|---|---|
 | `on_change` | `fn(String)` | 内容変更時に発火 |
 
+Accessibility では `TextInput` として現在の `text` を公開し、`SetText` は通常の property/event
+path、`Focus` は既存の Core focus path を使用する。
+
 ### `elwindui::ui::PasswordBox`
 
 マスク表示される安全なパスワード入力コントロール。
@@ -665,6 +679,9 @@ Button {
 | Name | Type | Description |
 |---|---|---|
 | `on_change` | `fn(String)` | 入力変更時に発火 |
+
+Accessibility role は `SecureTextInput` とし、`password` の plaintext は semantic value、
+fallback description、debug/diagnostic output、AX/UIA value のいずれにも公開しない。
 
 ### `elwindui::ui::CheckBox`
 
@@ -687,6 +704,8 @@ ON / OFF / （選択的）Indeterminate 状態を持つネイティブのチェ�
 #### Semantics
 
 ユーザーのクリック操作は `Unchecked` と `Checked` の2状態間のみを切り替える。`Indeterminate`（中間状態）はプログラムからの状態表示専用である。
+Core semantic tree では `AccessibilityRole::CheckBox` として `Off` / `On` / `Mixed` を公開し、
+`Activate` はこの通常の状態/event path を一度だけ実行する。
 
 ### `elwindui::ui::RadioButton`
 

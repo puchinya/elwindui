@@ -153,6 +153,14 @@ pub trait FocusHost {
 #[prop(hit_test_visible: Option<bool>)]
 #[prop(tab_stop: Option<bool>)]
 #[prop(focus_order: Option<i32>)]
+#[prop(accessibility_role: Option<crate::accessibility::AccessibilityRole>)]
+#[prop(accessibility_label: Option<String>)]
+#[prop(accessibility_value: Option<String>)]
+#[prop(accessibility_hint: Option<String>)]
+#[prop(accessibility_identifier: Option<String>)]
+#[prop(accessibility_hidden: Option<bool>)]
+#[prop(accessibility_children: Option<crate::accessibility::AccessibilityChildBehavior>)]
+#[prop(on_accessibility_action: fn(crate::accessibility::AccessibilityAction))]
 #[prop(routed, on_key_down: fn(crate::input::KeyEventArgs))]
 #[prop(routed, on_key_up: fn(crate::input::KeyEventArgs))]
 #[prop(routed, on_text_input: fn(crate::input::TextInputEventArgs))]
@@ -174,6 +182,8 @@ pub trait FocusHost {
 pub struct UIElement {
     /// Stable identity of this Visual's retained RenderGroup. Never reused within a process.
     pub render_group_id: u64,
+    /// Stable identity of this element in the Core semantic accessibility graph.
+    pub accessibility_id: crate::accessibility::AccessibilityId,
     pub margin: Cell<f32>,
     pub presentation_margin: Cell<f32>,
     pub horizontal_alignment: Cell<HorizontalAlignment>,
@@ -301,6 +311,20 @@ pub struct UIElement {
     /// The `FocusHost` counterpart to `invalidate_host` — see that field's own doc comment and
     /// `FocusHost`'s own.
     pub focus_host: RefCell<Option<Rc<dyn FocusHost>>>,
+    pub accessibility_role: Cell<Option<crate::accessibility::AccessibilityRole>>,
+    pub accessibility_label: RefCell<Option<String>>,
+    pub accessibility_value: RefCell<Option<String>>,
+    pub accessibility_hint: RefCell<Option<String>>,
+    pub accessibility_identifier: RefCell<Option<String>>,
+    pub accessibility_hidden: Cell<bool>,
+    pub accessibility_children: Cell<crate::accessibility::AccessibilityChildBehavior>,
+    pub accessibility_action_handler:
+        RefCell<Option<Box<dyn Fn(crate::accessibility::AccessibilityAction)>>>,
+    /// Core-owned semantic state mirrored by backend control setters. Native widget state is never
+    /// read by the accessibility runtime.
+    pub intrinsic_accessibility_semantics:
+        RefCell<Option<crate::accessibility::AccessibilitySemantics>>,
+    pub accessibility_host: RefCell<Option<Rc<dyn crate::accessibility::AccessibilityHost>>>,
     /// `#[shortcut(...)]`-annotated fields declared on this element, registered here by
     /// `elwindui-codegen`'s generated `new()` — not yet reachable from any `ShortcutRegistry` (this
     /// element doesn't know which tree/window it'll end up hosted under yet). A host's own
@@ -324,6 +348,9 @@ impl std::fmt::Debug for UIElement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UIElement")
             .field("render_group_id", &self.render_group_id)
+            .field("accessibility_id", &self.accessibility_id)
+            .field("accessibility_role", &self.accessibility_role.get())
+            .field("accessibility_hidden", &self.accessibility_hidden.get())
             .field("margin", &self.margin.get())
             .field("presentation_margin", &self.presentation_margin.get())
             .field("horizontal_alignment", &self.horizontal_alignment.get())
@@ -437,6 +464,7 @@ impl UIElement {
     fn construct() -> Self {
         UIElement {
             render_group_id: NEXT_RENDER_GROUP_ID.fetch_add(1, Ordering::Relaxed),
+            accessibility_id: crate::accessibility::AccessibilityId::new(),
             margin: Cell::new(0.0),
             presentation_margin: Cell::new(0.0),
             horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
@@ -481,6 +509,18 @@ impl UIElement {
             focus_order: Cell::new(None),
             focus_state: Cell::new(FocusState::Unfocused),
             focus_host: RefCell::new(None),
+            accessibility_role: Cell::new(None),
+            accessibility_label: RefCell::new(None),
+            accessibility_value: RefCell::new(None),
+            accessibility_hint: RefCell::new(None),
+            accessibility_identifier: RefCell::new(None),
+            accessibility_hidden: Cell::new(false),
+            accessibility_children: Cell::new(
+                crate::accessibility::AccessibilityChildBehavior::Automatic,
+            ),
+            accessibility_action_handler: RefCell::new(None),
+            intrinsic_accessibility_semantics: RefCell::new(None),
+            accessibility_host: RefCell::new(None),
             declared_shortcuts: RefCell::new(Vec::new()),
             context_menu: RefCell::new(None),
             context_menu_presentation: Cell::new(ContextMenuPresentation::Native),
@@ -680,6 +720,7 @@ impl UIElement {
     fn set_visibility(&self, visibility: Visibility) {
         self.as_ui_element().visibility.set(visibility);
         self.invalidate_measure();
+        self.request_accessibility_update();
     }
     fn set_opacity(&self, opacity: f32) {
         assert!(opacity.is_finite(), "UIElement opacity must be finite");
@@ -1011,6 +1052,166 @@ impl UIElement {
     fn try_as_native_control(&self) -> Option<&dyn Any> {
         None
     }
+    /// Returns the built-in semantic description for this element, if it has one.
+    #[overridable]
+    fn accessibility_intrinsic_semantics(
+        &self,
+    ) -> Option<crate::accessibility::AccessibilitySemantics> {
+        None
+    }
+    /// Performs a Core-owned accessibility action. Backends must not invoke native controls as a
+    /// fallback: an unhandled action is offered to the ordinary user callback exactly once.
+    #[overridable]
+    fn perform_accessibility_action(
+        &self,
+        _action: crate::accessibility::AccessibilityAction,
+    ) -> bool {
+        false
+    }
+    fn accessibility_id(&self) -> crate::accessibility::AccessibilityId {
+        self.as_ui_element().accessibility_id
+    }
+    fn accessibility_hidden(&self) -> bool {
+        self.as_ui_element().accessibility_hidden.get()
+    }
+    fn accessibility_semantics(&self) -> Option<crate::accessibility::AccessibilitySemantics> {
+        let base = self.as_ui_element();
+        let explicit_role = base.accessibility_role.get();
+        let mut semantics = self
+            .accessibility_intrinsic_semantics()
+            .or_else(|| base.intrinsic_accessibility_semantics.borrow().clone());
+        if semantics.is_none() && explicit_role.is_none() {
+            return None;
+        }
+        let semantics = semantics.get_or_insert_with(|| {
+            crate::accessibility::AccessibilitySemantics::new(
+                explicit_role.expect("role was checked above"),
+            )
+        });
+        if let Some(role) = explicit_role {
+            semantics.role = role;
+        }
+        if let Some(label) = base.accessibility_label.borrow().clone() {
+            semantics.label = Some(label);
+        }
+        if let Some(value) = base.accessibility_value.borrow().clone() {
+            semantics.value = Some(value);
+        }
+        if let Some(hint) = base.accessibility_hint.borrow().clone() {
+            semantics.hint = Some(hint);
+        }
+        if let Some(identifier) = base.accessibility_identifier.borrow().clone() {
+            semantics.identifier = Some(identifier);
+        }
+        semantics.child_behavior = base.accessibility_children.get();
+        semantics.state.focused = self.focus_state() != FocusState::Unfocused;
+        Some(semantics.clone())
+    }
+    #[doc(hidden)]
+    fn intrinsic_accessibility_semantics(
+        &self,
+    ) -> Option<crate::accessibility::AccessibilitySemantics> {
+        self.as_ui_element()
+            .intrinsic_accessibility_semantics
+            .borrow()
+            .clone()
+    }
+    #[doc(hidden)]
+    fn set_intrinsic_accessibility_semantics(
+        &self,
+        semantics: crate::accessibility::AccessibilitySemantics,
+    ) {
+        *self
+            .as_ui_element()
+            .intrinsic_accessibility_semantics
+            .borrow_mut() = Some(semantics);
+        self.request_accessibility_update();
+    }
+    #[doc(hidden)]
+    fn set_intrinsic_accessibility_state(&self, state: crate::accessibility::AccessibilityState) {
+        let mut semantics = self.intrinsic_accessibility_semantics().unwrap_or_else(|| {
+            crate::accessibility::AccessibilitySemantics::new(
+                crate::accessibility::AccessibilityRole::Group,
+            )
+        });
+        semantics.state = state;
+        self.set_intrinsic_accessibility_semantics(semantics);
+    }
+    fn set_accessibility_host(
+        &self,
+        host: Option<Rc<dyn crate::accessibility::AccessibilityHost>>,
+    ) {
+        *self.as_ui_element().accessibility_host.borrow_mut() = host;
+    }
+    fn request_accessibility_update(&self) {
+        let mut current = self.as_ui_element().visual_collection.owner_rc();
+        while let Some(node) = current {
+            if let Some(host) = node.as_ui_element().accessibility_host.borrow().clone() {
+                host.request_accessibility_update();
+                return;
+            }
+            current = node
+                .visual_parent()
+                .and_then(|parent| parent.as_ui_element().visual_collection.owner_rc());
+        }
+    }
+    fn set_accessibility_role(&self, role: crate::accessibility::AccessibilityRole) {
+        self.as_ui_element().accessibility_role.set(Some(role));
+        self.request_accessibility_update();
+    }
+    fn set_accessibility_label(&self, label: &str) {
+        *self.as_ui_element().accessibility_label.borrow_mut() = Some(label.to_string());
+        self.request_accessibility_update();
+    }
+    fn set_accessibility_value(&self, value: &str) {
+        *self.as_ui_element().accessibility_value.borrow_mut() = Some(value.to_string());
+        self.request_accessibility_update();
+    }
+    fn set_accessibility_hint(&self, hint: &str) {
+        *self.as_ui_element().accessibility_hint.borrow_mut() = Some(hint.to_string());
+        self.request_accessibility_update();
+    }
+    fn set_accessibility_identifier(&self, identifier: &str) {
+        *self.as_ui_element().accessibility_identifier.borrow_mut() = Some(identifier.to_string());
+        self.request_accessibility_update();
+    }
+    fn set_accessibility_hidden(&self, hidden: bool) {
+        self.as_ui_element().accessibility_hidden.set(hidden);
+        self.request_accessibility_update();
+    }
+    fn set_accessibility_children(
+        &self,
+        behavior: crate::accessibility::AccessibilityChildBehavior,
+    ) {
+        self.as_ui_element().accessibility_children.set(behavior);
+        self.request_accessibility_update();
+    }
+    fn set_on_accessibility_action(
+        &self,
+        callback: Box<dyn Fn(crate::accessibility::AccessibilityAction)>,
+    ) {
+        *self
+            .as_ui_element()
+            .accessibility_action_handler
+            .borrow_mut() = Some(callback);
+        self.request_accessibility_update();
+    }
+    fn invoke_accessibility_action(
+        &self,
+        action: crate::accessibility::AccessibilityAction,
+    ) -> bool {
+        let base = self.as_ui_element();
+        let callback = base.accessibility_action_handler.borrow_mut().take();
+        let Some(callback) = callback else {
+            return false;
+        };
+        callback(action);
+        let mut slot = base.accessibility_action_handler.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(callback);
+        }
+        true
+    }
     /// WPF's `UIElement.InvalidateVisual`: invalidates arrange state and asks the host for an
     /// asynchronous layout/render pass. The pass records this Visual's RenderGroup again.
     ///
@@ -1159,6 +1360,7 @@ impl UIElement {
     /// comment.
     fn set_focus_state(&self, value: FocusState) {
         self.as_ui_element().focus_state.set(value);
+        self.request_accessibility_update();
     }
     /// Called by whatever backend host is about to own this element as the root of a hosted tree —
     /// the `FocusHost` counterpart to `set_invalidate_host`, set at the same time by the same
@@ -1232,6 +1434,11 @@ impl UIElement {
         *self.as_ui_element().pointer_gesture_host.borrow_mut() = None;
         *self.as_ui_element().animation_frame_host.borrow_mut() = None;
         *self.as_ui_element().focus_host.borrow_mut() = None;
+        *self.as_ui_element().accessibility_host.borrow_mut() = None;
+        *self
+            .as_ui_element()
+            .accessibility_action_handler
+            .borrow_mut() = None;
         *self.as_ui_element().environment.borrow_mut() = None;
     }
     /// Every `#[shortcut(...)]` this element has declared — see `UIElement::declared_shortcuts`'s
@@ -1900,6 +2107,7 @@ pub fn begin_exit(node: &Rc<dyn UIElementExt>) -> bool {
     }
     node.clear_focus_in_subtree();
     base.visual_participation.set(VisualParticipation::Exiting);
+    node.request_accessibility_update();
     if let Some(parent) = node.visual_parent() {
         parent.as_ui_element().visual_collection.begin_exit(node);
     }
@@ -1925,6 +2133,7 @@ pub fn finish_exit(node: &Rc<dyn UIElementExt>) -> bool {
     node.as_ui_element()
         .visual_participation
         .set(VisualParticipation::Active);
+    node.request_accessibility_update();
     unmount_subtree(node);
     true
 }

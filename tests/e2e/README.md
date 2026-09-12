@@ -47,10 +47,12 @@ Do not add permanent product E2E cases under `tools/`.
 
 ## Current state
 
-No durable case is defined here yet. `tools/windows-ui-driver/tests/theme-demo-e2e.ps1` (a
-Windows-only, product-specific smoke script) was removed rather than kept as a placeholder --
-future durable cases are designed so AppKit and WinUI3 can consume the same scenario definition,
-which a Windows-only script cannot represent. See
+The first shared durable case is
+[`accessibility-semantics/scenario.md`](accessibility-semantics/scenario.md). It is designed for
+both AppKit and WinUI3 and is executed through the platform tester procedures. The former
+`tools/windows-ui-driver/tests/theme-demo-e2e.ps1` (a Windows-only, product-specific smoke script)
+was removed rather than kept as a placeholder. See
 [`docs/agents/winui3-e2e.md`](../../docs/agents/winui3-e2e.md) and
 [`docs/agents/appkit-e2e.md`](../../docs/agents/appkit-e2e.md) for the platform tester procedures a
-future case here will be executed through.
+the case is executed through. The executable fixture for this case is
+`examples/accessibility-semantics-demo`.

@@ -1353,7 +1353,6 @@ impl SaveButton {}
 7. (欠番 — `once` 宣言の廃止に伴い、`external::*` を許可する場所自体が無くなったため)
 8. importの循環・未解決パス → エラー
 9. (欠番 — `native!` / `target::backend()` 構文の廃止に伴い不要)
-10. `view`内に`Canvas`が含まれているが `#[accessible(...)]` が付与されていない → 警告(`docs/design/runtime/input_focus_design.md`参照)
 11. `on_mount`/`on_update`/`on_unmount`を含むあらゆる実行contextで`#[param]`フィールドの再代入相当の操作が行われている → エラー([`ui_tree_design.md`](../design/runtime/ui_tree_design.md)参照。paramの不変性は生涯を通じて保証される)
 12. リアクティブ属性式または`<=>`の参照先が`store`宣言(`docs/design/runtime/state_management_design.md`)の型・フィールドとして存在しない → エラー
 13. `store`/`viewmodel`フィールドへの`#[param]`側からの直接参照 → エラー(`docs/design/runtime/state_management_design.md`、`docs/agents/codegen.md`参照。store/viewmodelはViewのリアクティブ属性式または明示的な`<=>`から参照する)

@@ -83,11 +83,11 @@ if not isinstance(issue_body, str):
     fail(f"Issue #{issue_number} has no readable body")
 
 heading_re = re.compile(
-    r"^(#{1,6})[ \t]+(?:[0-9]+[.)][ \t]+)?Reviewer Checklist[ \t]*#*[ \t]*$"
+    r"^(?:(#{1,6})[ \t]+(?:[0-9]+[.)][ \t]+)?|[0-9]+[.)][ \t]+)Reviewer Checklist[ \t]*#*[ \t]*$"
 )
-generic_heading_re = re.compile(r"^(#{1,6})(?:[ \t]+.*)?$")
-checkbox_re = re.compile(r"^[ \t]*-[ \t]+\[[ xX]\][ \t]+(.+?)\s*$")
-empty_checkbox_re = re.compile(r"^[ \t]*-[ \t]+\[[ xX]\][ \t]*$")
+generic_heading_re = re.compile(r"^(#{1,6})(?:[ \t]+.*)?$|^[0-9]+[.)][ \t]+.*$")
+checkbox_re = re.compile(r"^[ \t]*[-*][ \t]+\[[ xX]\][ \t]+(.+?)\s*$")
+empty_checkbox_re = re.compile(r"^[ \t]*[-*][ \t]+\[[ xX]\][ \t]*$")
 canonical_begin = "ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN"
 canonical_end = "ELWINDUI_REVIEWER_CHECKLIST_V1_END"
 
@@ -109,14 +109,18 @@ def extract_checklist(text: str, source: str) -> list[str]:
         if not match:
             continue
         found = True
-        level = len(match.group(1))
+        level = len(match.group(1)) if match.group(1) else 1
         section_items: list[str] = []
+        template_markers: set[str] = set()
         for candidate_index in range(index + 1, len(lines)):
             candidate = lines[candidate_index]
             if not visible[candidate_index]:
                 continue
             next_heading = generic_heading_re.fullmatch(candidate)
-            if next_heading and len(next_heading.group(1)) <= level:
+            next_level = (
+                len(next_heading.group(1)) if next_heading and next_heading.group(1) else 1
+            )
+            if next_heading and next_level <= level:
                 break
             if empty_checkbox_re.fullmatch(candidate):
                 fail(f"{source} Reviewer Checklist has an empty checkbox item", "empty-checklist")
@@ -126,7 +130,11 @@ def extract_checklist(text: str, source: str) -> list[str]:
                 if not item:
                     fail(f"{source} Reviewer Checklist has an empty item", "empty-checklist")
                 section_items.append(item)
+            elif candidate.strip() in {"- PASS:", "- N/A:", "- FAIL:"}:
+                template_markers.add(candidate.strip())
         if not section_items:
+            if template_markers == {"- PASS:", "- N/A:", "- FAIL:"}:
+                continue
             fail(f"{source} Reviewer Checklist section has zero checkbox items", "empty-checklist")
         items.extend(section_items)
     return items if found else []

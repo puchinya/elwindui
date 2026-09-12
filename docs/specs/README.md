@@ -6,6 +6,7 @@
 |---|---|
 | DSL syntax、component、binding、control flow、diagnostics | [`dsl_spec.md`](dsl_spec.md) |
 | UIElement、layout、controls、events、focus | [`ui_spec.md`](ui_spec.md) |
+| Core-owned semantic accessibility tree and cross-backend equivalence | [`accessibility_spec.md`](accessibility_spec.md) |
 | Font、text style、inheritance、reset、fallback | [`text_style_spec.md`](text_style_spec.md) |
 | Color、Brush、Path、Image、VectorImage | [`graphics_spec.md`](graphics_spec.md) |
 | Theme、Environment、token、appearance | [`theme_environment_spec.md`](theme_environment_spec.md) |

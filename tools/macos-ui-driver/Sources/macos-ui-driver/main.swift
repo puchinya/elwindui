@@ -2,7 +2,7 @@
 // macOS GUI test CLI). Phase 1: app launch/terminate, window enumeration, per-window screenshot
 // capture, and permission diagnostics ("doctor"). Phase 2: Accessibility-tree walking
 // (`dump-tree`/`find`) and control interaction (`set-focus`/`click`/`point-click`/`drag`/`resize`/
-// `type-text`/`press-key`/`wait-for`) — driver-side only, see docs/status/tooling_status.md for
+// `type-text`/`set-value`/`press-key`/`wait-for`) — driver-side only, see docs/status/tooling_status.md for
 // scope notes.
 // elwindui-internal state introspection and image-diff regression testing are later phases, not
 // implemented here.
@@ -501,7 +501,11 @@ struct AXElement {
     let role: String
     let subrole: String
     let title: String
+    let description: String
     let value: Any?
+    let minValue: Any?
+    let maxValue: Any?
+    let valueIncrement: Any?
     let identifier: String
     let position: CGPoint?
     let size: CGSize?
@@ -516,6 +520,10 @@ struct AXElement {
         title = axString(element, kAXTitleAttribute as String)
         identifier = axString(element, kAXIdentifierAttribute as String)
         value = axJSONValue(axCopyAttribute(element, kAXValueAttribute as String))
+        description = axString(element, kAXDescriptionAttribute as String)
+        minValue = axJSONValue(axCopyAttribute(element, kAXMinValueAttribute as String))
+        maxValue = axJSONValue(axCopyAttribute(element, kAXMaxValueAttribute as String))
+        valueIncrement = axJSONValue(axCopyAttribute(element, kAXValueIncrementAttribute as String))
         position = axPoint(element, kAXPositionAttribute as String)
         size = axSize(element, kAXSizeAttribute as String)
         enabled = (axCopyAttribute(element, kAXEnabledAttribute as String) as? Bool) ?? true
@@ -525,8 +533,11 @@ struct AXElement {
 
     func jsonObject(includeChildren children: [[String: Any]]? = nil) -> [String: Any] {
         var obj: [String: Any] = [
-            "role": role, "subrole": subrole, "title": title, "identifier": identifier,
-            "enabled": enabled, "focused": focused, "value": value ?? NSNull(), "child_count": childCount,
+            "role": role, "subrole": subrole, "title": title, "description": description,
+            "identifier": identifier, "enabled": enabled, "focused": focused,
+            "value": value ?? NSNull(), "min_value": minValue ?? NSNull(),
+            "max_value": maxValue ?? NSNull(), "value_increment": valueIncrement ?? NSNull(),
+            "child_count": childCount,
         ]
         obj["position"] = position.map { ["x": $0.x, "y": $0.y] } ?? NSNull()
         obj["size"] = size.map { ["width": $0.width, "height": $0.height] } ?? NSNull()
@@ -620,7 +631,7 @@ func buildAXTree(_ element: AXUIElement, depth: Int, maxDepth: Int, nodeCount: i
 
 // MARK: - Phase 2: element selector
 
-/// Shared by `find`/`click`/`type-text`/`press-key`/`set-focus` — the same four selector flags
+/// Shared by `find`/`click`/`type-text`/`set-value`/`press-key`/`set-focus` — the same four selector flags
 /// everywhere, resolved consistently by `filterNodes`/`resolveElement` below.
 struct ElementSelector {
     let role: String?
@@ -658,7 +669,7 @@ func filterNodes(_ nodes: [AXNode], matching s: ElementSelector) -> [AXNode] {
     }
 }
 
-/// Strict single-match requirement used by `click`/`type-text`/`press-key`/`set-focus` — these
+/// Strict single-match requirement used by `click`/`type-text`/`set-value`/`press-key`/`set-focus` — these
 /// commands cause a real side effect on a live element, so they never guess among multiple matches
 /// and never silently no-op on zero. `Never`-returning on failure, matching `Args.requireString`'s
 /// own idiom.
@@ -1276,6 +1287,66 @@ func cmdTypeText(_ args: Args) -> Never {
         ])
 }
 
+// MARK: - set-value
+
+/// Sets a text or numeric `kAXValueAttribute` directly and verifies the observed value. This is
+/// intentionally separate from `type-text`: keyboard synthesis exercises native editing and
+/// focus delivery, while this command exercises an element's public AX value/action path (for
+/// example, Core-backed TextArea `SetText`) without requiring a platform-specific keyboard route.
+func cmdSetValue(_ args: Args) -> Never {
+    let (pid, _, window) = resolveContext(args)
+    let maxDepth = args.int("max-depth") ?? 40
+    let selector = ElementSelector(args)
+    let text = args.string("text")
+    let number = args.double("value")
+    let timeout = args.double("timeout") ?? 1.0
+    let element = resolveElement(in: window, selector: selector, maxDepth: maxDepth)
+
+    guard (text != nil) != (number != nil) else {
+        fail("exactly one of --text or --value is required")
+    }
+
+    let before = axJSONValue(axCopyAttribute(element, kAXValueAttribute as String))
+    let requested: CFTypeRef = if let text {
+        text as CFString
+    } else {
+        NSNumber(value: number!)
+    }
+    let status = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, requested)
+    guard status == .success else {
+        fail(
+            "failed to set AXValue (AXError \(status.rawValue))",
+            ["pid": Int(pid), "ax_error": status.rawValue, "before_value": before as Any])
+    }
+
+    let matches: () -> Bool
+    if let text {
+        matches = { axString(element, kAXValueAttribute as String) == text }
+    } else {
+        let expected = number!
+        matches = {
+            guard let raw = axCopyAttribute(element, kAXValueAttribute as String),
+                CFGetTypeID(raw) == CFNumberGetTypeID()
+            else { return false }
+            return (raw as! NSNumber).doubleValue == expected
+        }
+    }
+    let observed = pollUntil(timeout: timeout) { matches() ? true : nil } == true
+    let after = axJSONValue(axCopyAttribute(element, kAXValueAttribute as String))
+    var fields: [String: Any] = [
+        "pid": Int(pid),
+        "before_value": before ?? NSNull(),
+        "after_value": after ?? NSNull(),
+        "value_matches_expected": observed,
+    ]
+    if let text {
+        fields["requested_text"] = text
+    } else {
+        fields["requested_value"] = number!
+    }
+    emit(success: observed, fields)
+}
+
 // MARK: - press-key
 
 /// Named-key → virtual keycode table using `Carbon.HIToolbox` constants — a system framework
@@ -1428,7 +1499,7 @@ func cmdWaitFor(_ args: Args) -> Never {
 let argv = Array(CommandLine.arguments.dropFirst())
 guard let command = argv.first else {
     fail(
-        "usage: macos-ui-driver <doctor|launch|terminate|list-windows|capture-window|focus-window|dump-tree|find|set-focus|click|point-click|drag|resize|type-text|press-key|wait-for> [options]"
+        "usage: macos-ui-driver <doctor|launch|terminate|list-windows|capture-window|focus-window|dump-tree|find|set-focus|click|point-click|drag|resize|type-text|set-value|press-key|wait-for> [options]"
     )
 }
 let args = Args(Array(argv.dropFirst()))
@@ -1448,6 +1519,7 @@ case "point-click": cmdPointClick(args)
 case "drag": cmdDrag(args)
 case "resize": cmdResize(args)
 case "type-text": cmdTypeText(args)
+case "set-value": cmdSetValue(args)
 case "press-key": cmdPressKey(args)
 case "wait-for": cmdWaitFor(args)
 default:

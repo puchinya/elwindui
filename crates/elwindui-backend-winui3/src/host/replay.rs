@@ -8,6 +8,7 @@ use super::*;
 use crate::ffi::{AnyView, UiCallbackRegistryOwner};
 use crate::render::xaml_text_alignment;
 
+use crate::bindings::Microsoft::UI::Xaml::Automation::{AccessibilityView, AutomationProperties};
 use crate::bindings::Microsoft::UI::Xaml::Controls::{Canvas, Control, TextBlock};
 use crate::bindings::Microsoft::UI::Xaml::Media::{CompositeTransform, Transform};
 use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, RoutedEventHandler, UIElement};
@@ -87,6 +88,10 @@ fn apply_visual_projection(
     input_enabled: bool,
 ) {
     if let Ok(ui) = element.clone().cast::<UIElement>() {
+        // Native controls and paint TextBlocks are implementation details of the Core semantic
+        // tree. Keep them available to the raw XAML view for input/rendering diagnostics, but out
+        // of the public control view so the custom host peer cannot expose duplicate controls.
+        let _ = AutomationProperties::SetAccessibilityView(&ui, AccessibilityView::Raw);
         let _ = ui.SetIsHitTestVisible(input_enabled);
     }
     if let Ok(control) = element.clone().cast::<Control>() {

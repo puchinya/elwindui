@@ -6,8 +6,8 @@ Snapshot: 2026-09-12. Durable backend architecture is indexed in [`../design/REA
 
 | Backend | Current implementation | Current verification |
 |---|---|---|
-| AppKit (macOS) | ✅ primary backend | Local builds, workspace tests, screenshots, Accessibility-driven control interaction, and text/environment paths are supported where listed below. |
-| WinUI 3 (Windows) | 🚧 substantial implementation | Windows builds and real interaction cover the established startup, Window lifecycle, graphics, text/environment, Button, and selection paths; the full contract and newer pointer/popup/docking rows remain incomplete or deferred. |
+| AppKit (macOS) | ✅ primary backend | Local builds, workspace tests, screenshots, synthetic Core-backed AX projection, and text/environment paths are supported where listed below. |
+| WinUI 3 (Windows) | 🚧 substantial implementation | Core snapshot and the XAML AutomationPeer bridge skeleton are implemented in source; UIA pattern providers and real Windows build/runtime verification remain incomplete. |
 | GTK4 (Linux) | ⬜ stub | No functional backend or toolkit dependency. |
 | UIKit / Android | ⬜ absent | No implementation. |
 
@@ -19,6 +19,7 @@ Snapshot: 2026-09-12. Durable backend architecture is indexed in [`../design/REA
 - Native text widgets reduce unsupported gradient/image foreground brushes. TextArea character spacing does not cover every native text-storage path, and PasswordBox intentionally retains the system secure-font cascade.
 - SVG filters, blend modes, masks, image-brush fills, and pattern cases use documented simpler fallbacks where Core Image or native drawing cannot represent the requested effect.
 - Window hide/close, transparency, and floating/normal levels are implemented; interactive native close-button verification remains host-dependent where a test harness cannot construct an AppKit Window on the main thread.
+- Core-owned synthetic AX semantics are projected from `AccessibilityRuntime`; cached elements are keyed by `AccessibilityId`, and `NativeIslandView` remains a rendering/input containment boundary with no public AX children. The shared accessibility scenario is defined under [`../../tests/e2e/accessibility-semantics/scenario.md`](../../tests/e2e/accessibility-semantics/scenario.md). The checked-in AppKit driver completed two clean-launch runs, including direct AX text/numeric value setting, semantic state/value updates, exit removal, stale-action handling, duplicate suppression, and cleanup.
 
 ## WinUI 3 current state
 
@@ -27,6 +28,7 @@ Snapshot: 2026-09-12. Durable backend architecture is indexed in [`../design/REA
 - Popup teardown, native light-dismiss ordering, close interception, and newer Menu/icon paths are implemented or code-reviewed, but this macOS development environment cannot compile or execute the Windows-only backend; runtime verification remains in [#157](https://github.com/puchinya/elwindui/issues/157).
 - SVG offscreen effect-graph work, full cross-backend parity audit, and the remaining native styling/effect gaps are incomplete.
 - The Windows App Runtime registration limitation observed in the current sandbox is an environment constraint, not evidence of a product regression; Windows acceptance must run on a normal Windows host.
+- The Core snapshot, stable-ID callback ABI, and Canvas-compatible AutomationPeer source are present. The current bridge exposes the semantic tree and basic properties, but UIA pattern providers are not implemented. Real Windows bridge build, pattern/action checks, duplicate suppression, and the shared scenario require a supported Windows host and remain unverified.
 
 ## Platform boundaries
 

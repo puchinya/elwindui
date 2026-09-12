@@ -1,6 +1,7 @@
 # UI tree and lifecycle design
 
-Related specification: [`../../specs/ui_spec.md`](../../specs/ui_spec.md).
+Related specifications: [`../../specs/ui_spec.md`](../../specs/ui_spec.md) and
+[`../../specs/accessibility_spec.md`](../../specs/accessibility_spec.md).
 
 ## Responsibilities
 
@@ -13,6 +14,10 @@ The runtime distinguishes:
 - native owner: mapping from a backend widget to its ElwindUI element.
 
 Helpers inserted by a backend may participate in the visual tree but must not become observable logical parents.
+
+Accessibility is a separate Core-owned semantic graph over the hosted Visual tree. Its stable
+`AccessibilityId` allocation and snapshot traversal are independent from retained render-group
+identity and from backend native children; see [`accessibility_design.md`](accessibility_design.md).
 
 ## Ownership
 
@@ -47,6 +52,6 @@ defaultの`false`を継承し、template application stateとproviderはControl�
 
 ## Participation
 
-Existence and active participation are separate. A collapsed or inactive hosted subtree may retain UI and native-control state while being excluded from layout, render-tree generation, hit testing, focus order, and shortcut dispatch. Host activation is the boundary used by independently hosted content such as `TabView` pages.
+Existence and active participation are separate. A collapsed or inactive hosted subtree may retain UI and native-control state while being excluded from layout, render-tree generation, hit testing, focus order, shortcut dispatch, and the Core semantic accessibility snapshot. Host activation is the boundary used by independently hosted content such as `TabView` pages. `Exiting` visuals are retained for rendering but are removed from semantic accessibility immediately.
 
 Reactivation starts from layout with the current viewport and reconstructs backend render resources. Participation checks are centralized so the subsystems cannot disagree about whether a subtree is active.

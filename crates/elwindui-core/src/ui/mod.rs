@@ -34,6 +34,7 @@
 //! established by the time `construct()` returns (via `#[class]`'s `__self_weak`, see
 //! `UIElement::construct`) — well before any child is ever added.
 
+pub use crate::accessibility::*;
 use crate::base::{AffineTransform, CornerRadius, Point, Rect, Size};
 #[cfg(test)]
 use crate::graphics::Color;
@@ -82,7 +83,7 @@ mod text_style;
 // (`OverridableBase` inherits `UIElement`, the `Fake*` widgets are `struct_only` implementors of
 // the `NativeControl` family), so they must expand after every class above is registered.
 #[cfg(test)]
-mod testsupport;
+pub(crate) mod testsupport;
 
 // Glob re-exports, never named lists: `#[class]` emits a companion `__elwindui_macros_of_*` module
 // next to each class, which downstream `#[component(inherits ..)]` resolves as

@@ -5391,6 +5391,7 @@ fn generate_view(
     };
     let mut ctx = ViewCtx {
         closure_param: None,
+        closure_param_is_rc_identity: false,
         own_fields,
         mutable_own_fields: HashSet::new(),
         property_dependencies: own_dependents_of.clone(),
@@ -5414,6 +5415,8 @@ fn generate_view(
         template_target: None,
         template_bare_parent_fields: HashSet::new(),
         storage: ViewStorage::Component,
+        environment_scope_bindings_are_lexical: false,
+        dynamic_slots_are_lexical: false,
     };
 
     // Component default bodies are compiled through the same semantic backend used by standalone
@@ -8924,12 +8927,18 @@ enum ViewStorage {
     },
 }
 
+#[derive(Clone)]
 struct ViewCtx {
     /// Set while evaluating a `ViewExpr::Closure` body (`key`/`render_label`/`render_content`) to
     /// the closure's own declared parameter name (e.g. `"doc"`), so a bare reference to it emits
     /// the plain local variable that name is aliased to, rather than treating it as a component
     /// field owner. `None` everywhere else.
     closure_param: Option<String>,
+    /// Whether the current renderer parameter is supplied by an Rc-identity-preserving outer
+    /// collection. Nested collection paths such as `outer_item.children` can then retain their
+    /// own child renderers across refreshes without requiring the renderer parameter's concrete
+    /// item type to be present in the consumer's symbol table.
+    closure_param_is_rc_identity: bool,
     /// This component's own `#[param]`-shaped fields (no initializer — the same set `generate_view`
     /// turns into `new`'s positional arguments / raw struct fields, see `param_names`), mapped to
     /// each field's own declared type string. A bare 1-segment reference to one of these (e.g.
@@ -9006,28 +9015,36 @@ struct ViewCtx {
     /// generated fields and methods; ControlTemplate bodies use factory-local bindings and a
     /// refresh cell while retaining the exact same planning and value/event emitters.
     storage: ViewStorage,
+    /// Whether EnvironmentScope bindings in the current planning context are lexical locals. The
+    /// ordinary component plan resolves its retained scope through `self`; a persistent `for`
+    /// renderer switches its item-body plan to this lexical policy because scopes created there
+    /// live in the renderer's local plan rather than on the component struct.
+    environment_scope_bindings_are_lexical: bool,
+    /// Whether dynamic-region slots in the current planning context are lexical locals. The main
+    /// component plan keeps them on `self`; a persistent `for` renderer keeps its nested dynamic
+    /// slots alongside the renderer-local item plan and retains them through the item's existing
+    /// subscription ownership.
+    dynamic_slots_are_lexical: bool,
 }
 
 impl ViewCtx {
     fn with_closure_param(&self, param: &str) -> ViewCtx {
-        ViewCtx {
-            closure_param: Some(param.to_string()),
-            own_fields: self.own_fields.clone(),
-            mutable_own_fields: self.mutable_own_fields.clone(),
-            property_dependencies: self.property_dependencies.clone(),
-            bindable_owners: self.bindable_owners.clone(),
-            weak_bindable_owners: self.weak_bindable_owners.clone(),
-            default_template_parent: self.default_template_parent,
-            template_parent_alias: self.template_parent_alias.clone(),
-            template_base_fields: self.template_base_fields.clone(),
-            implicit_owner: self.implicit_owner.clone(),
-            target: self.target.clone(),
-            template_parent: self.template_parent.clone(),
-            template_property_bounds: self.template_property_bounds.clone(),
-            template_target: self.template_target.clone(),
-            template_bare_parent_fields: self.template_bare_parent_fields.clone(),
-            storage: self.storage.clone(),
-        }
+        let mut ctx = self.clone();
+        ctx.closure_param = Some(param.to_string());
+        ctx
+    }
+
+    fn with_closure_param_rc_identity(&self, is_rc_identity: bool) -> ViewCtx {
+        let mut ctx = self.clone();
+        ctx.closure_param_is_rc_identity = is_rc_identity;
+        ctx
+    }
+
+    fn with_lexical_environment_scope_bindings(&self) -> ViewCtx {
+        let mut ctx = self.clone();
+        ctx.environment_scope_bindings_are_lexical = true;
+        ctx.dynamic_slots_are_lexical = true;
+        ctx
     }
 
     fn is_template_storage(&self) -> bool {
@@ -9065,7 +9082,7 @@ impl ViewCtx {
     /// the same semantic value in their lexical factory scope.  A renderer must read this on each
     /// invocation so it observes in-place scope resync rather than a construction-time snapshot.
     fn environment_scope_value(&self, binding: &syn::Ident) -> TokenStream {
-        if self.is_template_storage() {
+        if self.is_template_storage() || self.environment_scope_bindings_are_lexical {
             quote! { #binding.clone() }
         } else {
             quote! {
@@ -9106,7 +9123,7 @@ impl ViewCtx {
 
     fn dynamic_slot(&self, binding: &syn::Ident) -> TokenStream {
         let slot = dynamic_slot_ident(binding);
-        if self.is_template_storage() {
+        if self.is_template_storage() || self.dynamic_slots_are_lexical {
             quote! { #slot }
         } else {
             quote! { self.#slot }
@@ -9210,6 +9227,7 @@ pub(crate) fn lower_template_body(
     let refresh_cell_ident = format_ident!("__elwindui_template_refresh_cell");
     let ctx = ViewCtx {
         closure_param: None,
+        closure_param_is_rc_identity: false,
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
         property_dependencies: HashMap::new(),
@@ -9228,6 +9246,8 @@ pub(crate) fn lower_template_body(
             environment: environment_ident.clone(),
             refresh_cell: refresh_cell_ident.clone(),
         },
+        environment_scope_bindings_are_lexical: true,
+        dynamic_slots_are_lexical: true,
     };
 
     let mut plan = Vec::new();
@@ -10432,7 +10452,6 @@ fn emit_for_renderer(
     environment_scope: Option<&syn::Ident>,
 ) -> TokenStream {
     let param_ident = format_ident!("{}", binding);
-    let closure_ctx = ctx.with_closure_param(binding);
     let renderer_scope = environment_scope.map(|_| format_ident!("__elwindui_for_scope"));
     let item_environment_scope = renderer_scope.as_ref();
     let scope_setup = environment_scope.map(|scope| {
@@ -10444,6 +10463,13 @@ fn emit_for_renderer(
             let #renderer_scope = #scope_value;
         }
     });
+    // Resolve the incoming enclosing scope with the caller's access policy above. Any
+    // EnvironmentScope markers created while planning this renderer's item body are lexical locals
+    // in this closure, so the item-body context must use the lexical policy afterward.
+    let closure_ctx = ctx
+        .with_closure_param(binding)
+        .with_closure_param_rc_identity(subscribe_to_item_changes)
+        .with_lexical_environment_scope_bindings();
     let mut plan = Vec::new();
     let mut roots = Vec::new();
     for entry in body {
@@ -10463,12 +10489,20 @@ fn emit_for_renderer(
     }
     let mut construct = TokenStream::new();
     for planned in &plan {
-        emit_construction(planned, &closure_ctx, from, table, &mut construct, &plan);
+        if planned.dynamic.is_none() {
+            emit_construction(planned, &closure_ctx, from, table, &mut construct, &plan);
+        }
     }
+    let renderer_local_dynamic_slot_declarations =
+        emit_renderer_local_dynamic_slot_declarations(&plan, from, table);
+    let renderer_local_dynamic_refreshes =
+        emit_renderer_local_dynamic_refreshes(&plan, &closure_ctx, from, table);
     let wiring = emit_for_item_wiring(&plan, &closure_ctx, from, table);
     let subscriptions = subscribe_to_item_changes
         .then(|| emit_for_item_subscriptions(&plan, binding, &closure_ctx, from, table))
         .unwrap_or_default();
+    let renderer_local_dynamic_subscriptions =
+        emit_renderer_local_dynamic_subscriptions(&plan, binding, &closure_ctx, from, table);
     let children = roots.iter().map(|(binding, ty)| {
         dynamic_child_binding(quote! { #binding }, ty, item_trait, from, table)
     });
@@ -10500,13 +10534,243 @@ fn emit_for_renderer(
     quote! {
         |#param_ident: &_| {
             #scope_setup
+            #renderer_local_dynamic_slot_declarations
             #construct
+            #renderer_local_dynamic_refreshes
             #wiring
             let mut __dynamic_item_subscriptions = Vec::new();
+            #renderer_local_dynamic_subscriptions
             #subscriptions
             #dynamic_item
         }
     }
+}
+
+/// Declares the `DynamicChildSlot` values needed by dynamic regions whose real host is built in a
+/// persistent `for` renderer. Component-main plans keep these slots on `self`; a renderer-local
+/// plan has no generated struct field, so the slot must live beside the item's constructed nodes
+/// and be retained by the item's existing subscription ownership.
+fn emit_renderer_local_dynamic_slot_declarations(
+    plan: &[PlannedNode],
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let mut out = TokenStream::new();
+    for node in plan {
+        if node.dynamic.is_none() {
+            continue;
+        }
+        let parent = find_dynamic_region_anchor(plan, &node.binding);
+        let parent_info = table.resolve(from, &parent.type_path);
+        if parent_info.map(effective_content_shape) == Some(EffectiveContentShape::Scalar) {
+            continue;
+        }
+        let props_macro = dynamic_content_props_macro_path(&parent.type_path, parent_info);
+        let item_ext = dynamic_collection_item_trait_for_type_with_props_macro(
+            &parent.type_path,
+            from,
+            table,
+            props_macro.clone(),
+        );
+        let slot = dynamic_slot_ident(&node.binding);
+        let slot_type = match parent_info.map(effective_content_shape) {
+            Some(EffectiveContentShape::Collection) => {
+                quote! { elwindui::core::ui::DynamicChildSlot<#item_ext> }
+            }
+            Some(EffectiveContentShape::External) | None => {
+                quote! { #props_macro!(@content_slot_type #item_ext) }
+            }
+            Some(EffectiveContentShape::Scalar) => continue,
+        };
+        out.extend(quote! {
+            let #slot: #slot_type =
+                <#slot_type as ::std::default::Default>::default();
+        });
+    }
+    out
+}
+
+/// Emits initial refreshes for the dynamic regions directly hosted by real nodes in a renderer's
+/// local plan. `emit_dynamic_node_refresh` recursively reaches nested `if`/`match`/`for` markers,
+/// so only the real-hosted entries are emitted here.
+fn emit_renderer_local_dynamic_refreshes(
+    plan: &[PlannedNode],
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let mut out = TokenStream::new();
+    for node in plan {
+        if node.dynamic.is_none() {
+            continue;
+        }
+        let Some(parent) = plan.iter().find(|candidate| {
+            candidate
+                .child_bindings
+                .iter()
+                .any(|(child, _)| child == &node.binding)
+        }) else {
+            continue;
+        };
+        out.extend(emit_renderer_local_dynamic_refresh(
+            plan, node, parent, ctx, from, table,
+        ));
+    }
+    out
+}
+
+/// Emits one renderer-local dynamic refresh, using the same shape-metadata boundary as the
+/// component-main refresh method. The host is a lexical node binding rather than `self` storage,
+/// while all nested dynamic markers share its slot and insertion point.
+fn emit_renderer_local_dynamic_refresh(
+    plan: &[PlannedNode],
+    node: &PlannedNode,
+    parent: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let parent_binding = &parent.binding;
+    let parent_info = table.resolve(from, &parent.type_path);
+    let parent_ext_path = dsl_ext_path(&parent.type_path, parent_info);
+    let scalar_item_ext = ItemTraitTokens::KnownIdent(format_ident!("UIElementExt"));
+    let scalar_body = {
+        let setter = parent_info
+            .and_then(|info| info.content_field.as_deref())
+            .map(|field| format_ident!("set_{field}"));
+        emit_scalar_dynamic_node_refresh(
+            plan,
+            node,
+            parent_binding,
+            setter.as_ref(),
+            false,
+            &parent.type_path,
+            &scalar_item_ext,
+            ctx,
+            from,
+            table,
+            false,
+        )
+    };
+    let body = match parent_info.map(effective_content_shape) {
+        Some(EffectiveContentShape::Collection) => {
+            let info = parent_info.expect("content shape came from parent metadata");
+            let item_ext = dynamic_collection_item_trait_for_type_with_props_macro(
+                &parent.type_path,
+                from,
+                table,
+                dynamic_content_props_macro_path(&parent.type_path, parent_info),
+            );
+            let host = dynamic_collection_host_for_info(info, quote! { #parent_binding }, false);
+            emit_dynamic_node_refresh(plan, node, &host, &item_ext, ctx, from, table)
+        }
+        Some(EffectiveContentShape::Scalar) => scalar_body,
+        Some(EffectiveContentShape::External) | None => {
+            let props_macro = dynamic_content_props_macro_path(&parent.type_path, parent_info);
+            let item_ext = dynamic_collection_item_trait_for_type_with_props_macro(
+                &parent.type_path,
+                from,
+                table,
+                props_macro.clone(),
+            );
+            let host = dynamic_collection_host_query_for_shape(
+                &parent.type_path,
+                parent_info,
+                props_macro.clone(),
+                quote! { #parent_binding },
+                false,
+            );
+            let collection_body =
+                emit_dynamic_node_refresh(plan, node, &host, &item_ext, ctx, from, table);
+            quote! {
+                #props_macro!(@content_shape { #scalar_body }, { #collection_body });
+            }
+        }
+    };
+    let layout_children_use =
+        if parent_info.is_some_and(|info| info.is_virtual_builtin) || parent_info.is_none() {
+            quote! { #[allow(unused_imports)] use elwindui::core::ui::LayoutExt as _; }
+        } else {
+            TokenStream::new()
+        };
+    quote! {
+        {
+            use #parent_ext_path as _;
+            #layout_children_use
+            #body
+        }
+    }
+}
+
+/// A renderer-local collection whose source is a direct property of the renderer parameter needs
+/// an item-owned subscription. This is the nested `for` case: the outer item's renderer already
+/// exists when its child collection changes, so refreshing the component-main plan cannot reach
+/// it. The callback recreates only the lexical aliases needed by the shared refresh emitter.
+fn emit_renderer_local_dynamic_subscriptions(
+    plan: &[PlannedNode],
+    parameter: &str,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let parameter_ident = format_ident!("{parameter}");
+    let mut out = TokenStream::new();
+    let mut subscription_index = 0usize;
+    for node in plan {
+        let Some(DynamicPlan::For { collection, .. }) = node.dynamic.as_ref() else {
+            continue;
+        };
+        let Some(property) = renderer_local_collection_property(collection, parameter) else {
+            continue;
+        };
+        let Some(parent) = plan.iter().find(|candidate| {
+            candidate
+                .child_bindings
+                .iter()
+                .any(|(child, _)| child == &node.binding)
+        }) else {
+            continue;
+        };
+        let refresh = emit_renderer_local_dynamic_refresh(plan, node, parent, ctx, from, table);
+        let source = format_ident!("__elwindui_renderer_source_{subscription_index}");
+        let source_for_callback =
+            format_ident!("__elwindui_renderer_source_for_callback_{subscription_index}");
+        let host = format_ident!("__elwindui_renderer_host_{subscription_index}");
+        let host_for_callback =
+            format_ident!("__elwindui_renderer_host_for_callback_{subscription_index}");
+        let property = syn::LitStr::new(&property, proc_macro2::Span::call_site());
+        let parent_binding = &parent.binding;
+        out.extend(quote! {
+            {
+                let #source = std::rc::Rc::clone(#parameter_ident);
+                let #source_for_callback = std::rc::Rc::clone(&#source);
+                let #host = std::rc::Rc::clone(&#parent_binding);
+                let #host_for_callback = std::rc::Rc::clone(&#host);
+                __dynamic_item_subscriptions.push(
+                    elwindui::core::reactive::ObservableExt::subscribe_property_changed(
+                        &*#source,
+                        move |property_name: &'static str| {
+                            if property_name == #property {
+                                let #parameter_ident = &#source_for_callback;
+                                let #parent_binding = std::rc::Rc::clone(&#host_for_callback);
+                                #refresh
+                            }
+                        },
+                    ),
+                );
+            }
+        });
+        subscription_index += 1;
+    }
+    out
+}
+
+fn renderer_local_collection_property(collection: &ViewExpr, parameter: &str) -> Option<String> {
+    let ViewExpr::Path(path) = collection else {
+        return None;
+    };
+    (path.len() == 2 && path.first().is_some_and(|segment| segment == parameter))
+        .then(|| path[1].clone())
 }
 
 /// Wires every `on_*` event attribute declared on an element inside a `for` loop's own item
@@ -11222,6 +11486,14 @@ fn collection_type_is_vec_rc(
             None => return false,
         },
         [owner, field] => {
+            if ctx.closure_param.as_deref() == Some(owner) && ctx.closure_param_is_rc_identity {
+                // The enclosing renderer only sets this policy when its source collection was
+                // proven to contain Rc identities. Generated observable Vec fields then expose
+                // the same Rc-wrapped item shape through the renderer parameter, even though the
+                // parameter's concrete item type is intentionally not in this consumer's symbol
+                // table.
+                return true;
+            }
             let Some(owner_type) = ctx.own_fields.get(owner) else {
                 return false;
             };
@@ -17563,6 +17835,14 @@ fn owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> TokenStrea
 /// genuinely unresolved `owner` falls through to the original `owner_value_tokens` call unchanged
 /// (preserving whatever diagnostic/behavior that already produced).
 fn path_owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> TokenStream {
+    // A persistent `for` renderer evaluates dynamic expressions with `EmitMode::WithSelf` so
+    // component-owned fields still resolve through the component receiver. Its own item
+    // parameter is the one lexical exception: `outer_item.children` must use the renderer's
+    // parameter, not become `self.outer_item.children()`.
+    if ctx.closure_param.as_deref() == Some(owner) {
+        let ident = format_ident!("{owner}");
+        return quote! { #ident };
+    }
     if ctx.own_fields.contains_key(owner) {
         return owner_value_tokens(ctx, mode, owner);
     }
@@ -17668,6 +17948,7 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
 ) -> TokenStream {
     let ctx = ViewCtx {
         closure_param: None,
+        closure_param_is_rc_identity: false,
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
         property_dependencies: HashMap::new(),
@@ -17686,6 +17967,8 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
             environment: format_ident!("__environment"),
             refresh_cell: format_ident!("__elwindui_template_refresh_cell"),
         },
+        environment_scope_bindings_are_lexical: true,
+        dynamic_slots_are_lexical: true,
     };
     emit_on_event_closure_body(body, closure_params, &ctx, &EmitMode::Construction)
 }

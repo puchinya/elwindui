@@ -486,3 +486,146 @@ fn template_scoped_for_late_item_uses_lexical_scope_storage() {
         )]
     );
 }
+
+// Review delta for PR #258: the inner scope is deliberately declared inside the outer `for`
+// item's local renderer plan. It must remain a lexical renderer-local binding rather than being
+// looked up as a nonexistent component `self` field.
+thread_local! {
+    static NESTED_RENDERER_SCOPED_FOR_RECORDS: RefCell<Vec<(String, String, String)>> =
+        RefCell::new(Vec::new());
+}
+
+#[elwindui::environment_key(
+    name = environment_scope_nested_renderer_outer,
+    value = String,
+    default = String::from("nested-renderer-root-outer")
+)]
+pub struct EnvironmentScopeNestedRendererOuter;
+
+#[elwindui::environment_key(
+    name = environment_scope_nested_renderer_inner,
+    value = String,
+    default = String::from("nested-renderer-root-inner")
+)]
+pub struct EnvironmentScopeNestedRendererInner;
+
+#[elwindui::viewmodel]
+mod environment_scope_nested_renderer_child_item {
+    struct EnvironmentScopeNestedRendererChildItem {
+        #[observable(default = String::new())]
+        label: String,
+    }
+}
+
+#[elwindui::viewmodel]
+mod environment_scope_nested_renderer_outer_item {
+    struct EnvironmentScopeNestedRendererOuterItem {
+        #[observable(default = String::new())]
+        label: String,
+        #[observable(default = Vec::new())]
+        children: Vec<EnvironmentScopeNestedRendererChildItem>,
+    }
+}
+
+#[elwindui::viewmodel]
+mod environment_scope_nested_renderer_items {
+    struct EnvironmentScopeNestedRendererItems {
+        #[observable(default = Vec::new())]
+        items: Vec<EnvironmentScopeNestedRendererOuterItem>,
+    }
+}
+
+#[elwindui::component(inherits ContentControl)]
+struct EnvironmentScopeNestedRendererProbe {
+    #[param]
+    label: String,
+    #[environment(environment_scope_nested_renderer_outer)]
+    outer: String,
+    #[environment(environment_scope_nested_renderer_inner)]
+    inner: String,
+
+    template: template_view!(|templated_parent: Self| {
+        on_mount {
+            NESTED_RENDERER_SCOPED_FOR_RECORDS.with(|records| {
+                records
+                    .borrow_mut()
+                    .push((self.label(), self.outer(), self.inner()));
+            });
+        }
+        TextBlock { text: label }
+    }),
+}
+
+#[elwindui::component]
+impl EnvironmentScopeNestedRendererProbe {}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct EnvironmentScopeNestedRendererParent {
+    #[bindable]
+    vm: std::rc::Rc<EnvironmentScopeNestedRendererItems>,
+
+    body: view! {
+        EnvironmentScope {
+            environment_scope_nested_renderer_outer: "scope-outer",
+            for outer_item in vm.items {
+                VerticalLayout {
+                    EnvironmentScope {
+                        environment_scope_nested_renderer_inner: "scope-inner",
+                        for inner_item in outer_item.children {
+                            EnvironmentScopeNestedRendererProbe { label: inner_item.label }
+                        }
+                    }
+                }
+            }
+        }
+    },
+}
+
+#[elwindui::component]
+impl EnvironmentScopeNestedRendererParent {}
+
+#[test]
+fn renderer_local_nested_environment_scope_uses_lexical_binding() {
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeNestedRendererOuter>("nested-renderer-root-outer".to_string());
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeNestedRendererInner>("nested-renderer-root-inner".to_string());
+    NESTED_RENDERER_SCOPED_FOR_RECORDS.with(|records| records.borrow_mut().clear());
+
+    let outer_item = EnvironmentScopeNestedRendererOuterItem::new();
+    outer_item.set_label("outer".to_string());
+    let vm = EnvironmentScopeNestedRendererItems::new();
+    vm.items_push(outer_item.clone());
+    let _parent = elwindui::new!(EnvironmentScopeNestedRendererParent(vm: vm.clone()));
+
+    let first_child = EnvironmentScopeNestedRendererChildItem::new();
+    first_child.set_label("first".to_string());
+    outer_item.children_push(first_child);
+    assert_eq!(
+        NESTED_RENDERER_SCOPED_FOR_RECORDS.with(|records| records.borrow().clone()),
+        vec![(
+            "first".to_string(),
+            "scope-outer".to_string(),
+            "scope-inner".to_string()
+        )]
+    );
+
+    let second_child = EnvironmentScopeNestedRendererChildItem::new();
+    second_child.set_label("second".to_string());
+    outer_item.children_push(second_child);
+    assert_eq!(
+        NESTED_RENDERER_SCOPED_FOR_RECORDS.with(|records| records.borrow().clone()),
+        vec![
+            (
+                "first".to_string(),
+                "scope-outer".to_string(),
+                "scope-inner".to_string()
+            ),
+            (
+                "second".to_string(),
+                "scope-outer".to_string(),
+                "scope-inner".to_string()
+            )
+        ]
+    );
+}

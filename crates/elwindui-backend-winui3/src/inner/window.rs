@@ -485,13 +485,6 @@ impl InnerWindow {
         self.try_register_bounds_changed_handler();
     }
 
-    #[cfg(test)]
-    pub(crate) fn is_visible_for_test(&self) -> bool {
-        self.app_window()
-            .and_then(|window| window.IsVisible().ok())
-            .unwrap_or(false)
-    }
-
     /// `Window.AppWindow` (Windows App SDK 1.3+) already handles the `WinRT.Interop.WindowNative`/
     /// `Win32Interop.GetWindowIdFromWindow` dance internally, so no manual interop is needed here.
     fn app_window(&self) -> Option<bindings::Microsoft::UI::Windowing::AppWindow> {

@@ -164,7 +164,6 @@ mod hosted_xaml_regression_tests {
     };
     use crate::bindings::Microsoft::UI::Xaml::Window as XamlWindow;
     use crate::bindings::winui_text::{FontStretch as XamlFontStretch, FontStyle as XamlFontStyle};
-    use crate::inner::InnerWindow;
     use crate::render::{
         WinUi3TextBackend, apply_cascaded_text_style_to_control, apply_text_style_to_control,
         apply_text_style_to_text_block, apply_text_style_to_text_block_with_foreground,
@@ -174,6 +173,7 @@ mod hosted_xaml_regression_tests {
         Brush, CascadedTextStyle, Color, ComputedTextStyle, FontFamily, FontStretch, FontStyle,
         FontWeight, TextBackend, TextMeasureRequest, TextWrapping,
     };
+    use elwindui_core::ui::WindowExt;
     use windows::Foundation::IPropertyValue;
     use windows::core::{HSTRING, Interface};
 
@@ -439,104 +439,100 @@ mod hosted_xaml_regression_tests {
                     failed_icon_conversion_does_not_remove_the_action();
 
                 crate::app::reset_window_lifecycle_test_state();
-                // Issue #254 / PR #257 review remediation: `InnerWindow::new` now takes the final
-                // owner's `Weak<dyn WindowExt>` (obtained from `__self_weak` at
-                // `Window::construct()` time in real usage). This is this crate's only real,
-                // host-executed Window-retention regression -- a second, independent one used to
-                // live in `crate::app::window_lifecycle_tests`, but `Microsoft.UI.Xaml.Application`
-                // /`XamlControlsResources` turned out to be a genuine process-wide singleton, not
-                // merely per-thread: running a second `crate::init()`/`application::run()` cycle in
-                // the same test *process* (even sequentially, even on its own thread) after this
-                // one already tore its own Application down failed to reinstall
-                // `XamlControlsResources` ("Cannot find a resource with the given key:
-                // AccentAcrylicBackgroundFillColorDefaultBrush") and then corrupted the heap on
-                // exit -- confirmed empirically once this crate's pre-existing, unrelated build
-                // failure (see `docs/status/backend_status.md`) was fixed and both tests could
-                // finally execute for the first time. All Window-retention coverage therefore lives
-                // in this one already-running Application session instead.
+                // Issue #254 / PR #257 final scope expansion: exercises the real backend `Window`
+                // object directly (`Window::construct()` -> `__self_weak` -> owned `InnerWindow` ->
+                // `Window::show()`/`hide()`/`close()`) -- the exact object DockingControl and every
+                // other caller actually construct -- rather than a decoy owner paired with a
+                // separately, manually constructed `InnerWindow`. An earlier revision of this test
+                // did the latter (`InnerWindow::new(weak_owner)` driven directly, `owner` used only
+                // to mint the `Weak`); that never called `Window::show()`/`hide()`/`close()` at all,
+                // so it could not actually prove the real `Window` path retains correctly.
                 //
-                // `owner_a`/`owner_b`/`owner_c` are standalone `native_ui::Window`s used purely to
-                // mint a valid `Weak<dyn WindowExt>` for each `InnerWindow::new()` call -- the
-                // actual value the app registry retains is the *owner*, so dropping the caller's
-                // own local `owner_*` binding after `show()` and then upgrading `weak_owner_*` is
-                // what proves the registry itself, not this local variable, is the strong lifetime
-                // authority.
-                let owner_a: Rc<dyn elwindui_core::ui::WindowExt> = crate::native_ui::Window::new();
-                let weak_owner_a = Rc::downgrade(&owner_a);
-                let lifecycle_window = InnerWindow::new(weak_owner_a.clone());
+                // This is this crate's only real, host-executed Window-retention regression --
+                // `Microsoft.UI.Xaml.Application`/`XamlControlsResources` is a genuine process-wide
+                // singleton, not merely per-thread: running a second `crate::init()`/
+                // `application::run()` cycle in the same test *process* after this one already tore
+                // its own Application down failed to reinstall `XamlControlsResources` ("Cannot find
+                // a resource with the given key: AccentAcrylicBackgroundFillColorDefaultBrush") and
+                // then corrupted the heap on exit -- confirmed empirically once this crate's
+                // pre-existing, unrelated build failure (see `docs/status/backend_status.md`) was
+                // fixed and both tests could finally execute for the first time. All Window-
+                // retention coverage therefore lives in this one already-running Application
+                // session instead of a second, independent one.
 
-                lifecycle_window.show();
-                drop(owner_a);
+                // A: caller-drop survival -- the *only* remaining strong reference after `drop`
+                // is the application registry's own, never a test-local one.
+                let window_a = crate::native_ui::Window::new();
+                let weak_a = Rc::downgrade(&window_a);
+                window_a.show();
+                drop(window_a);
                 assert!(
-                    lifecycle_window.is_visible_for_test(),
-                    "show() must make the AppWindow visible"
+                    weak_a.upgrade().is_some(),
+                    "the application registry, not the caller's own dropped Rc, must be what \
+                     keeps the real Window alive"
                 );
                 assert_eq!(crate::app::retained_window_count_for_test(), 1);
-                assert!(
-                    weak_owner_a.upgrade().is_some(),
-                    "the application registry, not the caller's own dropped Rc, must be what \
-                     keeps the owner alive"
-                );
 
-                lifecycle_window.hide();
-                assert!(
-                    !lifecycle_window.is_visible_for_test(),
-                    "hide() must make the AppWindow invisible"
-                );
+                // B: hide() then show() must retain exactly once, not twice. The temporary upgrade
+                // is scoped and dropped again immediately after use.
+                {
+                    let window_a = weak_a.upgrade().expect("A retained");
+                    window_a.hide();
+                    window_a.show();
+                }
                 assert_eq!(
                     crate::app::retained_window_count_for_test(),
                     1,
-                    "hide() must retain the existing native window"
+                    "hide() then show() must not create a second retention entry"
                 );
-
-                lifecycle_window.show();
                 assert!(
-                    lifecycle_window.is_visible_for_test(),
-                    "show() after hide() must make the same AppWindow visible again"
-                );
-                assert_eq!(
-                    crate::app::retained_window_count_for_test(),
-                    1,
-                    "re-showing must not retain the same native window twice"
+                    weak_a.upgrade().is_some(),
+                    "A must remain alive after the temporary upgrade used for hide()/show() drops"
                 );
 
-                // A second, independent Window -- proves isolation: closing A must not release B.
-                let owner_b: Rc<dyn elwindui_core::ui::WindowExt> = crate::native_ui::Window::new();
-                let weak_owner_b = Rc::downgrade(&owner_b);
-                let lifecycle_window_b = InnerWindow::new(weak_owner_b.clone());
-                lifecycle_window_b.show();
-                drop(owner_b);
+                // C: a second, independent real Window -- its own caller-side Rc is dropped too,
+                // so both Windows are proven alive by the application registry alone.
+                let window_b = crate::native_ui::Window::new();
+                let weak_b = Rc::downgrade(&window_b);
+                window_b.show();
+                drop(window_b);
                 assert_eq!(
                     crate::app::retained_window_count_for_test(),
                     2,
                     "a second shown window must also be retained, independently of the first"
                 );
+                assert!(weak_a.upgrade().is_some(), "A must still be alive");
+                assert!(weak_b.upgrade().is_some(), "B must still be alive");
 
-                lifecycle_window.close();
-                assert!(
-                    !lifecycle_window.is_visible_for_test(),
-                    "close() must leave no visible native window"
+                // Closing A (through a scoped temporary upgrade) releases only A.
+                {
+                    let window_a = weak_a.upgrade().expect("A retained");
+                    window_a.close();
+                }
+                assert_eq!(
+                    crate::app::release_window_call_count_for_test(),
+                    1,
+                    "programmatic close() must reach release_window exactly once for A"
                 );
                 assert_eq!(
                     crate::app::retained_window_count_for_test(),
                     1,
                     "closing A must release only A, leaving B retained"
                 );
-                assert_eq!(
-                    crate::app::release_window_call_count_for_test(),
-                    1,
-                    "programmatic close() must reach release_window exactly once"
+                assert!(
+                    weak_a.upgrade().is_none(),
+                    "A must actually have dropped now that its temporary upgrade is gone too"
                 );
                 assert!(
-                    weak_owner_a.upgrade().is_none(),
-                    "A's owner must actually have dropped once the registry released it"
-                );
-                assert!(
-                    weak_owner_b.upgrade().is_some(),
+                    weak_b.upgrade().is_some(),
                     "B must remain alive while A is gone"
                 );
 
-                lifecycle_window_b.close();
+                // Closing B releases it too and empties the registry.
+                {
+                    let window_b = weak_b.upgrade().expect("B retained");
+                    window_b.close();
+                }
                 assert_eq!(
                     crate::app::retained_window_count_for_test(),
                     0,
@@ -548,30 +544,29 @@ mod hosted_xaml_regression_tests {
                     "both windows must each release exactly once"
                 );
                 assert!(
-                    weak_owner_b.upgrade().is_none(),
-                    "B's owner must actually have dropped too"
+                    weak_b.upgrade().is_none(),
+                    "B must actually have dropped now that its temporary upgrade is gone too"
                 );
 
-                // T12: a never-shown Window creates no registry entry and can close/drop safely,
-                // without releasing an unrelated id.
-                let owner_c: Rc<dyn elwindui_core::ui::WindowExt> = crate::native_ui::Window::new();
-                let weak_owner_c = Rc::downgrade(&owner_c);
-                let lifecycle_window_c = InnerWindow::new(weak_owner_c.clone());
+                // D / T12: a never-shown real Window creates no registry entry and can close/drop
+                // safely, without releasing an unrelated id.
+                let window_c = crate::native_ui::Window::new();
+                let weak_c = Rc::downgrade(&window_c);
                 assert_eq!(
                     crate::app::retained_window_count_for_test(),
                     0,
                     "construct() alone must not retain"
                 );
-                lifecycle_window_c.close();
+                window_c.close();
                 assert_eq!(
                     crate::app::release_window_call_count_for_test(),
                     2,
                     "closing a never-shown window must not call release_window at all"
                 );
-                drop(owner_c);
+                drop(window_c);
                 assert!(
-                    weak_owner_c.upgrade().is_none(),
-                    "a never-shown, never-retained window's owner must drop normally"
+                    weak_c.upgrade().is_none(),
+                    "a never-shown, never-retained window must drop normally"
                 );
 
                 Ok(())

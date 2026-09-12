@@ -4,6 +4,11 @@ Operational tester procedure: [`../../agents/winui3-e2e.md`](../../agents/winui3
 precedent this mirrors operationally (not structurally): [`../../agents/appkit-e2e.md`](../../agents/appkit-e2e.md),
 [`../../../tools/macos-ui-driver/README.md`](../../../tools/macos-ui-driver/README.md).
 
+Shared plan compilation and caching, vision checkpoints, result-classification orchestration, and
+animation capture-sequence policy belong to the backend-neutral
+[`native_e2e_orchestration_design.md`](native_e2e_orchestration_design.md). This document keeps
+the Windows adapter-specific responsibilities and does not duplicate that shared orchestration.
+
 ## 1. Responsibility
 
 `tools/windows-ui-driver/windows-ui-driver.ps1` is a thin, repository-owned PowerShell adapter that

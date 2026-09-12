@@ -8,6 +8,11 @@ fixed product instruction example -- durable product cases originate under
 owning Issue's immutable `.agent-state` run directory; commit only a small reviewer-facing evidence
 subset when the owning Issue/workflow explicitly requires it.
 
+The shared native E2E orchestration target, including reusable plans, runtime-value boundaries,
+vision checkpoints, animation capture, budgets, and classification, is defined in
+[`native_e2e_orchestration_design.md`](../design/tools/native_e2e_orchestration_design.md). This
+guide remains the current AppKit operational authority until that shared runner is implemented.
+
 ## Codex and Claude Code routing and tester ownership
 
 This tester routing is provider-neutral (see also `docs/agents/winui3-e2e.md`'s own copy of this
@@ -16,10 +21,16 @@ retry rules, and PASS/FAIL/NOT RUN/BLOCKED semantics. Only the selected tester m
 provider-specific sub-agent mechanism differ:
 
 ```text
-Codex:        GPT-5.6 Luna, standard reasoning effort (medium)
+Codex target:  GPT-5.6 Luna, reasoning effort explicitly medium
 Claude Code:  Claude Haiku 4.5, normal/default reasoning configuration
               (do not enable extended thinking for routine E2E execution)
 ```
+
+The Luna/medium line is the required routing policy, not proof of current enforcement. The parent
+agent's reasoning effort must not be inherited as the effective child effort. When the provider
+exposes it, run evidence should attest the effective tester model and effort. The repository does
+not currently prove explicit Codex child-effort pinning; do not describe the policy as enforced or
+invent a `.codex/config.toml` setting.
 
 For every AppKit E2E request, the main agent must assign the real GUI execution to one bounded
 sub-agent before invoking the driver itself, using its own provider's sub-agent mechanism (Codex:
@@ -36,6 +47,16 @@ GUI-capable execution path is available, report BLOCKED rather than falling back
 When executing a permanent repository E2E scenario, the scenario must originate under
 [`tests/e2e/`](../../tests/e2e/README.md). Do not create AppKit-only permanent product scenarios
 under `tools/macos-ui-driver/` or `docs/agents/`.
+
+## Shared orchestration target
+
+The future flow is durable case -> deterministic compiler -> reusable compiled plan/script ->
+bounded shared runner -> AppKit driver -> structured result and immutable evidence. Unchanged
+declared plan dependencies permit plan reuse, but runtime identifiers, geometry, visual evidence,
+and PASS/FAIL results are reacquired for every run. The tester executes the prepared case and may
+observe only explicit, bounded visual checkpoints; it does not redesign the sequence between
+driver primitives. No shared runner, batch command, or plan-cache command is implemented by this
+guide.
 
 ## Stable driver artifact and rebuild policy
 
@@ -96,10 +117,18 @@ it to design a plan. Every sheet has these sections in this order:
 
 ## Foreground/action grouping
 
-Each driver process can leave the Codex window frontmost. For every GUI action or capture, run the
-checked-in driver's `focus-window` and the action sequentially in the same host-context shell
-invocation. If focus fails, do not run the action. The following helper makes that boundary
-explicit:
+Foreground is required only for operations whose delivery depends on real frontmost input or when
+foreground behavior itself is under test. These operations normally do not require a universal
+`focus-window` gate: `find`, `dump-tree`, `set-focus`, `wait-for`, `click --via ax-press`, and
+`capture-window`. `capture-window` is screenshot capture, not user input, so it must not be
+documented as requiring `focus-window`.
+
+`click` without `--via ax-press` is real mouse delivery. `click --via mouse` (the default),
+`point-click`, `drag`, `resize`, and synthesized keyboard input whose delivery depends on the
+frontmost application require the target to be foreground and input-routable. Because each driver
+invocation is a separate process and the Codex window may regain foreground, run `focus-window`
+immediately before those foreground-sensitive actions in the same host-context shell invocation.
+If focus fails, do not run the action. The following helper makes that boundary explicit:
 
 ```zsh
 run_focused() {
@@ -111,8 +140,10 @@ run_focused() {
 }
 ```
 
-This applies to `point-click`, `click`, `drag`, `resize`, `capture-window`, and keyboard input.
-For a cross-window drag, focus the source window immediately before the drag.
+Use the helper for `point-click`, `click --via mouse`, `drag`, `resize`, and applicable keyboard
+input. Run `capture-window` directly after resolving the current window ID; do not add a focus step
+unless foreground behavior is the subject of the case. For a cross-window drag, focus the source
+window immediately before the drag.
 
 ## Window-relative coordinates
 

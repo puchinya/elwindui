@@ -18,6 +18,18 @@ underlying driver commands differ.
 Platform-specific execution glue may differ where required, but product acceptance semantics and
 expected results remain shared.
 
+## Shared case compilation contract
+
+The durable backend-neutral case is the source for a future deterministic compiler and reusable
+plan. Declared case, runner, backend, driver, and compiler dependencies determine plan
+invalidation; an unrelated repository HEAD change does not invalidate an otherwise unchanged
+plan. A cached plan permits reuse of plan structure only: every run reacquires runtime identifiers
+such as PID, window identity, geometry, DPI/monitor state, and AX/UIA element identity, and creates
+fresh immutable evidence bound to the tested HEAD and runtime environment. Visual parameters and
+assertions must use explicit bounded checkpoints rather than implicit image rediscovery. The
+architecture and current-vs-planned boundary are defined in
+[`native_e2e_orchestration_design.md`](../../docs/design/tools/native_e2e_orchestration_design.md).
+
 ## Adding a durable E2E case
 
 A new durable case must:

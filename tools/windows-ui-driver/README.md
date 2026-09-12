@@ -8,6 +8,12 @@ all UIA/input/capture work to the external Microsoft `winapp` CLI. See
 for the architecture and [`docs/agents/winui3-e2e.md`](../../docs/agents/winui3-e2e.md) for the
 operational tester procedure.
 
+Shared backend-neutral case compilation, reusable-plan caching, vision checkpoints, result
+classification, and animation-sequence policy belong to
+[`native_e2e_orchestration_design.md`](../../docs/design/tools/native_e2e_orchestration_design.md).
+This README remains responsible only for the Windows adapter command surface and its platform
+mechanics.
+
 ## Prerequisite: `winapp`
 
 This driver never vendors or auto-installs `winapp`. Install it once, manually:

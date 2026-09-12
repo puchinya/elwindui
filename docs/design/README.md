@@ -25,6 +25,7 @@
 | Environment Key cross-crate macro | [`tools/environment_key_macro_design.md`](tools/environment_key_macro_design.md) |
 | Language server | [`tools/languageserver_design.md`](tools/languageserver_design.md) |
 | Animation runtime, transition ownership, and frame capabilities | [`runtime/animation_design.md`](runtime/animation_design.md) |
+| Native E2E orchestration, plans, evidence, and tester policy | [`tools/native_e2e_orchestration_design.md`](tools/native_e2e_orchestration_design.md) |
 | Windows UI driver（Windows native E2E adapter） | [`tools/windows_ui_driver_design.md`](tools/windows_ui_driver_design.md) |
 | Preview | [`tools/preview_design.md`](tools/preview_design.md) |
 | Hot reload | [`tools/hotreload_design.md`](tools/hotreload_design.md) |

@@ -118,15 +118,17 @@ function Extract-Checklist([string] $Text, [string] $Source) {
             continue
         }
         $found = $true
-        $level = $heading.Groups[1].Value.Length
+        $level = if ($heading.Groups[1].Value.Length -gt 0) { $heading.Groups[1].Value.Length } else { 1 }
         $sectionItems = [System.Collections.Generic.List[string]]::new()
+        $templateMarkers = [System.Collections.Generic.HashSet[string]]::new()
         for ($candidateIndex = $index + 1; $candidateIndex -lt $lines.Count; $candidateIndex++) {
             $candidate = $lines[$candidateIndex]
             if (-not $visible[$candidateIndex]) {
                 continue
             }
             $nextHeading = [regex]::Match($candidate, $genericHeadingPattern)
-            if ($nextHeading.Success -and (($nextHeading.Groups[1].Value.Length -eq 0) -or ($nextHeading.Groups[1].Value.Length -le $level)) ) {
+            $nextLevel = if ($nextHeading.Success -and $nextHeading.Groups[1].Value.Length -gt 0) { $nextHeading.Groups[1].Value.Length } else { 1 }
+            if ($nextHeading.Success -and $nextLevel -le $level) {
                 break
             }
             if ([regex]::IsMatch($candidate, $emptyCheckboxPattern)) {
@@ -139,9 +141,14 @@ function Extract-Checklist([string] $Text, [string] $Source) {
                     Stop-Workflow 'empty-checklist' "$Source Reviewer Checklist has an empty item"
                 }
                 [void] $sectionItems.Add($item)
+            } elseif ($candidate.Trim() -in @('- PASS:', '- N/A:', '- FAIL:')) {
+                [void] $templateMarkers.Add($candidate.Trim())
             }
         }
         if ($sectionItems.Count -eq 0) {
+            if ($templateMarkers.SetEquals(@('- PASS:', '- N/A:', '- FAIL:'))) {
+                continue
+            }
             Stop-Workflow 'empty-checklist' "$Source Reviewer Checklist section has zero checkbox items"
         }
         foreach ($item in $sectionItems) {

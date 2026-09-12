@@ -985,6 +985,14 @@ impl UIElement {
     fn visual_children(&self) -> Vec<Rc<dyn UIElementExt>> {
         self.as_ui_element().visual_collection.to_vec()
     }
+    /// Returns the public logical/projected children of a private Control template, when this
+    /// element owns one. `None` means that ordinary Visual-tree traversal remains authoritative;
+    /// `Some` is an explicit Core ownership boundary used by accessibility Automatic traversal.
+    #[doc(hidden)]
+    #[overridable]
+    fn __accessibility_template_children(&self) -> Option<Vec<Rc<dyn UIElementExt>>> {
+        None
+    }
     /// WinUI3's `GetType().Name` (via `.NET` reflection), commonly paired with `VisualTreeHelper`
     /// when dumping/debugging a tree — see `crate::visual_tree`. A default method, not overridden by
     /// any concrete type: `std::any::type_name::<Self>()` is monomorphized per implementor, so this

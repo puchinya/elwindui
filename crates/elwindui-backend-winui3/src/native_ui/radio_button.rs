@@ -3,7 +3,7 @@
 //! this is deliberately not delegated to native grouping — mirrors
 //! `elwindui_backend_appkit::native_ui::RadioButton`'s own registry exactly).
 
-use super::{NativeControl, base_accessibility_semantics};
+use super::{NativeControl, base_accessibility_semantics, sync_intrinsic_enabled};
 use crate::AnyView;
 use crate::inner::InnerRadioButton;
 use elwindui_core::accessibility::{
@@ -127,6 +127,7 @@ impl RadioButton {
     }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
+        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
     }
 
     fn construct() -> Self {

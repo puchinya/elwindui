@@ -1,6 +1,6 @@
 //! `elwindui::ui::ToggleSwitch` — the `ToggleSwitchExt` implementation.
 
-use super::{NativeControl, base_accessibility_semantics};
+use super::{NativeControl, base_accessibility_semantics, sync_intrinsic_enabled};
 use crate::AnyView;
 use crate::inner::InnerToggleSwitch;
 use elwindui_core::accessibility::{
@@ -68,6 +68,7 @@ impl ToggleSwitch {
     }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
+        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
     }
 
     fn construct() -> Self {

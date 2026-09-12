@@ -1,7 +1,7 @@
 //! `elwindui::ui::Slider` — the Windows-tested `SliderExt` implementation. Mirrors
 //! `elwindui_backend_appkit::native_ui::slider`'s own structure exactly.
 
-use super::{NativeControl, base_accessibility_semantics};
+use super::{NativeControl, base_accessibility_semantics, sync_intrinsic_enabled};
 use crate::AnyView;
 use crate::inner::InnerSlider;
 use elwindui_core::accessibility::{
@@ -136,6 +136,7 @@ impl Slider {
     }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
+        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
     }
 
     fn construct() -> Self {

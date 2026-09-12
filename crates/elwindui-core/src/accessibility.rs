@@ -298,16 +298,19 @@ fn semantic_children(
     }
 
     let semantics = node.accessibility_semantics();
-    let semantic_children = if semantics
-        .as_ref()
-        .is_some_and(|value| value.child_behavior == AccessibilityChildBehavior::Ignore)
-    {
-        Vec::new()
-    } else {
-        node.visual_children()
+    let semantic_children = match semantics.as_ref().map(|value| value.child_behavior) {
+        Some(AccessibilityChildBehavior::Ignore) => Vec::new(),
+        Some(AccessibilityChildBehavior::Automatic) => node
+            .__accessibility_template_children()
+            .unwrap_or_else(|| node.visual_children())
             .iter()
             .flat_map(|child| semantic_children(child, seen, owners))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        _ => node
+            .visual_children()
+            .iter()
+            .flat_map(|child| semantic_children(child, seen, owners))
+            .collect::<Vec<_>>(),
     };
 
     let Some(semantics) = semantics else {
@@ -323,6 +326,44 @@ fn semantic_children(
         bounds_in_root: bounds_in_root(node),
         children,
     }]
+}
+
+/// Finds logical/projected content inside a Control's private template without depending on the
+/// concrete template primitive (`ContentPresenter`, a layout, or a user component). The template
+/// root and its presentation chrome have no logical edge back to the Control; projected content
+/// retains the owning Control's logical parent edge. Returning that first edge preserves public
+/// content while suppressing private template descendants.
+pub(crate) fn template_accessibility_children(
+    owner: &Rc<dyn UIElementExt>,
+    template_root: &Rc<dyn UIElementExt>,
+) -> Vec<Rc<dyn UIElementExt>> {
+    let owner_id = owner.accessibility_id();
+    let mut children = Vec::new();
+    let mut seen = HashSet::new();
+    collect_template_accessibility_children(template_root, owner_id, &mut seen, &mut children);
+    children
+}
+
+fn collect_template_accessibility_children(
+    node: &Rc<dyn UIElementExt>,
+    owner_id: AccessibilityId,
+    seen: &mut HashSet<AccessibilityId>,
+    children: &mut Vec<Rc<dyn UIElementExt>>,
+) {
+    let mut logical_parent = node.parent();
+    while let Some(parent) = logical_parent {
+        if parent.accessibility_id() == owner_id {
+            if seen.insert(node.accessibility_id()) {
+                children.push(Rc::clone(node));
+            }
+            return;
+        }
+        logical_parent = parent.parent();
+    }
+
+    for child in node.visual_children() {
+        collect_template_accessibility_children(&child, owner_id, seen, children);
+    }
 }
 
 fn bounds_in_root(node: &Rc<dyn UIElementExt>) -> Rect {
@@ -391,6 +432,7 @@ mod tests {
     use super::*;
     use crate::layout::{Orientation, Visibility};
     use crate::ui::testsupport::{native, stack};
+    use crate::ui::{ContentControl, ContentControlExt, ContentPresenter, ControlExt, TextBlock};
 
     fn button(label: &str) -> Rc<dyn UIElementExt> {
         let node = native(
@@ -502,5 +544,43 @@ mod tests {
 
         assert!(snapshot.roots[0].semantics.value.is_none());
         assert!(!debug.contains("hunter2"));
+    }
+
+    #[test]
+    fn automatic_template_traversal_hides_private_chrome_but_keeps_projected_content() {
+        let control = ContentControl::new();
+        control.set_accessibility_role(AccessibilityRole::Button);
+        control.set_accessibility_label("Save");
+
+        let private_text = TextBlock::new();
+        private_text.set_accessibility_role(AccessibilityRole::StaticText);
+        private_text.set_accessibility_label("Save");
+        let private_chrome = stack(Orientation::Vertical, 0.0, vec![private_text]);
+
+        let content = TextBlock::new();
+        content.set_accessibility_role(AccessibilityRole::StaticText);
+        content.set_accessibility_label("public content");
+        control.set_content(content.clone());
+        control.__enable_template_presentation();
+        let presenter = ContentPresenter::new();
+        ContentPresenter::__bind_templated_parent(&presenter, &control);
+        let template_root = stack(
+            Orientation::Vertical,
+            0.0,
+            vec![private_chrome, presenter as Rc<dyn UIElementExt>],
+        );
+        control.__set_template_root(template_root);
+
+        let control_node: Rc<dyn UIElementExt> = control;
+        let snapshot = AccessibilityRuntime::new().rebuild(&control_node);
+
+        assert_eq!(snapshot.roots.len(), 1);
+        assert_eq!(snapshot.roots[0].semantics.role, AccessibilityRole::Button);
+        assert_eq!(snapshot.roots[0].children.len(), 1);
+        assert_eq!(snapshot.roots[0].children[0].id, content.accessibility_id());
+        assert_eq!(
+            snapshot.roots[0].children[0].semantics.label.as_deref(),
+            Some("public content")
+        );
     }
 }

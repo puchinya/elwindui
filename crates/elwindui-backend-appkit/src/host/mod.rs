@@ -1139,21 +1139,26 @@ impl TreeHostView {
     }
 
     pub(crate) fn rebuild_accessibility(&self) {
-        let snapshot_changed = self
-            .ivars()
-            .tree
-            .borrow()
-            .as_ref()
-            .map(|tree| {
-                let before = self.ivars().accessibility_runtime.revision();
-                self.ivars().accessibility_runtime.rebuild(tree);
-                before != self.ivars().accessibility_runtime.revision()
-            })
-            .unwrap_or_else(|| {
-                let before = self.ivars().accessibility_runtime.revision();
-                self.ivars().accessibility_runtime.clear();
-                before != self.ivars().accessibility_runtime.revision()
-            });
+        let snapshot_changed = if !self.ivars().active.get() {
+            let before = self.ivars().accessibility_runtime.revision();
+            self.ivars().accessibility_runtime.clear();
+            before != self.ivars().accessibility_runtime.revision()
+        } else {
+            self.ivars()
+                .tree
+                .borrow()
+                .as_ref()
+                .map(|tree| {
+                    let before = self.ivars().accessibility_runtime.revision();
+                    self.ivars().accessibility_runtime.rebuild(tree);
+                    before != self.ivars().accessibility_runtime.revision()
+                })
+                .unwrap_or_else(|| {
+                    let before = self.ivars().accessibility_runtime.revision();
+                    self.ivars().accessibility_runtime.clear();
+                    before != self.ivars().accessibility_runtime.revision()
+                })
+        };
         if snapshot_changed {
             unsafe {
                 NSAccessibilityPostNotification(
@@ -1234,6 +1239,10 @@ impl TreeHostView {
                 .set(objc2_foundation::NSSize::new(-1.0, -1.0));
             self.relayout();
         } else {
+            // Clear the Core semantic projection before releasing visual/native resources. The
+            // retained Core tree and cached synthetic AX objects remain alive, but their IDs are
+            // no longer current owners while this host is inactive.
+            self.rebuild_accessibility();
             self.stop_animation_display_link();
             self.ivars().pointer.cancel();
             // `relayout_inner`'s own GC (the `retain` calls below) only runs during a relayout
@@ -1803,6 +1812,59 @@ mod coordinate_conversion_tests {
         assert!(is_pointer_cancel_key(Some(Key::Escape)));
         assert!(!is_pointer_cancel_key(Some(Key::Enter)));
         assert!(!is_pointer_cancel_key(None));
+    }
+}
+
+#[cfg(test)]
+mod accessibility_active_state_tests {
+    use super::*;
+    use elwindui_core::accessibility::{AccessibilityAction, AccessibilityRole};
+    use elwindui_core::ui::{UIElementExt, VerticalLayout};
+
+    #[test]
+    #[ignore = "TreeHostView is MainThreadOnly; the active/inactive path is covered by AppKit host E2E"]
+    fn inactive_host_clears_ax_semantics_and_rebuilds_on_reactivation() {
+        let host = TreeHostView::new();
+        let root = VerticalLayout::new();
+        root.set_accessibility_role(AccessibilityRole::Button);
+        root.set_accessibility_label("inactive-host-test");
+        let root_node: Rc<dyn UIElementExt> = root;
+        host.set_tree(root_node);
+
+        let id = host
+            .ivars()
+            .accessibility_runtime
+            .snapshot()
+            .roots
+            .first()
+            .expect("active semantic root")
+            .id;
+        assert_eq!(
+            accessibility::children_for_host(&host, None).unwrap().len(),
+            1
+        );
+
+        host.set_active(false);
+        assert!(
+            host.ivars()
+                .accessibility_runtime
+                .snapshot()
+                .roots
+                .is_empty()
+        );
+        assert_eq!(
+            accessibility::children_for_host(&host, None).unwrap().len(),
+            0
+        );
+        assert!(
+            !host
+                .ivars()
+                .accessibility_runtime
+                .dispatch_action(id, AccessibilityAction::Activate)
+        );
+
+        host.set_active(true);
+        assert_eq!(host.ivars().accessibility_runtime.snapshot().roots.len(), 1);
     }
 }
 

@@ -968,6 +968,9 @@ impl UIElementExt for PaintingContainer {
     fn __dyn_x_for_visual_children(&self) -> &dyn UIElementExt {
         self.base.__dyn_x_for_visual_children()
     }
+    fn __dyn_x_for___accessibility_template_children(&self) -> &dyn UIElementExt {
+        self.base.__dyn_x_for___accessibility_template_children()
+    }
     fn __dyn_x_for_apply_template(&self) -> &dyn UIElementExt {
         self.base.__dyn_x_for_apply_template()
     }

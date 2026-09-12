@@ -3,7 +3,7 @@
 //! why a full rebuild, not incremental diffing like `TabView`/`MenuBar`, is the right call here).
 
 use super::dropdown_item::DropdownItem;
-use super::{NativeControl, base_accessibility_semantics};
+use super::{NativeControl, base_accessibility_semantics, sync_intrinsic_enabled};
 use crate::AnyView;
 use crate::inner::InnerDropdown;
 use elwindui_core::accessibility::{
@@ -55,6 +55,7 @@ impl Dropdown {
     }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
+        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
     }
     /// See `elwindui_core::ui::Menu::items`'s own doc comment for why this returns a borrow, not
     /// an owned `Rc`.

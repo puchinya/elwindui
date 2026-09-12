@@ -3,7 +3,7 @@
 //! rebuild and two-way selection are verified on Windows.
 
 use super::dropdown_item::DropdownItem;
-use super::{NativeControl, base_accessibility_semantics};
+use super::{NativeControl, base_accessibility_semantics, sync_intrinsic_enabled};
 use crate::AnyView;
 use crate::inner::InnerDropdown;
 use elwindui_core::accessibility::{AccessibilityActionKind, AccessibilityRole};
@@ -35,6 +35,7 @@ impl Dropdown {
     }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
+        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
     }
     fn items(&self) -> &dyn elwindui_core::ui::ListExt<dyn elwindui_core::ui::DropdownItemExt> {
         self

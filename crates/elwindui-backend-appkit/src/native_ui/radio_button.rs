@@ -2,7 +2,7 @@
 //! group-exclusivity bookkeeping (`elwindui_core::ui::RadioButton`'s own doc comment explains why
 //! this is deliberately not delegated to AppKit's native radio-grouping).
 
-use super::{NativeControl, base_accessibility_semantics};
+use super::{NativeControl, base_accessibility_semantics, sync_intrinsic_enabled};
 use crate::AnyView;
 use crate::inner::InnerRadioButton;
 use elwindui_core::accessibility::{
@@ -134,6 +134,7 @@ impl RadioButton {
     }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
+        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
     }
 
     fn construct() -> Self {

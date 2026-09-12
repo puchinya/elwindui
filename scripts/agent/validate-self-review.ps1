@@ -96,8 +96,8 @@ function Extract-Checklist([string] $Text, [string] $Source) {
     $lines = $normalized -split "`n"
     $headingPattern = '^(#{1,6})[ \t]+(?:[0-9]+[.)][ \t]+)?Reviewer Checklist[ \t]*#*[ \t]*$'
     $genericHeadingPattern = '^(#{1,6})(?:[ \t]+.*)?$'
-    $checkboxPattern = '^[ \t]*-[ \t]+\[[ xX]\][ \t]+(.+?)\s*$'
-    $emptyCheckboxPattern = '^[ \t]*-[ \t]+\[[ xX]\][ \t]*$'
+$checkboxPattern = '^[ \t]*[-*][ \t]+\[[ xX]\][ \t]+(.+?)\s*$'
+$emptyCheckboxPattern = '^[ \t]*[-*][ \t]+\[[ xX]\][ \t]*$'
     $visible = [System.Collections.Generic.List[bool]]::new()
     $fenced = $false
     foreach ($line in $lines) {

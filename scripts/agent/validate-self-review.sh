@@ -84,8 +84,8 @@ heading_re = re.compile(
     r"^(#{1,6})[ \t]+(?:[0-9]+[.)][ \t]+)?Reviewer Checklist[ \t]*#*[ \t]*$"
 )
 generic_heading_re = re.compile(r"^(#{1,6})(?:[ \t]+.*)?$")
-checkbox_re = re.compile(r"^[ \t]*-[ \t]+\[[ xX]\][ \t]+(.+?)\s*$")
-empty_checkbox_re = re.compile(r"^[ \t]*-[ \t]+\[[ xX]\][ \t]*$")
+checkbox_re = re.compile(r"^[ \t]*[-*][ \t]+\[[ xX]\][ \t]+(.+?)\s*$")
+empty_checkbox_re = re.compile(r"^[ \t]*[-*][ \t]+\[[ xX]\][ \t]*$")
 canonical_begin = "ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN"
 canonical_end = "ELWINDUI_REVIEWER_CHECKLIST_V1_END"
 structured_evidence_re = re.compile(

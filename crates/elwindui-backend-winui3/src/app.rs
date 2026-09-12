@@ -34,6 +34,7 @@ impl elwindui_core::task::Dispatcher for WinUI3Dispatcher {
 use crate::bindings;
 use elwindui_core::task::LocalExecutor;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 thread_local! {
     // The generated callback wrapper requires its closure to be `Send`, whereas startup is
@@ -48,7 +49,13 @@ thread_local! {
 
 pub(crate) struct RetainedWindow {
     id: u64,
-    _window: bindings::Microsoft::UI::Xaml::Window,
+    /// Issue #254: the final most-derived Rust `Window` owner (`Rc<dyn WindowExt>`, obtained via
+    /// `__self_weak` at construction time) — the application layer is the strong lifetime
+    /// authority for this until native close is observed. `InnerWindow` itself stores only the
+    /// matching `Weak`. Retaining this (rather than only the native XAML `Window`, as before)
+    /// keeps the whole Rust-side component tree — including `TreeHost`'s callback registry —
+    /// alive for as long as the native window is shown.
+    _owner: Rc<dyn elwindui_core::ui::WindowExt>,
 }
 
 // Hosting `Application` itself (composing it, registering `XamlControlsResources` into
@@ -86,7 +93,14 @@ extern "C" fn startup_trampoline() {
     });
 }
 
-pub(crate) fn retain_window(window: &bindings::Microsoft::UI::Xaml::Window) {
+/// Issue #254: becomes the application-layer strong lifetime authority for `owner` (the final
+/// most-derived generated/backend `Window`) until native close is observed via `xaml`'s `Closed`
+/// event. The `Closed` closure captures only the numeric `id`, never `owner` itself — so this
+/// registry, not any native callback, is what keeps `owner` alive.
+pub(crate) fn retain_window(
+    owner: Rc<dyn elwindui_core::ui::WindowExt>,
+    xaml: &bindings::Microsoft::UI::Xaml::Window,
+) -> u64 {
     let id = NEXT_WINDOW_ID.with(|next| {
         let id = next.get();
         next.set(id.wrapping_add(1));
@@ -96,27 +110,33 @@ pub(crate) fn retain_window(window: &bindings::Microsoft::UI::Xaml::Window) {
         release_window(id);
         Ok(())
     });
-    window
-        .Closed(&closed)
+    xaml.Closed(&closed)
         .expect("Window::Closed event registration");
     WINDOWS.with(|windows| {
-        windows.borrow_mut().push(RetainedWindow {
-            id,
-            _window: window.clone(),
-        });
+        windows
+            .borrow_mut()
+            .push(RetainedWindow { id, _owner: owner });
     });
+    id
 }
 
+/// Issue #254 §2.4/§2.7: the removed `RetainedWindow` (and the `Rc<dyn WindowExt>` owner it
+/// holds) is dropped only after `WINDOWS`'s `RefCell` borrow has ended, and registry emptiness is
+/// re-checked with a fresh borrow afterward — owner destruction can synchronously re-enter Window
+/// logic, which must never observe `WINDOWS` still mutably borrowed.
 pub(crate) fn release_window(id: u64) {
     #[cfg(test)]
     RELEASE_WINDOW_CALLS.with(|calls| calls.set(calls.get() + 1));
 
-    let has_windows = WINDOWS.with(|windows| {
+    let removed = WINDOWS.with(|windows| {
         let mut windows = windows.borrow_mut();
-        windows.retain(|entry| entry.id != id);
-        !windows.is_empty()
+        let index = windows.iter().position(|entry| entry.id == id);
+        index.map(|index| windows.remove(index))
     });
-    if !has_windows {
+    drop(removed);
+
+    let is_empty = WINDOWS.with(|windows| windows.borrow().is_empty());
+    if is_empty {
         bindings::Microsoft::UI::Xaml::Application::Current()
             .expect("Microsoft.UI.Xaml.Application::Current")
             .Exit()
@@ -165,4 +185,134 @@ where
     // `docs/design/runtime/theme_environment_design.md`'s "Application boundary" and
     // `elwindui-backend-appkit`'s `app::run` for the mirrored AppKit shape.
     unsafe { elwindui_winui3_run(startup_trampoline) };
+}
+
+#[cfg(test)]
+mod window_lifecycle_tests {
+    use super::*;
+    use elwindui_core::ui::WindowExt;
+
+    /// Issue #254, T1/T2/T3/T4/T12: proves the application-layer retention invariant using a bare
+    /// `crate::native_ui::Window` (no `elwindui-codegen` generated component involved, and no
+    /// dependency on the higher-level `elwindui` DSL crate, which cannot see this crate's
+    /// `pub(crate)` test counters across the crate boundary). The mechanism under test —
+    /// `__self_weak` captured at `Window::construct()`, threaded into `InnerWindow`, handed to
+    /// `retain_window` on first `show()` — is identical for a bare `Window::new()` and for a
+    /// generated `inherits Window` component's own base field (`__self_weak` there resolves to the
+    /// outer generated `Rc`, coerced to `Weak<dyn WindowExt>` — see
+    /// `docs/design/runtime/component_lifecycle_design.md` §4j), so this single-crate test proves
+    /// the mechanism generically.
+    ///
+    /// Packed into one `#[test]`/one `crate::run()` call, mirroring
+    /// `crates/elwindui/tests/window_mount_hide_close.rs`'s own convention:
+    /// `Microsoft.UI.Xaml.Application` is a process/apartment-wide singleton, so only one
+    /// `crate::run()` per test thread is safe; this crate's `thread_local!` `WINDOWS`/
+    /// `NEXT_WINDOW_ID`/`RELEASE_WINDOW_CALLS` registry state is isolated per test thread
+    /// regardless, so this does not need to be the crate's only test.
+    #[test]
+    fn window_registry_retention_lifecycle() {
+        crate::init().expect("elwindui_backend_winui3::init");
+        reset_window_lifecycle_test_state();
+
+        run(|| {
+            // T12: a never-shown Window creates no registry entry and can close/drop safely,
+            // without releasing an unrelated id.
+            let never_shown = crate::native_ui::Window::new();
+            let never_shown_weak = std::rc::Rc::downgrade(&never_shown);
+            assert_eq!(
+                retained_window_count_for_test(),
+                0,
+                "T12: construct() alone must not retain"
+            );
+            never_shown.close();
+            assert_eq!(
+                release_window_call_count_for_test(),
+                0,
+                "T12: closing a never-shown window must not call release_window at all"
+            );
+            drop(never_shown);
+            assert!(
+                never_shown_weak.upgrade().is_none(),
+                "T12: a never-shown, never-retained window must drop normally"
+            );
+
+            // T1: a shown Window survives the caller's own Rc dropping.
+            let window = crate::native_ui::Window::new();
+            let weak = std::rc::Rc::downgrade(&window);
+            window.show();
+            drop(window);
+            assert!(
+                weak.upgrade().is_some(),
+                "T1: the final owner must still be alive after the caller's own Rc drops"
+            );
+            assert_eq!(
+                retained_window_count_for_test(),
+                1,
+                "T1: exactly one retained window"
+            );
+
+            // T3: hide() then show() must retain exactly once, not twice.
+            let window = weak.upgrade().expect("T1 already proved this upgrades");
+            window.hide();
+            window.show();
+            assert_eq!(
+                retained_window_count_for_test(),
+                1,
+                "T3: hide() then show() must not create a second retention entry"
+            );
+
+            // T4: a second, independent Window.
+            let window_b = crate::native_ui::Window::new();
+            let weak_b = std::rc::Rc::downgrade(&window_b);
+            window_b.show();
+            assert_eq!(
+                retained_window_count_for_test(),
+                2,
+                "T4: two shown windows must both be retained"
+            );
+
+            // T4/T2: closing the first releases only the first.
+            window.close();
+            assert_eq!(
+                release_window_call_count_for_test(),
+                1,
+                "T2: release_window must be called exactly once for the first window"
+            );
+            assert_eq!(
+                retained_window_count_for_test(),
+                1,
+                "T4: the second window must remain retained after the first closes"
+            );
+            assert!(
+                weak.upgrade().is_none(),
+                "T2: the first window's owner must actually have dropped"
+            );
+            assert!(
+                weak_b.upgrade().is_some(),
+                "T4: the second window must remain alive while the first is gone"
+            );
+
+            // T4/T2: closing the second releases it too and empties the registry. WinUI3's
+            // exit-on-empty-registry call (`release_window`) is not independently observable from
+            // inside this same synchronous startup closure — `Application::Exit()` only takes
+            // effect once this closure returns control to the native message loop — but this whole
+            // `run()` call itself returning after this test function ends is the proof the loop
+            // did in fact stop once the registry emptied.
+            window_b.close();
+            assert_eq!(
+                release_window_call_count_for_test(),
+                2,
+                "T2: both windows must each release exactly once"
+            );
+            assert_eq!(
+                retained_window_count_for_test(),
+                0,
+                "T4: registry must be empty"
+            );
+            assert!(
+                weak_b.upgrade().is_none(),
+                "T2: the second window's owner must have dropped"
+            );
+        });
+    }
 }

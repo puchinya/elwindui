@@ -12,7 +12,7 @@
 
 use std::cell::RefCell;
 
-use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
+use elwindui::core::ui::UIElementExt as _;
 
 thread_local! {
     static INSIDE_LOCALE: RefCell<String> = RefCell::new(String::new());
@@ -277,5 +277,212 @@ fn an_if_directly_inside_environment_scope_is_scope_aware() {
         "fr-FR",
         "a literal element inside an `if` branch that is itself inside an EnvironmentScope must \
          observe the scope's override, not the un-overridden application_environment() value"
+    );
+}
+
+// Issue #127: a `for` renderer outlives `__build_view()`, so it must read the live retained scope
+// context when a later collection refresh creates an item.  The nested scope in the item body
+// also proves that the item was mounted against the effective outer scope rather than the
+// application environment.
+thread_local! {
+    static SCOPED_FOR_RECORDS: RefCell<Vec<(String, String, String)>> = RefCell::new(Vec::new());
+    static TEMPLATE_SCOPED_FOR_RECORDS: RefCell<Vec<(String, String)>> = RefCell::new(Vec::new());
+}
+
+#[elwindui::environment_key(
+    name = environment_scope_for_outer,
+    value = String,
+    default = String::from("root-outer")
+)]
+pub struct EnvironmentScopeForOuter;
+
+#[elwindui::environment_key(
+    name = environment_scope_for_inner,
+    value = String,
+    default = String::from("root-inner")
+)]
+pub struct EnvironmentScopeForInner;
+
+#[elwindui::viewmodel]
+mod environment_scope_for_collection_item {
+    struct EnvironmentScopeForCollectionItem {
+        #[observable(default = String::new())]
+        label: String,
+    }
+}
+
+#[elwindui::viewmodel]
+mod environment_scope_for_items_view_model {
+    struct EnvironmentScopeForItemsViewModel {
+        #[observable(default = Vec::new())]
+        items: Vec<EnvironmentScopeForCollectionItem>,
+    }
+}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct EnvironmentScopeForItemProbe {
+    #[param]
+    label: String,
+    #[environment(environment_scope_for_outer)]
+    outer: String,
+    #[environment(environment_scope_for_inner)]
+    inner: String,
+
+    body: view! {
+        on_mount {
+            SCOPED_FOR_RECORDS.with(|records| {
+                records.borrow_mut().push((
+                    self.label(),
+                    self.outer(),
+                    self.inner(),
+                ));
+            });
+        }
+        TextBlock { text: label }
+    },
+}
+
+#[elwindui::component]
+impl EnvironmentScopeForItemProbe {}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct EnvironmentScopeForItem {
+    #[param]
+    label: String,
+
+    body: view! {
+        EnvironmentScope {
+            environment_scope_for_inner: "inner-scope",
+            EnvironmentScopeForItemProbe { label: label }
+        }
+    },
+}
+
+#[elwindui::component]
+impl EnvironmentScopeForItem {}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct EnvironmentScopeForParent {
+    #[bindable]
+    vm: std::rc::Rc<EnvironmentScopeForItemsViewModel>,
+    #[prop(default = String::from("scope-a"))]
+    outer_value: String,
+
+    body: view! {
+        EnvironmentScope {
+            environment_scope_for_outer: outer_value,
+            for item in vm.items {
+                EnvironmentScopeForItem { label: item.label }
+            }
+        }
+    },
+}
+
+#[elwindui::component]
+impl EnvironmentScopeForParent {}
+
+#[test]
+fn scoped_for_late_item_uses_live_scope_and_preserves_rc_identity() {
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeForOuter>("root-outer".to_string());
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeForInner>("root-inner".to_string());
+    SCOPED_FOR_RECORDS.with(|records| records.borrow_mut().clear());
+
+    let first = EnvironmentScopeForCollectionItem::new();
+    first.set_label("first".to_string());
+    let second = EnvironmentScopeForCollectionItem::new();
+    second.set_label("second".to_string());
+    let vm = EnvironmentScopeForItemsViewModel::new();
+    let parent = elwindui::new!(EnvironmentScopeForParent(vm: vm.clone()));
+
+    vm.items_push(first.clone());
+    assert_eq!(
+        SCOPED_FOR_RECORDS.with(|records| records.borrow().clone()),
+        vec![(
+            "first".to_string(),
+            "scope-a".to_string(),
+            "inner-scope".to_string()
+        )]
+    );
+
+    parent.set_outer_value("scope-b".to_string());
+    SCOPED_FOR_RECORDS.with(|records| records.borrow_mut().clear());
+    vm.items_push(second);
+    assert_eq!(
+        SCOPED_FOR_RECORDS.with(|records| records.borrow().clone()),
+        vec![(
+            "second".to_string(),
+            "scope-b".to_string(),
+            "inner-scope".to_string()
+        )]
+    );
+}
+
+#[elwindui::environment_key(
+    name = environment_scope_template_for,
+    value = String,
+    default = String::from("template-root")
+)]
+pub struct EnvironmentScopeTemplateFor;
+
+#[elwindui::component(inherits ContentControl)]
+struct EnvironmentScopeTemplateForItem {
+    #[param]
+    label: String,
+    #[environment(environment_scope_template_for)]
+    value: String,
+
+    template: template_view!(|templated_parent: Self| {
+        on_mount {
+            TEMPLATE_SCOPED_FOR_RECORDS.with(|records| {
+                records
+                    .borrow_mut()
+                    .push((self.label(), self.value()));
+            });
+        }
+        TextBlock { text: templated_parent.label }
+    }),
+}
+
+#[elwindui::component]
+impl EnvironmentScopeTemplateForItem {}
+
+#[elwindui::component(inherits ContentControl)]
+struct EnvironmentScopeTemplateForParent {
+    #[prop(default = Vec::new())]
+    items: Vec<String>,
+
+    template: template_view!(|templated_parent: Self| {
+        VerticalLayout {
+            EnvironmentScope {
+                environment_scope_template_for: "template-scope",
+                for item in templated_parent.items {
+                    EnvironmentScopeTemplateForItem { label: item }
+                }
+            }
+        }
+    }),
+}
+
+#[elwindui::component]
+impl EnvironmentScopeTemplateForParent {}
+
+#[test]
+fn template_scoped_for_late_item_uses_lexical_scope_storage() {
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeTemplateFor>("template-root".to_string());
+    TEMPLATE_SCOPED_FOR_RECORDS.with(|records| records.borrow_mut().clear());
+
+    let parent = EnvironmentScopeTemplateForParent::new();
+    assert!(parent.apply_template());
+
+    parent.set_items(vec!["late-template-item".to_string()]);
+    assert_eq!(
+        TEMPLATE_SCOPED_FOR_RECORDS.with(|records| records.borrow().clone()),
+        vec![(
+            "late-template-item".to_string(),
+            "template-scope".to_string()
+        )]
     );
 }

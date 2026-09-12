@@ -1169,6 +1169,13 @@ impl TreeHostView {
         }
     }
 
+    #[cfg(feature = "accessibility-regression")]
+    pub(crate) fn accessibility_children_count_for_regression(&self) -> usize {
+        accessibility::children_for_host(self, None)
+            .map(|children| children.len())
+            .unwrap_or(0)
+    }
+
     /// Issue #162 §3.18: closes this host's own active custom popup/context-menu surface, if any —
     /// see `close_active_popup_slot`'s own doc comment for the reentrancy-safety reasoning. Shared
     /// by the existing request-replacement paths above and the owner `Window::unmount_override`
@@ -1822,7 +1829,7 @@ mod accessibility_active_state_tests {
     use elwindui_core::ui::{UIElementExt, VerticalLayout};
 
     #[test]
-    #[ignore = "TreeHostView is MainThreadOnly; the active/inactive path is covered by AppKit host E2E"]
+    #[ignore = "TreeHostView is MainThreadOnly; run the accessibility_active_host_regression example"]
     fn inactive_host_clears_ax_semantics_and_rebuilds_on_reactivation() {
         let host = TreeHostView::new();
         let root = VerticalLayout::new();

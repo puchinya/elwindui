@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
+accessibility-regression = []
 # Enables `render::stats` counters (Core Animation mutation traffic, resource creation, memory
 # footprint) in an optimized build. Already on for free under `cfg(test)`/`cfg(debug_assertions)`
 # — see that module's own doc comment — so this is only needed to profile a release build.

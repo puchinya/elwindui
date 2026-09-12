@@ -298,20 +298,25 @@ fn semantic_children(
     }
 
     let semantics = node.accessibility_semantics();
-    let semantic_children = match semantics.as_ref().map(|value| value.child_behavior) {
-        Some(AccessibilityChildBehavior::Ignore) => Vec::new(),
-        Some(AccessibilityChildBehavior::Automatic) => node
+    // A transparent node has no public semantics from which Ignore or Contain could be
+    // resolved. Its effective policy is therefore Automatic, which is important for a templated
+    // Control: the private template boundary must still be respected while projected content is
+    // hoisted through the transparent owner.
+    let effective_child_behavior = semantics
+        .as_ref()
+        .map(|value| value.child_behavior)
+        .unwrap_or(AccessibilityChildBehavior::Automatic);
+    let child_nodes = match effective_child_behavior {
+        AccessibilityChildBehavior::Ignore => Vec::new(),
+        AccessibilityChildBehavior::Automatic => node
             .__accessibility_template_children()
-            .unwrap_or_else(|| node.visual_children())
-            .iter()
-            .flat_map(|child| semantic_children(child, seen, owners))
-            .collect::<Vec<_>>(),
-        _ => node
-            .visual_children()
-            .iter()
-            .flat_map(|child| semantic_children(child, seen, owners))
-            .collect::<Vec<_>>(),
+            .unwrap_or_else(|| node.visual_children()),
+        AccessibilityChildBehavior::Contain => node.visual_children(),
     };
+    let semantic_children = child_nodes
+        .iter()
+        .flat_map(|child| semantic_children(child, seen, owners))
+        .collect::<Vec<_>>();
 
     let Some(semantics) = semantics else {
         return semantic_children;
@@ -582,5 +587,35 @@ mod tests {
             snapshot.roots[0].children[0].semantics.label.as_deref(),
             Some("public content")
         );
+    }
+
+    #[test]
+    fn transparent_templated_control_hides_private_chrome_and_hoists_content() {
+        let control = ContentControl::new();
+
+        let private_text = TextBlock::new();
+        private_text.set_accessibility_role(AccessibilityRole::StaticText);
+        private_text.set_accessibility_label("decorative");
+        let private_chrome = stack(Orientation::Vertical, 0.0, vec![private_text]);
+
+        let content = button("Save");
+        control.set_content(content.clone());
+        control.__enable_template_presentation();
+        let presenter = ContentPresenter::new();
+        ContentPresenter::__bind_templated_parent(&presenter, &control);
+        let template_root = stack(
+            Orientation::Vertical,
+            0.0,
+            vec![private_chrome, presenter as Rc<dyn UIElementExt>],
+        );
+        control.__set_template_root(template_root);
+
+        let owner: Rc<dyn UIElementExt> = control;
+        let snapshot = AccessibilityRuntime::new().rebuild(&owner);
+
+        assert_eq!(snapshot.roots.len(), 1);
+        assert_eq!(snapshot.roots[0].id, content.accessibility_id());
+        assert_eq!(snapshot.roots[0].semantics.role, AccessibilityRole::Button);
+        assert_eq!(snapshot.roots[0].semantics.label.as_deref(), Some("Save"));
     }
 }

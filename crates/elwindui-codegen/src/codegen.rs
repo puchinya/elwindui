@@ -9060,6 +9060,23 @@ impl ViewCtx {
         }
     }
 
+    /// Returns the live EnvironmentContext represented by an enclosing EnvironmentScope binding.
+    /// Component views retain the binding in the generated per-scope OnceCell; template views keep
+    /// the same semantic value in their lexical factory scope.  A renderer must read this on each
+    /// invocation so it observes in-place scope resync rather than a construction-time snapshot.
+    fn environment_scope_value(&self, binding: &syn::Ident) -> TokenStream {
+        if self.is_template_storage() {
+            quote! { #binding.clone() }
+        } else {
+            quote! {
+                self.#binding
+                    .get()
+                    .expect("EnvironmentScope renderer: scope is not yet mounted")
+                    .clone()
+            }
+        }
+    }
+
     /// Returns an owned node handle in the scope where a shared emitter is running.  In an
     /// ordinary component the handle is an `OnceCell` field; in a template it is the local `Rc`
     /// binding emitted by the same construction pass.
@@ -10257,7 +10274,7 @@ fn plan_children_in_scope(
                 let scope_var = plan_environment_scope(elem, out, environment_scope);
                 child_bindings.extend(plan_children_in_scope(
                     &elem.children,
-                    &elem.type_path,
+                    parent_type_path,
                     ctx,
                     from,
                     table,
@@ -10304,14 +10321,9 @@ fn plan_children_in_scope(
                 ));
             }
             ChildEntry::For { .. } => {
-                // Not yet supported inside an `EnvironmentScope` (CI-7 follow-up) — a `for` loop's
-                // items are constructed on demand by a persistent renderer closure that outlives
-                // `__build_view()` entirely (unlike an eager `if`/`match` branch, which is part of
-                // that same one-time statement sequence), so its items self-mount via the ordinary,
-                // non-scoped `application_environment()` bridge, same as if no `EnvironmentScope`
-                // were present — `environment_scope` is deliberately not threaded to
-                // `plan_dynamic_entry` for this arm. `docs/specs/dsl_spec.md` §5 documents this
-                // narrower remaining gap explicitly.
+                // Unlike a scoped `if`/`match`, a `for` renderer runs after `__build_view()` and
+                // therefore obtains its enclosing scope from the storage adapter inside the
+                // renderer invocation. Keep the active scope in the shared dynamic plan.
                 child_bindings.push(plan_dynamic_entry(
                     child,
                     parent_type_path,
@@ -10320,7 +10332,7 @@ fn plan_children_in_scope(
                     table,
                     out,
                     lets,
-                    None,
+                    environment_scope,
                 ));
             }
         }
@@ -10417,16 +10429,28 @@ fn emit_for_renderer(
     table: &SymbolTable,
     item_trait: &ItemTraitTokens,
     subscribe_to_item_changes: bool,
+    environment_scope: Option<&syn::Ident>,
 ) -> TokenStream {
     let param_ident = format_ident!("{}", binding);
     let closure_ctx = ctx.with_closure_param(binding);
+    let renderer_scope = environment_scope.map(|_| format_ident!("__elwindui_for_scope"));
+    let item_environment_scope = renderer_scope.as_ref();
+    let scope_setup = environment_scope.map(|scope| {
+        let renderer_scope = renderer_scope
+            .as_ref()
+            .expect("a renderer scope alias must exist for a scoped renderer");
+        let scope_value = ctx.environment_scope_value(scope);
+        quote! {
+            let #renderer_scope = #scope_value;
+        }
+    });
     let mut plan = Vec::new();
     let mut roots = Vec::new();
     for entry in body {
         let ChildEntry::Literal(element) = entry else {
             unreachable!()
         };
-        roots.push(plan_element(
+        roots.push(plan_element_in_scope(
             element,
             &closure_ctx,
             from,
@@ -10434,6 +10458,7 @@ fn emit_for_renderer(
             &mut plan,
             true,
             &HashMap::new(),
+            item_environment_scope,
         ));
     }
     let mut construct = TokenStream::new();
@@ -10474,6 +10499,7 @@ fn emit_for_renderer(
     };
     quote! {
         |#param_ident: &_| {
+            #scope_setup
             #construct
             #wiring
             let mut __dynamic_item_subscriptions = Vec::new();
@@ -12324,8 +12350,16 @@ fn plan_dynamic_entry(
             let item_trait = dynamic_collection_item_trait_ty(&parent, from, table);
             let rc_identity =
                 collection_uses_rc_identity(collection, body, binding, ctx, from, table);
-            let renderer =
-                emit_for_renderer(binding, body, ctx, from, table, &item_trait, rc_identity);
+            let renderer = emit_for_renderer(
+                binding,
+                body,
+                ctx,
+                from,
+                table,
+                &item_trait,
+                rc_identity,
+                environment_scope,
+            );
             let node_binding = format_ident!("__node_{}", out.len());
             out.push(PlannedNode {
                 binding: node_binding.clone(),

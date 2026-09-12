@@ -283,6 +283,40 @@ fn winui3_show_hide_show_builds_once_and_close_cascades_unmount() {
             "re-show must not trigger unmount"
         );
 
+        // Issue #254 / PR #257 review remediation (A2, then B1): the *final generated* Window
+        // owner (not merely its backend base `Window`) must survive the caller's own `Rc`
+        // dropping, and must actually drop once native close is observed. Every operation after
+        // the initial drop goes through a freshly-upgraded, explicitly scoped temporary `Rc` --
+        // never a lingering local binding -- so the final `weak.upgrade().is_none()` assertion
+        // genuinely proves the application registry (not a leftover test-local strong reference)
+        // was the only thing keeping this alive.
+        //
+        // B1: this block runs here -- while `window` (above) is still shown and therefore still
+        // retained by `crate::app::WINDOWS` -- rather than after `window.close()` below. WinUI3's
+        // `release_window` calls `Application::Exit()` once the retained-window registry becomes
+        // empty; running the probe after `window.close()` would let its own retain/release cycle
+        // interact with (or depend on) that shutdown request instead of testing Window ownership
+        // in isolation against a stable, already-retained sibling Window.
+        let probe: Rc<WindowLifetimeProbe> = WindowLifetimeProbe::new();
+        let probe_weak = Rc::downgrade(&probe);
+        probe.show();
+        drop(probe);
+        assert!(
+            probe_weak.upgrade().is_some(),
+            "generated Window owner must still be alive after the caller's own Rc drops"
+        );
+        {
+            let retained = probe_weak
+                .upgrade()
+                .expect("generated Window retained after caller Rc drop");
+            retained.close();
+        }
+        assert!(
+            probe_weak.upgrade().is_none(),
+            "generated Window owner must actually drop once native close is observed and the \
+             temporary upgrade used to close it is gone"
+        );
+
         window.close();
         assert_eq!(
             get_unmount_events(),
@@ -304,33 +338,6 @@ fn winui3_show_hide_show_builds_once_and_close_cascades_unmount() {
             BUILD_COUNT.with(Cell::get),
             1,
             "show() after close must be a no-op"
-        );
-
-        // Issue #254 / PR #257 review remediation (A2): the *final generated* Window owner
-        // (not merely its backend base `Window`) must survive the caller's own `Rc` dropping,
-        // and must actually drop once native close is observed. Every operation after the
-        // initial drop goes through a freshly-upgraded, explicitly scoped temporary `Rc` --
-        // never a lingering local binding -- so the final `weak.upgrade().is_none()` assertion
-        // genuinely proves the application registry (not a leftover test-local strong reference)
-        // was the only thing keeping this alive.
-        let probe: Rc<WindowLifetimeProbe> = WindowLifetimeProbe::new();
-        let probe_weak = Rc::downgrade(&probe);
-        probe.show();
-        drop(probe);
-        assert!(
-            probe_weak.upgrade().is_some(),
-            "generated Window owner must still be alive after the caller's own Rc drops"
-        );
-        {
-            let retained = probe_weak
-                .upgrade()
-                .expect("generated Window retained after caller Rc drop");
-            retained.close();
-        }
-        assert!(
-            probe_weak.upgrade().is_none(),
-            "generated Window owner must actually drop once native close is observed and the \
-             temporary upgrade used to close it is gone"
         );
     });
 

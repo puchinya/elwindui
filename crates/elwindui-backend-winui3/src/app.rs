@@ -242,9 +242,11 @@ mod window_lifecycle_tests {
             // freshly-upgraded, explicitly scoped temporary `Rc` that is dropped again before the
             // next assertion — an earlier revision of this test kept a `let window = weak.upgrade()
             // ...` binding alive across `hide()`/`show()`/`close()` and all the way to the final
-            // `weak.upgrade().is_none()` assertion, which that local binding alone would have made
-            // pass trivially (upgrade succeeds whenever *any* strong Rc exists, application-owned
-            // or not) regardless of whether `app::WINDOWS` was doing anything at all.
+            // `weak.upgrade().is_none()` assertion. That lingering local `Rc` made
+            // `weak.upgrade()` keep succeeding regardless of whether `app::WINDOWS` had actually
+            // released its own entry, so `weak.upgrade().is_none()` could never become true —
+            // making the final assertion impossible to satisfy and therefore unable to prove that
+            // application-registry release, specifically, is what this test claims to verify.
             let window_a = crate::native_ui::Window::new();
             let weak_a = std::rc::Rc::downgrade(&window_a);
             window_a.show();

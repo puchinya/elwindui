@@ -32,6 +32,14 @@ Implementer self-review is evidence, not reviewer approval. The reviewer indepen
 
 Use `gh` to inspect PR comments/reviews/threads/checks.
 
+## GitHub Markdown and image evidence
+
+For multiline PR comments and review bodies, use `--body-file` when the `gh` command supports it. The source file must contain real newline characters; `--body` is only for genuinely single-line text, and literal \n must not substitute for an intended Markdown line break.
+
+Review screenshots or other image evidence that materially supports a finding MAY be attached to the owning Issue with `gh --attach`. This workflow uses Issue attachments for images only. Required image evidence must be verified after publication by checking the resulting Issue/comment and confirming the expected image asset or link; missing or partial uploads cannot be reported as PASS.
+
+Do not attach contracts, logs, text, generic files, or videos; keep those artifacts in the local Issue/PR/evidence workflow.
+
 ## Review handling
 
 1. Inspect all actionable review submissions, inline threads, and required CI checks.

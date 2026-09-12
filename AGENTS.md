@@ -17,6 +17,17 @@ Research-only work does not require an Issue unless requested. If research becom
 
 Use `gh` for GitHub Issue/PR/label/milestone/comment/review/Actions operations and `git` for local branch/staging/commit/push operations.
 
+GitHub Markdown transport invariant:
+- Multiline Markdown MUST use `--body-file` when supported.
+- The body source MUST contain real newline characters.
+- `--body` is only for genuinely single-line text.
+- Never encode intended line breaks as literal \n.
+
+Issue image evidence:
+- Useful/required image evidence SHOULD be attached to the owning Issue with `gh --attach`.
+- This workflow uses Issue attachments for images only.
+- Required image uploads must be verified after publication.
+
 ## Instruction input modes
 
 Repository-changing work has two input modes:

@@ -1,6 +1,6 @@
 # Tooling status
 
-Snapshot: 2026-09-07. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-09-12. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
 
 ## Current capability matrix
 
@@ -13,6 +13,19 @@ Snapshot: 2026-09-07. Tool architecture is indexed in [`../design/README.md`](..
 | `elwindui-test` | 🚧 | Render-tree dump exists; canvas/image snapshots are absent. |
 | `macos-ui-driver` | 🚧 | Process/window control, focus, Accessibility queries/actions, screenshots, coordinate clicks, real press/drag/release, and native resize gestures are implemented; full keyboard synthesis and every AX action are incomplete. |
 | `windows-ui-driver` | 🚧 | Process/window control, UIA inspect/search/invoke/get-value/get-property/set-focus/wait-for, real mouse click/drag, screenshot (window and screen-capture modes), and move/resize are implemented over the external `winapp` CLI; `send-keys` is implemented but not yet exercised end to end by a live case. |
+| Shared native E2E orchestration | ⬜ | Backend-neutral durable cases, deterministic compilation, reusable local plan cache, batch runner, bounded vision checkpoints, and animation capture sequence are planned but not implemented. |
+
+## Native E2E orchestration state
+
+The shared architecture is [`native_e2e_orchestration_design.md`](../design/tools/native_e2e_orchestration_design.md).
+The platform drivers above exist, but the shared durable case runner/compiler/cache is planned and
+not implemented. No durable shared product E2E case exists yet; durable cases remain deferred to
+[`tests/e2e/`](../../tests/e2e/README.md). The animation `capture-sequence` capability is planned,
+not implemented, and no AI image-recognition pipeline is claimed.
+
+The required Codex tester routing policy is GPT-5.6 Luna with child reasoning effort explicitly
+`medium`. The repository does not currently prove explicit child-effort enforcement or attestation;
+the policy must not be described as enforced, and no speculative `.codex/config.toml` key is used.
 
 ## macOS UI driver verification
 

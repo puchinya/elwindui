@@ -6,6 +6,11 @@ command illustration for native WinUI3 GUI acceptance. It is separate from
 remain Issue-scoped evidence under `.agent-state/issues/<issue>/e2e/<head>/<run-id>/`; a small
 reviewer-facing result set may be committed when the owning Issue requires durable evidence.
 
+The shared native E2E orchestration target, including reusable plans, runtime-value boundaries,
+vision checkpoints, animation capture, budgets, and classification, is defined in
+[`native_e2e_orchestration_design.md`](../design/tools/native_e2e_orchestration_design.md). This
+guide remains the current WinUI3 operational authority until that shared runner is implemented.
+
 ## Codex and Claude Code routing and tester ownership
 
 This routing is provider-neutral: Codex and Claude Code use the same bounded tester contract,
@@ -13,10 +18,16 @@ instruction-sheet structure, evidence obligations, retry rules, and PASS/FAIL/NO
 semantics. Only the selected tester model and each provider's own sub-agent mechanism differ.
 
 ```text
-Codex:        GPT-5.6 Luna, standard reasoning effort (medium)
+Codex target:  GPT-5.6 Luna, reasoning effort explicitly medium
 Claude Code:  Claude Haiku 4.5, normal/default reasoning configuration
               (do not enable extended thinking for routine E2E execution)
 ```
+
+The Luna/medium line is the required routing policy, not proof of current enforcement. The parent
+agent's reasoning effort must not be inherited as the effective child effort. When the provider
+exposes it, run evidence should attest the effective tester model and effort. The repository does
+not currently prove explicit Codex child-effort pinning; do not describe the policy as enforced or
+invent a `.codex/config.toml` setting.
 
 For every WinUI3 E2E request, the main agent must assign the real GUI execution to one bounded
 tester sub-agent before invoking the driver itself, using its provider's own sub-agent mechanism.
@@ -145,6 +156,16 @@ This guide owns the WinUI3 tester procedure, not the set of permanent product E2
 product/application E2E scenarios originate under [`tests/e2e/`](../../tests/e2e/README.md); this
 driver and guide only execute them. Do not create WinUI3-only permanent product scenarios under
 `tools/windows-ui-driver/` or this `docs/agents/` guide.
+
+## Shared orchestration target
+
+The future flow is durable case -> deterministic compiler -> reusable compiled plan/script ->
+bounded shared runner -> WinUI3 driver -> structured result and immutable evidence. Unchanged
+declared plan dependencies permit plan reuse, but runtime identifiers, geometry, visual evidence,
+and PASS/FAIL results are reacquired for every run. The tester executes the prepared case and may
+observe only explicit, bounded visual checkpoints; it does not redesign the sequence between
+driver primitives. Execution and vision budgets are part of the future runner contract. No shared
+runner, batch command, or plan-cache command is implemented by this guide.
 
 ## Executing a durable case
 

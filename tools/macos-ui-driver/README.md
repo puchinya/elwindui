@@ -11,6 +11,11 @@ Every command prints one JSON object to stdout (`{"success": true, ...}` or `{"s
 "error": "..."}`) and sets the process exit code accordingly (0/1). No fixed `sleep`-based waiting
 anywhere — `launch --wait-window-timeout` and `terminate --timeout` both poll a real condition.
 
+The shared native E2E orchestration target is defined in
+[`docs/design/tools/native_e2e_orchestration_design.md`](../../docs/design/tools/native_e2e_orchestration_design.md).
+This README remains the driver command and platform-mechanics authority; it does not implement the
+shared runner or its future plan/cache protocol.
+
 ## Build
 
 ```bash
@@ -64,10 +69,17 @@ The assigned E2E sub-agent must complete its assigned scenarios itself and must 
 them. It must return the required window values and separate stdout/stderr logs; an incomplete
 summary is NOT RUN and cannot be recorded as PASS.
 
-Each Driver CLI invocation is a separate process. The Codex window may regain foreground after it
-exits, so callers must frontmost `docking-demo` immediately before every GUI-acting invocation
-(`focus-window`, `point-click`, `click`, `resize`, and `capture-window`) instead of relying on a
-previous command's focus.
+Each Driver CLI invocation is a separate process. Foreground is required only for operations whose
+delivery depends on real frontmost input or when foreground behavior itself is under test. The
+semantic operations `find`, `dump-tree`, `set-focus`, `wait-for`, and `click --via ax-press` do not
+need a universal `focus-window` step. `capture-window` is screenshot capture, not user input, and
+does not require `focus-window` by policy.
+
+`click` without `--via ax-press` is real mouse delivery (`--via mouse`, the default). Use a
+foreground/input-routing prerequisite immediately before `click --via mouse`, `point-click`,
+`drag`, `resize`, and synthesized keyboard input when frontmost delivery matters. If focus is
+needed, verify it before the real-input action; do not treat a failed focus request as permission
+to continue. Do not apply a universal focus rule to captures or semantic Accessibility operations.
 
 When a driver command fails or a GUI result is abnormal, save its exact stdout and stderr with
 the command and case name. Keep high-volume logs under the Issue-scoped
@@ -88,6 +100,7 @@ macos-ui-driver list-windows [--pid <pid>] [--name <substring>]
 
 macos-ui-driver capture-window --window-id <id> --out <path.png>
 # {"success":true,"window_id":...,"path":"...","width":...,"height":...}
+# Screenshot capture is not user input and does not require focus-window by policy.
 
 macos-ui-driver terminate --pid <pid> [--timeout <seconds>]
 # {"success":true,"pid":...,"terminated":true,"forced":false}
@@ -140,6 +153,7 @@ macos-ui-driver set-focus --pid <pid> [--window-id <id>] <selector> [--timeout 1
 # {"success":true,"focus_confirmed":true,"set_attribute_status_ok":true,"before":{...},"after":{...}}
 
 macos-ui-driver click --pid <pid> [--window-id <id>] <selector> [--via mouse|ax-press = mouse] [--timeout 1.0]
+# Without --via ax-press, click is real mouse delivery (--via mouse, the default).
 # --via mouse (default): a real CGEventPost mouse down/up pair at the element's AXPosition/AXSize
 #   center — the more faithful "does this behave like a real click" test.
 # --via ax-press: AXUIElementPerformAction(kAXPressAction) instead.

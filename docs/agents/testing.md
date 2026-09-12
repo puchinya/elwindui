@@ -101,6 +101,13 @@ RUSTFLAGS="--cfg rust_analyzer" cargo check --workspace
 - For WinUI 3 / Windows use `docs/agents/winui3.md`; native WinUI3 E2E (process/window control,
   UIA, real input, screenshots) routes to `docs/agents/winui3-e2e.md`, not ad-hoc scripts.
 
+Native E2E orchestration architecture, compiled-plan reuse, runtime-value boundaries, visual
+checkpoints, animation capture, classification, budgets, and tester routing are defined in
+[`../design/tools/native_e2e_orchestration_design.md`](../design/tools/native_e2e_orchestration_design.md).
+The current AppKit and WinUI3 guides remain the operational authority until a shared runner is
+implemented; this routing does not claim that runner, plan cache, batch execution, or capture
+sequence exists. Preserve the Rust verification gate above unchanged for Rust-affecting work.
+
 ## Durable E2E case ownership
 
 Durable product/application E2E test cases belong under `tests/e2e/`. Platform drivers remain

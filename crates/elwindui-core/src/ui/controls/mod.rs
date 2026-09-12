@@ -19,7 +19,7 @@
 //!
 //! `TabView`/`TabViewItem` are deliberately **not** included in that shared set: their own methods
 //! (`insert_tab`/`remove_tab`/`set_tab_content_visible`, an owned content host handle per platform)
-//! are genuinely different in shape per backend (AppKit's `Retained<TreeHostView>`/`TabChipImpl` vs
+//! are genuinely different in shape per backend (AppKit's `Retained<TreeHost>`/`TabChipImpl` vs
 //! WinUI3's own equivalents have no common signature to share without associated types this crate
 //! doesn't need yet) — each backend keeps declaring its own local `TabView` trait.
 

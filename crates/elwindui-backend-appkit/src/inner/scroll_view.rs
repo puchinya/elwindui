@@ -1,28 +1,28 @@
 //! `NSScrollView` and its per-axis scroller enablement.
 
 use crate::ffi::{AnyView, mtm};
-use crate::host::TreeHostView;
+use crate::host::TreeHost;
 use elwindui_core::ui::UIElementExt;
 use objc2::rc::Retained;
 use objc2_app_kit::NSScrollView;
 use std::cell::Cell;
 use std::rc::Rc;
 
-/// Raw `NSScrollView` + nested `TreeHostView` (`ElwinduiContentRoot`) — composed by
+/// Raw `NSScrollView` + nested `TreeHost` (`ElwinduiContentRoot`) — composed by
 /// `native_ui::ScrollView`. See `elwindui_core::ui::ScrollView`'s own doc comment for the
 /// `ScrollView -> NativeScrollHost -> ElwinduiContentRoot -> content` structure this implements.
-/// `content_host` is a second, independent `TreeHostView` instance — the same nested-hosting
-/// pattern `InnerTabView::insert_tab`'s own per-tab `TreeHostView::new()` already establishes, not a
+/// `content_host` is a second, independent `TreeHost` instance — the same nested-hosting
+/// pattern `InnerTabView::insert_tab`'s own per-tab `TreeHost::new()` already establishes, not a
 /// one-off special case — with its own `set_tree`, its own `AppKitRelayoutHost`/`AppKitFocusHost`
-/// registration (falls out of `TreeHostView::set_tree` unchanged, no new focus-chain code needed:
-/// `ElwinduiWindow::make_first_responder`'s responder-chain walk already finds *any* `TreeHostView`
+/// registration (falls out of `TreeHost::set_tree` unchanged, no new focus-chain code needed:
+/// `ElwinduiWindow::make_first_responder`'s responder-chain walk already finds *any* `TreeHost`
 /// ancestor, nested ones included), and — the one genuinely new piece — `unconstrained_axes` set on
 /// whichever axis scrolls, so that axis measures/arranges at its true natural size instead of being
 /// clamped to the viewport.
 pub(crate) struct InnerScrollView {
     handle: AnyView,
     scroll: Retained<NSScrollView>,
-    content_host: Retained<TreeHostView>,
+    content_host: Retained<TreeHost>,
     /// `(horizontal_scroll_enabled, vertical_scroll_enabled)` — mirrors the DSL-visible
     /// property names directly (unlike `TreeHostIvars::unconstrained_axes`, which is phrased as
     /// "width/height unconstrained" — the same booleans, just named from the opposite perspective:
@@ -34,7 +34,7 @@ impl InnerScrollView {
     pub(crate) fn new() -> Self {
         let m = mtm();
         let scroll = NSScrollView::new(m);
-        let content_host = TreeHostView::new();
+        let content_host = TreeHost::new();
         content_host.setTranslatesAutoresizingMaskIntoConstraints(true);
         scroll.setDocumentView(Some(&content_host));
         let handle = AnyView::from(scroll.clone());

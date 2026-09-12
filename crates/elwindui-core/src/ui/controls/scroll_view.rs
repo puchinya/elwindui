@@ -8,8 +8,8 @@ use super::*;
 /// far (`Button`/`TextArea`/`TextBox`/`PasswordBox`/`TabView`, all self-contained native widgets),
 /// `ScrollView`'s own content is a full elwindui subtree with its own layout/paint/hit-test/focus —
 /// each backend's `ElwinduiContentRoot` is a second, nested instance of that same backend's own
-/// "reflect an `Rc<dyn UIElement>` into real native views" host (AppKit's `TreeHostView`, WinUI3's
-/// `TreeHostPanel`), the same pattern `TabView`'s own per-tab content host already establishes —
+/// "reflect an `Rc<dyn UIElement>` into real native views" host (AppKit's `TreeHost`, WinUI3's
+/// `TreeHost`), the same pattern `TabView`'s own per-tab content host already establishes —
 /// not a one-off special case. The one genuinely new piece is that this nested host's own Measure
 /// must run *unconstrained* on the scrolling axis/axes (so the content reports/gets arranged at its
 /// true natural size, letting the native container's own scroll physics do the rest) rather than

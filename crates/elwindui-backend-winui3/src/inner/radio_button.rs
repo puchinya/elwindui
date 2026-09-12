@@ -26,7 +26,7 @@ impl InnerRadioButton {
         let xaml = XamlRadioButton::new().expect("RadioButton::new");
         // An unset `GroupName` makes WinUI implicitly group every RadioButton with the same visual
         // parent. Give each raw widget a unique native group so only elwindui's logical `group`
-        // registry decides exclusivity, including when two logical groups share one TreeHostPanel.
+        // registry decides exclusivity, including when two logical groups share one TreeHost.
         let native_group = format!(
             "elwindui-radio-{}",
             NEXT_NATIVE_GROUP.fetch_add(1, Ordering::Relaxed)

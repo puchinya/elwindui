@@ -3,7 +3,7 @@
 
 use super::InnerMenuBar;
 use crate::ffi::mtm;
-use crate::host::TreeHostView;
+use crate::host::TreeHost;
 use elwindui_core::base::Rect;
 use elwindui_core::input::FocusState;
 use elwindui_core::ui::UIElementExt;
@@ -17,29 +17,29 @@ use objc2_app_kit::{
     NSWindowStyleMask,
 };
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSRect, NSString};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::future::poll_fn;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::task::Poll;
 use std::time::Duration;
 
-/// Walks up from `responder`'s own `NSView` ancestor chain looking for the nearest `TreeHostView`
+/// Walks up from `responder`'s own `NSView` ancestor chain looking for the nearest `TreeHost`
 /// (the window's own top-level content host, or a nested one — `InnerTabView`'s per-tab host,
 /// `InnerScrollView`'s content host once that exists, ...) that has `responder`'s *immediate child*
-/// registered as one of its own native leaf islands (`TreeHostView::native_containers`). Returns
+/// registered as one of its own native leaf islands (`TreeHost::native_containers`). Returns
 /// that host together with the owning element's `render_group_id`, ready for
 /// `elwindui_core::focus::native_focus_gained`/`native_focus_lost`. Returns `None` for anything not
 /// reachable this way — most commonly a `TabView` chip/close button (an `InnerButton` created
 /// directly by `create_tab_chip`, never wrapped in a `RenderCommand::NativeControl`) or the
-/// `TreeHostView`/`NSWindow` itself becoming first responder (e.g. on window activation with
+/// `TreeHost`/`NSWindow` itself becoming first responder (e.g. on window activation with
 /// nothing else focused yet) — both are correctly not elwindui-visible focus targets.
 fn resolve_focus_owner(
     responder: Option<Retained<NSResponder>>,
-) -> Option<(Retained<TreeHostView>, u64)> {
+) -> Option<(Retained<TreeHost>, u64)> {
     let mut previous: Option<Retained<NSView>> = None;
     let mut current: Option<Retained<NSView>> = responder.and_then(|r| r.downcast::<NSView>().ok());
     while let Some(view) = current {
-        match view.downcast::<TreeHostView>() {
+        match view.downcast::<TreeHost>() {
             Ok(host) => {
                 let owner_id = previous
                     .as_deref()
@@ -62,6 +62,12 @@ fn resolve_focus_owner(
 pub(crate) struct ElwinduiWindowIvars {
     close_request_handler: RefCell<Option<Rc<dyn Fn() -> bool>>>,
     bounds_changed_handler: RefCell<Option<Rc<dyn Fn(Rect)>>>,
+    /// Issue #254: `Some` once `InnerWindow::show()` has retained the final Window owner through
+    /// `crate::app::retain_window` — `None` before the first `show()`, and again after
+    /// `windowWillClose:` has released it. Lives here (not on `InnerWindow`) for the same reason
+    /// `close_request_handler` does: `windowWillClose:` only ever has `self: &ElwinduiWindow`/
+    /// `self.ivars()` in scope, not a real `InnerWindow`.
+    retention_id: Cell<Option<u64>>,
 }
 
 /// Suspends a UI-affine future without blocking AppKit's main thread. The wake-up is delivered
@@ -90,7 +96,7 @@ define_class!(
     /// Subclassing the window (rather than every individual native leaf class) is the standard,
     /// minimal-surface-area AppKit technique for observing "did some view anywhere in this window
     /// become/stop being first responder" without per-widget-class overrides, and mirrors this same
-    /// file's own `TreeHostView` subclassing convention. Also owns the Issue #162 §3.21 native
+    /// file's own `TreeHost` subclassing convention. Also owns the Issue #162 §3.21 native
     /// close-request veto (`windowShouldClose:`).
     #[unsafe(super(NSWindow))]
     #[thread_kind = objc2::MainThreadOnly]
@@ -190,6 +196,23 @@ define_class!(
             false.into()
         }
 
+        /// Issue #254 §2.10: the final application-retention release point — takes
+        /// `retention_id` (a no-op if already `None`, e.g. a never-shown Window or a repeat
+        /// notification), holds a temporary strong native retain across `release_window` so
+        /// releasing the app-owned `Rc<dyn WindowExt>` cannot drop `InnerWindow`'s
+        /// `Retained<NSWindow>` while AppKit is still inside this native close callback, then lets
+        /// the retain go once this method returns. Does not replace or affect
+        /// `windowShouldClose:`'s own deferred-close/veto mechanism above — `windowWillClose:`
+        /// fires only once AppKit has already committed to closing.
+        #[unsafe(method(windowWillClose:))]
+        fn window_will_close(&self, _notification: &NSNotification) {
+            let Some(id) = self.ivars().retention_id.take() else {
+                return;
+            };
+            let _native_keepalive = self.retain();
+            crate::app::release_window(id);
+        }
+
         #[unsafe(method(elwinduiWindowBoundsChanged:))]
         fn bounds_changed(&self, _notification: &NSNotification) {
             let Some(handler) = self.ivars().bounds_changed_handler.borrow().clone() else {
@@ -261,12 +284,17 @@ mod native_close_decision_tests {
 /// Raw `NSWindow` + content host — composed by `native_ui::Window`.
 #[derive(Clone)]
 pub(crate) struct InnerWindow {
+    /// Issue #254: `Weak` only — the application-layer registry (`crate::app::WINDOWS`) is the
+    /// strong lifetime authority for the final owner once `show()` has retained it; this must
+    /// never become a strong reference, or the owner/`InnerWindow`/native-window chain would form
+    /// a cycle no drop could ever break.
+    owner: Weak<dyn elwindui_core::ui::WindowExt>,
     ns: Retained<NSWindow>,
-    content_host: Retained<TreeHostView>,
+    content_host: Retained<TreeHost>,
 }
 
 impl InnerWindow {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(owner: Weak<dyn elwindui_core::ui::WindowExt>) -> Self {
         let mtm = mtm();
         let content_rect = NSRect::new(
             objc2_foundation::NSPoint::new(0.0, 0.0),
@@ -310,7 +338,7 @@ impl InnerWindow {
                 Some(&*ns as &objc2::runtime::AnyObject),
             );
         }
-        let content_host = TreeHostView::new();
+        let content_host = TreeHost::new();
         // `Window` property setters can resize the NSWindow after this content view has been
         // installed (the notepad starts at 640×480 although InnerWindow's construction rect is
         // 480×360). Keep the host synchronized with the client area just like per-tab hosts do.
@@ -320,7 +348,11 @@ impl InnerWindow {
                 | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         ns.setContentView(Some(&content_host));
-        Self { ns, content_host }
+        Self {
+            owner,
+            ns,
+            content_host,
+        }
     }
 
     /// Issue #162 §3.18: closes this window's own active custom popup/context-menu surface, if
@@ -390,7 +422,23 @@ impl InnerWindow {
         NSApplication::sharedApplication(mtm()).setMainMenu(Some(&menu_bar.ns));
     }
 
+    /// Issue #254: on the first call, hands the final Window owner to
+    /// `crate::app::retain_window` so the application layer becomes its strong lifetime authority
+    /// until `windowWillClose:` observes native close; the returned id is stored on
+    /// `ElwinduiWindowIvars::retention_id` so a later `hide()`/`show()` cycle does not retain a
+    /// second time.
     pub(crate) fn show(&self) {
+        let window = self
+            .ns
+            .downcast_ref::<ElwinduiWindow>()
+            .expect("InnerWindow::ns is always a real ElwinduiWindow");
+        if window.ivars().retention_id.get().is_none() {
+            let owner = self.owner.upgrade().expect(
+                "InnerWindow::show: internal invariant violated - final Window owner was already dropped before its first show()",
+            );
+            let id = crate::app::retain_window(owner);
+            window.ivars().retention_id.set(Some(id));
+        }
         let mtm = mtm();
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Regular);

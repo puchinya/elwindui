@@ -20,9 +20,14 @@ impl Window {
     // The bare (not `Rc`-wrapped) value `#[class]`'s auto-generated `new` wraps — this is also what
     // lets a `component X inherits Window` (host composition) embed a real `Window` directly as its
     // own `base` field.
+    //
+    // Issue #254: `__self_weak` (the final, most-derived `Rc<dyn WindowExt>`'s own weak
+    // reference, provided by `#[class]`) is threaded into `InnerWindow` so `show()` can hand it
+    // to `crate::app::retain_window` on first show — the application layer, not this struct or
+    // any caller local, becomes the strong lifetime authority for the shown Window.
     fn construct() -> Self {
         Self {
-            inner: InnerWindow::new(),
+            inner: InnerWindow::new(__self_weak.clone()),
             content: RefCell::new(None),
         }
     }

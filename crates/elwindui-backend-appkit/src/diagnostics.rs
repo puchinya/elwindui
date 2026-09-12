@@ -5,7 +5,7 @@
 //! `CALayer` objects.
 
 use crate::ffi::mtm;
-use crate::host::TreeHostView;
+use crate::host::TreeHost;
 use crate::render;
 use crate::render::stats;
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -29,14 +29,14 @@ thread_local! {
 ///
 /// The live object counts cover the `NSView` trees attached to windows returned by
 /// `NSApplication.windows()`. `CALayer` counts additionally include retained render-group roots
-/// owned by attached `TreeHostView`s, with object identities de-duplicated across both sources.
+/// owned by attached `TreeHost`s, with object identities de-duplicated across both sources.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AppKitMemorySnapshot {
     /// macOS `phys_footprint`, the primary value shown by Activity Monitor's Memory column.
     pub physical_footprint_bytes: u64,
     /// Current resident bytes from `TASK_VM_INFO`; this is a supplementary metric.
     pub resident_bytes: u64,
-    /// Number of attached `TreeHostView` objects reachable from application windows.
+    /// Number of attached `TreeHost` objects reachable from application windows.
     pub attached_tree_host_count: u32,
     /// Attached tree hosts whose own `hidden` flag is set.
     pub hidden_tree_host_count: u32,
@@ -132,9 +132,9 @@ pub fn capture_memory_snapshot() -> AppKitMemorySnapshot {
 pub enum MemoryBaselineCase {
     /// A plain empty `NSView` installed as the sole window content view.
     EmptyNsView,
-    /// An empty `TreeHostView` with no explicitly requested backing layer.
+    /// An empty `TreeHost` with no explicitly requested backing layer.
     EmptyTreeHost,
-    /// An empty `TreeHostView` forced to create an AppKit backing layer.
+    /// An empty `TreeHost` forced to create an AppKit backing layer.
     LayerBackedTreeHost,
 }
 
@@ -157,9 +157,9 @@ pub fn show_memory_baseline(case: MemoryBaselineCase) {
     };
     let content: Retained<NSView> = match case {
         MemoryBaselineCase::EmptyNsView => NSView::new(mtm),
-        MemoryBaselineCase::EmptyTreeHost => Retained::into_super(TreeHostView::new()),
+        MemoryBaselineCase::EmptyTreeHost => Retained::into_super(TreeHost::new()),
         MemoryBaselineCase::LayerBackedTreeHost => {
-            let host = TreeHostView::new();
+            let host = TreeHost::new();
             host.setWantsLayer(true);
             Retained::into_super(host)
         }
@@ -201,7 +201,7 @@ fn collect_view(
     seen_layers: &mut HashSet<usize>,
     seen_masks: &mut HashSet<usize>,
 ) {
-    let host = view.clone().downcast::<TreeHostView>().ok();
+    let host = view.clone().downcast::<TreeHost>().ok();
     let layer = view.layer();
     record_view_metadata(
         snapshot,

@@ -2,7 +2,7 @@
 
 use super::NativeControl;
 use crate::AnyView;
-use crate::host::TreeHostPanel;
+use crate::host::TreeHost;
 use crate::inner::InnerTabView;
 use elwindui_core::ui::UIElementExt;
 use std::any::Any;
@@ -15,11 +15,11 @@ use std::rc::{Rc, Weak};
 /// normalizes into. `Microsoft.UI.Xaml.Controls.
 /// TabView` is a real native tabbed-document control (unlike AppKit, which has none, hence that
 /// backend's hand-rolled `TabChip`/`TabStrip`), and each `TabViewItem`'s `Content` here is a live
-/// `crate::host::TreeHostPanel` holding that tab's whole widget tree — recreating it on every
+/// `crate::host::TreeHost` holding that tab's whole widget tree — recreating it on every
 /// resync (as AppKit's *chips*, which are cheap, safely do) would reset a document's `TextArea`
 /// (lost cursor/focus) on every keystroke. Unlike AppKit, this backend has **no** "content already
 /// shown once" limitation for static mode: a `TabViewItem`'s `content` is moved into its own
-/// persistent `TreeHostPanel` exactly once, when that `TabViewItem` is first inserted as a real
+/// persistent `TreeHost` exactly once, when that `TabViewItem` is first inserted as a real
 /// native tab — it is never subsequently discarded by selecting a different tab
 /// (`Controls::TabView` shows/hides each item's own `Content` natively), so there's nothing to
 /// restore. `struct_only = elwindui_core::ui::TabViewExt` (a deliberately empty shared trait — see
@@ -36,7 +36,7 @@ pub struct TabView {
     /// Parallel to `displayed`: each real XAML tab's persistent content host, in display order.
     /// Ownership lives here rather than in `InnerTabView` so keyed removal can suppress and drop
     /// exactly the host belonging to a closed declarative item.
-    content_hosts: RefCell<Vec<TreeHostPanel>>,
+    content_hosts: RefCell<Vec<TreeHost>>,
     /// Pointer identity of the entry whose host currently participates in layout/render. `None`
     /// means either no selected child exists or the selected index is out of range.
     active: Cell<Option<usize>>,
@@ -61,7 +61,7 @@ pub struct TabView {
 pub struct TabViewItem {
     header: RefCell<String>,
     on_header_changed: RefCell<Option<Box<dyn Fn()>>>,
-    // Taken (moved into a real `TreeHostPanel`) the first time this `TabViewItem` is inserted as a
+    // Taken (moved into a real `TreeHost`) the first time this `TabViewItem` is inserted as a
     // displayed tab; `None` afterward — see `TabView`'s own doc comment for why that's never a
     // problem here (unlike AppKit's single shared content pane).
     content: RefCell<Option<Rc<dyn UIElementExt>>>,

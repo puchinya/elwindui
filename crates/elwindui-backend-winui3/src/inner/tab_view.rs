@@ -10,7 +10,7 @@ use crate::bindings::Microsoft::UI::Xaml::SizeChangedEventHandler;
 use crate::ffi::{
     AnyView, UiCallbackRegistryOwner, invoke_ui_event_callback, invoke_ui_index_event_callback,
 };
-use crate::host::TreeHostPanel;
+use crate::host::TreeHost;
 use std::cell::RefCell;
 use std::rc::Rc;
 use windows::Foundation::{PropertyValue, TypedEventHandler};
@@ -19,7 +19,7 @@ use windows::core::{HSTRING, Interface};
 /// See docs/specs/ui_spec.md#tabs. `Microsoft.UI.Xaml.Controls.TabView` is a real native
 /// tabbed-document control (unlike AppKit, which has none — `elwindui_backend_appkit::inner`'s
 /// `TabStripImpl`/`TabChipImpl` hand-roll one from `Button`s), so this wraps it directly instead of
-/// assembling a strip from scratch. Each tab's `TabViewItem.Content` is a `TreeHostPanel` holding
+/// assembling a strip from scratch. Each tab's `TabViewItem.Content` is a `TreeHost` holding
 /// that tab's whole widget tree — composed by `native_ui::TabView`, which owns the mapping from
 /// `items_source`/static `TabViewItem`s to entries; this type only knows about "N tabs, each with a
 /// title and a content host", the same division AppKit's `InnerTabView` keeps.
@@ -40,7 +40,7 @@ pub(crate) struct InnerTabView {
 }
 
 // `TabView` lays out each item content below its tab strip, but the manually
-// sized TreeHostPanel is otherwise given the TabView's full height. Reserve the
+// sized TreeHost is otherwise given the TabView's full height. Reserve the
 // native strip height so a custom-drawn card keeps its lower margin and rounded
 // corners inside the content presenter instead of being clipped by the window.
 pub(crate) const TAB_VIEW_CONTENT_TOP_INSET: f64 = 40.0;
@@ -185,20 +185,15 @@ impl InnerTabView {
     /// Applies a viewport to one host and requests its synchronous layout. Suppressed hosts still
     /// retain the explicit size but make `force_relayout` a no-op, so selection can size first and
     /// activate second without doing a wasted pass.
-    pub(crate) fn resize_content_host(
-        &self,
-        content_host: &TreeHostPanel,
-        width: f64,
-        height: f64,
-    ) {
+    pub(crate) fn resize_content_host(&self, content_host: &TreeHost, width: f64, height: f64) {
         let element = content_host.as_element();
         let _ = element.SetWidth(width);
         let _ = element.SetHeight(height);
         content_host.force_relayout();
     }
 
-    pub(crate) fn insert_tab(&self, index: usize, title: &str, closable: bool) -> TreeHostPanel {
-        let content_host = TreeHostPanel::new();
+    pub(crate) fn insert_tab(&self, index: usize, title: &str, closable: bool) -> TreeHost {
+        let content_host = TreeHost::new();
         // A tab host must be suppressed before `native_ui::TabView::rebuild` attaches its tree;
         // otherwise `set_tree` would build a full RenderTree for every never-selected tab once.
         content_host.set_active(false);

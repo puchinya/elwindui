@@ -3,7 +3,7 @@
 
 use super::InnerButton;
 use crate::ffi::{AnyView, mtm, new_stack};
-use crate::host::TreeHostView;
+use crate::host::TreeHost;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
@@ -92,7 +92,7 @@ fn top_rounded_rect_path(rect: NSRect, radius: f64) -> Retained<NSBezierPath> {
 }
 
 /// Visual/native-interaction state owned by a single chip's own backing view — never
-/// `TabViewItem`, `TreeHostView`, selected index, or ElwindUI callbacks, which stay with their
+/// `TabViewItem`, `TreeHost`, selected index, or ElwindUI callbacks, which stay with their
 /// existing owners (`TabChipImpl`/`native_ui::TabView`).
 pub(crate) struct TabChipViewIvars {
     selected: Cell<bool>,
@@ -104,7 +104,7 @@ pub(crate) struct TabChipViewIvars {
     close_button: Retained<NSButton>,
     /// The single `NSTrackingArea` this chip keeps registered for itself — `updateTrackingAreas`
     /// removes the previous one before installing a freshly-sized replacement rather than
-    /// accumulating a new one on every resize, mirroring `host::TreeHostView`'s own tracking area.
+    /// accumulating a new one on every resize, mirroring `host::TreeHost`'s own tracking area.
     tracking_area: RefCell<Option<Retained<NSTrackingArea>>>,
     /// Fired by `mouseDown:` below — lets clicking anywhere on the chip's own background (the
     /// padding around `title_button`, not just `title_button`'s own bounds) select the tab too,
@@ -461,7 +461,7 @@ impl TabStripImpl {
 /// `TabViewItem`s to `TabChipImpl`s + content hosts. This type only holds the widget areas — it has
 /// no notion of "the list of tabs" on its own.
 ///
-/// Each tab gets its own persistent `TreeHostView` (created once, in `insert_tab`), added as an
+/// Each tab gets its own persistent `TreeHost` (created once, in `insert_tab`), added as an
 /// overlaid subview of `content_container` and shown/hidden via `set_tab_content_visible` rather
 /// than destroyed and rebuilt — a single shared pane would have no way to restore a previously-
 /// shown-then-hidden tab's content after switching away from it.
@@ -528,7 +528,7 @@ impl InnerTabView {
         closable: bool,
         on_select: Box<dyn Fn()>,
         on_close: Box<dyn Fn()>,
-    ) -> (TabChipImpl, Retained<TreeHostView>) {
+    ) -> (TabChipImpl, Retained<TreeHost>) {
         let chip = self.strip.insert_tab(index, title, closable);
         // Shared between two click paths — `title_button`'s own `on_click` (AppKit routes a
         // click on its exact bounds straight to it) and the chip's own background `mouseDown:`
@@ -542,7 +542,7 @@ impl InnerTabView {
         chip.set_on_select(Box::new(move || on_select()));
         chip.close_button.set_on_click(on_close);
 
-        let host = TreeHostView::new();
+        let host = TreeHost::new();
         // Classic pre-Auto-Layout "fill the parent" technique instead of `NSLayoutConstraint`s:
         // `translatesAutoresizingMaskIntoConstraints(true)` (this container has no Auto Layout
         // constraints of its own, so this is the default anyway, made explicit) plus a
@@ -570,9 +570,9 @@ impl InnerTabView {
     }
 
     /// Removes a tab's chip and its persistent content host together.
-    pub(crate) fn remove_tab(&self, chip: &TabChipImpl, host: &TreeHostView) {
+    pub(crate) fn remove_tab(&self, chip: &TabChipImpl, host: &TreeHost) {
         self.strip.remove_tab(chip);
-        // Explicit rather than relying on the last `Retained<TreeHostView>` being dropped by the
+        // Explicit rather than relying on the last `Retained<TreeHost>` being dropped by the
         // caller (which happens to be immediate today, but isn't guaranteed by anything at this
         // call site) — releases `render_tree`/every retained CALayer/native island deterministically
         // right here, matching `set_active`'s own doc comment.
@@ -584,7 +584,7 @@ impl InnerTabView {
     /// previously-selected one, never touching either one's actual content. Activating before
     /// unhiding (and hiding before deactivating) avoids ever presenting a suppressed host's empty
     /// frame for even one paint.
-    pub(crate) fn set_tab_content_visible(&self, host: &TreeHostView, visible: bool) {
+    pub(crate) fn set_tab_content_visible(&self, host: &TreeHost, visible: bool) {
         if visible {
             host.set_active(true);
             host.setHidden(false);

@@ -178,7 +178,7 @@ struct TapRecord {
 
 /// Turns raw mouse input into `elwindui_core::ui::hit_test`/`dispatch_routed` calls against a
 /// hosted tree — one instance per hosted tree (owned by a backend's own host view, e.g.
-/// `elwindui-backend-appkit`'s `TreeHostView`), fed every native mouse event via [`Self::handle`].
+/// `elwindui-backend-appkit`'s `TreeHost`), fed every native mouse event via [`Self::handle`].
 /// Modeled on WinUI3's input manager + `GestureRecognizer` (docs/design/README.md
 /// §5.10), with two deliberate simplifications from real WinUI3, both documented where they apply:
 ///

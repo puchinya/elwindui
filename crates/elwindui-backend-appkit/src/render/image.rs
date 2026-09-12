@@ -76,7 +76,7 @@ pub(crate) fn fitted_image_rect(
 /// Builds the layer or `masksToBounds` container needed for one `RenderCommand::DrawImage`
 /// — factored out of `replay_paint_command`'s own arm so `crop_cgimage`/`fitted_image_rect`'s
 /// actual `CALayer` construction (not just their own pure-value-level unit tests) is directly
-/// exercisable from `golden_tests` without needing a real `TreeHostView`/`NSView`. Returns `None`
+/// exercisable from `golden_tests` without needing a real `TreeHost`/`NSView`. Returns `None`
 /// when there's nothing to draw (`source` clamps to an empty crop against `resolved_cg_image`'s
 /// own bounds).
 pub(crate) fn build_image_container_layer(

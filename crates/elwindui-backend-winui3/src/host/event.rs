@@ -1,5 +1,5 @@
 //! WinRT key/modifier -> `elwindui_core::input` translation. Pure value mapping; the dispatch
-//! itself lives on `TreeHostPanel` in this module's parent.
+//! itself lives on `TreeHost` in this module's parent.
 
 use crate::bindings::Microsoft::UI::Input::InputKeyboardSource;
 use elwindui_core::input::{Key, KeyModifiers};

@@ -20,7 +20,7 @@
 //!
 //! `Window` is deliberately *not* a `UIElement` — like WinUI3's `Window`, it's a separate
 //! top-level host that owns a `Rc<dyn UIElement>` (its content), drives `layout_root`, and
-//! its own client area (see `elwindui-backend-appkit`'s `TreeHostView`).
+//! its own client area (see `elwindui-backend-appkit`'s `TreeHost`).
 //!
 //! **Ownership: `Rc`, not `Box`.** Every node holds a real parent back-reference
 //! (`UIElement::visual_parent`, WinUI3's `_parent`) so `dispatch_routed` can bubble a routed event

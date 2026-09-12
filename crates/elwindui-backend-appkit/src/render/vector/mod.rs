@@ -149,7 +149,7 @@ pub(crate) fn draw_vector_image(
                     // `dest`'s actually-displayed size (in points) times this layer's own
                     // `contentsScale` — `layer` here is always a layer already attached through
                     // `render::add_sublayer_scaled`, which stamps it down from
-                    // `TreeHostView::backing_scale_factor` at attach time (Core Animation does
+                    // `TreeHost::backing_scale_factor` at attach time (Core Animation does
                     // *not* propagate `contentsScale` from a superlayer on its own; see
                     // `render::layer`'s doc comment), so `layer.contentsScale()` is authoritative
                     // here without this function needing its own screen/window lookup.

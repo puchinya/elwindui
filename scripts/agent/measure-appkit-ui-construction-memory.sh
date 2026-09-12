@@ -229,7 +229,7 @@ done
     printf -- '- Architecture: %s\n' "$(uname -m)"
     printf -- '- Samples: %s separate processes per case, JSON report after %s ms\n' "$sample_count" "$settle_ms"
     printf -- '- Raw process logs and `vmmap -summary` captures: `%s/` (not committed)\n\n' "$raw_root"
-    printf 'Case definitions: A empty `NSView`; E empty `TreeHostView`; F `TabView` with 0 tabs; G 1 empty tab; H 7 empty tabs; I current 7-tab graphics-demo UIElement/state tree with every canvas paint callback disabled; J normal graphics-demo with Fills selected and painting enabled.\n\n'
+    printf 'Case definitions: A empty `NSView`; E empty `TreeHost`; F `TabView` with 0 tabs; G 1 empty tab; H 7 empty tabs; I current 7-tab graphics-demo UIElement/state tree with every canvas paint callback disabled; J normal graphics-demo with Fills selected and painting enabled.\n\n'
     printf '## 全sample\n\n'
     printf '| Case | Run | Footprint MiB | RSS MiB | MALLOC allocated KiB | FRAG KiB | MALLOC_SMALL dirty KiB | CA dirty KiB | VM_ALLOCATE dirty KiB | NSView | TreeHost | CALayer | NSStackView | NSButton |\n'
     printf '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n'

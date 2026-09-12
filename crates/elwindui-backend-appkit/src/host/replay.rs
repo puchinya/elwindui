@@ -1,14 +1,14 @@
 //! The `RenderGroup`/`RenderCommand` -> `CALayer` replay pass, plus its per-group cache key.
 //!
-//! Lives under `host` rather than `render` because it is `TreeHostView`'s own rendering pass —
-//! but note that none of the functions below actually take a `&TreeHostView` any more. Everything
+//! Lives under `host` rather than `render` because it is `TreeHost`'s own rendering pass —
+//! but note that none of the functions below actually take a `&TreeHost` any more. Everything
 //! they read or write across passes lives in [`ReplayState`], a plain, ObjC-free struct that
 //! `cargo test` can construct directly; the one thing a pass genuinely needs a live view for
 //! (creating/attaching a `RenderCommand::NativeControl`'s `NSView` island) is factored out behind
 //! the small [`NativeIslandHost`] trait instead. This is what lets a unit test drive `replay_group`
-//! against a bare `CALayer` — see `TreeHostView`'s own `NativeIslandHost` impl in `host::mod` for
+//! against a bare `CALayer` — see `TreeHost`'s own `NativeIslandHost` impl in `host::mod` for
 //! the real one used in production, and this crate's own `testsupport::golden` for why a real
-//! `TreeHostView` can't be constructed from a `cargo test` worker thread at all
+//! `TreeHost` can't be constructed from a `cargo test` worker thread at all
 //! (`MainThreadMarker::new()` returns `None` there).
 
 use crate::ffi::AnyView;
@@ -98,7 +98,7 @@ impl ClipRelation {
 ///
 /// `scale` (the host's `backing_scale_factor()` at the time of the last rebuild) is part of this
 /// key so a group whose geometry is byte-for-byte unchanged still rebuilds when the window moves
-/// to a display with a different backing scale — see `TreeHostView::backing_scale_factor` and
+/// to a display with a different backing scale — see `TreeHost::backing_scale_factor` and
 /// `render::add_sublayer_scaled`.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct GroupCacheKey {
@@ -207,7 +207,7 @@ pub(crate) struct ReplayState {
 
 /// The one thing a replay pass genuinely needs a live `NSView`-backed host for: the container
 /// island a `RenderCommand::NativeControl` renders its native leaf into. Everything else a pass
-/// touches lives in [`ReplayState`] and needs no live view at all. `TreeHostView`'s own impl
+/// touches lives in [`ReplayState`] and needs no live view at all. `TreeHost`'s own impl
 /// (`host::mod`) is the one used in production; a test double whose methods `unreachable!()` is
 /// enough for any tree that contains no `NativeControl` commands.
 pub(crate) trait NativeIslandHost {
@@ -1259,7 +1259,7 @@ mod tests {
     /// method call is a test bug (a tree that needs a real native island), not a code path this
     /// double is meant to support. Proves `replay_group`/`replay_commands` need no live `NSView`
     /// host at all for ordinary painted content — see this module's own doc comment on why that
-    /// matters (`TreeHostView` itself can't be constructed off the real main thread that `cargo
+    /// matters (`TreeHost` itself can't be constructed off the real main thread that `cargo
     /// test`'s worker threads are not).
     struct NoNativeIslands;
 

@@ -266,7 +266,7 @@ impl AnyView {
         }
     }
 
-    /// Positions this native leaf via plain `NSView.setFrame` — called directly by `TreeHostView`'s
+    /// Positions this native leaf via plain `NSView.setFrame` — called directly by `TreeHost`'s
     /// own render loop below, after `layout_root` and RenderTree reconciliation have produced its
     /// retained native command.
     pub(crate) fn arrange(&mut self, final_rect: elwindui_core::base::Rect) {

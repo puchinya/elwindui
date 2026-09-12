@@ -93,10 +93,10 @@ function Extract-CanonicalChecklist([string] $Text, [string] $Source) {
 function Extract-Checklist([string] $Text, [string] $Source) {
     $normalized = $Text -replace "`r`n", "`n" -replace "`r", "`n"
     $lines = $normalized -split "`n"
-    $headingPattern = '^(#{1,6})[ \t]+(?:[0-9]+[.)][ \t]+)?Reviewer Checklist[ \t]*#*[ \t]*$'
-    $genericHeadingPattern = '^(#{1,6})(?:[ \t]+.*)?$'
-    $checkboxPattern = '^[ \t]*-[ \t]+\[[ xX]\][ \t]+(.+?)\s*$'
-    $emptyCheckboxPattern = '^[ \t]*-[ \t]+\[[ xX]\][ \t]*$'
+    $headingPattern = '^(?:(#{1,6})[ \t]+(?:[0-9]+[.)][ \t]+)?|[0-9]+[.)][ \t]+)Reviewer Checklist[ \t]*#*[ \t]*$'
+    $genericHeadingPattern = '^(#{1,6})(?:[ \t]+.*)?$|^[0-9]+[.)][ \t]+.*$'
+    $checkboxPattern = '^[ \t]*[-*][ \t]+\[[ xX]\][ \t]+(.+?)\s*$'
+    $emptyCheckboxPattern = '^[ \t]*[-*][ \t]+\[[ xX]\][ \t]*$'
     $visible = [System.Collections.Generic.List[bool]]::new()
     $fenced = $false
     foreach ($line in $lines) {
@@ -118,14 +118,17 @@ function Extract-Checklist([string] $Text, [string] $Source) {
         }
         $found = $true
         $level = $heading.Groups[1].Value.Length
+        if ($level -eq 0) { $level = 1 }
         $sectionItems = [System.Collections.Generic.List[string]]::new()
+        $templateMarkers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
         for ($candidateIndex = $index + 1; $candidateIndex -lt $lines.Count; $candidateIndex++) {
             $candidate = $lines[$candidateIndex]
             if (-not $visible[$candidateIndex]) {
                 continue
             }
             $nextHeading = [regex]::Match($candidate, $genericHeadingPattern)
-            if ($nextHeading.Success -and $nextHeading.Groups[1].Value.Length -le $level) {
+            $nextLevel = $nextHeading.Groups[1].Value.Length
+            if ($nextHeading.Success -and (($nextLevel -eq 0) -or $nextLevel -le $level)) {
                 break
             }
             if ([regex]::IsMatch($candidate, $emptyCheckboxPattern)) {
@@ -138,9 +141,14 @@ function Extract-Checklist([string] $Text, [string] $Source) {
                     Stop-Workflow 'empty-checklist' "$Source Reviewer Checklist has an empty item"
                 }
                 [void] $sectionItems.Add($item)
+            } elseif ($candidate.Trim() -in @('- PASS:', '- N/A:', '- FAIL:')) {
+                [void] $templateMarkers.Add($candidate.Trim())
             }
         }
         if ($sectionItems.Count -eq 0) {
+            if ($templateMarkers.Count -eq 3) {
+                continue
+            }
             Stop-Workflow 'empty-checklist' "$Source Reviewer Checklist section has zero checkbox items"
         }
         foreach ($item in $sectionItems) {

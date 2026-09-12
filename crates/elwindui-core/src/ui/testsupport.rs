@@ -968,6 +968,9 @@ impl UIElementExt for PaintingContainer {
     fn __dyn_x_for_visual_children(&self) -> &dyn UIElementExt {
         self.base.__dyn_x_for_visual_children()
     }
+    fn __dyn_x_for___accessibility_template_children(&self) -> &dyn UIElementExt {
+        self.base.__dyn_x_for___accessibility_template_children()
+    }
     fn __dyn_x_for_apply_template(&self) -> &dyn UIElementExt {
         self.base.__dyn_x_for_apply_template()
     }
@@ -982,6 +985,12 @@ impl UIElementExt for PaintingContainer {
     }
     fn __dyn_x_for_try_as_native_control(&self) -> &dyn UIElementExt {
         self.base.__dyn_x_for_try_as_native_control()
+    }
+    fn __dyn_x_for_accessibility_intrinsic_semantics(&self) -> &dyn UIElementExt {
+        self.base.__dyn_x_for_accessibility_intrinsic_semantics()
+    }
+    fn __dyn_x_for_perform_accessibility_action(&self) -> &dyn UIElementExt {
+        self.base.__dyn_x_for_perform_accessibility_action()
     }
     fn __dyn_x_for_hit_test_content(&self) -> &dyn UIElementExt {
         self.base.__dyn_x_for_hit_test_content()

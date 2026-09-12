@@ -19,6 +19,71 @@
 // bound to `crate::NativeControlExt`, so that trait has to be nameable at *this crate's* root.
 pub use elwindui_core::ui::NativeControlExt;
 
+pub(crate) fn base_accessibility_semantics(
+    role: elwindui_core::accessibility::AccessibilityRole,
+    actions: &[elwindui_core::accessibility::AccessibilityActionKind],
+) -> elwindui_core::accessibility::AccessibilitySemantics {
+    let mut semantics = elwindui_core::accessibility::AccessibilitySemantics::new(role);
+    semantics.actions = actions.to_vec();
+    semantics
+}
+
+pub(crate) fn sync_intrinsic_enabled(node: &dyn elwindui_core::ui::UIElementExt, enabled: bool) {
+    let Some(mut semantics) = node.intrinsic_accessibility_semantics() else {
+        return;
+    };
+    semantics.state.disabled = !enabled;
+    node.set_intrinsic_accessibility_semantics(semantics);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use elwindui_core::accessibility::{
+        AccessibilityAction, AccessibilityActionKind, AccessibilityRole,
+    };
+    use elwindui_core::ui::{UIElementExt, VerticalLayout};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[test]
+    fn disabled_intrinsic_semantics_reject_actions_until_reenabled() {
+        let node = VerticalLayout::new();
+        let mut semantics = base_accessibility_semantics(
+            AccessibilityRole::Button,
+            &[AccessibilityActionKind::Activate],
+        );
+        node.set_intrinsic_accessibility_semantics(semantics.clone());
+        let calls = Rc::new(Cell::new(0));
+        node.set_on_accessibility_action(Box::new({
+            let calls = calls.clone();
+            move |_| calls.set(calls.get() + 1)
+        }));
+
+        sync_intrinsic_enabled(node.as_ui_element(), false);
+        semantics = node
+            .intrinsic_accessibility_semantics()
+            .expect("intrinsic semantics");
+        assert!(semantics.state.disabled);
+        let runtime = elwindui_core::accessibility::AccessibilityRuntime::new();
+        let owner: Rc<dyn UIElementExt> = node.clone();
+        let id = runtime.rebuild(&owner).roots[0].id;
+        assert!(!runtime.dispatch_action(id, AccessibilityAction::Activate));
+        assert_eq!(calls.get(), 0);
+
+        sync_intrinsic_enabled(node.as_ui_element(), true);
+        assert!(
+            !node
+                .intrinsic_accessibility_semantics()
+                .expect("intrinsic semantics")
+                .state
+                .disabled
+        );
+        assert!(runtime.dispatch_action(id, AccessibilityAction::Activate));
+        assert_eq!(calls.get(), 1);
+    }
+}
+
 mod button;
 mod check_box;
 mod control;

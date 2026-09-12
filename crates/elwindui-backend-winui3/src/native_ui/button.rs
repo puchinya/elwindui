@@ -1,8 +1,11 @@
 //! `elwindui::ui::Button` — the `ButtonExt` implementation.
 
-use super::NativeControl;
+use super::{NativeControl, base_accessibility_semantics, sync_intrinsic_enabled};
 use crate::AnyView;
 use crate::inner::InnerButton;
+use elwindui_core::accessibility::{
+    AccessibilityAction, AccessibilityActionKind, AccessibilityRole,
+};
 use elwindui_core::ui::UIElementExt;
 use std::rc::Rc;
 
@@ -13,6 +16,22 @@ pub struct Button {
 
 #[elwindui_macros::class]
 impl Button {
+    #[overrides]
+    fn perform_accessibility_action(&self, action: AccessibilityAction) -> bool {
+        match action {
+            AccessibilityAction::Activate => {
+                let Some(node) = self.as_ui_element().visual_collection.owner_rc() else {
+                    return false;
+                };
+                let args = elwindui_core::input::RoutedEventArgs::default();
+                elwindui_core::ui::dispatch_routed(&node, "on_click", &(), &args);
+                true
+            }
+            AccessibilityAction::Focus => self.focus(),
+            _ => false,
+        }
+    }
+
     /// `#[routed] on_click` (`Button`'s `#[class]` declaration) is registered directly onto this
     /// widget's own `base` — real since construction (see `new`), and already wired (also in `new`)
     /// to fire `dispatch_routed` starting at this same node.
@@ -34,12 +53,27 @@ impl Button {
 
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
+        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
     }
     fn set_on_click(&self, callback: Box<dyn Fn()>) {
         self.inner.set_on_click(callback);
     }
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
+        let mut semantics = self
+            .base
+            .intrinsic_accessibility_semantics()
+            .unwrap_or_else(|| {
+                base_accessibility_semantics(
+                    AccessibilityRole::Button,
+                    &[
+                        AccessibilityActionKind::Activate,
+                        AccessibilityActionKind::Focus,
+                    ],
+                )
+            });
+        semantics.label = Some(text.to_string());
+        self.base.set_intrinsic_accessibility_semantics(semantics);
     }
     fn set_role(&self, role: elwindui_core::ui::ButtonRole) {
         self.inner.set_role(role);
@@ -58,6 +92,14 @@ impl Button {
     }
 
     fn on_constructed(&self) {
+        self.base
+            .set_intrinsic_accessibility_semantics(base_accessibility_semantics(
+                AccessibilityRole::Button,
+                &[
+                    AccessibilityActionKind::Activate,
+                    AccessibilityActionKind::Focus,
+                ],
+            ));
         // WinUI3's `Button` is a tab stop by default — see
         // docs/design/runtime/input_focus_design.md.
         self.set_tab_stop(true);

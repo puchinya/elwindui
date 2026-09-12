@@ -2,10 +2,11 @@
 //! `elwindui_backend_appkit::native_ui::dropdown`'s own doc comment and structure; dynamic item
 //! rebuild and two-way selection are verified on Windows.
 
-use super::NativeControl;
 use super::dropdown_item::DropdownItem;
+use super::{NativeControl, base_accessibility_semantics, sync_intrinsic_enabled};
 use crate::AnyView;
 use crate::inner::InnerDropdown;
+use elwindui_core::accessibility::{AccessibilityActionKind, AccessibilityRole};
 use elwindui_core::ui::UIElementExt;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -27,12 +28,14 @@ impl Dropdown {
     fn set_selected_index(&self, selected_index: usize) {
         self.selected_index.set(selected_index);
         self.inner.set_selected_index(selected_index);
+        self.update_accessibility_value();
     }
     fn set_on_change(&self, callback: Box<dyn Fn(usize)>) {
         self.inner.set_on_change(callback);
     }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
+        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
     }
     fn items(&self) -> &dyn elwindui_core::ui::ListExt<dyn elwindui_core::ui::DropdownItemExt> {
         self
@@ -50,6 +53,11 @@ impl Dropdown {
     }
 
     fn on_constructed(&self) {
+        self.base
+            .set_intrinsic_accessibility_semantics(base_accessibility_semantics(
+                AccessibilityRole::ComboBox,
+                &[AccessibilityActionKind::Focus],
+            ));
         self.set_tab_stop(true);
     }
 
@@ -82,6 +90,26 @@ impl Dropdown {
             .collect();
         self.inner.rebuild_items(&texts);
         self.inner.set_selected_index(self.selected_index.get());
+        self.update_accessibility_value();
+    }
+
+    #[inherent]
+    fn update_accessibility_value(&self) {
+        let mut semantics = self
+            .base
+            .intrinsic_accessibility_semantics()
+            .unwrap_or_else(|| {
+                base_accessibility_semantics(
+                    AccessibilityRole::ComboBox,
+                    &[AccessibilityActionKind::Focus],
+                )
+            });
+        semantics.value = self
+            .children
+            .to_vec()
+            .get(self.selected_index.get())
+            .map(|item| downcast_dropdown_item(&**item).text());
+        self.base.set_intrinsic_accessibility_semantics(semantics);
     }
 }
 

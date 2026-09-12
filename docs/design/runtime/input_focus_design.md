@@ -32,4 +32,10 @@ Shortcut registration belongs to the mounted host. Unmounting or deactivating a 
 
 ## Accessibility
 
-Accessibility adapters expose public roles, names, values, enabled/focus state, and actions from the same owner mapping. Backend-only helper views are hidden unless they represent an independently meaningful public element.
+The Core-owned semantic accessibility runtime is specified in
+[`accessibility_design.md`](accessibility_design.md) and
+[`../../specs/accessibility_spec.md`](../../specs/accessibility_spec.md). Accessibility focus uses
+the same per-host Core focus tracker described above; it does not create a second focus owner.
+Semantic traversal is independent from native widget hierarchies and excludes collapsed,
+inactive, exiting, and accessibility-hidden subtrees immediately. Backend-only helper views remain
+hidden unless Core exposes them as an independently meaningful semantic element.

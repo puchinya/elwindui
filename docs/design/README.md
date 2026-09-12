@@ -8,6 +8,7 @@
 | Measure、Arrange、invalidation、scroll constraint | [`runtime/layout_design.md`](runtime/layout_design.md) |
 | RenderTree、reconcile、backend replay、cache | [`runtime/rendering_design.md`](runtime/rendering_design.md) |
 | Pointer、routed event、keyboard、focus | [`runtime/input_focus_design.md`](runtime/input_focus_design.md) |
+| Core accessibility runtime、semantic snapshots、AX/UIA projection | [`runtime/accessibility_design.md`](runtime/accessibility_design.md) |
 | Native widget host、owner mapping、reconciliation | [`runtime/native_control_design.md`](runtime/native_control_design.md) |
 | Text cascade、measurement seam | [`runtime/text_design.md`](runtime/text_design.md) |
 | IconSource value、IconElement realization、native/custom icon paths | [`runtime/icon_source_design.md`](runtime/icon_source_design.md) |

@@ -3,10 +3,13 @@
 //! this is deliberately not delegated to native grouping — mirrors
 //! `elwindui_backend_appkit::native_ui::RadioButton`'s own registry exactly).
 
-use super::NativeControl;
+use super::{NativeControl, base_accessibility_semantics, sync_intrinsic_enabled};
 use crate::AnyView;
 use crate::inner::InnerRadioButton;
-use elwindui_core::ui::UIElementExt;
+use elwindui_core::accessibility::{
+    AccessibilityAction, AccessibilityActionKind, AccessibilityCheckState, AccessibilityRole,
+};
+use elwindui_core::ui::{RadioButtonExt, UIElementExt};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
@@ -29,6 +32,18 @@ thread_local! {
 
 #[elwindui_macros::class]
 impl RadioButton {
+    #[overrides]
+    fn perform_accessibility_action(&self, action: AccessibilityAction) -> bool {
+        match action {
+            AccessibilityAction::Activate | AccessibilityAction::Select => {
+                self.activate();
+                true
+            }
+            AccessibilityAction::Focus => self.focus(),
+            _ => false,
+        }
+    }
+
     #[inherent]
     pub fn into_any_view(&self) -> AnyView {
         self.inner.handle()
@@ -36,9 +51,44 @@ impl RadioButton {
 
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
+        let mut semantics = self
+            .base
+            .intrinsic_accessibility_semantics()
+            .unwrap_or_else(|| {
+                base_accessibility_semantics(
+                    AccessibilityRole::RadioButton,
+                    &[
+                        AccessibilityActionKind::Activate,
+                        AccessibilityActionKind::Select,
+                        AccessibilityActionKind::Focus,
+                    ],
+                )
+            });
+        semantics.label = Some(text.to_string());
+        self.base.set_intrinsic_accessibility_semantics(semantics);
     }
     fn set_checked(&self, checked: bool) {
         self.inner.set_checked(checked);
+        let mut semantics = self
+            .base
+            .intrinsic_accessibility_semantics()
+            .unwrap_or_else(|| {
+                base_accessibility_semantics(
+                    AccessibilityRole::RadioButton,
+                    &[
+                        AccessibilityActionKind::Activate,
+                        AccessibilityActionKind::Select,
+                        AccessibilityActionKind::Focus,
+                    ],
+                )
+            });
+        semantics.state.checked = Some(if checked {
+            AccessibilityCheckState::On
+        } else {
+            AccessibilityCheckState::Off
+        });
+        semantics.state.selected = Some(checked);
+        self.base.set_intrinsic_accessibility_semantics(semantics);
         if checked {
             self.uncheck_siblings();
         }
@@ -77,6 +127,7 @@ impl RadioButton {
     }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
+        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
     }
 
     fn construct() -> Self {
@@ -91,6 +142,17 @@ impl RadioButton {
     }
 
     fn on_constructed(&self) {
+        let mut semantics = base_accessibility_semantics(
+            AccessibilityRole::RadioButton,
+            &[
+                AccessibilityActionKind::Activate,
+                AccessibilityActionKind::Select,
+                AccessibilityActionKind::Focus,
+            ],
+        );
+        semantics.state.checked = Some(AccessibilityCheckState::Off);
+        semantics.state.selected = Some(false);
+        self.base.set_intrinsic_accessibility_semantics(semantics);
         self.set_tab_stop(true);
         let node: Rc<dyn UIElementExt> = self
             .as_ui_element()
@@ -101,12 +163,14 @@ impl RadioButton {
             let this = elwindui_core::base::AsAny::as_any(node.as_ref())
                 .downcast_ref::<RadioButton>()
                 .expect("owner_rc of a RadioButton must downcast to RadioButton");
-            this.inner.set_checked(true);
-            this.uncheck_siblings();
-            if let Some(callback) = this.on_change.borrow().as_ref() {
-                callback(true);
-            }
+            this.activate();
         }));
+    }
+
+    #[inherent]
+    fn activate(&self) {
+        self.set_checked(true);
+        self.notify_change(true);
     }
 
     #[inherent]
@@ -115,29 +179,37 @@ impl RadioButton {
         if group.is_empty() {
             return;
         }
-        GROUPS.with(|groups| {
+        let members: Vec<Rc<dyn UIElementExt>> = GROUPS.with(|groups| {
             let groups = groups.borrow();
-            let Some(members) = groups.get(group.as_str()) else {
-                return;
-            };
-            for member in members {
-                let member: Option<Rc<dyn UIElementExt>> = member.upgrade();
-                let Some(member) = member else {
-                    continue;
-                };
-                let Some(member) = elwindui_core::base::AsAny::as_any(member.as_ref())
-                    .downcast_ref::<RadioButton>()
-                else {
-                    continue;
-                };
-                if std::ptr::eq(member, self) {
-                    continue;
-                }
-                member.inner.set_checked(false);
-                if let Some(callback) = member.on_change.borrow().as_ref() {
-                    callback(false);
-                }
-            }
+            groups
+                .get(group.as_str())
+                .into_iter()
+                .flat_map(|members| members.iter().filter_map(Weak::upgrade))
+                .collect()
         });
+        for member in members {
+            let Some(member) =
+                elwindui_core::base::AsAny::as_any(member.as_ref()).downcast_ref::<RadioButton>()
+            else {
+                continue;
+            };
+            if std::ptr::eq(member, self) {
+                continue;
+            }
+            member.set_checked(false);
+            member.notify_change(false);
+        }
+    }
+
+    #[inherent]
+    fn notify_change(&self, checked: bool) {
+        let callback = self.on_change.borrow_mut().take();
+        if let Some(callback) = callback {
+            callback(checked);
+            let mut slot = self.on_change.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(callback);
+            }
+        }
     }
 }

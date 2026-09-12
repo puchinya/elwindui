@@ -2,10 +2,13 @@
 //! group-exclusivity bookkeeping (`elwindui_core::ui::RadioButton`'s own doc comment explains why
 //! this is deliberately not delegated to AppKit's native radio-grouping).
 
-use super::NativeControl;
+use super::{NativeControl, base_accessibility_semantics, sync_intrinsic_enabled};
 use crate::AnyView;
 use crate::inner::InnerRadioButton;
-use elwindui_core::ui::UIElementExt;
+use elwindui_core::accessibility::{
+    AccessibilityAction, AccessibilityActionKind, AccessibilityCheckState, AccessibilityRole,
+};
+use elwindui_core::ui::{RadioButtonExt, UIElementExt};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
@@ -37,6 +40,21 @@ thread_local! {
 
 #[elwindui_macros::class]
 impl RadioButton {
+    #[overrides]
+    fn perform_accessibility_action(
+        &self,
+        action: elwindui_core::accessibility::AccessibilityAction,
+    ) -> bool {
+        match action {
+            AccessibilityAction::Activate | AccessibilityAction::Select => {
+                self.activate();
+                true
+            }
+            AccessibilityAction::Focus => self.focus(),
+            _ => false,
+        }
+    }
+
     #[inherent]
     pub fn into_any_view(&self) -> AnyView {
         self.inner.handle()
@@ -44,6 +62,21 @@ impl RadioButton {
 
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
+        let mut semantics = self
+            .base
+            .intrinsic_accessibility_semantics()
+            .unwrap_or_else(|| {
+                base_accessibility_semantics(
+                    AccessibilityRole::RadioButton,
+                    &[
+                        AccessibilityActionKind::Activate,
+                        AccessibilityActionKind::Select,
+                        AccessibilityActionKind::Focus,
+                    ],
+                )
+            });
+        semantics.label = Some(text.to_string());
+        self.base.set_intrinsic_accessibility_semantics(semantics);
         self.base.reapply_text_style();
     }
 
@@ -53,6 +86,26 @@ impl RadioButton {
     /// siblings off would leave the UI showing two selections at once.
     fn set_checked(&self, checked: bool) {
         self.inner.set_checked(checked);
+        let mut semantics = self
+            .base
+            .intrinsic_accessibility_semantics()
+            .unwrap_or_else(|| {
+                base_accessibility_semantics(
+                    AccessibilityRole::RadioButton,
+                    &[
+                        AccessibilityActionKind::Activate,
+                        AccessibilityActionKind::Select,
+                        AccessibilityActionKind::Focus,
+                    ],
+                )
+            });
+        semantics.state.checked = Some(if checked {
+            AccessibilityCheckState::On
+        } else {
+            AccessibilityCheckState::Off
+        });
+        semantics.state.selected = Some(checked);
+        self.base.set_intrinsic_accessibility_semantics(semantics);
         if checked {
             self.uncheck_siblings();
         }
@@ -81,6 +134,7 @@ impl RadioButton {
     }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
+        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
     }
 
     fn construct() -> Self {
@@ -95,6 +149,17 @@ impl RadioButton {
     }
 
     fn on_constructed(&self) {
+        let mut semantics = base_accessibility_semantics(
+            AccessibilityRole::RadioButton,
+            &[
+                AccessibilityActionKind::Activate,
+                AccessibilityActionKind::Select,
+                AccessibilityActionKind::Focus,
+            ],
+        );
+        semantics.state.checked = Some(AccessibilityCheckState::Off);
+        semantics.state.selected = Some(false);
+        self.base.set_intrinsic_accessibility_semantics(semantics);
         self.set_tab_stop(true);
         let node: Rc<dyn UIElementExt> = self
             .as_ui_element()
@@ -106,14 +171,7 @@ impl RadioButton {
                 .as_any()
                 .downcast_ref::<RadioButton>()
                 .expect("owner_rc of a RadioButton must downcast to RadioButton");
-            // A native radio click always lands the widget on "checked" — there is no native
-            // click path to *uncheck* one — so this always reports `true` and always runs
-            // exclusivity, matching `set_checked`'s own model→widget behavior above.
-            this.inner.set_checked(true);
-            this.uncheck_siblings();
-            if let Some(callback) = this.on_change.borrow().as_ref() {
-                callback(true);
-            }
+            this.activate();
         }));
     }
 
@@ -138,11 +196,29 @@ impl RadioButton {
                 if std::ptr::eq(member, self) {
                     continue;
                 }
-                member.inner.set_checked(false);
-                if let Some(callback) = member.on_change.borrow().as_ref() {
-                    callback(false);
-                }
+                member.set_checked(false);
+                member.notify_change(false);
             }
         });
+    }
+
+    #[inherent]
+    fn activate(&self) {
+        // A native radio click always lands the widget on "checked" — there is no native click
+        // path to uncheck one. Keep the same Core metadata and callback path for OS and AX action.
+        self.set_checked(true);
+        self.notify_change(true);
+    }
+
+    #[inherent]
+    fn notify_change(&self, checked: bool) {
+        let callback = self.on_change.borrow_mut().take();
+        if let Some(callback) = callback {
+            callback(checked);
+            let mut slot = self.on_change.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(callback);
+            }
+        }
     }
 }

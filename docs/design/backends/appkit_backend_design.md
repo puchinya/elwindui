@@ -56,17 +56,16 @@ synchronous; if the native suppression operation fails, the host removes the
 island immediately rather than leaving an interactive outgoing control.
 
 Each native island is a stable backend-owned `NativeIslandView` object for the
-whole Active -> Exiting -> removed lifetime. It remains an unignored AppKit
-`AXGroup`; while Active, its accessibility children, visible children,
-navigation order, and hit testing delegate to AppKit's normal `NSView`
-projection. When Exiting, the island synchronously returns no accessibility
-children and no hit-test result, while remaining attached and visible for the
-visual transition. The backend stores this state on the island itself and
-posts a layout-changed notification after entering Exiting. Projection orders
-suppressed identity insertion, native focus clearing, state change, and the
-notification before applying the visual transform/opacity. Core retains the
-last arranged geometry for an Exiting Visual so the island can reach this
-boundary without being relaid out into a zero-sized slot.
+whole Active -> Exiting -> removed lifetime. It remains the transform/input/native
+containment boundary, but it is not a public semantic child of `TreeHostView`.
+`TreeHostView` exposes cached synthetic `NSAccessibilityElement` objects keyed by
+Core `AccessibilityId`; their children, order, role/name/value/state, bounds,
+focus, hit testing, and actions come only from the Core snapshot. The island
+returns no public accessibility children in both Active and Exiting states, so
+raw inner native controls cannot duplicate Core semantics. Exiting still
+synchronously suppresses accessibility and hit testing while retaining visual
+transition geometry. Cache pruning and advisory notifications follow effective
+snapshot changes, and cache/callback teardown happens before native host release.
 
 CVDisplayLink is only a frame source. Its callback schedules a main-thread host
 tick and never mutates Core UI state off the main thread. The link is stopped

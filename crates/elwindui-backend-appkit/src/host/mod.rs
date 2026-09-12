@@ -38,9 +38,11 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+mod accessibility;
 mod event;
 mod replay;
 
+use accessibility::AppKitAccessibilityHost;
 use event::*;
 use replay::*;
 
@@ -60,6 +62,15 @@ pub struct TreeHostIvars {
     /// element does this native container belong to" without a second registry of its own; see
     /// `resolve_native_owner_id`.
     pub(crate) native_owner_ids: RefCell<HashMap<usize, u64>>,
+    /// Stable synthetic AX objects keyed by Core semantic identity. The cache contains no native
+    /// widget state; each object reads the current immutable Core snapshot on demand.
+    pub(crate) accessibility_elements: RefCell<
+        HashMap<
+            elwindui_core::accessibility::AccessibilityId,
+            Retained<accessibility::SyntheticAccessibilityElement>,
+        >,
+    >,
+    pub(crate) accessibility_runtime: Rc<elwindui_core::accessibility::AccessibilityRuntime>,
     /// Native islands whose owning Core Visual is currently not eligible for input/focus. They
     /// remain visible during an exit transition, while `hitTest:` routes their mouse events back
     /// to this host so Core's presentation-aware hit test can choose the active tree instead.
@@ -347,12 +358,11 @@ pub(crate) struct NativeIslandIvars {
     accessibility_state: Cell<NativeIslandAccessibilityState>,
 }
 
-// The AppKit-owned accessibility boundary for one `NativeControl` island.
+// The AppKit-owned native containment boundary for one `NativeControl` island.
 //
-// This view stays an unignored `AXGroup` for its complete lifetime. While active, AppKit remains
-// responsible for projecting the native leaf's normal accessibility semantics. During an exit,
-// only this boundary's child relationships are emptied, so the outgoing native view can remain
-// attached for its visual transition without remaining reachable through AX.
+// This view remains attached for transform/input/rendering, but it is never a public accessibility
+// element. TreeHostView's synthetic Core projection is the only public AX source, including while
+// the native view is retained for an exit transition.
 define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind = objc2::MainThreadOnly]
@@ -362,40 +372,30 @@ define_class!(
     unsafe impl NSObjectProtocol for NativeIslandView {}
 
     impl NativeIslandView {
+        #[unsafe(method(isAccessibilityElement))]
+        fn is_accessibility_element(&self) -> bool {
+            false
+        }
+
         #[unsafe(method_id(accessibilityChildren))]
         fn accessibility_children(&self) -> Option<Retained<NSArray>> {
-            if self.ivars().accessibility_state.get() == NativeIslandAccessibilityState::Exiting {
-                Some(NSArray::from_slice(&[]))
-            } else {
-                unsafe { msg_send![super(self), accessibilityChildren] }
-            }
+            Some(NSArray::from_slice(&[]))
         }
 
         #[unsafe(method_id(accessibilityVisibleChildren))]
         fn accessibility_visible_children(&self) -> Option<Retained<NSArray>> {
-            if self.ivars().accessibility_state.get() == NativeIslandAccessibilityState::Exiting {
-                Some(NSArray::from_slice(&[]))
-            } else {
-                unsafe { msg_send![super(self), accessibilityVisibleChildren] }
-            }
+            Some(NSArray::from_slice(&[]))
         }
 
         #[unsafe(method_id(accessibilityChildrenInNavigationOrder))]
         fn accessibility_children_in_navigation_order(&self) -> Option<Retained<NSArray>> {
-            if self.ivars().accessibility_state.get() == NativeIslandAccessibilityState::Exiting {
-                Some(NSArray::from_slice(&[]))
-            } else {
-                unsafe { msg_send![super(self), accessibilityChildrenInNavigationOrder] }
-            }
+            Some(NSArray::from_slice(&[]))
         }
 
         #[unsafe(method_id(accessibilityHitTest:))]
         fn accessibility_hit_test(&self, point: NSPoint) -> Option<Retained<AnyObject>> {
-            if self.ivars().accessibility_state.get() == NativeIslandAccessibilityState::Exiting {
-                None
-            } else {
-                unsafe { msg_send![super(self), accessibilityHitTest: point] }
-            }
+            let _ = point;
+            None
         }
     }
 );
@@ -425,11 +425,10 @@ impl NativeIslandView {
         let this = Self::alloc(mtm()).set_ivars(ivars);
         let this: Retained<Self> =
             unsafe { msg_send![super(this), initWithFrame: NSRect::default()] };
-        // Keep the same AX boundary for Active and Exiting. The native child remains the source of
-        // its own label, role, value, and actions while Active.
+        // Keep the native island attached for rendering and input only. Core's synthetic host
+        // projection owns all public AX semantics for both Active and Exiting.
         unsafe {
-            let _: () = msg_send![&*this, setAccessibilityElement: true];
-            let _: () = msg_send![&*this, setAccessibilityRole: NSAccessibilityGroupRole];
+            let _: () = msg_send![&*this, setAccessibilityElement: false];
         }
         this
     }
@@ -444,6 +443,26 @@ define_class!(
     unsafe impl NSObjectProtocol for TreeHostView {}
 
     impl TreeHostView {
+        #[unsafe(method_id(accessibilityChildren))]
+        fn accessibility_children(&self) -> Option<Retained<NSArray>> {
+            accessibility::children_for_host(self, None)
+        }
+
+        #[unsafe(method_id(accessibilityVisibleChildren))]
+        fn accessibility_visible_children(&self) -> Option<Retained<NSArray>> {
+            accessibility::children_for_host(self, None)
+        }
+
+        #[unsafe(method_id(accessibilityChildrenInNavigationOrder))]
+        fn accessibility_children_in_navigation_order(&self) -> Option<Retained<NSArray>> {
+            accessibility::children_for_host(self, None)
+        }
+
+        #[unsafe(method_id(accessibilityHitTest:))]
+        fn accessibility_hit_test(&self, point: NSPoint) -> Option<Retained<AnyObject>> {
+            accessibility::hit_test_host(self, point)
+        }
+
         #[unsafe(method(layout))]
         fn layout(&self) {
             unsafe {
@@ -874,6 +893,8 @@ impl TreeHostView {
             render_tree: RefCell::new(None),
             native_containers: RefCell::new(HashMap::new()),
             native_owner_ids: RefCell::new(HashMap::new()),
+            accessibility_elements: RefCell::new(HashMap::new()),
+            accessibility_runtime: elwindui_core::accessibility::AccessibilityRuntime::new(),
             suppressed_native_ids: RefCell::new(HashSet::new()),
             replay_state: RefCell::new(ReplayState::default()),
             weak_self: RefCell::new(objc2::rc::Weak::default()),
@@ -898,6 +919,10 @@ impl TreeHostView {
         let this = Self::alloc(m).set_ivars(ivars);
         let this: Retained<Self> =
             unsafe { msg_send![super(this), initWithFrame: NSRect::default()] };
+        unsafe {
+            let _: () = msg_send![&*this, setAccessibilityElement: true];
+            let _: () = msg_send![&*this, setAccessibilityRole: NSAccessibilityGroupRole];
+        }
         this.ivars()
             .display_link_state
             .host
@@ -1068,11 +1093,16 @@ impl TreeHostView {
             .set_animation_frame_host(Some(Rc::new(AppKitAnimationFrameHost(weak_self.clone()))));
         tree.as_ui_element()
             .set_focus_host(Some(Rc::new(AppKitFocusHost(weak_self))));
+        tree.as_ui_element()
+            .set_accessibility_host(Some(Rc::new(AppKitAccessibilityHost(
+                self.ivars().weak_self.borrow().clone(),
+            ))));
         self.ivars().keyboard.focus.clear_focus();
         self.ivars().keyboard.shortcuts().clear();
         self.ivars().keyboard.shortcuts().collect_from_tree(&tree);
         *self.ivars().tree.borrow_mut() = Some(tree);
         *self.ivars().render_tree.borrow_mut() = None;
+        self.rebuild_accessibility();
         self.invalidateIntrinsicContentSize();
         self.relayout();
     }
@@ -1089,6 +1119,8 @@ impl TreeHostView {
         *self.ivars().replay_state.borrow_mut() = ReplayState::default();
         self.ivars().keyboard.focus.clear_focus();
         self.ivars().keyboard.shortcuts().clear();
+        self.ivars().accessibility_runtime.clear();
+        self.ivars().accessibility_elements.borrow_mut().clear();
         *self.ivars().tree.borrow_mut() = None;
         *self.ivars().render_tree.borrow_mut() = None;
     }
@@ -1102,7 +1134,46 @@ impl TreeHostView {
             old_tree.set_pointer_gesture_host(None);
             old_tree.set_animation_frame_host(None);
             old_tree.set_focus_host(None);
+            old_tree.set_accessibility_host(None);
         }
+    }
+
+    pub(crate) fn rebuild_accessibility(&self) {
+        let snapshot_changed = if !self.ivars().active.get() {
+            let before = self.ivars().accessibility_runtime.revision();
+            self.ivars().accessibility_runtime.clear();
+            before != self.ivars().accessibility_runtime.revision()
+        } else {
+            self.ivars()
+                .tree
+                .borrow()
+                .as_ref()
+                .map(|tree| {
+                    let before = self.ivars().accessibility_runtime.revision();
+                    self.ivars().accessibility_runtime.rebuild(tree);
+                    before != self.ivars().accessibility_runtime.revision()
+                })
+                .unwrap_or_else(|| {
+                    let before = self.ivars().accessibility_runtime.revision();
+                    self.ivars().accessibility_runtime.clear();
+                    before != self.ivars().accessibility_runtime.revision()
+                })
+        };
+        if snapshot_changed {
+            unsafe {
+                NSAccessibilityPostNotification(
+                    self as &AnyObject,
+                    NSAccessibilityLayoutChangedNotification,
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "accessibility-regression")]
+    pub(crate) fn accessibility_children_count_for_regression(&self) -> usize {
+        accessibility::children_for_host(self, None)
+            .map(|children| children.len())
+            .unwrap_or(0)
     }
 
     /// Issue #162 §3.18: closes this host's own active custom popup/context-menu surface, if any —
@@ -1175,6 +1246,10 @@ impl TreeHostView {
                 .set(objc2_foundation::NSSize::new(-1.0, -1.0));
             self.relayout();
         } else {
+            // Clear the Core semantic projection before releasing visual/native resources. The
+            // retained Core tree and cached synthetic AX objects remain alive, but their IDs are
+            // no longer current owners while this host is inactive.
+            self.rebuild_accessibility();
             self.stop_animation_display_link();
             self.ivars().pointer.cancel();
             // `relayout_inner`'s own GC (the `retain` calls below) only runs during a relayout
@@ -1206,6 +1281,7 @@ impl TreeHostView {
         self.ivars().relaying_out.set(true);
         self.relayout_inner();
         self.ivars().relaying_out.set(false);
+        self.rebuild_accessibility();
 
         let pending: Vec<u64> = self
             .ivars()
@@ -1743,6 +1819,59 @@ mod coordinate_conversion_tests {
         assert!(is_pointer_cancel_key(Some(Key::Escape)));
         assert!(!is_pointer_cancel_key(Some(Key::Enter)));
         assert!(!is_pointer_cancel_key(None));
+    }
+}
+
+#[cfg(test)]
+mod accessibility_active_state_tests {
+    use super::*;
+    use elwindui_core::accessibility::{AccessibilityAction, AccessibilityRole};
+    use elwindui_core::ui::{UIElementExt, VerticalLayout};
+
+    #[test]
+    #[ignore = "TreeHostView is MainThreadOnly; run the accessibility_active_host_regression example"]
+    fn inactive_host_clears_ax_semantics_and_rebuilds_on_reactivation() {
+        let host = TreeHostView::new();
+        let root = VerticalLayout::new();
+        root.set_accessibility_role(AccessibilityRole::Button);
+        root.set_accessibility_label("inactive-host-test");
+        let root_node: Rc<dyn UIElementExt> = root;
+        host.set_tree(root_node);
+
+        let id = host
+            .ivars()
+            .accessibility_runtime
+            .snapshot()
+            .roots
+            .first()
+            .expect("active semantic root")
+            .id;
+        assert_eq!(
+            accessibility::children_for_host(&host, None).unwrap().len(),
+            1
+        );
+
+        host.set_active(false);
+        assert!(
+            host.ivars()
+                .accessibility_runtime
+                .snapshot()
+                .roots
+                .is_empty()
+        );
+        assert_eq!(
+            accessibility::children_for_host(&host, None).unwrap().len(),
+            0
+        );
+        assert!(
+            !host
+                .ivars()
+                .accessibility_runtime
+                .dispatch_action(id, AccessibilityAction::Activate)
+        );
+
+        host.set_active(true);
+        assert_eq!(host.ivars().accessibility_runtime.snapshot().roots.len(), 1);
     }
 }
 

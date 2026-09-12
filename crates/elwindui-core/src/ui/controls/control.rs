@@ -199,6 +199,17 @@ impl Control {
     fn __template_root(&self) -> Option<Rc<dyn UIElementExt>> {
         self.template_root.borrow().clone()
     }
+    /// Exposes only logical/projected content from a private template to Core accessibility
+    /// traversal. Template chrome remains a rendering detail under Automatic; `Contain` uses the
+    /// ordinary Visual children path so controls may intentionally publish their child structure.
+    #[overrides]
+    fn __accessibility_template_children(&self) -> Option<Vec<Rc<dyn UIElementExt>>> {
+        let owner = self.as_ui_element().visual_collection.owner_rc()?;
+        let root = self.__template_root()?;
+        Some(crate::accessibility::template_accessibility_children(
+            &owner, &root,
+        ))
+    }
     /// Replaces the Visual template root without adding it to the logical tree.
     #[doc(hidden)]
     fn __set_template_root(&self, root: Rc<dyn UIElementExt>) {

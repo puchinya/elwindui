@@ -47,3 +47,23 @@ activation while remaining visible until Core completes the transition.
 The Rendering event token is revoked when the runtime becomes idle and during
 host teardown. Projection failure follows the Core safe-cleanup path and cannot
 retain an interactive outgoing native child.
+
+## Accessibility projection
+
+WinUI accessibility is a projection of the Core semantic snapshot, not a read of
+native child control state. The actual `TreeHostPanel` backing element is a
+Canvas-compatible C++/WinRT XAML subclass whose `OnCreateAutomationPeer` returns
+the custom root peer. `GetChildrenCore` and virtual child peers read Core values
+through the narrow Rust C ABI; peers are cached by integer `AccessibilityId`.
+
+C++ owns only composable host subclassing, AutomationPeer mechanics, copied-value
+translation, and callback-context lifetime. Rust/Core owns roles, traversal,
+state, IDs, action dispatch, and user callbacks. The bridge detaches before host
+destruction and returns empty/unavailable data for late calls. Native XAML
+projection children use the narrowest accessibility-view suppression needed to
+avoid public duplicates. A raw HWND-wide `WM_GETOBJECT` provider is not used.
+
+The root peer exposes Core name, control type, root-relative-to-screen bounds,
+enabled state, keyboard focus, semantic children, and focus. Invoke, Toggle,
+RangeValue, Value, SelectionItem, and ExpandCollapse patterns are advertised only
+when the Core node advertises an executable matching action.

@@ -214,6 +214,8 @@ fn main() {
         "Microsoft.UI.Xaml.HorizontalAlignment".to_owned(),
         "Microsoft.UI.Xaml.VerticalAlignment".to_owned(),
         "Microsoft.UI.Xaml.UIElement".to_owned(),
+        "Microsoft.UI.Xaml.Automation.AccessibilityView".to_owned(),
+        "Microsoft.UI.Xaml.Automation.AutomationProperties".to_owned(),
         "Microsoft.UI.Xaml.XamlRoot".to_owned(),
         "Microsoft.UI.Xaml.Window".to_owned(),
         "Microsoft.UI.Xaml.WindowEventArgs".to_owned(),
@@ -682,6 +684,8 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String]) {
         "Windows.Foundation.Collections",
         "Windows.UI",
         "Windows.System",
+        "Microsoft.UI.Xaml.Automation",
+        "Microsoft.UI.Xaml.Automation.Peers",
     ] {
         args.push("-include".to_owned());
         args.push(namespace.to_owned());
@@ -712,6 +716,7 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String]) {
         .cpp(true)
         .std("c++20")
         .file("cpp/app_host.cpp")
+        .file("cpp/accessibility_host.cpp")
         .include(&projection_dir)
         .flag_if_supported("/await:strict")
         .flag_if_supported("/EHsc")
@@ -720,6 +725,8 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String]) {
 
     println!("cargo:rustc-link-lib=WindowsApp");
     println!("cargo:rerun-if-changed=cpp/app_host.cpp");
+    println!("cargo:rerun-if-changed=cpp/accessibility_host.h");
+    println!("cargo:rerun-if-changed=cpp/accessibility_host.cpp");
 }
 
 /// Looks for `<nuget_packages>/<package>/<version>/lib/<filename>` (the WebView2 package's own

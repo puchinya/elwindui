@@ -25,6 +25,19 @@ pub struct TextBlock {
 #[elwindui_macros::class]
 impl TextBlock {
     #[overrides]
+    fn accessibility_intrinsic_semantics(
+        &self,
+    ) -> Option<crate::accessibility::AccessibilitySemantics> {
+        let mut semantics = crate::accessibility::AccessibilitySemantics::new(
+            crate::accessibility::AccessibilityRole::StaticText,
+        );
+        let text = self.text.borrow().clone();
+        semantics.label = Some(text.clone());
+        semantics.value = Some(text);
+        Some(semantics)
+    }
+
+    #[overrides]
     fn measure_override(&self, available: Size) -> Size {
         let style = self.resolved_text_style();
         let text = self.text.borrow();
@@ -77,6 +90,7 @@ impl TextBlock {
     fn set_text(&self, text: &str) {
         *self.text.borrow_mut() = text.to_string();
         self.invalidate_measure();
+        self.request_accessibility_update();
     }
     fn set_text_alignment(&self, alignment: TextAlignment) {
         self.alignment.set(alignment);

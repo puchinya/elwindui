@@ -4,6 +4,7 @@
 //!
 //! Depends downward on `render` for all drawing.
 
+mod accessibility;
 mod event;
 mod replay;
 
@@ -28,6 +29,7 @@ use crate::render::composition::{
     CompositionClipSpec, CompositionPrimitive, CompositionRenderer, DesiredCompositionIsland,
     DesiredCompositionNode, IslandId,
 };
+use accessibility::{WinUI3AccessibilityHost, WinUI3AccessibilityState};
 use elwindui_core::base::{Point, Rect};
 use elwindui_core::input::{
     FocusState, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent, RawKeyEventKind,
@@ -236,6 +238,7 @@ pub struct TreeHostPanel {
     callback_owner: UiCallbackRegistryOwner,
     animation_runtime: Rc<AnimationRuntime>,
     rendering: Rc<WinUI3RenderingState>,
+    accessibility: Rc<WinUI3AccessibilityState>,
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostPanel` — wraps a *weak* reference back to the
@@ -529,13 +532,15 @@ impl PointerGestureHost for WinUI3PointerGestureHost {
 
 impl TreeHostPanel {
     pub(crate) fn new() -> Self {
-        let canvas = Canvas::new().expect("Canvas::new");
+        let canvas = accessibility::create_canvas();
         let composition = CompositionRenderer::new(&canvas).expect("CompositionRenderer::new");
+        let tree = Rc::new(RefCell::new(None));
+        let accessibility = WinUI3AccessibilityState::new(Rc::downgrade(&tree));
         let this = Self {
             canvas,
             relayout_cycle: Rc::new(RelayoutCycleState::default()),
             composition: Rc::new(RefCell::new(composition)),
-            tree: Rc::new(RefCell::new(None)),
+            tree,
             render_tree: Rc::new(RefCell::new(None)),
             native_children: Rc::new(RefCell::new(NativeChildMap::new())),
             keyboard: Rc::new(KeyboardDispatcher::new()),
@@ -546,7 +551,10 @@ impl TreeHostPanel {
             callback_owner: UiCallbackRegistryOwner::default(),
             animation_runtime: AnimationRuntime::new(),
             rendering: Rc::new(WinUI3RenderingState::default()),
+            accessibility,
         };
+        #[cfg(windows)]
+        this.accessibility.bind_canvas(&this.canvas);
         // WinUI3's `Control.IsTabStop` gate. Once the WinRT event projection is restored this
         // allows the host to receive OS keyboard focus, mirroring AppKit's TreeHostView.
         let _ = this.canvas.SetIsTabStop(true);
@@ -1229,6 +1237,7 @@ impl TreeHostPanel {
             &self.active,
             &self.relayout_cycle,
         );
+        self.accessibility.rebuild();
     }
 
     /// Issue #225: pushes an owner-supplied logical viewport into this host's `Canvas` and
@@ -1271,6 +1280,7 @@ impl TreeHostPanel {
             return;
         }
 
+        self.accessibility.clear();
         self.rendering.stop();
         if self.pointer.cancel() {
             let _ = self.canvas.ReleasePointerCaptures();
@@ -1343,6 +1353,10 @@ impl TreeHostPanel {
             .set_focus_host(Some(Rc::new(WinUI3FocusHost {
                 keyboard: Rc::downgrade(&self.keyboard),
             })));
+        tree.as_ui_element()
+            .set_accessibility_host(Some(Rc::new(WinUI3AccessibilityHost::new(Rc::downgrade(
+                &self.accessibility,
+            )))));
         self.keyboard.as_ref().focus.clear_focus();
         self.keyboard.shortcuts().clear();
         self.keyboard.shortcuts().collect_from_tree(&tree);
@@ -1386,7 +1400,9 @@ impl TreeHostPanel {
             old_tree.set_pointer_gesture_host(None);
             old_tree.set_animation_frame_host(None);
             old_tree.set_focus_host(None);
+            old_tree.set_accessibility_host(None);
         }
+        self.accessibility.clear();
     }
 
     /// Issue #162 §3.18: closes this host's own active custom popup/context-menu surface, if any —

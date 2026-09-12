@@ -4,10 +4,17 @@ version.workspace = true
 edition.workspace = true
 
 [features]
+accessibility-regression = []
+
 # Enables `render::stats` counters (Core Animation mutation traffic, resource creation, memory
 # footprint) in an optimized build. Already on for free under `cfg(test)`/`cfg(debug_assertions)`
 # — see that module's own doc comment — so this is only needed to profile a release build.
 render-stats = []
+
+[[example]]
+name = "accessibility_active_host_regression"
+path = "examples/accessibility_active_host_regression.rs"
+required-features = ["accessibility-regression"]
 
 [[example]]
 name = "appkit-memory-baseline"
@@ -73,6 +80,7 @@ objc2-app-kit = { version = "0.3", features = [
     # conformance in objc2-app-kit 0.3.2 — that lives behind `NSAccessibilityProtocols`.
     "NSAccessibilityProtocols",
     "NSAccessibilityConstants",
+    "NSAccessibilityElement",
     "objc2-quartz-core",
     # Font model support (see crates/elwindui-backend-appkit/src/render/text.rs). Deliberately no
     # `objc2-core-text` dependency: `NSFontDescriptor`'s traits dictionary (weight/width/symbolic

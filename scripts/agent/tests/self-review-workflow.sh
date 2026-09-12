@@ -256,6 +256,15 @@ assert_contains "$out" 'items=2'
 grep -q -- '- C001 | contract | contract obligation one' .agent-state/issues/123/reviewer-checklist.md
 echo 'T2 contract extraction: PASS'
 
+reset_state
+numbered_contract_body=$'9. Reviewer Checklist\n\n* [ ] numbered contract obligation\n\n10. Completion Report\n\n## Reviewer Checklist\n- PASS:\n- N/A:\n- FAIL:\n'
+write_contract "$numbered_contract_body"
+set_issue_body $'## Purpose\nNumbered contract checklist with completion-report template.'
+out="$($TMP/scripts/agent/prepare-self-review.sh 123)"
+assert_contains "$out" 'items=1'
+grep -q -- '- C001 | contract | numbered contract obligation' .agent-state/issues/123/reviewer-checklist.md
+echo 'T2b numbered contract and report template: PASS'
+
 canonical_contract=$'transport heading\nELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\n\nREVIEW_ITEM: canonical obligation one\nREVIEW_ITEM: canonical obligation two\n\nELWINDUI_REVIEWER_CHECKLIST_V1_END\n'
 set_issue_body $'## Purpose\nCanonical contract supplies the checklist.'
 reset_state

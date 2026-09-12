@@ -3,8 +3,8 @@
 AI-agent-drivable CLI for launching, inspecting, screenshotting, and interacting with elwindui (or
 any) macOS app windows — see `docs/status/tooling_status.md` for what's implemented
 (Phase 1: launch/terminate/list-windows/capture-window/doctor/focus-window; Phase 2:
-dump-tree/find/set-focus/click/point-click/drag/resize/type-text/press-key/wait-for — driver-side only, see that doc for the
-Rust-side accessibility-identifier wiring left out of scope) versus deferred (Phase 3+:
+dump-tree/find/set-focus/click/point-click/drag/resize/type-text/set-value/press-key/wait-for —
+including Core-backed accessibility identifiers and direct AX value setting) versus deferred (Phase 3+:
 elwindui-internal state introspection, image-diff regression testing).
 
 Every command prints one JSON object to stdout (`{"success": true, ...}` or `{"success": false,
@@ -127,12 +127,11 @@ Every Phase 2 command shares two flag groups:
   `list-windows`/`capture-window`; resolving it to the matching AX window uses only public API
   (title+geometry matching against `listOnScreenWindows()` when the app has more than one window —
   no private `_AXUIElementGetWindow`).
-- **Element selector** (`find`/`set-focus`/`click`/`type-text`/`press-key`): `--role`, `--title`
-  (exact), `--title-contains` (substring), `--identifier` (exact — currently inert, since no
-  elwindui control sets a custom `accessibilityIdentifier`; standard AppKit `role`/`title`/`value`
-  attributes are populated automatically and are enough to select on), `--index <n>` to disambiguate
+- **Element selector** (`find`/`set-focus`/`click`/`type-text`/`set-value`/`press-key`): `--role`, `--title`
+  (exact), `--title-contains` (substring), `--identifier` (exact Core-backed accessibility
+  identifier), `--index <n>` to disambiguate
   multiple matches. `find`/`dump-tree` never fail on 0 or 2+ matches (an empty/ambiguous result is a
-  valid answer); `set-focus`/`click`/`type-text`/`press-key` always require exactly one match (or an
+  valid answer); `set-focus`/`click`/`type-text`/`set-value`/`press-key` always require exactly one match (or an
   explicit `--index`) since they cause a real side effect.
 
 ```bash
@@ -197,6 +196,13 @@ macos-ui-driver type-text --pid <pid> [--window-id <id>] <selector> --text <stri
 # and the post-typing value matching what was requested — the decisive tool for testing whether a
 # text control's focus/input wiring actually works end-to-end.
 # {"success":true,"focus_confirmed":true,"before_value":"","after_value":"hello","value_matches_expected":true}
+
+macos-ui-driver set-value --pid <pid> [--window-id <id>] <selector> (--text <string> | --value <number>)
+    [--timeout 1.0]
+# Sets the target's public kAXValueAttribute directly and verifies the observed value. Use this
+# for semantic Value/SetText coverage; use type-text when the test specifically requires real
+# keyboard delivery and native editing/focus behavior. Exactly one of --text or --value is required.
+# {"success":true,"before_value":"hello","requested_text":"semantic-text","after_value":"semantic-text","value_matches_expected":true}
 
 macos-ui-driver press-key --pid <pid> [--window-id <id>] [selector optional]
     --key <enter|tab|escape|backspace|delete|forward-delete|space|left|right|up|down>

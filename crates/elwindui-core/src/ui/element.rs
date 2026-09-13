@@ -718,7 +718,11 @@ impl UIElement {
         self.invalidate_arrange();
     }
     fn set_visibility(&self, visibility: Visibility) {
-        self.as_ui_element().visibility.set(visibility);
+        let base = self.as_ui_element();
+        if base.visibility.get() == visibility {
+            return;
+        }
+        base.visibility.set(visibility);
         self.invalidate_measure();
         self.request_accessibility_update();
     }
@@ -1278,11 +1282,26 @@ impl UIElement {
     /// which also picks `T` via an explicit turbofish matching the `#[attached]` field's declared
     /// type — never inferred from `value` alone, since a mismatched inferred type here would make
     /// `get_attached`'s `downcast_ref` silently miss and fall back to its caller's default.
-    fn set_attached<T: 'static>(&self, owner: &'static str, field: &'static str, value: T)
-    where
+    fn set_attached<T: PartialEq + 'static>(
+        &self,
+        owner: &'static str,
+        field: &'static str,
+        value: T,
+    ) where
         Self: Sized,
     {
-        self.as_ui_element()
+        let element = self.as_ui_element();
+        if element
+            .attached
+            .borrow()
+            .get(&(owner, field))
+            .and_then(|current| current.downcast_ref::<T>())
+            .is_some_and(|current| current == &value)
+        {
+            return;
+        }
+
+        element
             .attached
             .borrow_mut()
             .insert((owner, field), Box::new(value));
@@ -2369,5 +2388,61 @@ mod tests {
             InvalidationKind::Render.max(InvalidationKind::Measure),
             InvalidationKind::Measure
         );
+    }
+
+    #[test]
+    fn setting_visibility_to_the_effective_value_is_a_no_op() {
+        struct CountingHost {
+            calls: Rc<RefCell<usize>>,
+        }
+
+        impl RelayoutHost for CountingHost {
+            fn request_relayout(&self, _dirty_group_id: u64, _kind: InvalidationKind) {
+                *self.calls.borrow_mut() += 1;
+            }
+        }
+
+        let leaf = native("a", size(10.0, 20.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        let calls = Rc::new(RefCell::new(0));
+        root.set_invalidate_host(Some(Rc::new(CountingHost {
+            calls: Rc::clone(&calls),
+        })));
+
+        leaf.set_visibility(Visibility::Visible);
+        assert_eq!(*calls.borrow(), 0);
+        leaf.set_visibility(Visibility::Collapsed);
+        assert_eq!(*calls.borrow(), 1);
+        leaf.set_visibility(Visibility::Collapsed);
+        assert_eq!(*calls.borrow(), 1);
+        leaf.set_visibility(Visibility::Visible);
+        assert_eq!(*calls.borrow(), 2);
+    }
+
+    #[test]
+    fn setting_attached_property_to_the_effective_value_is_a_no_op() {
+        struct CountingHost {
+            calls: Rc<RefCell<usize>>,
+        }
+
+        impl RelayoutHost for CountingHost {
+            fn request_relayout(&self, _dirty_group_id: u64, _kind: InvalidationKind) {
+                *self.calls.borrow_mut() += 1;
+            }
+        }
+
+        let leaf = native("a", size(10.0, 20.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        let calls = Rc::new(RefCell::new(0));
+        root.set_invalidate_host(Some(Rc::new(CountingHost {
+            calls: Rc::clone(&calls),
+        })));
+
+        leaf.as_ui_element().set_attached("Grid", "row", 1i32);
+        assert_eq!(*calls.borrow(), 1);
+        leaf.as_ui_element().set_attached("Grid", "row", 1i32);
+        assert_eq!(*calls.borrow(), 1);
+        leaf.as_ui_element().set_attached("Grid", "row", 2i32);
+        assert_eq!(*calls.borrow(), 2);
     }
 }

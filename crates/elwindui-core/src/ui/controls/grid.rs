@@ -135,24 +135,36 @@ impl Grid {
         final_size
     }
     fn set_rows(&self, rows: Vec<GridLength>) {
+        if *self.rows.borrow() == rows {
+            return;
+        }
         *self.rows.borrow_mut() = rows;
         self.resolved_row_sizes.borrow_mut().clear();
         self.resolved_column_sizes.borrow_mut().clear();
         self.invalidate_measure();
     }
     fn set_columns(&self, columns: Vec<GridLength>) {
+        if *self.columns.borrow() == columns {
+            return;
+        }
         *self.columns.borrow_mut() = columns;
         self.resolved_column_sizes.borrow_mut().clear();
         self.resolved_row_sizes.borrow_mut().clear();
         self.invalidate_measure();
     }
     fn set_row_constraints(&self, constraints: Vec<GridTrackConstraint>) {
+        if *self.row_constraints.borrow() == constraints {
+            return;
+        }
         *self.row_constraints.borrow_mut() = constraints;
         self.resolved_row_sizes.borrow_mut().clear();
         self.resolved_column_sizes.borrow_mut().clear();
         self.invalidate_measure();
     }
     fn set_column_constraints(&self, constraints: Vec<GridTrackConstraint>) {
+        if *self.column_constraints.borrow() == constraints {
+            return;
+        }
         *self.column_constraints.borrow_mut() = constraints;
         self.resolved_column_sizes.borrow_mut().clear();
         self.resolved_row_sizes.borrow_mut().clear();
@@ -181,6 +193,37 @@ impl Grid {
 mod tests {
     use super::*;
     use crate::ui::testsupport::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn identical_track_definitions_do_not_invalidate_measure() {
+        struct CountingHost {
+            calls: RefCell<usize>,
+        }
+
+        impl RelayoutHost for CountingHost {
+            fn request_relayout(&self, _dirty_group_id: u64, _kind: InvalidationKind) {
+                *self.calls.borrow_mut() += 1;
+            }
+        }
+
+        let root = Grid::new();
+        let host = Rc::new(CountingHost {
+            calls: RefCell::new(0),
+        });
+        root.set_invalidate_host(Some(host.clone()));
+        let rows = vec![GridLength::Fixed(10.0)];
+        let columns = vec![GridLength::Star(1.0)];
+
+        root.set_rows(rows.clone());
+        root.set_columns(columns.clone());
+        assert_eq!(*host.calls.borrow(), 2);
+
+        root.set_rows(rows);
+        root.set_columns(columns);
+        assert_eq!(*host.calls.borrow(), 2);
+    }
 
     #[test]
     fn grid_measures_children_in_two_passes_per_track_kind() {

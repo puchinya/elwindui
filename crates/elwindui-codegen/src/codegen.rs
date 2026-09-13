@@ -6,7 +6,11 @@
 use crate::ast::{
     AssignmentKind, Attr, ChildEntry, ClosureBody, ComponentDef, DeferredViewExpr, ElementNode,
     EnumDef, FieldDef, FieldKind, Initializer, Item, MethodDef, Module, ShortcutScope, StoreDef,
-    ViewAttribute, ViewBody, ViewDef, ViewExpr, ViewModelDef, ViewModifier,
+    UseDecl, ViewAttribute, ViewBody, ViewDef, ViewExpr, ViewModelDef, ViewModifier,
+};
+use crate::type_resolution::{
+    CollectionIdentity, ResolutionContext, ResolvedCollection, ResolvedTypeRef,
+    nested_vec_item_type,
 };
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident, quote};
@@ -25,9 +29,21 @@ use syn::visit_mut::VisitMut;
 /// different modules never collide, and a lookup must go through `resolve` (i.e. through a `use`,
 /// or be in the same module) instead of being visible from anywhere in the compilation unit. See
 /// docs/specs/dsl_spec.md §11, docs/design/tools/codegen_design.md
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ResolvedTypeKey {
+    pub(crate) module_path: Vec<String>,
+    pub(crate) item_name: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModuleResolutionContext {
+    uses: Vec<UseDecl>,
+}
+
 #[derive(Clone)]
 pub struct SymbolTable {
     types: HashMap<(Vec<String>, String), TypeInfo>,
+    module_contexts: HashMap<Vec<String>, ModuleResolutionContext>,
 }
 
 #[derive(Clone)]
@@ -1574,20 +1590,17 @@ fn dsl_concrete_type_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStre
 }
 
 impl SymbolTable {
-    /// Resolves `name` as seen from `from` to its symbol-table key: a type defined locally in
-    /// `from` (same real path), or brought into scope by one of `from`'s `use` declarations,
-    /// matched by real path exactly like Rust's own name resolution (`use`'s last path segment is
-    /// the item name; the segments before it — with a leading `crate` keyword stripped, since
-    /// `Module::path` never includes it — must equal some module's real path). `resolve` (below)
-    /// is the public, common-case wrapper; `resolve_is_native` needs the key itself so it can
-    /// recurse into *that* type's own `is_native` computation rather than reading a
-    /// not-yet-finalized `TypeInfo`.
-    fn resolve_key(&self, from: &Module, name: &str) -> Option<(Vec<String>, String)> {
-        let direct = (from.path.clone(), name.to_string());
+    fn resolve_key_with_context(
+        &self,
+        module_path: &[String],
+        uses: &[UseDecl],
+        name: &str,
+    ) -> Option<(Vec<String>, String)> {
+        let direct = (module_path.to_vec(), name.to_string());
         if self.types.contains_key(&direct) {
             return Some(direct);
         }
-        from.uses.iter().find_map(|u| {
+        uses.iter().find_map(|u| {
             let [prefix @ .., last] = u.path.as_slice() else {
                 return None;
             };
@@ -1601,6 +1614,57 @@ impl SymbolTable {
             let key = (real_prefix.to_vec(), name.to_string());
             self.types.contains_key(&key).then_some(key)
         })
+    }
+
+    /// Resolves `name` as seen from `from` to its symbol-table key: a type defined locally in
+    /// `from` (same real path), or brought into scope by one of `from`'s `use` declarations,
+    /// matched by real path exactly like Rust's own name resolution (`use`'s last path segment is
+    /// the item name; the segments before it — with a leading `crate` keyword stripped, since
+    /// `Module::path` never includes it — must equal some module's real path). `resolve` (below)
+    /// is the public, common-case wrapper; `resolve_is_native` needs the key itself so it can
+    /// recurse into *that* type's own `is_native` computation rather than reading a
+    /// not-yet-finalized `TypeInfo`.
+    fn resolve_key(&self, from: &Module, name: &str) -> Option<(Vec<String>, String)> {
+        self.resolve_key_with_context(&from.path, &from.uses, name)
+    }
+
+    pub(crate) fn resolve_type_key(&self, from: &Module, name: &str) -> Option<ResolvedTypeKey> {
+        self.resolve_key(from, name)
+            .map(|(module_path, item_name)| ResolvedTypeKey {
+                module_path,
+                item_name,
+            })
+    }
+
+    pub(crate) fn resolve_unqualified_type_key(&self, name: &str) -> Option<ResolvedTypeKey> {
+        let mut matches = self
+            .types
+            .iter()
+            .filter(|((_, candidate), info)| candidate == name && !info.is_builtin)
+            .map(|((module_path, item_name), _)| ResolvedTypeKey {
+                module_path: module_path.clone(),
+                item_name: item_name.clone(),
+            });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
+    pub(crate) fn type_info_for_key(&self, key: &ResolvedTypeKey) -> Option<&TypeInfo> {
+        self.types
+            .get(&(key.module_path.clone(), key.item_name.clone()))
+    }
+
+    pub(crate) fn resolve_type_key_in_defining_module(
+        &self,
+        owner: &ResolvedTypeKey,
+        name: &str,
+    ) -> Option<ResolvedTypeKey> {
+        let context = self.module_contexts.get(&owner.module_path)?;
+        self.resolve_key_with_context(&owner.module_path, &context.uses, name)
+            .map(|(module_path, item_name)| ResolvedTypeKey {
+                module_path,
+                item_name,
+            })
     }
 
     /// Resolves `name` as seen from `from`. Returns `None` if `name` isn't visible from `from` at
@@ -1617,13 +1681,8 @@ impl SymbolTable {
     /// spelling is present; ambiguous names stay unresolved instead of inventing a type-name
     /// dispatch rule or silently selecting one component from another module.
     pub fn resolve_unqualified(&self, name: &str) -> Option<&TypeInfo> {
-        let mut matches = self
-            .types
-            .iter()
-            .filter(|((_, candidate), info)| candidate == name && !info.is_builtin)
-            .map(|(_, info)| info);
-        let first = matches.next()?;
-        matches.next().is_none().then_some(first)
+        let key = self.resolve_unqualified_type_key(name)?;
+        self.type_info_for_key(&key)
     }
 }
 
@@ -1743,6 +1802,17 @@ pub(crate) fn strip_weak_wrapper(ty: &str) -> &str {
 
 pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
     let mut types = HashMap::new();
+    // Keep only the lightweight import context needed to resolve a field type after its owner has
+    // crossed a renderer boundary. The AST and TypeInfo remain owned by their existing callers;
+    // this map is keyed by real module path and stores cloned `use` paths once per module.
+    let mut module_contexts = HashMap::new();
+    for module in modules {
+        module_contexts
+            .entry(module.path.clone())
+            .or_insert_with(|| ModuleResolutionContext {
+                uses: module.uses.clone(),
+            });
+    }
     // `(module index, #[[inherits]] base name, effective view's root element type, #[native])` per
     // `component` key — the raw material `resolve_is_native` (below) needs; not every component has
     // an effective `view` (native leaf builtins and virtual builtins like `VerticalLayout`/`Rectangle`
@@ -2066,7 +2136,10 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
         }
     }
 
-    let table = SymbolTable { types };
+    let table = SymbolTable {
+        types,
+        module_contexts: module_contexts.clone(),
+    };
     let mut memo: HashMap<(Vec<String>, String), bool> = HashMap::new();
     let keys: Vec<(Vec<String>, String)> = table.types.keys().cloned().collect();
     for key in &keys {
@@ -2106,7 +2179,10 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
             .flatten()
             .map(|(name, _)| name);
     }
-    SymbolTable { types }
+    SymbolTable {
+        types,
+        module_contexts,
+    }
 }
 
 /// Resolves `name` as seen from `from` directly against `modules`' raw AST (no `SymbolTable`
@@ -3529,28 +3605,6 @@ fn is_copy_type(ty: &str) -> bool {
             && !ty.contains('<')
             && !ty.contains("::")
     }
-}
-
-/// `Vec<Document>` where `Document` is itself a known `component`/`viewmodel` in this compilation
-/// unit: such a field needs `Rc`-wrapped elements (`Vec<Rc<Document>>`) rather than the generic
-/// `is_copy_type`-driven wrapping, because cloning a plain `Vec<Document>` on every getter call
-/// (as every other `#[observable]` field does) would clone each `Document`'s `Cell`/`RefCell`
-/// fields into independent copies — mutating one through the getter's clone would silently not
-/// persist. `Rc` cloning is cheap (a refcount bump) and every clone still refers to the same
-/// shared `Document`, so e.g. a `TabView`'s per-tab `TextArea` edits reach the real stored
-/// document. This is what lets a `viewmodel` hold a dynamic list of independently-reactive
-/// sub-viewmodels (needed for notepad's real multi-document tabs) without a general nested-list
-/// compiler feature; see docs/specs/ui_spec.md#tabs.
-fn nested_vec_item_type(ty: &str, from: &Module, table: &SymbolTable) -> Option<String> {
-    let inner = ty.strip_prefix("Vec<")?.strip_suffix(">")?.trim();
-    // `resolve` only finds `inner` if it's locally defined in `from` or reachable through one of
-    // `from`'s `use` declarations. The attribute-macro frontend (`attr_frontend.rs`) expands each
-    // `#[elwindui::viewmodel] mod { ... }` in isolation — it has no way to see a *different* mod's
-    // struct, so it always calls this with an empty table and relies entirely on the heuristic
-    // below, same idea as `is_copy_type`'s "capitalized and not a known scalar" guess.
-    let known = table.resolve(from, inner).is_some();
-    let looks_nested = inner.chars().next().is_some_and(|c| c.is_uppercase()) && inner != "String";
-    (known || looks_nested).then(|| inner.to_string())
 }
 
 /// Builds the token sequence a dependency's setter emits for one of its dependent fields, branching
@@ -5391,6 +5445,7 @@ fn generate_view(
     };
     let mut ctx = ViewCtx {
         closure_param: None,
+        closure_param_type: None,
         own_fields,
         mutable_own_fields: HashSet::new(),
         property_dependencies: own_dependents_of.clone(),
@@ -5414,6 +5469,12 @@ fn generate_view(
         template_target: None,
         template_bare_parent_fields: HashSet::new(),
         storage: ViewStorage::Component,
+        environment_scope_bindings_are_lexical: false,
+        dynamic_slots_are_lexical: false,
+        template_parent_type: view
+            .template_header
+            .as_ref()
+            .map(|_| ResolvedTypeRef::from_module(target_name.clone(), from, table)),
     };
 
     // Component default bodies are compiled through the same semantic backend used by standalone
@@ -5441,6 +5502,7 @@ fn generate_view(
                 .iter()
                 .map(|field| field.name.clone())
                 .collect(),
+            false,
         )
         .unwrap_or_else(|error| {
             panic!(
@@ -8924,12 +8986,17 @@ enum ViewStorage {
     },
 }
 
+#[derive(Clone)]
 struct ViewCtx {
     /// Set while evaluating a `ViewExpr::Closure` body (`key`/`render_label`/`render_content`) to
     /// the closure's own declared parameter name (e.g. `"doc"`), so a bare reference to it emits
     /// the plain local variable that name is aliased to, rather than treating it as a component
     /// field owner. `None` everywhere else.
     closure_param: Option<String>,
+    /// The concrete DSL type represented by the current renderer parameter. Nested collection
+    /// paths resolve from this type, so an outer item's Rc representation never predicts the
+    /// identity semantics of one of its fields.
+    closure_param_type: Option<ResolvedTypeRef>,
     /// This component's own `#[param]`-shaped fields (no initializer — the same set `generate_view`
     /// turns into `new`'s positional arguments / raw struct fields, see `param_names`), mapped to
     /// each field's own declared type string. A bare 1-segment reference to one of these (e.g.
@@ -9006,28 +9073,57 @@ struct ViewCtx {
     /// generated fields and methods; ControlTemplate bodies use factory-local bindings and a
     /// refresh cell while retaining the exact same planning and value/event emitters.
     storage: ViewStorage,
+    /// Whether EnvironmentScope bindings in the current planning context are lexical locals. The
+    /// ordinary component plan resolves its retained scope through `self`; a persistent `for`
+    /// renderer switches its item-body plan to this lexical policy because scopes created there
+    /// live in the renderer's local plan rather than on the component struct.
+    environment_scope_bindings_are_lexical: bool,
+    /// Whether dynamic-region slots in the current planning context are lexical locals. The main
+    /// component plan keeps them on `self`; a persistent `for` renderer keeps its nested dynamic
+    /// slots alongside the renderer-local item plan and retains them through the item's existing
+    /// subscription ownership.
+    dynamic_slots_are_lexical: bool,
+    /// The concrete target type represented by a typed template parent alias, when one is known.
+    /// This is used only by the shared static collection resolver.
+    template_parent_type: Option<ResolvedTypeRef>,
 }
 
 impl ViewCtx {
     fn with_closure_param(&self, param: &str) -> ViewCtx {
-        ViewCtx {
-            closure_param: Some(param.to_string()),
-            own_fields: self.own_fields.clone(),
-            mutable_own_fields: self.mutable_own_fields.clone(),
-            property_dependencies: self.property_dependencies.clone(),
-            bindable_owners: self.bindable_owners.clone(),
-            weak_bindable_owners: self.weak_bindable_owners.clone(),
-            default_template_parent: self.default_template_parent,
-            template_parent_alias: self.template_parent_alias.clone(),
-            template_base_fields: self.template_base_fields.clone(),
-            implicit_owner: self.implicit_owner.clone(),
-            target: self.target.clone(),
-            template_parent: self.template_parent.clone(),
-            template_property_bounds: self.template_property_bounds.clone(),
-            template_target: self.template_target.clone(),
-            template_bare_parent_fields: self.template_bare_parent_fields.clone(),
-            storage: self.storage.clone(),
-        }
+        let mut ctx = self.clone();
+        ctx.closure_param = Some(param.to_string());
+        ctx
+    }
+
+    fn with_closure_param_type(&self, item_type: Option<ResolvedTypeRef>) -> ViewCtx {
+        let mut ctx = self.clone();
+        ctx.closure_param_type = item_type;
+        ctx
+    }
+
+    fn with_lexical_environment_scope_bindings(&self) -> ViewCtx {
+        let mut ctx = self.clone();
+        ctx.environment_scope_bindings_are_lexical = true;
+        ctx.dynamic_slots_are_lexical = true;
+        ctx
+    }
+
+    fn resolve_collection(
+        &self,
+        collection: &ViewExpr,
+        from: &Module,
+        table: &SymbolTable,
+    ) -> Result<ResolvedCollection, crate::type_resolution::ResolutionFailure> {
+        let context = ResolutionContext {
+            from,
+            table,
+            own_fields: &self.own_fields,
+            lexical_name: self.closure_param.as_deref(),
+            lexical_type: self.closure_param_type.as_ref(),
+            template_parent_alias: self.template_parent_alias.as_deref(),
+            template_parent_type: self.template_parent_type.as_ref(),
+        };
+        crate::type_resolution::resolve_collection(collection, &context)
     }
 
     fn is_template_storage(&self) -> bool {
@@ -9060,6 +9156,23 @@ impl ViewCtx {
         }
     }
 
+    /// Returns the live EnvironmentContext represented by an enclosing EnvironmentScope binding.
+    /// Component views retain the binding in the generated per-scope OnceCell; template views keep
+    /// the same semantic value in their lexical factory scope.  A renderer must read this on each
+    /// invocation so it observes in-place scope resync rather than a construction-time snapshot.
+    fn environment_scope_value(&self, binding: &syn::Ident) -> TokenStream {
+        if self.is_template_storage() || self.environment_scope_bindings_are_lexical {
+            quote! { #binding.clone() }
+        } else {
+            quote! {
+                self.#binding
+                    .get()
+                    .expect("EnvironmentScope renderer: scope is not yet mounted")
+                    .clone()
+            }
+        }
+    }
+
     /// Returns an owned node handle in the scope where a shared emitter is running.  In an
     /// ordinary component the handle is an `OnceCell` field; in a template it is the local `Rc`
     /// binding emitted by the same construction pass.
@@ -9089,7 +9202,7 @@ impl ViewCtx {
 
     fn dynamic_slot(&self, binding: &syn::Ident) -> TokenStream {
         let slot = dynamic_slot_ident(binding);
-        if self.is_template_storage() {
+        if self.is_template_storage() || self.dynamic_slots_are_lexical {
             quote! { #slot }
         } else {
             quote! { self.#slot }
@@ -9186,6 +9299,7 @@ pub(crate) fn lower_template_body(
     target_type: TokenStream,
     parent_alias: String,
     bare_parent_fields: HashSet<String>,
+    template_parent_type: ResolvedTypeRef,
 ) -> Result<LoweredTemplateBody, String> {
     let property_bounds = Rc::new(RefCell::new(BTreeMap::new()));
     let parent_ident = format_ident!("__elwindui_template_parent");
@@ -9193,6 +9307,7 @@ pub(crate) fn lower_template_body(
     let refresh_cell_ident = format_ident!("__elwindui_template_refresh_cell");
     let ctx = ViewCtx {
         closure_param: None,
+        closure_param_type: None,
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
         property_dependencies: HashMap::new(),
@@ -9211,6 +9326,9 @@ pub(crate) fn lower_template_body(
             environment: environment_ident.clone(),
             refresh_cell: refresh_cell_ident.clone(),
         },
+        environment_scope_bindings_are_lexical: true,
+        dynamic_slots_are_lexical: true,
+        template_parent_type: Some(template_parent_type),
     };
 
     let mut plan = Vec::new();
@@ -10257,7 +10375,7 @@ fn plan_children_in_scope(
                 let scope_var = plan_environment_scope(elem, out, environment_scope);
                 child_bindings.extend(plan_children_in_scope(
                     &elem.children,
-                    &elem.type_path,
+                    parent_type_path,
                     ctx,
                     from,
                     table,
@@ -10304,14 +10422,9 @@ fn plan_children_in_scope(
                 ));
             }
             ChildEntry::For { .. } => {
-                // Not yet supported inside an `EnvironmentScope` (CI-7 follow-up) — a `for` loop's
-                // items are constructed on demand by a persistent renderer closure that outlives
-                // `__build_view()` entirely (unlike an eager `if`/`match` branch, which is part of
-                // that same one-time statement sequence), so its items self-mount via the ordinary,
-                // non-scoped `application_environment()` bridge, same as if no `EnvironmentScope`
-                // were present — `environment_scope` is deliberately not threaded to
-                // `plan_dynamic_entry` for this arm. `docs/specs/dsl_spec.md` §5 documents this
-                // narrower remaining gap explicitly.
+                // Unlike a scoped `if`/`match`, a `for` renderer runs after `__build_view()` and
+                // therefore obtains its enclosing scope from the storage adapter inside the
+                // renderer invocation. Keep the active scope in the shared dynamic plan.
                 child_bindings.push(plan_dynamic_entry(
                     child,
                     parent_type_path,
@@ -10320,7 +10433,7 @@ fn plan_children_in_scope(
                     table,
                     out,
                     lets,
-                    None,
+                    environment_scope,
                 ));
             }
         }
@@ -10416,17 +10529,36 @@ fn emit_for_renderer(
     from: &Module,
     table: &SymbolTable,
     item_trait: &ItemTraitTokens,
+    item_type: Option<&ResolvedTypeRef>,
     subscribe_to_item_changes: bool,
+    environment_scope: Option<&syn::Ident>,
 ) -> TokenStream {
     let param_ident = format_ident!("{}", binding);
-    let closure_ctx = ctx.with_closure_param(binding);
+    let renderer_scope = environment_scope.map(|_| format_ident!("__elwindui_for_scope"));
+    let item_environment_scope = renderer_scope.as_ref();
+    let scope_setup = environment_scope.map(|scope| {
+        let renderer_scope = renderer_scope
+            .as_ref()
+            .expect("a renderer scope alias must exist for a scoped renderer");
+        let scope_value = ctx.environment_scope_value(scope);
+        quote! {
+            let #renderer_scope = #scope_value;
+        }
+    });
+    // Resolve the incoming enclosing scope with the caller's access policy above. Any
+    // EnvironmentScope markers created while planning this renderer's item body are lexical locals
+    // in this closure, so the item-body context must use the lexical policy afterward.
+    let closure_ctx = ctx
+        .with_closure_param(binding)
+        .with_closure_param_type(item_type.cloned())
+        .with_lexical_environment_scope_bindings();
     let mut plan = Vec::new();
     let mut roots = Vec::new();
     for entry in body {
         let ChildEntry::Literal(element) = entry else {
             unreachable!()
         };
-        roots.push(plan_element(
+        roots.push(plan_element_in_scope(
             element,
             &closure_ctx,
             from,
@@ -10434,16 +10566,25 @@ fn emit_for_renderer(
             &mut plan,
             true,
             &HashMap::new(),
+            item_environment_scope,
         ));
     }
     let mut construct = TokenStream::new();
     for planned in &plan {
-        emit_construction(planned, &closure_ctx, from, table, &mut construct, &plan);
+        if planned.dynamic.is_none() {
+            emit_construction(planned, &closure_ctx, from, table, &mut construct, &plan);
+        }
     }
+    let renderer_local_dynamic_slot_declarations =
+        emit_renderer_local_dynamic_slot_declarations(&plan, from, table);
+    let renderer_local_dynamic_refreshes =
+        emit_renderer_local_dynamic_refreshes(&plan, &closure_ctx, from, table);
     let wiring = emit_for_item_wiring(&plan, &closure_ctx, from, table);
     let subscriptions = subscribe_to_item_changes
         .then(|| emit_for_item_subscriptions(&plan, binding, &closure_ctx, from, table))
         .unwrap_or_default();
+    let renderer_local_dynamic_subscriptions =
+        emit_renderer_local_dynamic_subscriptions(&plan, binding, &closure_ctx, from, table);
     let children = roots.iter().map(|(binding, ty)| {
         dynamic_child_binding(quote! { #binding }, ty, item_trait, from, table)
     });
@@ -10474,13 +10615,244 @@ fn emit_for_renderer(
     };
     quote! {
         |#param_ident: &_| {
+            #scope_setup
+            #renderer_local_dynamic_slot_declarations
             #construct
+            #renderer_local_dynamic_refreshes
             #wiring
             let mut __dynamic_item_subscriptions = Vec::new();
+            #renderer_local_dynamic_subscriptions
             #subscriptions
             #dynamic_item
         }
     }
+}
+
+/// Declares the `DynamicChildSlot` values needed by dynamic regions whose real host is built in a
+/// persistent `for` renderer. Component-main plans keep these slots on `self`; a renderer-local
+/// plan has no generated struct field, so the slot must live beside the item's constructed nodes
+/// and be retained by the item's existing subscription ownership.
+fn emit_renderer_local_dynamic_slot_declarations(
+    plan: &[PlannedNode],
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let mut out = TokenStream::new();
+    for node in plan {
+        if node.dynamic.is_none() {
+            continue;
+        }
+        let parent = find_dynamic_region_anchor(plan, &node.binding);
+        let parent_info = table.resolve(from, &parent.type_path);
+        if parent_info.map(effective_content_shape) == Some(EffectiveContentShape::Scalar) {
+            continue;
+        }
+        let props_macro = dynamic_content_props_macro_path(&parent.type_path, parent_info);
+        let item_ext = dynamic_collection_item_trait_for_type_with_props_macro(
+            &parent.type_path,
+            from,
+            table,
+            props_macro.clone(),
+        );
+        let slot = dynamic_slot_ident(&node.binding);
+        let slot_type = match parent_info.map(effective_content_shape) {
+            Some(EffectiveContentShape::Collection) => {
+                quote! { elwindui::core::ui::DynamicChildSlot<#item_ext> }
+            }
+            Some(EffectiveContentShape::External) | None => {
+                quote! { #props_macro!(@content_slot_type #item_ext) }
+            }
+            Some(EffectiveContentShape::Scalar) => continue,
+        };
+        out.extend(quote! {
+            let #slot: #slot_type =
+                <#slot_type as ::std::default::Default>::default();
+        });
+    }
+    out
+}
+
+/// Emits initial refreshes for the dynamic regions directly hosted by real nodes in a renderer's
+/// local plan. `emit_dynamic_node_refresh` recursively reaches nested `if`/`match`/`for` markers,
+/// so only the real-hosted entries are emitted here.
+fn emit_renderer_local_dynamic_refreshes(
+    plan: &[PlannedNode],
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let mut out = TokenStream::new();
+    for node in plan {
+        if node.dynamic.is_none() {
+            continue;
+        }
+        let Some(parent) = plan.iter().find(|candidate| {
+            candidate
+                .child_bindings
+                .iter()
+                .any(|(child, _)| child == &node.binding)
+        }) else {
+            continue;
+        };
+        out.extend(emit_renderer_local_dynamic_refresh(
+            plan, node, parent, ctx, from, table,
+        ));
+    }
+    out
+}
+
+/// Emits one renderer-local dynamic refresh, using the same shape-metadata boundary as the
+/// component-main refresh method. The host is a lexical node binding rather than `self` storage,
+/// while all nested dynamic markers share its slot and insertion point.
+fn emit_renderer_local_dynamic_refresh(
+    plan: &[PlannedNode],
+    node: &PlannedNode,
+    parent: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let parent_binding = &parent.binding;
+    let parent_info = table.resolve(from, &parent.type_path);
+    let parent_ext_path = dsl_ext_path(&parent.type_path, parent_info);
+    let scalar_item_ext = ItemTraitTokens::KnownIdent(format_ident!("UIElementExt"));
+    let scalar_body = {
+        let setter = parent_info
+            .and_then(|info| info.content_field.as_deref())
+            .map(|field| format_ident!("set_{field}"));
+        emit_scalar_dynamic_node_refresh(
+            plan,
+            node,
+            parent_binding,
+            setter.as_ref(),
+            false,
+            &parent.type_path,
+            &scalar_item_ext,
+            ctx,
+            from,
+            table,
+            false,
+        )
+    };
+    let body = match parent_info.map(effective_content_shape) {
+        Some(EffectiveContentShape::Collection) => {
+            let info = parent_info.expect("content shape came from parent metadata");
+            let item_ext = dynamic_collection_item_trait_for_type_with_props_macro(
+                &parent.type_path,
+                from,
+                table,
+                dynamic_content_props_macro_path(&parent.type_path, parent_info),
+            );
+            let host = dynamic_collection_host_for_info(info, quote! { #parent_binding }, false);
+            emit_dynamic_node_refresh(plan, node, &host, &item_ext, ctx, from, table)
+        }
+        Some(EffectiveContentShape::Scalar) => scalar_body,
+        Some(EffectiveContentShape::External) | None => {
+            let props_macro = dynamic_content_props_macro_path(&parent.type_path, parent_info);
+            let item_ext = dynamic_collection_item_trait_for_type_with_props_macro(
+                &parent.type_path,
+                from,
+                table,
+                props_macro.clone(),
+            );
+            let host = dynamic_collection_host_query_for_shape(
+                &parent.type_path,
+                parent_info,
+                props_macro.clone(),
+                quote! { #parent_binding },
+                false,
+            );
+            let collection_body =
+                emit_dynamic_node_refresh(plan, node, &host, &item_ext, ctx, from, table);
+            quote! {
+                #props_macro!(@content_shape { #scalar_body }, { #collection_body });
+            }
+        }
+    };
+    let layout_children_use =
+        if parent_info.is_some_and(|info| info.is_virtual_builtin) || parent_info.is_none() {
+            quote! { #[allow(unused_imports)] use elwindui::core::ui::LayoutExt as _; }
+        } else {
+            TokenStream::new()
+        };
+    quote! {
+        {
+            use #parent_ext_path as _;
+            #layout_children_use
+            #body
+        }
+    }
+}
+
+/// A renderer-local collection whose source is a direct property of the renderer parameter needs
+/// an item-owned subscription. This is the nested `for` case: the outer item's renderer already
+/// exists when its child collection changes, so refreshing the component-main plan cannot reach
+/// it. The callback recreates only the lexical aliases needed by the shared refresh emitter.
+fn emit_renderer_local_dynamic_subscriptions(
+    plan: &[PlannedNode],
+    parameter: &str,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let parameter_ident = format_ident!("{parameter}");
+    let mut out = TokenStream::new();
+    let mut subscription_index = 0usize;
+    for node in plan {
+        let Some(DynamicPlan::For { collection, .. }) = node.dynamic.as_ref() else {
+            continue;
+        };
+        let Some(property) = renderer_local_collection_property(collection, parameter) else {
+            continue;
+        };
+        let Some(parent) = plan.iter().find(|candidate| {
+            candidate
+                .child_bindings
+                .iter()
+                .any(|(child, _)| child == &node.binding)
+        }) else {
+            continue;
+        };
+        let refresh = emit_renderer_local_dynamic_refresh(plan, node, parent, ctx, from, table);
+        let source = format_ident!("__elwindui_renderer_source_{subscription_index}");
+        let source_for_callback =
+            format_ident!("__elwindui_renderer_source_for_callback_{subscription_index}");
+        let host = format_ident!("__elwindui_renderer_host_{subscription_index}");
+        let host_for_callback =
+            format_ident!("__elwindui_renderer_host_for_callback_{subscription_index}");
+        let property = syn::LitStr::new(&property, proc_macro2::Span::call_site());
+        let parent_binding = &parent.binding;
+        out.extend(quote! {
+            {
+                let #source = std::rc::Rc::clone(#parameter_ident);
+                let #source_for_callback = std::rc::Rc::clone(&#source);
+                let #host = std::rc::Rc::clone(&#parent_binding);
+                let #host_for_callback = std::rc::Rc::clone(&#host);
+                __dynamic_item_subscriptions.push(
+                    elwindui::core::reactive::ObservableExt::subscribe_property_changed(
+                        &*#source,
+                        move |property_name: &'static str| {
+                            if property_name == #property {
+                                let #parameter_ident = &#source_for_callback;
+                                let #parent_binding = std::rc::Rc::clone(&#host_for_callback);
+                                #refresh
+                            }
+                        },
+                    ),
+                );
+            }
+        });
+        subscription_index += 1;
+    }
+    out
+}
+
+fn renderer_local_collection_property(collection: &ViewExpr, parameter: &str) -> Option<String> {
+    let ViewExpr::Path(path) = collection else {
+        return None;
+    };
+    (path.len() == 2 && path.first().is_some_and(|segment| segment == parameter))
+        .then(|| path[1].clone())
 }
 
 /// Wires every `on_*` event attribute declared on an element inside a `for` loop's own item
@@ -11154,74 +11526,27 @@ fn dynamic_collection_item_trait_for_info(info: &TypeInfo) -> syn::Ident {
 /// Keeping this conservative is intentional: an unresolved expression must never be treated as
 /// identity-stable merely because it happens to yield `Rc` values at runtime.
 ///
-/// Three independent ways to prove that: the collection's own declared type textually says
-/// `Vec<Rc<T>>` (checked here directly), a known viewmodel's `#[observable] Vec<T>` field (which
-/// `generate_viewmodel` stores as `Vec<Rc<T>>`), or the loop body hands the item to some child
-/// element's `#[bindable]` or `#[two_way]` field (`for_body_binds_item_to_a_bindable_field`, below) — the latter
-/// deliberately never resolves the *item*'s own type (e.g. `DocumentViewModel`) at all, only the
-/// *receiving component*'s (e.g. `DocumentView`), for the same reason `#[bindable]` itself exists: a
-/// `#[elwindui::viewmodel]` type is commonly declared in a plain `.rs` file (or a sibling
-/// `#[elwindui::component]` proc-macro invocation) that the `for` loop's own file/module never has
-/// a `use` for and was never going to need one, since it only ever references the item through the
-/// loop variable — so a resolve-by-name check against *that* type is fragile in a way a check
-/// against the always-in-scope receiving component type isn't (see
-/// `docs/design/backends/winui3_backend_design.md`'s "Root cause of 'text not reflected after Open'" for the
-/// concrete bug this replaced).
+/// The shared resolver proves the collection's own declared `Vec<Rc<T>>` shape or a known
+/// viewmodel's `#[observable] Vec<T>` field (which `generate_viewmodel` stores as `Vec<Rc<T>>`).
+/// The separate body rule below also preserves the established `#[bindable]`/`#[two_way]`
+/// ownership escape hatch: it deliberately resolves the receiving component's field rather than
+/// the item's own type (for example, `DocumentView` rather than an otherwise out-of-scope
+/// `DocumentViewModel`). This keeps the visibility boundary that the existing `#[bindable]`
+/// semantics rely on (see `docs/design/backends/winui3_backend_design.md`'s "Root cause of 'text
+/// not reflected after Open'" for the concrete bug this replaced).
 fn collection_uses_rc_identity(
-    collection: &ViewExpr,
+    collection_resolution: Option<&ResolvedCollection>,
     body: &[ChildEntry],
     binding: &str,
-    ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
 ) -> bool {
-    if collection_type_is_vec_rc(collection, ctx, from, table) {
+    if collection_resolution
+        .is_some_and(|resolved| resolved.collection_identity() == CollectionIdentity::RcIdentity)
+    {
         return true;
     }
     for_body_binds_item_to_a_bindable_field(body, binding, from, table)
-}
-
-fn collection_type_is_vec_rc(
-    collection: &ViewExpr,
-    ctx: &ViewCtx,
-    from: &Module,
-    table: &SymbolTable,
-) -> bool {
-    let ViewExpr::Path(path) = collection else {
-        return false;
-    };
-    let (collection_type, is_viewmodel_observable) = match path.as_slice() {
-        [field] => match ctx.own_fields.get(field) {
-            Some(collection_type) => (collection_type.as_str(), false),
-            None => return false,
-        },
-        [owner, field] => {
-            let Some(owner_type) = ctx.own_fields.get(owner) else {
-                return false;
-            };
-            let Some(owner_info) = table.resolve(from, strip_rc_wrapper(owner_type)) else {
-                return false;
-            };
-            let Some(collection_type) = owner_info.value_field_types.get(field) else {
-                return false;
-            };
-            (
-                collection_type.as_str(),
-                owner_info.is_viewmodel
-                    && matches!(owner_info.fields.get(field), Some(FieldKind::Observable))
-                    && nested_vec_item_type(collection_type, from, table).is_some(),
-            )
-        }
-        _ => return false,
-    };
-    let compact = collection_type
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>();
-    is_viewmodel_observable
-        || compact.starts_with("Vec<Rc<")
-        || compact.starts_with("Vec<std::rc::Rc<")
-        || compact.starts_with("Vec<rc::Rc<")
 }
 
 /// Whether `binding` (the `for`-loop's own bare loop variable) is passed, anywhere in `body`
@@ -12322,10 +12647,27 @@ fn plan_dynamic_entry(
                 environment_scope: None,
             };
             let item_trait = dynamic_collection_item_trait_ty(&parent, from, table);
-            let rc_identity =
-                collection_uses_rc_identity(collection, body, binding, ctx, from, table);
-            let renderer =
-                emit_for_renderer(binding, body, ctx, from, table, &item_trait, rc_identity);
+            let collection_resolution = ctx.resolve_collection(collection, from, table).ok();
+            let rc_identity = collection_uses_rc_identity(
+                collection_resolution.as_ref(),
+                body,
+                binding,
+                from,
+                table,
+            );
+            let renderer = emit_for_renderer(
+                binding,
+                body,
+                ctx,
+                from,
+                table,
+                &item_trait,
+                collection_resolution
+                    .as_ref()
+                    .and_then(|resolved| resolved.collection_item_type()),
+                rc_identity,
+                environment_scope,
+            );
             let node_binding = format_ident!("__node_{}", out.len());
             out.push(PlannedNode {
                 binding: node_binding.clone(),
@@ -12775,6 +13117,7 @@ fn emit_deferred_view_value(
             target.clone(),
             parent_alias,
             ctx.template_bare_parent_fields.clone(),
+            false,
         )
         .unwrap_or_else(|error| panic!("invalid nested template_view body: {error}"));
         return crate::emit_view_factory(&compiled, target, &parent);
@@ -17529,6 +17872,14 @@ fn owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> TokenStrea
 /// genuinely unresolved `owner` falls through to the original `owner_value_tokens` call unchanged
 /// (preserving whatever diagnostic/behavior that already produced).
 fn path_owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> TokenStream {
+    // A persistent `for` renderer evaluates dynamic expressions with `EmitMode::WithSelf` so
+    // component-owned fields still resolve through the component receiver. Its own item
+    // parameter is the one lexical exception: `outer_item.children` must use the renderer's
+    // parameter, not become `self.outer_item.children()`.
+    if ctx.closure_param.as_deref() == Some(owner) {
+        let ident = format_ident!("{owner}");
+        return quote! { #ident };
+    }
     if ctx.own_fields.contains_key(owner) {
         return owner_value_tokens(ctx, mode, owner);
     }
@@ -17629,11 +17980,13 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
     parent: &syn::Ident,
     property_bounds: &Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
     template_target: TokenStream,
+    template_parent_type: ResolvedTypeRef,
     parent_alias: String,
     bare_parent_fields: HashSet<String>,
 ) -> TokenStream {
     let ctx = ViewCtx {
         closure_param: None,
+        closure_param_type: None,
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
         property_dependencies: HashMap::new(),
@@ -17646,12 +17999,15 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
         target: format_ident!("__ElwinduiTemplateTarget"),
         template_parent: Some(parent.clone()),
         template_property_bounds: Some(property_bounds.clone()),
-        template_target: Some(template_target),
+        template_target: Some(template_target.clone()),
         template_bare_parent_fields: bare_parent_fields,
         storage: ViewStorage::Template {
             environment: format_ident!("__environment"),
             refresh_cell: format_ident!("__elwindui_template_refresh_cell"),
         },
+        environment_scope_bindings_are_lexical: true,
+        dynamic_slots_are_lexical: true,
+        template_parent_type: Some(template_parent_type),
     };
     emit_on_event_closure_body(body, closure_params, &ctx, &EmitMode::Construction)
 }
@@ -20773,6 +21129,131 @@ struct NotepadWindow {
             items: vec![Item::ViewModel(def)],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn nested_plain_collection_does_not_inherit_outer_rc_identity() {
+        let module = multi_item_module(&[
+            TestItem::ViewModel(r#"mod nested_plain_child_mod { struct NestedPlainChild { } }"#),
+            TestItem::ViewModel(
+                r#"
+                mod nested_plain_outer_mod {
+                    struct NestedPlainOuter {
+                        #[observable(default = Vec::new())]
+                        children: Vec<String>,
+                    }
+                }
+                "#,
+            ),
+            TestItem::ViewModel(
+                r#"
+                mod nested_plain_root_mod {
+                    struct NestedPlainRoot {
+                        #[observable(default = Vec::new())]
+                        items: Vec<NestedPlainOuter>,
+                    }
+                }
+                "#,
+            ),
+            TestItem::Component(
+                Some("VerticalLayout"),
+                r#"
+                struct NestedPlainHost {
+                    #[bindable]
+                    vm: Rc<NestedPlainRoot>,
+
+                    body: view! {
+                        VerticalLayout {
+                            for outer_item in vm.items {
+                                VerticalLayout {
+                                    for child in outer_item.children {
+                                        TextBlock { text: child }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+                "#,
+            ),
+        ]);
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("nested_plain_collection_identity", &generated);
+        let rendered = generated.to_string();
+        assert_eq!(rendered.matches("replace_rc_items").count(), 1);
+        let nested_rebuild_calls = rendered
+            .match_indices("replace_items")
+            .filter(|(index, _)| rendered[*index..].contains("outer_item . children"))
+            .count();
+        assert!(nested_rebuild_calls > 0, "nested rebuild call: {rendered}");
+    }
+
+    #[test]
+    fn nested_generated_model_collection_retains_rc_identity() {
+        let module = multi_item_module(&[
+            TestItem::ViewModel(
+                r#"
+                mod nested_rc_child_mod {
+                    struct NestedRcChild {
+                        #[observable(default = String::new())]
+                        label: String,
+                    }
+                }
+                "#,
+            ),
+            TestItem::ViewModel(
+                r#"
+                mod nested_rc_outer_mod {
+                    struct NestedRcOuter {
+                        #[observable(default = Vec::new())]
+                        children: Vec<NestedRcChild>,
+                    }
+                }
+                "#,
+            ),
+            TestItem::ViewModel(
+                r#"
+                mod nested_rc_root_mod {
+                    struct NestedRcRoot {
+                        #[observable(default = Vec::new())]
+                        items: Vec<NestedRcOuter>,
+                    }
+                }
+                "#,
+            ),
+            TestItem::Component(
+                Some("VerticalLayout"),
+                r#"
+                struct NestedRcHost {
+                    #[bindable]
+                    vm: Rc<NestedRcRoot>,
+
+                    body: view! {
+                        VerticalLayout {
+                            for outer_item in vm.items {
+                                VerticalLayout {
+                                    for child in outer_item.children {
+                                        TextBlock { text: child.label }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+                "#,
+            ),
+        ]);
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("nested_generated_model_collection_identity", &generated);
+        let rendered = generated.to_string();
+        assert_eq!(rendered.matches("replace_items (").count(), 0);
+        let nested_rc_calls = rendered
+            .match_indices("replace_rc_items")
+            .filter(|(index, _)| rendered[*index..].contains("outer_item . children"))
+            .count();
+        assert!(nested_rc_calls > 0, "nested Rc call: {rendered}");
     }
 
     /// Regression test for the real `examples/notepad` bug this session root-caused: a `for` loop

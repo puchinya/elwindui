@@ -12,7 +12,7 @@
 
 use std::cell::RefCell;
 
-use elwindui::core::ui::{ControlExt as _, UIElementExt as _};
+use elwindui::core::ui::UIElementExt as _;
 
 thread_local! {
     static INSIDE_LOCALE: RefCell<String> = RefCell::new(String::new());
@@ -277,5 +277,488 @@ fn an_if_directly_inside_environment_scope_is_scope_aware() {
         "fr-FR",
         "a literal element inside an `if` branch that is itself inside an EnvironmentScope must \
          observe the scope's override, not the un-overridden application_environment() value"
+    );
+}
+
+// Issue #127: a `for` renderer outlives `__build_view()`, so it must read the live retained scope
+// context when a later collection refresh creates an item.  The nested scope in the item body
+// also proves that the item was mounted against the effective outer scope rather than the
+// application environment.
+thread_local! {
+    static SCOPED_FOR_RECORDS: RefCell<Vec<(String, String, String)>> = RefCell::new(Vec::new());
+    static TEMPLATE_SCOPED_FOR_RECORDS: RefCell<Vec<(String, String)>> = RefCell::new(Vec::new());
+}
+
+#[elwindui::environment_key(
+    name = environment_scope_for_outer,
+    value = String,
+    default = String::from("root-outer")
+)]
+pub struct EnvironmentScopeForOuter;
+
+#[elwindui::environment_key(
+    name = environment_scope_for_inner,
+    value = String,
+    default = String::from("root-inner")
+)]
+pub struct EnvironmentScopeForInner;
+
+#[elwindui::viewmodel]
+mod environment_scope_for_collection_item {
+    struct EnvironmentScopeForCollectionItem {
+        #[observable(default = String::new())]
+        label: String,
+    }
+}
+
+#[elwindui::viewmodel]
+mod environment_scope_for_items_view_model {
+    struct EnvironmentScopeForItemsViewModel {
+        #[observable(default = Vec::new())]
+        items: Vec<EnvironmentScopeForCollectionItem>,
+    }
+}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct EnvironmentScopeForItemProbe {
+    #[param]
+    label: String,
+    #[environment(environment_scope_for_outer)]
+    outer: String,
+    #[environment(environment_scope_for_inner)]
+    inner: String,
+
+    body: view! {
+        on_mount {
+            SCOPED_FOR_RECORDS.with(|records| {
+                records.borrow_mut().push((
+                    self.label(),
+                    self.outer(),
+                    self.inner(),
+                ));
+            });
+        }
+        TextBlock { text: label }
+    },
+}
+
+#[elwindui::component]
+impl EnvironmentScopeForItemProbe {}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct EnvironmentScopeForItem {
+    #[param]
+    label: String,
+
+    body: view! {
+        EnvironmentScope {
+            environment_scope_for_inner: "inner-scope",
+            EnvironmentScopeForItemProbe { label: label }
+        }
+    },
+}
+
+#[elwindui::component]
+impl EnvironmentScopeForItem {}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct EnvironmentScopeForParent {
+    #[bindable]
+    vm: std::rc::Rc<EnvironmentScopeForItemsViewModel>,
+    #[prop(default = String::from("scope-a"))]
+    outer_value: String,
+
+    body: view! {
+        EnvironmentScope {
+            environment_scope_for_outer: outer_value,
+            for item in vm.items {
+                EnvironmentScopeForItem { label: item.label }
+            }
+        }
+    },
+}
+
+#[elwindui::component]
+impl EnvironmentScopeForParent {}
+
+#[test]
+fn scoped_for_late_item_uses_live_scope_and_preserves_rc_identity() {
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeForOuter>("root-outer".to_string());
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeForInner>("root-inner".to_string());
+    SCOPED_FOR_RECORDS.with(|records| records.borrow_mut().clear());
+
+    let first = EnvironmentScopeForCollectionItem::new();
+    first.set_label("first".to_string());
+    let second = EnvironmentScopeForCollectionItem::new();
+    second.set_label("second".to_string());
+    let vm = EnvironmentScopeForItemsViewModel::new();
+    let parent = elwindui::new!(EnvironmentScopeForParent(vm: vm.clone()));
+
+    vm.items_push(first.clone());
+    assert_eq!(
+        SCOPED_FOR_RECORDS.with(|records| records.borrow().clone()),
+        vec![(
+            "first".to_string(),
+            "scope-a".to_string(),
+            "inner-scope".to_string()
+        )]
+    );
+
+    parent.set_outer_value("scope-b".to_string());
+    SCOPED_FOR_RECORDS.with(|records| records.borrow_mut().clear());
+    vm.items_push(second);
+    assert_eq!(
+        SCOPED_FOR_RECORDS.with(|records| records.borrow().clone()),
+        vec![(
+            "second".to_string(),
+            "scope-b".to_string(),
+            "inner-scope".to_string()
+        )]
+    );
+}
+
+#[elwindui::environment_key(
+    name = environment_scope_template_for,
+    value = String,
+    default = String::from("template-root")
+)]
+pub struct EnvironmentScopeTemplateFor;
+
+#[elwindui::component(inherits ContentControl)]
+struct EnvironmentScopeTemplateForItem {
+    #[param]
+    label: String,
+    #[environment(environment_scope_template_for)]
+    value: String,
+
+    template: template_view!(|templated_parent: Self| {
+        on_mount {
+            TEMPLATE_SCOPED_FOR_RECORDS.with(|records| {
+                records
+                    .borrow_mut()
+                    .push((self.label(), self.value()));
+            });
+        }
+        TextBlock { text: templated_parent.label }
+    }),
+}
+
+#[elwindui::component]
+impl EnvironmentScopeTemplateForItem {}
+
+#[elwindui::component(inherits ContentControl)]
+struct EnvironmentScopeTemplateForParent {
+    #[prop(default = Vec::new())]
+    items: Vec<String>,
+
+    template: template_view!(|templated_parent: Self| {
+        VerticalLayout {
+            EnvironmentScope {
+                environment_scope_template_for: "template-scope",
+                for item in templated_parent.items {
+                    EnvironmentScopeTemplateForItem { label: item }
+                }
+            }
+        }
+    }),
+}
+
+#[elwindui::component]
+impl EnvironmentScopeTemplateForParent {}
+
+#[test]
+fn template_scoped_for_late_item_uses_lexical_scope_storage() {
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeTemplateFor>("template-root".to_string());
+    TEMPLATE_SCOPED_FOR_RECORDS.with(|records| records.borrow_mut().clear());
+
+    let parent = EnvironmentScopeTemplateForParent::new();
+    assert!(parent.apply_template());
+
+    parent.set_items(vec!["late-template-item".to_string()]);
+    assert_eq!(
+        TEMPLATE_SCOPED_FOR_RECORDS.with(|records| records.borrow().clone()),
+        vec![(
+            "late-template-item".to_string(),
+            "template-scope".to_string()
+        )]
+    );
+}
+
+// Review delta for PR #258: the inner scope is deliberately declared inside the outer `for`
+// item's local renderer plan. It must remain a lexical renderer-local binding rather than being
+// looked up as a nonexistent component `self` field.
+thread_local! {
+    static NESTED_RENDERER_SCOPED_FOR_RECORDS: RefCell<Vec<(String, String, String)>> =
+        RefCell::new(Vec::new());
+}
+
+#[elwindui::environment_key(
+    name = environment_scope_nested_renderer_outer,
+    value = String,
+    default = String::from("nested-renderer-root-outer")
+)]
+pub struct EnvironmentScopeNestedRendererOuter;
+
+#[elwindui::environment_key(
+    name = environment_scope_nested_renderer_inner,
+    value = String,
+    default = String::from("nested-renderer-root-inner")
+)]
+pub struct EnvironmentScopeNestedRendererInner;
+
+#[elwindui::viewmodel]
+mod environment_scope_nested_renderer_child_item {
+    struct EnvironmentScopeNestedRendererChildItem {
+        #[observable(default = String::new())]
+        label: String,
+    }
+}
+
+#[elwindui::viewmodel]
+mod environment_scope_nested_renderer_outer_item {
+    struct EnvironmentScopeNestedRendererOuterItem {
+        #[observable(default = String::new())]
+        label: String,
+        #[observable(default = Vec::new())]
+        children: Vec<EnvironmentScopeNestedRendererChildItem>,
+    }
+}
+
+#[elwindui::viewmodel]
+mod environment_scope_nested_renderer_items {
+    struct EnvironmentScopeNestedRendererItems {
+        #[observable(default = Vec::new())]
+        items: Vec<EnvironmentScopeNestedRendererOuterItem>,
+    }
+}
+
+#[elwindui::component(inherits ContentControl)]
+struct EnvironmentScopeNestedRendererProbe {
+    #[param]
+    label: String,
+    #[environment(environment_scope_nested_renderer_outer)]
+    outer: String,
+    #[environment(environment_scope_nested_renderer_inner)]
+    inner: String,
+
+    template: template_view!(|templated_parent: Self| {
+        on_mount {
+            NESTED_RENDERER_SCOPED_FOR_RECORDS.with(|records| {
+                records
+                    .borrow_mut()
+                    .push((self.label(), self.outer(), self.inner()));
+            });
+        }
+        TextBlock { text: label }
+    }),
+}
+
+#[elwindui::component]
+impl EnvironmentScopeNestedRendererProbe {}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct EnvironmentScopeNestedRendererParent {
+    #[bindable]
+    vm: std::rc::Rc<EnvironmentScopeNestedRendererItems>,
+
+    body: view! {
+        EnvironmentScope {
+            environment_scope_nested_renderer_outer: "scope-outer",
+            for outer_item in vm.items {
+                VerticalLayout {
+                    EnvironmentScope {
+                        environment_scope_nested_renderer_inner: "scope-inner",
+                        for inner_item in outer_item.children {
+                            EnvironmentScopeNestedRendererProbe { label: inner_item.label }
+                        }
+                    }
+                }
+            }
+        }
+    },
+}
+
+#[elwindui::component]
+impl EnvironmentScopeNestedRendererParent {}
+
+#[test]
+fn renderer_local_nested_environment_scope_uses_lexical_binding() {
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeNestedRendererOuter>("nested-renderer-root-outer".to_string());
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeNestedRendererInner>("nested-renderer-root-inner".to_string());
+    NESTED_RENDERER_SCOPED_FOR_RECORDS.with(|records| records.borrow_mut().clear());
+
+    let outer_item = EnvironmentScopeNestedRendererOuterItem::new();
+    outer_item.set_label("outer".to_string());
+    let vm = EnvironmentScopeNestedRendererItems::new();
+    vm.items_push(outer_item.clone());
+    let _parent = elwindui::new!(EnvironmentScopeNestedRendererParent(vm: vm.clone()));
+
+    let first_child = EnvironmentScopeNestedRendererChildItem::new();
+    first_child.set_label("first".to_string());
+    outer_item.children_push(first_child);
+    assert_eq!(
+        NESTED_RENDERER_SCOPED_FOR_RECORDS.with(|records| records.borrow().clone()),
+        vec![(
+            "first".to_string(),
+            "scope-outer".to_string(),
+            "scope-inner".to_string()
+        )]
+    );
+
+    let second_child = EnvironmentScopeNestedRendererChildItem::new();
+    second_child.set_label("second".to_string());
+    outer_item.children_push(second_child);
+    assert_eq!(
+        NESTED_RENDERER_SCOPED_FOR_RECORDS.with(|records| records.borrow().clone()),
+        vec![
+            (
+                "first".to_string(),
+                "scope-outer".to_string(),
+                "scope-inner".to_string()
+            ),
+            (
+                "second".to_string(),
+                "scope-outer".to_string(),
+                "scope-inner".to_string()
+            )
+        ]
+    );
+}
+
+// Review delta for PR #258: the outer renderer has Rc-stable items, while the nested collection
+// is explicitly a plain `Vec<String>`. The nested renderer must rebuild its range independently;
+// the outer item's identity must not upgrade the string collection to pointer reconciliation.
+thread_local! {
+    static NESTED_PLAIN_RENDERER_SCOPED_FOR_RECORDS: RefCell<Vec<(String, String, String)>> =
+        RefCell::new(Vec::new());
+}
+
+#[elwindui::environment_key(
+    name = environment_scope_nested_plain_renderer_outer,
+    value = String,
+    default = String::from("nested-plain-root-outer")
+)]
+pub struct EnvironmentScopeNestedPlainRendererOuter;
+
+#[elwindui::environment_key(
+    name = environment_scope_nested_plain_renderer_inner,
+    value = String,
+    default = String::from("nested-plain-root-inner")
+)]
+pub struct EnvironmentScopeNestedPlainRendererInner;
+
+#[elwindui::viewmodel]
+mod environment_scope_nested_plain_renderer_outer_item {
+    struct EnvironmentScopeNestedPlainRendererOuterItem {
+        #[observable(default = Vec::new())]
+        children: Vec<String>,
+    }
+}
+
+#[elwindui::viewmodel]
+mod environment_scope_nested_plain_renderer_items {
+    struct EnvironmentScopeNestedPlainRendererItems {
+        #[observable(default = Vec::new())]
+        items: Vec<EnvironmentScopeNestedPlainRendererOuterItem>,
+    }
+}
+
+#[elwindui::component(inherits ContentControl)]
+struct EnvironmentScopeNestedPlainRendererProbe {
+    #[param]
+    label: String,
+    #[environment(environment_scope_nested_plain_renderer_outer)]
+    outer: String,
+    #[environment(environment_scope_nested_plain_renderer_inner)]
+    inner: String,
+
+    template: template_view!(|templated_parent: Self| {
+        on_mount {
+            NESTED_PLAIN_RENDERER_SCOPED_FOR_RECORDS.with(|records| {
+                records
+                    .borrow_mut()
+                    .push((self.label(), self.outer(), self.inner()));
+            });
+        }
+        TextBlock { text: label }
+    }),
+}
+
+#[elwindui::component]
+impl EnvironmentScopeNestedPlainRendererProbe {}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct EnvironmentScopeNestedPlainRendererParent {
+    #[bindable]
+    vm: std::rc::Rc<EnvironmentScopeNestedPlainRendererItems>,
+
+    body: view! {
+        EnvironmentScope {
+            environment_scope_nested_plain_renderer_outer: "scope-outer",
+            for outer_item in vm.items {
+                VerticalLayout {
+                    EnvironmentScope {
+                        environment_scope_nested_plain_renderer_inner: "scope-inner",
+                        for child in outer_item.children {
+                            EnvironmentScopeNestedPlainRendererProbe { label: child }
+                        }
+                    }
+                }
+            }
+        }
+    },
+}
+
+#[elwindui::component]
+impl EnvironmentScopeNestedPlainRendererParent {}
+
+#[test]
+fn renderer_local_nested_plain_collection_rebuilds_with_lexical_scope() {
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeNestedPlainRendererOuter>("nested-plain-root-outer".to_string());
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeNestedPlainRendererInner>("nested-plain-root-inner".to_string());
+    NESTED_PLAIN_RENDERER_SCOPED_FOR_RECORDS.with(|records| records.borrow_mut().clear());
+
+    let outer_item = EnvironmentScopeNestedPlainRendererOuterItem::new();
+    let vm = EnvironmentScopeNestedPlainRendererItems::new();
+    vm.items_push(outer_item.clone());
+    let _parent = elwindui::new!(EnvironmentScopeNestedPlainRendererParent(vm: vm.clone()));
+
+    outer_item.set_children(vec!["first".to_string()]);
+    assert_eq!(
+        NESTED_PLAIN_RENDERER_SCOPED_FOR_RECORDS.with(|records| records.borrow().clone()),
+        vec![(
+            "first".to_string(),
+            "scope-outer".to_string(),
+            "scope-inner".to_string()
+        )]
+    );
+
+    outer_item.set_children(vec!["first".to_string(), "second".to_string()]);
+    assert_eq!(
+        NESTED_PLAIN_RENDERER_SCOPED_FOR_RECORDS.with(|records| records.borrow().clone()),
+        vec![
+            (
+                "first".to_string(),
+                "scope-outer".to_string(),
+                "scope-inner".to_string()
+            ),
+            (
+                "first".to_string(),
+                "scope-outer".to_string(),
+                "scope-inner".to_string()
+            ),
+            (
+                "second".to_string(),
+                "scope-outer".to_string(),
+                "scope-inner".to_string()
+            )
+        ]
     );
 }

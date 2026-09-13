@@ -233,6 +233,18 @@ validatorは [`dsl_spec.md`](../../specs/dsl_spec.md) のcompile-time ruleをAST
 
 macro processで完全に解決できないRust型やpathは、生成するRust構文によってrustcのtype checkとpattern exhaustiveness checkへ引き継ぐ。正しさを隠す合成的なwildcard armは生成しない。
 
+`for`のcollection pathに必要な静的DSL型解決は、`crates/elwindui-codegen/src/type_resolution.rs`
+に集約し、validationとloweringの両方から共有する。このresolverの範囲はDSLが持つ
+`SymbolTable`/`TypeInfo`のfield metadataに意図的に限定され、Rust一般のtype inferenceではない。
+collection itemのidentityを静的に証明できない場合、loweringは保守的にrebuild semanticsへ
+fallbackする。validation側はこのresolverのfactsを既存のdiagnosticと
+`ValidationDependency`へ変換し、diagnosticの所有権は`validate.rs`に残す。
+解決済みの型はbare nameではなく、実モジュールパスとitem nameからなる
+`SymbolTable`のcanonical identityをmetadataとして保持するため、renderer boundaryを越えても
+同名型を取り違えない。nested field/itemの解決はconsumerではなくownerのdefining-moduleと
+その`use` metadataを使う。lexical module contextを持たないexpression-form frontendに限って
+`resolve_unqualified`を使い、成功時は直ちにcanonical metadataへ変換する。
+
 ControlTemplateのcross-crate target、Environment Key Value、declared parent alias getter、
 `ContentPresenter` targetはそれぞれ生成した`ControlExt`、型一致、method resolution、`ContentControlExt` boundで検査する。
 

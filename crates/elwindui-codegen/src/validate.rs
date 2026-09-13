@@ -7,6 +7,10 @@ use crate::ast::{
     Item, Module, ViewAttribute, ViewExpr, ViewModifier,
 };
 use crate::codegen::{self, SymbolTable, strip_option, strip_rc_wrapper, strip_weak_wrapper};
+use crate::type_resolution::{
+    CollectionIdentity, ResolutionContext, ResolvedTypeRef, resolve_collection,
+    resolve_type_ref_info,
+};
 use std::collections::{HashMap, HashSet};
 use syn::visit::Visit;
 
@@ -874,68 +878,42 @@ fn resolve_for_item_info<'a>(
     table: &'a SymbolTable,
     template_parent_alias: Option<&str>,
 ) -> Result<&'a crate::codegen::TypeInfo, (ValidationDependency, String)> {
-    let (collection_ty, is_viewmodel_observable) = match collection {
+    let own_fields: HashMap<String, String> = component
+        .fields
+        .iter()
+        .map(|field| (field.name.clone(), field.ty.clone()))
+        .collect();
+
+    match collection {
         ViewExpr::Path(path) if path.len() == 1 => {
-            let name = &path[0];
-            let field = component
-                .fields
-                .iter()
-                .find(|field| &field.name == name)
-                .ok_or_else(|| {
-                    (
-                        ValidationDependency::ItemLocal,
-                        format!("collection `{name}` is not a component field"),
-                    )
-                })?;
-            (field.ty.as_str(), false)
+            if !own_fields.contains_key(&path[0]) {
+                return Err((
+                    ValidationDependency::ItemLocal,
+                    format!("collection `{}` is not a component field", path[0]),
+                ));
+            }
         }
         ViewExpr::Path(path) if path.len() == 2 => {
             let owner = &path[0];
-            let name = &path[1];
-            let (owner_ty, owner_is_viewmodel) =
-                if template_parent_alias.is_some_and(|alias| owner == alias) {
-                    (component.name.as_str(), false)
-                } else {
-                    let owner_field = component
-                        .fields
-                        .iter()
-                        .find(|field| &field.name == owner)
-                        .ok_or_else(|| {
-                            (
-                                ValidationDependency::ItemLocal,
-                                format!("collection owner `{owner}` is not a component field"),
-                            )
-                        })?;
-                    if !owner_field
-                        .attrs
-                        .iter()
-                        .any(|attr| matches!(attr, Attr::Bindable))
-                    {
-                        return Err((
-                            ValidationDependency::ItemLocal,
-                            format!("collection owner `{owner}` is not #[bindable]"),
-                        ));
-                    }
-                    (strip_rc_wrapper(&owner_field.ty), true)
+            if !template_parent_alias.is_some_and(|alias| owner == alias) {
+                let Some(owner_field) = component.fields.iter().find(|field| &field.name == owner)
+                else {
+                    return Err((
+                        ValidationDependency::ItemLocal,
+                        format!("collection owner `{owner}` is not a component field"),
+                    ));
                 };
-            let owner_info = table.resolve(from, owner_ty).ok_or_else(|| {
-                (
-                    ValidationDependency::RegistryDependent,
-                    format!("cannot resolve collection owner type `{owner_ty}`"),
-                )
-            })?;
-            let collection_ty = owner_info.value_field_types.get(name).ok_or_else(|| {
-                (
-                    ValidationDependency::RegistryDependent,
-                    format!("bindable owner `{owner}` has no collection `{name}`"),
-                )
-            })?;
-            (
-                collection_ty.as_str(),
-                owner_is_viewmodel
-                    && owner_info.is_viewmodel
-                    && matches!(owner_info.fields.get(name), Some(FieldKind::Observable)),
-            )
+                if !owner_field
+                    .attrs
+                    .iter()
+                    .any(|attr| matches!(attr, Attr::Bindable))
+                {
+                    return Err((
+                        ValidationDependency::ItemLocal,
+                        format!("collection owner `{owner}` is not #[bindable]"),
+                    ));
+                }
+            }
         }
         ViewExpr::Path(path) => {
             return Err((
@@ -952,43 +930,78 @@ fn resolve_for_item_info<'a>(
                 "collection is not a statically resolvable path".to_string(),
             ));
         }
-    };
+    }
 
-    let item_ty = explicit_rc_vec_item_type(collection_ty).or_else(|| {
-        if is_viewmodel_observable {
-            collection_ty
-                .strip_prefix("Vec<")
-                .and_then(|inner| inner.strip_suffix(">"))
-                .map(str::trim)
-        } else {
-            None
-        }
-    });
-    let item_ty = item_ty.ok_or_else(|| {
+    let template_parent_type = template_parent_alias
+        .map(|_| ResolvedTypeRef::from_module(component.name.clone(), from, table));
+    let context = ResolutionContext {
+        from,
+        table,
+        own_fields: &own_fields,
+        lexical_name: None,
+        lexical_type: None,
+        template_parent_alias,
+        template_parent_type: template_parent_type.as_ref(),
+    };
+    let resolved = resolve_collection(collection, &context).map_err(|failure| {
+        let (dependency, reason) = match failure {
+            crate::type_resolution::ResolutionFailure::UnknownOwnerType(owner) => (
+                ValidationDependency::RegistryDependent,
+                format!("cannot resolve collection owner type `{owner}`"),
+            ),
+            crate::type_resolution::ResolutionFailure::UnknownField { owner, field } => (
+                ValidationDependency::RegistryDependent,
+                format!("bindable owner `{owner}` has no collection `{field}`"),
+            ),
+            crate::type_resolution::ResolutionFailure::UnknownOwner(owner) => (
+                ValidationDependency::ItemLocal,
+                format!("collection owner `{owner}` is not a component field"),
+            ),
+            crate::type_resolution::ResolutionFailure::UnknownOwnField(field) => (
+                ValidationDependency::ItemLocal,
+                format!("collection `{field}` is not a component field"),
+            ),
+            crate::type_resolution::ResolutionFailure::UnsupportedPath(path) => (
+                ValidationDependency::ItemLocal,
+                format!(
+                    "collection path `{path}` is not a direct component or bindable-owner field"
+                ),
+            ),
+            crate::type_resolution::ResolutionFailure::NotStaticPath => (
+                ValidationDependency::ItemLocal,
+                "collection is not a statically resolvable path".to_string(),
+            ),
+        };
+        (dependency, reason)
+    })?;
+
+    if resolved.collection_identity() != CollectionIdentity::RcIdentity {
+        return Err((
+            ValidationDependency::ItemLocal,
+            format!(
+                "collection type `{}` does not provide stable Vec<Rc<T>> item identity",
+                resolved.expression.declared_type
+            ),
+        ));
+    }
+    let item_type = resolved.collection_item_type().ok_or_else(|| {
         (
             ValidationDependency::ItemLocal,
             format!(
-                "collection type `{collection_ty}` does not provide stable Vec<Rc<T>> item identity"
+                "collection type `{}` does not provide stable Vec<Rc<T>> item identity",
+                resolved.expression.declared_type
             ),
         )
     })?;
-    table.resolve(from, item_ty).ok_or_else(|| {
+    resolve_type_ref_info(item_type, table).ok_or_else(|| {
         (
             ValidationDependency::RegistryDependent,
-            format!("cannot resolve `for` item type `{item_ty}`"),
+            format!(
+                "cannot resolve `for` item type `{}`",
+                item_type.declared_type()
+            ),
         )
     })
-}
-
-fn explicit_rc_vec_item_type(ty: &str) -> Option<&str> {
-    let ty = ty.trim();
-    let inner = ty
-        .strip_prefix("Vec<")
-        .or_else(|| ty.strip_prefix("std::vec::Vec<"))?
-        .strip_suffix(">")?
-        .trim();
-    let item = strip_rc_wrapper(inner);
-    (item != inner).then_some(item)
 }
 
 fn unsupported_dependency_macro(expr: &ViewExpr) -> Option<String> {

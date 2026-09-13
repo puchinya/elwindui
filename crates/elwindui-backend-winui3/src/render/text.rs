@@ -262,6 +262,8 @@ pub(crate) struct WinUi3TextBackend;
 
 thread_local! {
     static SCRATCH_TEXT_BLOCK: TextBlock = TextBlock::new().expect("TextBlock::new");
+    static PERF_MEASURE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static PERF_MEASURE_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 impl TextBackend for WinUi3TextBackend {
@@ -310,7 +312,8 @@ impl TextBackend for WinUi3TextBackend {
     }
 
     fn measure_text(&self, req: &TextMeasureRequest<'_>) -> TextMeasureResult {
-        SCRATCH_TEXT_BLOCK.with(|text_block| {
+        let __perf_start = std::time::Instant::now();
+        let __result = SCRATCH_TEXT_BLOCK.with(|text_block| {
             let _ = text_block.SetText(&HSTRING::from(req.text));
             // Every property, including the system-family reset, is applied before measuring.
             // A style application failure must not silently reuse the previous scratch style.
@@ -365,7 +368,25 @@ impl TextBackend for WinUi3TextBackend {
                 baseline: 0.8 * req.style.font_size,
                 line_count: 1,
             }
-        })
+        });
+        if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
+            let elapsed = __perf_start.elapsed().as_nanos() as u64;
+            PERF_MEASURE_COUNT.with(|c| c.set(c.get() + 1));
+            let total = PERF_MEASURE_NANOS.with(|t| {
+                let n = t.get() + elapsed;
+                t.set(n);
+                n
+            });
+            let count = PERF_MEASURE_COUNT.with(|c| c.get());
+            if count % 50 == 0 {
+                eprintln!(
+                    "[perf] measure_text calls={count} cumulative={:.1}ms avg={:.3}ms",
+                    total as f64 / 1e6,
+                    (total as f64 / count as f64) / 1e6
+                );
+            }
+        }
+        __result
     }
 }
 

@@ -6,7 +6,7 @@ use crate::inner::{InnerPasswordBox, InnerTextArea, InnerTextBox};
 use elwindui_core::accessibility::{
     AccessibilityAction, AccessibilityActionKind, AccessibilityRole,
 };
-use elwindui_core::ui::UIElementExt;
+use elwindui_core::ui::{TextAreaExt, TextBoxExt, UIElementExt};
 use std::cell::RefCell;
 use std::rc::Rc;
 

@@ -156,6 +156,7 @@ fn lookup_resource<T: Interface>(key: &str) -> Option<T> {
 #[cfg(test)]
 mod hosted_xaml_regression_tests {
     use super::*;
+    use crate::bindings::Microsoft;
     use crate::bindings::Microsoft::UI::Xaml::Controls::{
         Canvas, Control, TextBlock, TextBox as XamlTextBox, ToolTip as XamlToolTip, ToolTipService,
     };
@@ -345,6 +346,11 @@ mod hosted_xaml_regression_tests {
         thread_local! {
             static VIEW: RefCell<Option<AnyView>> = const { RefCell::new(None) };
             static WIDTH: RefCell<Option<f32>> = const { RefCell::new(None) };
+            static RELAYOUT_PASS_COUNT_BEFORE_DRAIN: RefCell<Option<u32>> = const { RefCell::new(None) };
+            static RELAYOUT_PASS_COUNT_AFTER_DRAIN: RefCell<Option<u32>> = const { RefCell::new(None) };
+            static LIFECYCLE_VISIBLE_AFTER_CLOSE: RefCell<Option<bool>> = const { RefCell::new(None) };
+            static RETAINED_COUNT_AFTER_CLOSE: RefCell<Option<usize>> = const { RefCell::new(None) };
+            static RELEASE_CALL_COUNT_AFTER_CLOSE: RefCell<Option<usize>> = const { RefCell::new(None) };
         }
 
         crate::init().expect("elwindui_backend_winui3::init");
@@ -470,21 +476,61 @@ mod hosted_xaml_regression_tests {
                     "re-showing must not retain the same native window twice"
                 );
 
-                lifecycle_window.close();
-                assert!(
-                    !lifecycle_window.is_visible_for_test(),
-                    "close() must leave no visible native window"
-                );
-                assert_eq!(
-                    crate::app::retained_window_count_for_test(),
-                    0,
-                    "the Closed handler must release the retained native window"
-                );
-                assert_eq!(
-                    crate::app::release_window_call_count_for_test(),
-                    1,
-                    "programmatic close() must reach release_window exactly once"
-                );
+                // Issue #261 regression: `WinUI3RelayoutHost::request_relayout` must coalesce a
+                // burst of invalidations against the same host into exactly one real relayout pass
+                // per UI-turn, and must not suppress an independent sibling host's own pass.
+                //
+                // A panic must never unwind through a native `DispatcherQueueHandler`/
+                // `RoutedEventHandler` invocation (that vtable thunk aborts the process instead of
+                // propagating a Rust panic — confirmed directly, not assumed) — every assertion
+                // below is therefore deferred until after `crate::application::run()` returns,
+                // mirroring `WIDTH`/`VIEW`'s own established pattern in this same test.
+                {
+                    use elwindui_core::ui::TextBlockExt;
+                    let probe = elwindui_core::ui::TextBlock::new();
+                    lifecycle_window.set_content(probe.clone());
+                    let sibling_window = InnerWindow::new();
+                    sibling_window.show();
+                    let sibling_probe = elwindui_core::ui::TextBlock::new();
+                    sibling_window.set_content(sibling_probe.clone());
+
+                    crate::host::reset_relayout_static_pass_count_for_test();
+                    for i in 0..20 {
+                        probe.set_text(&format!("probe {i}"));
+                    }
+                    sibling_probe.set_text("sibling probe");
+                    let pass_count_before_drain =
+                        crate::host::relayout_static_pass_count_for_test();
+                    RELAYOUT_PASS_COUNT_BEFORE_DRAIN
+                        .with(|slot| *slot.borrow_mut() = Some(pass_count_before_drain));
+
+                    let callback_id = register_ui_event_callback(Rc::new(move || {
+                        RELAYOUT_PASS_COUNT_AFTER_DRAIN.with(|slot| {
+                            *slot.borrow_mut() =
+                                Some(crate::host::relayout_static_pass_count_for_test())
+                        });
+                        sibling_window.close();
+                        lifecycle_window.close();
+                        LIFECYCLE_VISIBLE_AFTER_CLOSE.with(|slot| {
+                            *slot.borrow_mut() = Some(lifecycle_window.is_visible_for_test())
+                        });
+                        RETAINED_COUNT_AFTER_CLOSE.with(|slot| {
+                            *slot.borrow_mut() = Some(crate::app::retained_window_count_for_test())
+                        });
+                        RELEASE_CALL_COUNT_AFTER_CLOSE.with(|slot| {
+                            *slot.borrow_mut() =
+                                Some(crate::app::release_window_call_count_for_test())
+                        });
+                    }));
+                    let queue = Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread()
+                        .expect("DispatcherQueue::GetForCurrentThread");
+                    let handler =
+                        Microsoft::UI::Dispatching::DispatcherQueueHandler::new(move || {
+                            invoke_ui_event_callback(callback_id);
+                            Ok(())
+                        });
+                    let _ = queue.TryEnqueue(&handler);
+                }
                 Ok(())
             });
             let _ = element.Loaded(&loaded);
@@ -497,6 +543,57 @@ mod hosted_xaml_regression_tests {
         assert!(
             width > 10.0,
             "Button must recover a nonzero natural width after a zero-size arrange, got {width}"
+        );
+
+        // Issue #261 regression assertions (deferred from inside native callbacks — see that
+        // code's own comment on why panicking there is unsafe).
+        let pass_count_before_drain = RELAYOUT_PASS_COUNT_BEFORE_DRAIN
+            .with(|slot| *slot.borrow())
+            .expect("pass count before drain should have been recorded");
+        assert_eq!(
+            pass_count_before_drain, 0,
+            "many consecutive invalidations against one host, plus an independent invalidation \
+             against a sibling host, must not run any real relayout pass before this UI-turn drains"
+        );
+        let pass_count_after_drain = RELAYOUT_PASS_COUNT_AFTER_DRAIN
+            .with(|slot| *slot.borrow())
+            .expect("pass count after drain should have been recorded");
+        // Each host settles in exactly 2 real passes here (confirmed independent of burst size --
+        // 20 vs. 500 `set_text` calls against `probe` both produce the same total), matching
+        // `RelayoutCycleState::run_coalesced`'s own already-tested contract
+        // (`run_coalesced_same_host_reentry_reruns_once_without_recursing`): setting real text
+        // content mid-measure legitimately dirties the same host once more (real text metrics are
+        // only available after the first attach-driven pass), producing one coalesced rerun of
+        // `relayout_static_pass` before this per-turn scheduling layer's own queued job resolves --
+        // never a separate additional `DispatcherQueue` job. 4 total (2 per host, both hosts
+        // independent) is therefore the correct, bounded value, not a per-invalidation count.
+        assert_eq!(
+            pass_count_after_drain, 4,
+            "the coalesced burst against the first host and the independent invalidation against \
+             the sibling host must each settle in the same small, bounded number of real passes \
+             once this UI-turn drains, regardless of how many invalidations were coalesced into \
+             it -- neither host suppresses the other's own pass"
+        );
+        let lifecycle_visible_after_close = LIFECYCLE_VISIBLE_AFTER_CLOSE
+            .with(|slot| *slot.borrow())
+            .expect("lifecycle window visibility after close should have been recorded");
+        assert!(
+            !lifecycle_visible_after_close,
+            "close() must leave no visible native window"
+        );
+        let retained_count_after_close = RETAINED_COUNT_AFTER_CLOSE
+            .with(|slot| *slot.borrow())
+            .expect("retained window count after close should have been recorded");
+        assert_eq!(
+            retained_count_after_close, 0,
+            "the Closed handler must release every retained native window"
+        );
+        let release_call_count_after_close = RELEASE_CALL_COUNT_AFTER_CLOSE
+            .with(|slot| *slot.borrow())
+            .expect("release_window call count after close should have been recorded");
+        assert_eq!(
+            release_call_count_after_close, 2,
+            "programmatic close() on both windows must reach release_window exactly once each"
         );
     }
 }

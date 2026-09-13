@@ -16,6 +16,7 @@
 #include <winrt/Microsoft.UI.Xaml.Automation.Peers.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.h>
+#include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
 
 using namespace winrt;
@@ -115,11 +116,11 @@ struct SemanticPeer : AutomationPeerT<SemanticPeer> {
         return {record.x, record.y, record.width, record.height};
     }
 
-    com_array<AutomationPeer> GetChildrenCore() {
+    Windows::Foundation::Collections::IVector<AutomationPeer> GetChildrenCore() {
         std::vector<AutomationPeer> children;
         auto bridge = bridge_for(m_canvas);
         if (!bridge || !bridge->callbacks.child_count || !bridge->callbacks.child_id) {
-            return children;
+            return single_threaded_vector<AutomationPeer>(std::move(children));
         }
         auto count = bridge->callbacks.child_count(bridge->callbacks.context, m_id);
         children.reserve(count);
@@ -132,7 +133,7 @@ struct SemanticPeer : AutomationPeerT<SemanticPeer> {
             }
             children.push_back(it->second);
         }
-        return com_array<AutomationPeer>(std::move(children));
+        return single_threaded_vector<AutomationPeer>(std::move(children));
     }
 
     // Pattern providers remain in the generated peer surface and are enabled by the same copied
@@ -152,11 +153,11 @@ struct SemanticRootPeer : FrameworkElementAutomationPeerT<SemanticRootPeer> {
     hstring GetNameCore() { return {}; }
     AutomationControlType GetAutomationControlTypeCore() { return AutomationControlType::Group; }
 
-    com_array<AutomationPeer> GetChildrenCore() {
+    Windows::Foundation::Collections::IVector<AutomationPeer> GetChildrenCore() {
         std::vector<AutomationPeer> children;
         auto bridge = bridge_for(m_canvas);
         if (!bridge || !bridge->callbacks.child_count || !bridge->callbacks.child_id) {
-            return children;
+            return single_threaded_vector<AutomationPeer>(std::move(children));
         }
         auto count = bridge->callbacks.child_count(bridge->callbacks.context, 0);
         children.reserve(count);
@@ -169,7 +170,7 @@ struct SemanticRootPeer : FrameworkElementAutomationPeerT<SemanticRootPeer> {
             }
             children.push_back(it->second);
         }
-        return com_array<AutomationPeer>(std::move(children));
+        return single_threaded_vector<AutomationPeer>(std::move(children));
     }
 
 private:
@@ -178,7 +179,8 @@ private:
 
 struct AccessibilityCanvas : CanvasT<AccessibilityCanvas> {
     AutomationPeer OnCreateAutomationPeer() {
-        return make<SemanticRootPeer>(*this, get_abi(*this));
+        auto inspectable = get_strong().as<Windows::Foundation::IInspectable>();
+        return make<SemanticRootPeer>(*this, get_abi(inspectable));
     }
 };
 
@@ -187,7 +189,7 @@ struct AccessibilityCanvas : CanvasT<AccessibilityCanvas> {
 extern "C" __declspec(dllexport) void* elwindui_winui3_accessibility_canvas_create() {
     try {
         auto canvas = make<AccessibilityCanvas>();
-        auto inspectable = canvas.as<IInspectable>();
+        auto inspectable = canvas.as<Windows::Foundation::IInspectable>();
         auto key = get_abi(inspectable);
         g_bridges.emplace(key, std::make_shared<CanvasBridgeState>());
         return detach_abi(inspectable);

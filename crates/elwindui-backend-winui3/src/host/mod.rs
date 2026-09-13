@@ -24,7 +24,7 @@ use crate::bindings::Microsoft::UI::Xaml::Input::{
     CharacterReceivedRoutedEventArgs, KeyEventHandler, PointerEventHandler, PointerRoutedEventArgs,
 };
 use crate::bindings::Microsoft::UI::Xaml::Media::CompositionTarget;
-use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, SizeChangedEventHandler, UIElement};
+use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, UIElement};
 use crate::render::composition::{
     CompositionClipSpec, CompositionPrimitive, CompositionRenderer, DesiredCompositionIsland,
     DesiredCompositionNode, IslandId,
@@ -194,6 +194,33 @@ impl Default for WinUI3RenderingState {
     }
 }
 
+/// The explicit viewport a `TreeHostPanel` measures/arranges its logical tree against — the only
+/// source of `layout_root`'s available size (Issue #261 review remediation §2.2). `Some(width)`/
+/// `Some(height)` is a constrained axis (normalized finite, non-negative); `None` is unconstrained
+/// (Core receives `f32::INFINITY` on that axis, and the axis grows to the tree's own natural size
+/// after layout — see `relayout_static_pass`). This single value replaces the previous three-way
+/// split model (a separate `unconstrained_axes` flag pair, a native `Canvas.Width`/`Height` used
+/// as *both* a presentation property and a layout input, and a bit-exact `last_viewport_size`
+/// dedup cache) — see `TreeHostPanel::set_viewport`'s own doc comment for why that split model was
+/// itself the root cause of a same-host self-feedback cascade.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TreeHostViewport {
+    pub(crate) width: Option<f64>,
+    pub(crate) height: Option<f64>,
+}
+
+impl TreeHostViewport {
+    fn normalized(self) -> Self {
+        fn normalize(value: Option<f64>) -> Option<f64> {
+            value.map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 })
+        }
+        Self {
+            width: normalize(self.width),
+            height: normalize(self.height),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TreeHostPanel {
     canvas: Canvas,
@@ -219,17 +246,12 @@ pub struct TreeHostPanel {
     keyboard: Rc<KeyboardDispatcher>,
     /// Core routed-pointer dispatcher for self-drawn content hosted directly by `canvas`.
     pointer: Rc<PointerDispatcher>,
-    /// `(width_unconstrained, height_unconstrained)` — mirrors
-    /// `elwindui_backend_appkit::inner::TreeHostIvars::unconstrained_axes` (see that field's own
-    /// doc comment for the full rationale). `false`/`false` (the default, every existing host) means
-    /// `relayout_static` measures against `canvas`'s current explicit `Width`/`Height` (or
-    /// `ActualWidth`/`ActualHeight` if unset), same as always. `true` on an axis measures that axis
-    /// as unconstrained instead, growing `canvas` to the resulting natural size on that axis —
-    /// `InnerScrollView`'s content host uses this. `Rc<Cell<..>>`, not a plain `Cell<..>` field on
-    /// `TreeHostPanel` itself, because `relayout_static`'s own closures (`SizeChanged`, ...) need
-    /// their own weak-captured handle to read it at fire time, the same pattern `render_tree`/
-    /// `native_children` already use.
-    unconstrained_axes: Rc<Cell<(bool, bool)>>,
+    /// This host's current explicit viewport, supplied exclusively by its owner (Window/TabView/
+    /// ScrollView/Popup — see `set_viewport`'s own doc comment) — `None` until the first call.
+    /// `Rc<Cell<..>>`, not a plain `Cell<..>` field on `TreeHostPanel` itself, because
+    /// `relayout_static`'s own weakly-captured closures need their own handle to read it at fire
+    /// time, the same pattern `render_tree`/`native_children` already use.
+    viewport: Rc<Cell<Option<TreeHostViewport>>>,
     /// Gates all layout and rendering work while this host belongs to a non-selected tab.
     active: Rc<Cell<bool>>,
     /// Keeps track of an active standalone custom popup surface, if any, ensuring single-popup ownership.
@@ -241,19 +263,14 @@ pub struct TreeHostPanel {
     rendering: Rc<WinUI3RenderingState>,
     accessibility: Rc<WinUI3AccessibilityState>,
     /// Weak route to whichever `WinUI3RelayoutHost` `set_tree()` most recently installed — lets
-    /// `Canvas.SizeChanged` and `force_relayout()` schedule through that host's own
-    /// pending/queue-ticket state machine instead of calling `relayout_static` directly and
-    /// bypassing it (Issue #261 review remediation §2.4/§2.5). `Rc<RefCell<..>>`, not a plain
-    /// `RefCell<..>` field, so it can be independently downgraded and captured weakly by the
-    /// `SizeChanged` closure below, the same pattern every other field here already uses.
-    /// Replaced wholesale (not mutated in place) each time `set_tree()` installs a new host; the
-    /// old `Weak` simply stops upgrading once nothing else holds its target's `Rc` — no explicit
-    /// teardown needed.
+    /// `force_relayout_with_source` schedule through that host's own pending/queue-ticket state
+    /// machine instead of calling `relayout_static` directly and bypassing it (Issue #261 review
+    /// remediation §2.5). `Rc<RefCell<..>>`, not a plain `RefCell<..>` field, so it can be
+    /// independently downgraded and captured weakly, the same pattern every other field here
+    /// already uses. Replaced wholesale (not mutated in place) each time `set_tree()` installs a
+    /// new host; the old `Weak` simply stops upgrading once nothing else holds its target's `Rc` —
+    /// no explicit teardown needed.
     relayout_host: Rc<RefCell<Weak<WinUI3RelayoutHost>>>,
-    /// Bit-exact `(width, height)` last actually applied by `set_viewport_size` — see that
-    /// method's own doc comment (Issue #261 review remediation §3.4). `None` before the first
-    /// call, so the first push is never suppressed.
-    last_viewport_size: Cell<Option<(u64, u64)>>,
 }
 
 #[cfg(test)]
@@ -275,8 +292,7 @@ pub(crate) fn reset_relayout_static_pass_count_for_test() {
 /// panel's own tree storage (not a full owned `TreeHostPanel` clone) since a strong one would
 /// create a reference cycle: this panel's own `tree` strongly holds the hosted tree's root, and
 /// that root's own `UIElementImpl::invalidate_host` would then strongly hold this, right back to
-/// the panel. `canvas` is captured strongly, matching `TreeHostPanel::new`'s own `SizeChanged`
-/// handler below, which uses the exact same capture split (strong `canvas`, weak `tree`).
+/// the panel. `canvas` is captured strongly, weak `tree`.
 ///
 /// Unlike AppKit's `AppKitRelayoutHost` (where `NSView.setNeedsLayout(true)` is itself already
 /// coalesced by AppKit into a single pass per display cycle, no matter how many times it's called),
@@ -292,22 +308,21 @@ pub(crate) fn reset_relayout_static_pass_count_for_test() {
 /// Identifies why a given relayout cycle was scheduled/realized — attached to the
 /// `ELWINDUI_PERF_TRACE` diagnostic line emitted per real cycle (see `run_relayout_now`) so a
 /// live run's actual pass count can be attributed back to its originating call sites instead of
-/// only being visible as one opaque total (Issue #261 review remediation §3.3).
+/// only being visible as one opaque total (Issue #261 review remediation §3.3). Deliberately has
+/// *no* variant for a native size-change notification this host's own layout produced (e.g. a
+/// `Canvas.SizeChanged`) — Issue #261 review remediation §2.6 removed that path entirely, since a
+/// `TreeHost` observing its own native size output is exactly the same-host feedback loop that
+/// caused a 595+-cycle cascade on live `docking-demo`; see `set_viewport`'s own doc comment.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum RelayoutSource {
     /// A general `elwindui_core::ui::RelayoutHost::request_relayout` invalidation (an element's
     /// own `invalidate_measure`/`invalidate_arrange`/`invalidate_render`).
     QueuedRequest,
-    /// The native `Canvas.SizeChanged` event.
-    CanvasSizeChanged,
-    /// `TreeHostPanel::force_relayout()` called directly by an owner (e.g. `TabView`/`ScrollView`
-    /// pushing an explicit content-area size ad hoc).
-    ForceRelayout,
     /// `TreeHostPanel::set_tree()`'s own initial relayout of newly attached content.
     SetTreeInitial,
     /// `TreeHostPanel::set_active(true)` reactivating a previously suspended host.
     SetActiveReactivate,
-    /// `TreeHostPanel::set_viewport_size()` pushing an owner-supplied logical viewport.
+    /// `TreeHostPanel::set_viewport()` pushing an owner-supplied viewport change.
     ViewportSync,
     /// `RelayoutHost::flush_interactive_relayout()` realizing an already-queued batch early.
     InteractiveFlush,
@@ -329,8 +344,8 @@ pub(crate) struct WinUI3RelayoutHost {
     /// child discovered during this relayout pass can wire its own `GotFocus`/`LostFocus` — see
     /// `reconcile_native_children`'s own doc comment on that wiring.
     keyboard: Weak<KeyboardDispatcher>,
-    /// See `TreeHostPanel::unconstrained_axes`'s own doc comment.
-    unconstrained_axes: Weak<Cell<(bool, bool)>>,
+    /// See `TreeHostPanel::viewport`'s own doc comment.
+    viewport: Weak<Cell<Option<TreeHostViewport>>>,
     /// See `TreeHostPanel::active`.
     active: Weak<Cell<bool>>,
     /// See `RelayoutCycleState`'s own doc comment — this host's own reentrancy-coalescing state,
@@ -408,7 +423,7 @@ impl WinUI3RelayoutHost {
             Option<Rc<RefCell<NativeChildMap>>>,
             Option<Rc<RefCell<CompositionRenderer>>>,
             Option<Rc<KeyboardDispatcher>>,
-            Option<Rc<Cell<(bool, bool)>>>,
+            Option<Rc<Cell<Option<TreeHostViewport>>>>,
             Option<Rc<Cell<bool>>>,
             Option<Rc<RelayoutCycleState>>,
         ) = (
@@ -417,7 +432,7 @@ impl WinUI3RelayoutHost {
             self.native_children.upgrade(),
             self.composition.upgrade(),
             self.keyboard.upgrade(),
-            self.unconstrained_axes.upgrade(),
+            self.viewport.upgrade(),
             self.active.upgrade(),
             self.relayout_cycle.upgrade(),
         );
@@ -427,7 +442,7 @@ impl WinUI3RelayoutHost {
             Some(native_children),
             Some(composition),
             Some(keyboard),
-            Some(unconstrained_axes),
+            Some(viewport),
             Some(active),
             Some(relayout_cycle),
         ) = upgraded
@@ -445,7 +460,7 @@ impl WinUI3RelayoutHost {
                 &render_tree,
                 &native_children,
                 &keyboard,
-                unconstrained_axes.get(),
+                viewport.get(),
                 &active,
                 &relayout_cycle,
             );
@@ -485,13 +500,10 @@ impl WinUI3RelayoutHost {
         self.run_relayout_now(source);
     }
 
-    /// The per-host, per-UI-turn coalescing layer shared by `RelayoutHost::request_relayout` (via
-    /// the `RelayoutSource::QueuedRequest`/general-invalidation path) and `Canvas.SizeChanged`
-    /// (via `RelayoutSource::CanvasSizeChanged`) — the two top-level entry points that both need
-    /// "coalesce a burst within one UI turn into exactly one queued job" semantics without either
-    /// one requiring the other's own arguments (a `SizeChanged` event has no dirty render group to
-    /// mark). `RelayoutHost::request_relayout` marks its render group dirty *before* calling this;
-    /// this method owns everything from there on (Issue #261 review remediation §2.4).
+    /// The per-host, per-UI-turn coalescing layer for `RelayoutHost::request_relayout` (ordinary
+    /// element invalidation) — coalesces a burst of separate top-level invalidations within one
+    /// UI turn into exactly one queued job. `RelayoutHost::request_relayout` marks its render
+    /// group dirty *before* calling this; this method owns everything from there on.
     fn schedule(&self, kind: elwindui_core::ui::InvalidationKind, source: RelayoutSource) {
         let Some(active) = self.active.upgrade() else {
             return;
@@ -699,7 +711,7 @@ impl TreeHostPanel {
             native_children: Rc::new(RefCell::new(NativeChildMap::new())),
             keyboard: Rc::new(KeyboardDispatcher::new()),
             pointer: Rc::new(PointerDispatcher::new()),
-            unconstrained_axes: Rc::new(Cell::new((false, false))),
+            viewport: Rc::new(Cell::new(None)),
             active: Rc::new(Cell::new(true)),
             active_popup: Rc::new(RefCell::new(None)),
             callback_owner: UiCallbackRegistryOwner::default(),
@@ -707,7 +719,6 @@ impl TreeHostPanel {
             rendering: Rc::new(WinUI3RenderingState::default()),
             accessibility,
             relayout_host: Rc::new(RefCell::new(Weak::new())),
-            last_viewport_size: Cell::new(None),
         };
         #[cfg(windows)]
         this.accessibility.bind_canvas(&this.canvas);
@@ -1037,33 +1048,12 @@ impl TreeHostPanel {
                 Ok(())
             }));
         }
-        {
-            // Issue #261 review remediation §2.4: routed through the current `WinUI3RelayoutHost`'s
-            // own per-turn scheduler instead of calling `relayout_static` directly, so a native
-            // resize burst coalesces with (and is superseded/coalesced the same way as) every other
-            // relayout source instead of always forcing an immediate, unbatched full pass.
-            let weak_relayout_host = Rc::downgrade(&this.relayout_host);
-            let callback_id = this.callback_owner.register_event(Rc::new(move || {
-                if let Some(host) = weak_relayout_host
-                    .upgrade()
-                    .and_then(|slot| slot.borrow().upgrade())
-                {
-                    host.schedule(
-                        elwindui_core::ui::InvalidationKind::Measure,
-                        RelayoutSource::CanvasSizeChanged,
-                    );
-                }
-            }));
-            // `SizeChanged` fires whenever this panel's own allotted space changes (window resize,
-            // or — for a `NativeTabView`'s per-tab content area — the tab strip/window resizing together)
-            // — the same role `layout()` plays for AppKit's `TreeHostView`.
-            let _ = this
-                .canvas
-                .SizeChanged(&SizeChangedEventHandler::new(move |_, _| {
-                    invoke_ui_event_callback(callback_id);
-                    Ok(())
-                }));
-        }
+        // Issue #261 review remediation §2.6: `canvas`'s own `SizeChanged` is deliberately *not*
+        // observed here. A `TreeHost` is a viewport *consumer*, never its own viewport producer —
+        // see `set_viewport`'s own doc comment for why self-observing a native size notification
+        // this host's own layout output produced is a same-host feedback loop, not a legitimate
+        // relayout trigger, and how every real viewport authority (`Window`/`TabView`/`ScrollView`/
+        // `Popup`) now pushes changes in through `set_viewport` instead.
         {
             let tree_for_context = Rc::downgrade(&this.tree);
             let keyboard_for_context = Rc::downgrade(&this.keyboard);
@@ -1330,25 +1320,13 @@ impl TreeHostPanel {
         }
     }
 
-    /// Forces an immediate, synchronous relayout pass against `canvas`'s *current*
-    /// `ActualWidth`/`ActualHeight` — for hosts whose size is pushed in explicitly (e.g. a
-    /// `TabViewItem`'s own content `Canvas`, sized by `native_ui::TabView`/`InnerTabView` rather
-    /// than by native layout) rather than reliably arriving through `canvas`'s own `SizeChanged`.
-    /// Confirmed necessary, not just defensive: `SetWidth`/`SetHeight` (even with
-    /// `InvalidateMeasure`/`InvalidateArrange`) on such a `Canvas` does not, in practice, make its
-    /// `SizeChanged` fire on any later frame either — logged and observed directly, not assumed.
-    pub(crate) fn force_relayout(&self) {
-        self.force_relayout_with_source(RelayoutSource::ForceRelayout);
-    }
-
-    /// Shared body of `force_relayout()`, parameterized by the `RelayoutSource` diagnostic tag so
-    /// internal callers with a more specific reason (`set_tree`'s initial layout,
-    /// `set_active(true)`'s reactivation, `set_viewport_size`'s explicit push) attribute
-    /// correctly. Issue #261 review remediation §2.5: routed through the currently-installed
-    /// `WinUI3RelayoutHost`'s own `realize_synchronously` (supersede queued ticket, consume
-    /// pending state, run) instead of calling `relayout_static` directly and bypassing that state
-    /// machine — without this, a queued dispatcher job already pending for this host would still
-    /// fire afterward and run a second, redundant pass.
+    /// Shared realization body for a viewport/tree/activation change, parameterized by the
+    /// `RelayoutSource` diagnostic tag so each caller (`set_tree`'s initial layout,
+    /// `set_active(true)`'s reactivation, `set_viewport`'s explicit push) attributes correctly.
+    /// Routed through the currently-installed `WinUI3RelayoutHost`'s own `realize_synchronously`
+    /// (supersede queued ticket, consume pending state, run) instead of calling `relayout_static`
+    /// directly and bypassing that state machine — without this, a queued dispatcher job already
+    /// pending for this host would still fire afterward and run a second, redundant pass.
     fn force_relayout_with_source(&self, source: RelayoutSource) {
         if !self.active.get() {
             if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
@@ -1361,6 +1339,9 @@ impl TreeHostPanel {
         } else {
             // No `WinUI3RelayoutHost` installed yet (called before any `set_tree()`) — fall back
             // to the raw pass directly; there is no queued job to supersede in this case.
+            // `relayout_static_pass`'s own tree-check makes this a safe, cheap no-op when no tree
+            // is attached yet (e.g. `set_viewport` called during popup construction, before
+            // `set_tree`).
             Self::relayout_static(
                 &self.canvas,
                 &self.composition,
@@ -1368,7 +1349,7 @@ impl TreeHostPanel {
                 &self.render_tree,
                 &self.native_children,
                 &self.keyboard,
-                self.unconstrained_axes.get(),
+                self.viewport.get(),
                 &self.active,
                 &self.relayout_cycle,
             );
@@ -1376,37 +1357,38 @@ impl TreeHostPanel {
         self.accessibility.rebuild();
     }
 
-    /// Issue #225: pushes an owner-supplied logical viewport into this host's `Canvas` and
-    /// synchronously relays out — the single centralized form of the explicit `SetWidth`/
-    /// `SetHeight` + `force_relayout()` sequence `TabView`/`ScrollView` already use ad hoc for
-    /// their own "size pushed in explicitly" hosts. A negative or non-finite value is normalized
-    /// to `0.0` rather than handed to native `SetWidth`/`SetHeight` (whose own behavior for such
-    /// input is not a contract this host relies on).
-    pub(crate) fn set_viewport_size(&self, width: f64, height: f64) {
-        let width = if width.is_finite() {
-            width.max(0.0)
-        } else {
-            0.0
-        };
-        let height = if height.is_finite() {
-            height.max(0.0)
-        } else {
-            0.0
-        };
-        // Issue #261 review remediation §3.4: bit-exact comparison (not `==`) against the last
-        // *applied* value, so a repeated identical push (observed in practice during docking-demo's
-        // startup/relayout storm) is a true no-op — no native setter call, no forced relayout —
-        // instead of unconditionally re-arranging every time. Bit-exact rather than `==` purely as
-        // a robustness match for `f64`'s general non-reflexive-equality hazard (`NaN`), even though
-        // both values here are already normalized to a finite, non-negative number above.
-        let key = (width.to_bits(), height.to_bits());
-        if self.last_viewport_size.get() == Some(key) {
+    /// The single authority API every viewport *owner* (`Window`/`TabView`/`ScrollView`/`Popup` —
+    /// see each type's own doc comment for which one owns which host) must use to push a viewport
+    /// change into this host. This is the only source of `layout_root`'s available size (Issue
+    /// #261 review remediation §2.2/§2.3) — `relayout_static_pass` never reads `canvas`'s own
+    /// `ActualWidth`/`ActualHeight`, and this host never observes its own `canvas.SizeChanged`.
+    ///
+    /// That last point is load-bearing, not incidental: `canvas.SizeChanged` used to feed directly
+    /// back into this same host's own relayout scheduling. On live `docking-demo` (a deeply nested
+    /// `Window -> TreeHost -> TabView -> TreeHost -> ...` tree) that created a same-host feedback
+    /// cascade — each layout's own presentation-size output re-triggered another layout of the
+    /// *same* host, and because the trigger was posted through the async per-turn queue, each step
+    /// of what used to be an immediately-resolving native resize cascade could only propagate one
+    /// dispatcher turn at a time. Measured: 595+ separate queued cycles and 112.5s+ of cumulative
+    /// text-measurement time on one single host before the run was force-stopped. A `TreeHost` must
+    /// be a viewport *consumer*, never its own viewport producer — this method, not a native
+    /// self-observed size notification, is the only legitimate way this host's layout input changes.
+    ///
+    /// A negative or non-finite constrained axis is normalized to `0.0` (see `TreeHostViewport::
+    /// normalized`). An unchanged effective viewport (post-normalization) is a true no-op: no
+    /// native `SetWidth`/`SetHeight` call, no relayout. If this host has no tree attached yet (e.g.
+    /// during popup construction, before `set_tree`) or is currently suspended
+    /// (`set_active(false)`), the viewport is still stored so the next `set_tree`/
+    /// `set_active(true)` picks it up, but no layout work happens now.
+    pub(crate) fn set_viewport(&self, viewport: TreeHostViewport) {
+        let viewport = viewport.normalized();
+        if self.viewport.get() == Some(viewport) {
             return;
         }
-        self.last_viewport_size.set(Some(key));
+        self.viewport.set(Some(viewport));
         let element = self.as_element();
-        let _ = element.SetWidth(width);
-        let _ = element.SetHeight(height);
+        let _ = element.SetWidth(viewport.width.unwrap_or(f64::NAN));
+        let _ = element.SetHeight(viewport.height.unwrap_or(f64::NAN));
         self.force_relayout_with_source(RelayoutSource::ViewportSync);
     }
 
@@ -1447,14 +1429,6 @@ impl TreeHostPanel {
         *self.render_tree.borrow_mut() = None;
     }
 
-    /// See `TreeHostPanel::unconstrained_axes`'s own doc comment. `InnerScrollView` calls this once,
-    /// at construction, on its nested content host; every other host leaves both `false` (the
-    /// default). Structurally mirrors
-    /// `elwindui_backend_appkit::inner::TreeHostView::set_unconstrained_axes`.
-    pub(crate) fn set_unconstrained_axes(&self, width: bool, height: bool) {
-        self.unconstrained_axes.set((width, height));
-    }
-
     /// Replaces this host's entire content. Both composition islands and `Text`/`NativeControl`
     /// children are reconciled by `relayout_static` rather than via `Children.Clear()`: a genuinely
     /// new tree's `RenderGroup` ids never match the old tree's, so the diff naturally tears down
@@ -1469,7 +1443,7 @@ impl TreeHostPanel {
             render_tree: Rc::downgrade(&self.render_tree),
             native_children: Rc::downgrade(&self.native_children),
             keyboard: Rc::downgrade(&self.keyboard),
-            unconstrained_axes: Rc::downgrade(&self.unconstrained_axes),
+            viewport: Rc::downgrade(&self.viewport),
             active: Rc::downgrade(&self.active),
             relayout_cycle: Rc::downgrade(&self.relayout_cycle),
             pending: Cell::new(false),
@@ -1600,7 +1574,7 @@ impl TreeHostPanel {
         retained_tree: &Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
         native_children: &Rc<RefCell<NativeChildMap>>,
         keyboard: &Rc<KeyboardDispatcher>,
-        unconstrained_axes: (bool, bool),
+        viewport: Option<TreeHostViewport>,
         active: &Cell<bool>,
         relayout_cycle: &RelayoutCycleState,
     ) {
@@ -1615,7 +1589,7 @@ impl TreeHostPanel {
                 retained_tree,
                 native_children,
                 keyboard,
-                unconstrained_axes,
+                viewport,
             );
         });
     }
@@ -1630,47 +1604,25 @@ impl TreeHostPanel {
         retained_tree: &Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
         native_children: &Rc<RefCell<NativeChildMap>>,
         keyboard: &Rc<KeyboardDispatcher>,
-        unconstrained_axes: (bool, bool),
+        viewport: Option<TreeHostViewport>,
     ) {
         #[cfg(test)]
         RELAYOUT_STATIC_PASS_COUNT.with(|count| count.set(count.get() + 1));
         use elwindui_core::base::Size as LSize;
 
-        // `ActualWidth`/`ActualHeight` only update after a real native layout pass runs on this
-        // element, which never happens for a panel used as `TabViewItem.Content` (see
-        // `force_relayout`'s doc comment). When a caller has explicitly set `Width`/`Height` (not
-        // `NaN`, the "unset" sentinel) ahead of calling this — e.g. `InnerTabView`'s resize
-        // callback — that value is authoritative and already reflects the real available size, so
-        // prefer it over the possibly-stale `ActualWidth`/`ActualHeight`.
-        let explicit_width = canvas.Width().unwrap_or(f64::NAN);
-        let explicit_height = canvas.Height().unwrap_or(f64::NAN);
-        let width = if explicit_width.is_finite() {
-            explicit_width as f32
-        } else {
-            canvas.ActualWidth().unwrap_or(0.0) as f32
+        // Issue #261 review remediation §2.2: the stored viewport (supplied exclusively by this
+        // host's owner via `set_viewport`) is the *only* source of available size — never
+        // `canvas.Width`/`Height`/`ActualWidth`/`ActualHeight`. No viewport yet (e.g. a tree
+        // attached before its owner has ever called `set_viewport`) means there is nothing valid
+        // to measure against yet; wait for the owner rather than guessing `0x0`.
+        let Some(viewport) = viewport else {
+            return;
         };
-        let height = if explicit_height.is_finite() {
-            explicit_height as f32
-        } else {
-            canvas.ActualHeight().unwrap_or(0.0) as f32
-        };
-        let (unconstrained_width, unconstrained_height) = unconstrained_axes;
-        // `InnerScrollView`'s content host (`unconstrained_axes`, set via
-        // `TreeHostPanel::set_unconstrained_axes`) measures the scrolling axis/axes as unconstrained
-        // instead of clamped to `width`/`height` — mirrors
-        // `elwindui_backend_appkit::inner::TreeHostView::relayout`'s own `unconstrained_axes`
-        // handling; every other host has both `false` and this is a no-op.
+        let unconstrained_width = viewport.width.is_none();
+        let unconstrained_height = viewport.height.is_none();
         let available = LSize {
-            width: if unconstrained_width {
-                f32::INFINITY
-            } else {
-                width
-            },
-            height: if unconstrained_height {
-                f32::INFINITY
-            } else {
-                height
-            },
+            width: viewport.width.map(|w| w as f32).unwrap_or(f32::INFINITY),
+            height: viewport.height.map(|h| h as f32).unwrap_or(f32::INFINITY),
         };
 
         let tree_ref = tree.borrow();
@@ -1678,21 +1630,25 @@ impl TreeHostPanel {
             return;
         };
         elwindui_core::ui::layout_root(tree, available);
-        // Grows `canvas` to the resulting natural size on any unconstrained axis — the WinUI3-side
-        // counterpart of AppKit's own post-`layout_root` `setFrame` in `TreeHostView::relayout`.
+        // Grows `canvas`'s native *presentation* size to the resulting natural size on any
+        // unconstrained axis — the WinUI3-side counterpart of AppKit's own post-`layout_root`
+        // `setFrame` in `TreeHostView::relayout`. This is presentation output only: it must never
+        // be read back as this host's own layout input (that self-observation is exactly the
+        // same-host feedback loop `set_viewport`'s own doc comment describes) — this host has no
+        // `canvas.SizeChanged` listener, so it structurally cannot be.
         let final_width = if unconstrained_width {
-            tree.arranged_width().unwrap_or(0.0)
+            tree.arranged_width().unwrap_or(0.0) as f64
         } else {
-            width
+            available.width as f64
         };
         let final_height = if unconstrained_height {
-            tree.arranged_height().unwrap_or(0.0)
+            tree.arranged_height().unwrap_or(0.0) as f64
         } else {
-            height
+            available.height as f64
         };
         if unconstrained_width || unconstrained_height {
-            let _ = canvas.SetWidth(final_width as f64);
-            let _ = canvas.SetHeight(final_height as f64);
+            let _ = canvas.SetWidth(final_width);
+            let _ = canvas.SetHeight(final_height);
         }
         {
             let mut retained_tree = retained_tree.borrow_mut();

@@ -3,9 +3,8 @@
 //! Hosts arbitrary `UIElement` subtrees inside a lightweight, light-dismissable XAML `Popup`.
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::Primitives::Popup;
-use crate::bindings::Microsoft::UI::Xaml::FrameworkElement;
 use crate::ffi::{UiCallbackRegistryOwner, invoke_ui_event_callback};
-use crate::host::TreeHostPanel;
+use crate::host::{TreeHostPanel, TreeHostViewport};
 use elwindui_core::ui::popup::{
     PopupDismissPolicy, PopupFocusPolicy, PopupHost, PopupRequest, PopupSurfaceHandle,
 };
@@ -48,18 +47,23 @@ impl InnerPopupSurface {
         let local = TreeHostPanel::screen_logical_to_xaml_local(owner_canvas, request.position)?;
         // 2. Native Popup construction.
         let popup = Popup::new().ok()?;
-        // 3. Empty content host only — no `set_tree` yet.
+        // 3. Empty content host only — no `set_tree` yet. `PopupRequest.size` is this host's
+        // viewport authority (Issue #261 review remediation §2.4) — pushed through `set_viewport`
+        // now, before any tree is attached, so it's already the stored viewport `set_tree`'s own
+        // initial layout (step 10, below) will use; `set_viewport` itself is a no-op layout-wise
+        // with no tree attached yet (see that method's own doc comment).
         let content_host = TreeHostPanel::new();
+        content_host.set_viewport(TreeHostViewport {
+            width: Some(request.size.width as f64),
+            height: Some(request.size.height as f64),
+        });
 
-        // 4. Casts (of the still-empty host's own Canvas, not of `request.content`).
+        // 4. Cast (of the still-empty host's own Canvas, not of `request.content`).
         let canvas = content_host.canvas();
-        let fe: FrameworkElement = canvas.cast().ok()?;
         let uie: crate::bindings::Microsoft::UI::Xaml::UIElement = canvas.cast().ok()?;
 
         // 5. Configure every structural popup property on the still-empty host/native popup.
         // `request.content` is not reachable through any of this yet.
-        fe.SetWidth(request.size.width as f64).ok()?;
-        fe.SetHeight(request.size.height as f64).ok()?;
         popup.SetChild(&uie).ok()?;
         popup.SetHorizontalOffset(local.x as f64).ok()?;
         popup.SetVerticalOffset(local.y as f64).ok()?;

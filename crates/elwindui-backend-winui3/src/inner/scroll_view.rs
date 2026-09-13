@@ -3,7 +3,7 @@
 use crate::bindings::Microsoft::UI::Xaml::Controls::{ScrollMode, ScrollViewer};
 use crate::bindings::Microsoft::UI::Xaml::SizeChangedEventHandler;
 use crate::ffi::{AnyView, invoke_ui_event_callback, register_ui_event_callback};
-use crate::host::TreeHostPanel;
+use crate::host::{TreeHostPanel, TreeHostViewport};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -16,19 +16,18 @@ use std::rc::Rc;
 /// pattern `InnerTabView::insert_tab`'s own per-tab `TreeHostPanel::new()` already establishes, not
 /// a one-off special case. Unlike AppKit (where a plain `NSAutoresizingMaskOptions` bit keeps the
 /// cross axis tracking the clip view automatically, no notification/event wiring needed), WinUI3's
-/// `Canvas` has no autoresizing equivalent — its `Width`/`Height` must be pushed in explicitly,
-/// the exact same issue (and the exact same `SizeChanged` + `force_relayout` fix)
-/// `InnerTabView::insert_tab`'s own doc comment already documents for `TabViewItem.Content`.
+/// `Canvas` has no autoresizing equivalent — its viewport must be pushed in explicitly via
+/// `TreeHostPanel::set_viewport`, the same pattern `InnerTabView::insert_tab`'s own doc comment
+/// documents for `TabViewItem.Content`, this being the `ScrollViewer` content-host viewport
+/// authority (Issue #261 review remediation §2.4).
 pub(crate) struct InnerScrollView {
     handle: AnyView,
     scroll_viewer: ScrollViewer,
     content_host: TreeHostPanel,
     /// `(horizontal_scroll_enabled, vertical_scroll_enabled)` — see
     /// `elwindui_backend_appkit::inner::InnerScrollView::axes`'s own doc comment for the naming
-    /// rationale (same booleans `TreeHostPanel::unconstrained_axes` uses, phrased from the opposite
-    /// perspective). `Rc<Cell<..>>`, not a plain `Cell<..>`, so the `SizeChanged` closure below can
-    /// read the current value at fire time rather than a snapshot from construction — the same
-    /// reason `TreeHostPanel::unconstrained_axes` itself is `Rc`-wrapped.
+    /// rationale. `Rc<Cell<..>>`, not a plain `Cell<..>`, so the `SizeChanged` closure below can
+    /// read the current value at fire time rather than a snapshot from construction.
     axes: Rc<Cell<(bool, bool)>>,
 }
 
@@ -69,15 +68,14 @@ impl InnerScrollView {
         this
     }
 
-    /// Applies `axes` to the native scroll-mode properties and `content_host`'s own
-    /// unconstrained-measure axes, then immediately re-syncs the cross axis and force-relays-out —
-    /// needed here too (not just from the `SizeChanged` handler above), since toggling an axis at
-    /// runtime via `set_horizontal_scroll_enabled`/`set_vertical_scroll_enabled` doesn't itself fire
-    /// `SizeChanged`.
+    /// Applies `axes` to the native scroll-mode properties, then immediately re-syncs the cross
+    /// axis viewport — needed here too (not just from the `SizeChanged` handler above), since
+    /// toggling an axis at runtime via `set_horizontal_scroll_enabled`/`set_vertical_scroll_enabled`
+    /// doesn't itself fire `SizeChanged`. `sync_scroll_view_cross_axis` below is the sole place
+    /// that encodes which axis is unconstrained, via `TreeHostViewport`'s own `None` — there is no
+    /// separate "unconstrained axes" state to keep in sync with it.
     fn apply_axes(&self) {
         let (horizontal, vertical) = self.axes.get();
-        self.content_host
-            .set_unconstrained_axes(horizontal, vertical);
         let _ = self.scroll_viewer.SetHorizontalScrollMode(if horizontal {
             ScrollMode::Auto
         } else {
@@ -116,27 +114,26 @@ impl InnerScrollView {
     }
 }
 
-/// Pushes `scroll_viewer`'s own current viewport size into `content_host`'s explicit `Width`/
-/// `Height` on whichever axis does *not* scroll, resets the scrolling axis/axes back to the
-/// `NaN` ("unset") sentinel (so a stale explicit size doesn't linger across a runtime axis-toggle —
-/// `relayout_static`'s own `explicit_width.is_finite()` check, this function's counterpart), and
-/// force-relays-out. Shared by `InnerScrollView::new`'s `SizeChanged` handler and
-/// `InnerScrollView::apply_axes`, rather than duplicated between them.
+/// Pushes `scroll_viewer`'s own current viewport size into `content_host` as the constrained
+/// cross axis, encoding whichever axis *does* scroll as `TreeHostViewport`'s `None` (unconstrained)
+/// — the `ScrollViewer` content-host viewport authority (Issue #261 review remediation §2.4).
+/// Shared by `InnerScrollView::new`'s `SizeChanged` handler and `InnerScrollView::apply_axes`,
+/// rather than duplicated between them.
 pub(crate) fn sync_scroll_view_cross_axis(
     content_host: &TreeHostPanel,
     scroll_viewer: &ScrollViewer,
     (horizontal, vertical): (bool, bool),
 ) {
-    let element = content_host.as_element();
-    if horizontal {
-        let _ = element.SetWidth(f64::NAN);
-    } else {
-        let _ = element.SetWidth(scroll_viewer.ActualWidth().unwrap_or(0.0));
-    }
-    if vertical {
-        let _ = element.SetHeight(f64::NAN);
-    } else {
-        let _ = element.SetHeight(scroll_viewer.ActualHeight().unwrap_or(0.0));
-    }
-    content_host.force_relayout();
+    content_host.set_viewport(TreeHostViewport {
+        width: if horizontal {
+            None
+        } else {
+            Some(scroll_viewer.ActualWidth().unwrap_or(0.0))
+        },
+        height: if vertical {
+            None
+        } else {
+            Some(scroll_viewer.ActualHeight().unwrap_or(0.0))
+        },
+    });
 }

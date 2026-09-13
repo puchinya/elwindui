@@ -629,3 +629,136 @@ fn renderer_local_nested_environment_scope_uses_lexical_binding() {
         ]
     );
 }
+
+// Review delta for PR #258: the outer renderer has Rc-stable items, while the nested collection
+// is explicitly a plain `Vec<String>`. The nested renderer must rebuild its range independently;
+// the outer item's identity must not upgrade the string collection to pointer reconciliation.
+thread_local! {
+    static NESTED_PLAIN_RENDERER_SCOPED_FOR_RECORDS: RefCell<Vec<(String, String, String)>> =
+        RefCell::new(Vec::new());
+}
+
+#[elwindui::environment_key(
+    name = environment_scope_nested_plain_renderer_outer,
+    value = String,
+    default = String::from("nested-plain-root-outer")
+)]
+pub struct EnvironmentScopeNestedPlainRendererOuter;
+
+#[elwindui::environment_key(
+    name = environment_scope_nested_plain_renderer_inner,
+    value = String,
+    default = String::from("nested-plain-root-inner")
+)]
+pub struct EnvironmentScopeNestedPlainRendererInner;
+
+#[elwindui::viewmodel]
+mod environment_scope_nested_plain_renderer_outer_item {
+    struct EnvironmentScopeNestedPlainRendererOuterItem {
+        #[observable(default = Vec::new())]
+        children: Vec<String>,
+    }
+}
+
+#[elwindui::viewmodel]
+mod environment_scope_nested_plain_renderer_items {
+    struct EnvironmentScopeNestedPlainRendererItems {
+        #[observable(default = Vec::new())]
+        items: Vec<EnvironmentScopeNestedPlainRendererOuterItem>,
+    }
+}
+
+#[elwindui::component(inherits ContentControl)]
+struct EnvironmentScopeNestedPlainRendererProbe {
+    #[param]
+    label: String,
+    #[environment(environment_scope_nested_plain_renderer_outer)]
+    outer: String,
+    #[environment(environment_scope_nested_plain_renderer_inner)]
+    inner: String,
+
+    template: template_view!(|templated_parent: Self| {
+        on_mount {
+            NESTED_PLAIN_RENDERER_SCOPED_FOR_RECORDS.with(|records| {
+                records
+                    .borrow_mut()
+                    .push((self.label(), self.outer(), self.inner()));
+            });
+        }
+        TextBlock { text: label }
+    }),
+}
+
+#[elwindui::component]
+impl EnvironmentScopeNestedPlainRendererProbe {}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct EnvironmentScopeNestedPlainRendererParent {
+    #[bindable]
+    vm: std::rc::Rc<EnvironmentScopeNestedPlainRendererItems>,
+
+    body: view! {
+        EnvironmentScope {
+            environment_scope_nested_plain_renderer_outer: "scope-outer",
+            for outer_item in vm.items {
+                VerticalLayout {
+                    EnvironmentScope {
+                        environment_scope_nested_plain_renderer_inner: "scope-inner",
+                        for child in outer_item.children {
+                            EnvironmentScopeNestedPlainRendererProbe { label: child }
+                        }
+                    }
+                }
+            }
+        }
+    },
+}
+
+#[elwindui::component]
+impl EnvironmentScopeNestedPlainRendererParent {}
+
+#[test]
+fn renderer_local_nested_plain_collection_rebuilds_with_lexical_scope() {
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeNestedPlainRendererOuter>("nested-plain-root-outer".to_string());
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeNestedPlainRendererInner>("nested-plain-root-inner".to_string());
+    NESTED_PLAIN_RENDERER_SCOPED_FOR_RECORDS.with(|records| records.borrow_mut().clear());
+
+    let outer_item = EnvironmentScopeNestedPlainRendererOuterItem::new();
+    let vm = EnvironmentScopeNestedPlainRendererItems::new();
+    vm.items_push(outer_item.clone());
+    let _parent = elwindui::new!(EnvironmentScopeNestedPlainRendererParent(vm: vm.clone()));
+
+    outer_item.set_children(vec!["first".to_string()]);
+    assert_eq!(
+        NESTED_PLAIN_RENDERER_SCOPED_FOR_RECORDS.with(|records| records.borrow().clone()),
+        vec![(
+            "first".to_string(),
+            "scope-outer".to_string(),
+            "scope-inner".to_string()
+        )]
+    );
+
+    outer_item.set_children(vec!["first".to_string(), "second".to_string()]);
+    assert_eq!(
+        NESTED_PLAIN_RENDERER_SCOPED_FOR_RECORDS.with(|records| records.borrow().clone()),
+        vec![
+            (
+                "first".to_string(),
+                "scope-outer".to_string(),
+                "scope-inner".to_string()
+            ),
+            (
+                "first".to_string(),
+                "scope-outer".to_string(),
+                "scope-inner".to_string()
+            ),
+            (
+                "second".to_string(),
+                "scope-outer".to_string(),
+                "scope-inner".to_string()
+            )
+        ]
+    );
+}

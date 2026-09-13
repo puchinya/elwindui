@@ -11,6 +11,7 @@ mod text_style;
 #[doc(hidden)]
 pub use text_style::TEXT_STYLE_FIELDS;
 pub mod theme_frontend;
+mod type_resolution;
 pub mod validate;
 
 use proc_macro2::TokenStream;

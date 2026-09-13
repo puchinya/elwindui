@@ -8,6 +8,10 @@ use crate::ast::{
     EnumDef, FieldDef, FieldKind, Initializer, Item, MethodDef, Module, ShortcutScope, StoreDef,
     ViewAttribute, ViewBody, ViewDef, ViewExpr, ViewModelDef, ViewModifier,
 };
+use crate::type_resolution::{
+    CollectionIdentity, ResolutionContext, ResolvedCollection, ResolvedTypeRef,
+    nested_vec_item_type,
+};
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident, quote};
 use std::cell::RefCell;
@@ -3531,28 +3535,6 @@ fn is_copy_type(ty: &str) -> bool {
     }
 }
 
-/// `Vec<Document>` where `Document` is itself a known `component`/`viewmodel` in this compilation
-/// unit: such a field needs `Rc`-wrapped elements (`Vec<Rc<Document>>`) rather than the generic
-/// `is_copy_type`-driven wrapping, because cloning a plain `Vec<Document>` on every getter call
-/// (as every other `#[observable]` field does) would clone each `Document`'s `Cell`/`RefCell`
-/// fields into independent copies — mutating one through the getter's clone would silently not
-/// persist. `Rc` cloning is cheap (a refcount bump) and every clone still refers to the same
-/// shared `Document`, so e.g. a `TabView`'s per-tab `TextArea` edits reach the real stored
-/// document. This is what lets a `viewmodel` hold a dynamic list of independently-reactive
-/// sub-viewmodels (needed for notepad's real multi-document tabs) without a general nested-list
-/// compiler feature; see docs/specs/ui_spec.md#tabs.
-fn nested_vec_item_type(ty: &str, from: &Module, table: &SymbolTable) -> Option<String> {
-    let inner = ty.strip_prefix("Vec<")?.strip_suffix(">")?.trim();
-    // `resolve` only finds `inner` if it's locally defined in `from` or reachable through one of
-    // `from`'s `use` declarations. The attribute-macro frontend (`attr_frontend.rs`) expands each
-    // `#[elwindui::viewmodel] mod { ... }` in isolation — it has no way to see a *different* mod's
-    // struct, so it always calls this with an empty table and relies entirely on the heuristic
-    // below, same idea as `is_copy_type`'s "capitalized and not a known scalar" guess.
-    let known = table.resolve(from, inner).is_some();
-    let looks_nested = inner.chars().next().is_some_and(|c| c.is_uppercase()) && inner != "String";
-    (known || looks_nested).then(|| inner.to_string())
-}
-
 /// Builds the token sequence a dependency's setter emits for one of its dependent fields, branching
 /// on the dependent's own `FieldKind`: a `Computed` dependent recomputes synchronously inline and
 /// notifies immediately (existing behavior); an `AsyncComputed` dependent only spawns a new
@@ -5391,7 +5373,7 @@ fn generate_view(
     };
     let mut ctx = ViewCtx {
         closure_param: None,
-        closure_param_is_rc_identity: false,
+        closure_param_type: None,
         own_fields,
         mutable_own_fields: HashSet::new(),
         property_dependencies: own_dependents_of.clone(),
@@ -5417,6 +5399,10 @@ fn generate_view(
         storage: ViewStorage::Component,
         environment_scope_bindings_are_lexical: false,
         dynamic_slots_are_lexical: false,
+        template_parent_type: view
+            .template_header
+            .as_ref()
+            .map(|_| ResolvedTypeRef::new(target_name.clone())),
     };
 
     // Component default bodies are compiled through the same semantic backend used by standalone
@@ -8934,11 +8920,10 @@ struct ViewCtx {
     /// the plain local variable that name is aliased to, rather than treating it as a component
     /// field owner. `None` everywhere else.
     closure_param: Option<String>,
-    /// Whether the current renderer parameter is supplied by an Rc-identity-preserving outer
-    /// collection. Nested collection paths such as `outer_item.children` can then retain their
-    /// own child renderers across refreshes without requiring the renderer parameter's concrete
-    /// item type to be present in the consumer's symbol table.
-    closure_param_is_rc_identity: bool,
+    /// The concrete DSL type represented by the current renderer parameter. Nested collection
+    /// paths resolve from this type, so an outer item's Rc representation never predicts the
+    /// identity semantics of one of its fields.
+    closure_param_type: Option<ResolvedTypeRef>,
     /// This component's own `#[param]`-shaped fields (no initializer — the same set `generate_view`
     /// turns into `new`'s positional arguments / raw struct fields, see `param_names`), mapped to
     /// each field's own declared type string. A bare 1-segment reference to one of these (e.g.
@@ -9025,6 +9010,9 @@ struct ViewCtx {
     /// slots alongside the renderer-local item plan and retains them through the item's existing
     /// subscription ownership.
     dynamic_slots_are_lexical: bool,
+    /// The concrete target type represented by a typed template parent alias, when one is known.
+    /// This is used only by the shared static collection resolver.
+    template_parent_type: Option<ResolvedTypeRef>,
 }
 
 impl ViewCtx {
@@ -9034,9 +9022,9 @@ impl ViewCtx {
         ctx
     }
 
-    fn with_closure_param_rc_identity(&self, is_rc_identity: bool) -> ViewCtx {
+    fn with_closure_param_type(&self, item_type: Option<ResolvedTypeRef>) -> ViewCtx {
         let mut ctx = self.clone();
-        ctx.closure_param_is_rc_identity = is_rc_identity;
+        ctx.closure_param_type = item_type;
         ctx
     }
 
@@ -9045,6 +9033,24 @@ impl ViewCtx {
         ctx.environment_scope_bindings_are_lexical = true;
         ctx.dynamic_slots_are_lexical = true;
         ctx
+    }
+
+    fn resolve_collection(
+        &self,
+        collection: &ViewExpr,
+        from: &Module,
+        table: &SymbolTable,
+    ) -> Result<ResolvedCollection, crate::type_resolution::ResolutionFailure> {
+        let context = ResolutionContext {
+            from,
+            table,
+            own_fields: &self.own_fields,
+            lexical_name: self.closure_param.as_deref(),
+            lexical_type: self.closure_param_type.as_ref(),
+            template_parent_alias: self.template_parent_alias.as_deref(),
+            template_parent_type: self.template_parent_type.as_ref(),
+        };
+        crate::type_resolution::resolve_collection(collection, &context)
     }
 
     fn is_template_storage(&self) -> bool {
@@ -9227,7 +9233,7 @@ pub(crate) fn lower_template_body(
     let refresh_cell_ident = format_ident!("__elwindui_template_refresh_cell");
     let ctx = ViewCtx {
         closure_param: None,
-        closure_param_is_rc_identity: false,
+        closure_param_type: None,
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
         property_dependencies: HashMap::new(),
@@ -9248,6 +9254,7 @@ pub(crate) fn lower_template_body(
         },
         environment_scope_bindings_are_lexical: true,
         dynamic_slots_are_lexical: true,
+        template_parent_type: Some(ResolvedTypeRef::new(target_type.to_string())),
     };
 
     let mut plan = Vec::new();
@@ -10448,6 +10455,7 @@ fn emit_for_renderer(
     from: &Module,
     table: &SymbolTable,
     item_trait: &ItemTraitTokens,
+    item_type: Option<&ResolvedTypeRef>,
     subscribe_to_item_changes: bool,
     environment_scope: Option<&syn::Ident>,
 ) -> TokenStream {
@@ -10468,7 +10476,7 @@ fn emit_for_renderer(
     // in this closure, so the item-body context must use the lexical policy afterward.
     let closure_ctx = ctx
         .with_closure_param(binding)
-        .with_closure_param_rc_identity(subscribe_to_item_changes)
+        .with_closure_param_type(item_type.cloned())
         .with_lexical_environment_scope_bindings();
     let mut plan = Vec::new();
     let mut roots = Vec::new();
@@ -11444,82 +11452,27 @@ fn dynamic_collection_item_trait_for_info(info: &TypeInfo) -> syn::Ident {
 /// Keeping this conservative is intentional: an unresolved expression must never be treated as
 /// identity-stable merely because it happens to yield `Rc` values at runtime.
 ///
-/// Three independent ways to prove that: the collection's own declared type textually says
-/// `Vec<Rc<T>>` (checked here directly), a known viewmodel's `#[observable] Vec<T>` field (which
-/// `generate_viewmodel` stores as `Vec<Rc<T>>`), or the loop body hands the item to some child
-/// element's `#[bindable]` or `#[two_way]` field (`for_body_binds_item_to_a_bindable_field`, below) — the latter
-/// deliberately never resolves the *item*'s own type (e.g. `DocumentViewModel`) at all, only the
-/// *receiving component*'s (e.g. `DocumentView`), for the same reason `#[bindable]` itself exists: a
-/// `#[elwindui::viewmodel]` type is commonly declared in a plain `.rs` file (or a sibling
-/// `#[elwindui::component]` proc-macro invocation) that the `for` loop's own file/module never has
-/// a `use` for and was never going to need one, since it only ever references the item through the
-/// loop variable — so a resolve-by-name check against *that* type is fragile in a way a check
-/// against the always-in-scope receiving component type isn't (see
-/// `docs/design/backends/winui3_backend_design.md`'s "Root cause of 'text not reflected after Open'" for the
-/// concrete bug this replaced).
+/// The shared resolver proves the collection's own declared `Vec<Rc<T>>` shape or a known
+/// viewmodel's `#[observable] Vec<T>` field (which `generate_viewmodel` stores as `Vec<Rc<T>>`).
+/// The separate body rule below also preserves the established `#[bindable]`/`#[two_way]`
+/// ownership escape hatch: it deliberately resolves the receiving component's field rather than
+/// the item's own type (for example, `DocumentView` rather than an otherwise out-of-scope
+/// `DocumentViewModel`). This keeps the visibility boundary that the existing `#[bindable]`
+/// semantics rely on (see `docs/design/backends/winui3_backend_design.md`'s "Root cause of 'text
+/// not reflected after Open'" for the concrete bug this replaced).
 fn collection_uses_rc_identity(
-    collection: &ViewExpr,
+    collection_resolution: Option<&ResolvedCollection>,
     body: &[ChildEntry],
     binding: &str,
-    ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
 ) -> bool {
-    if collection_type_is_vec_rc(collection, ctx, from, table) {
+    if collection_resolution
+        .is_some_and(|resolved| resolved.collection_identity() == CollectionIdentity::RcIdentity)
+    {
         return true;
     }
     for_body_binds_item_to_a_bindable_field(body, binding, from, table)
-}
-
-fn collection_type_is_vec_rc(
-    collection: &ViewExpr,
-    ctx: &ViewCtx,
-    from: &Module,
-    table: &SymbolTable,
-) -> bool {
-    let ViewExpr::Path(path) = collection else {
-        return false;
-    };
-    let (collection_type, is_viewmodel_observable) = match path.as_slice() {
-        [field] => match ctx.own_fields.get(field) {
-            Some(collection_type) => (collection_type.as_str(), false),
-            None => return false,
-        },
-        [owner, field] => {
-            if ctx.closure_param.as_deref() == Some(owner) && ctx.closure_param_is_rc_identity {
-                // The enclosing renderer only sets this policy when its source collection was
-                // proven to contain Rc identities. Generated observable Vec fields then expose
-                // the same Rc-wrapped item shape through the renderer parameter, even though the
-                // parameter's concrete item type is intentionally not in this consumer's symbol
-                // table.
-                return true;
-            }
-            let Some(owner_type) = ctx.own_fields.get(owner) else {
-                return false;
-            };
-            let Some(owner_info) = table.resolve(from, strip_rc_wrapper(owner_type)) else {
-                return false;
-            };
-            let Some(collection_type) = owner_info.value_field_types.get(field) else {
-                return false;
-            };
-            (
-                collection_type.as_str(),
-                owner_info.is_viewmodel
-                    && matches!(owner_info.fields.get(field), Some(FieldKind::Observable))
-                    && nested_vec_item_type(collection_type, from, table).is_some(),
-            )
-        }
-        _ => return false,
-    };
-    let compact = collection_type
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>();
-    is_viewmodel_observable
-        || compact.starts_with("Vec<Rc<")
-        || compact.starts_with("Vec<std::rc::Rc<")
-        || compact.starts_with("Vec<rc::Rc<")
 }
 
 /// Whether `binding` (the `for`-loop's own bare loop variable) is passed, anywhere in `body`
@@ -12620,8 +12573,14 @@ fn plan_dynamic_entry(
                 environment_scope: None,
             };
             let item_trait = dynamic_collection_item_trait_ty(&parent, from, table);
-            let rc_identity =
-                collection_uses_rc_identity(collection, body, binding, ctx, from, table);
+            let collection_resolution = ctx.resolve_collection(collection, from, table).ok();
+            let rc_identity = collection_uses_rc_identity(
+                collection_resolution.as_ref(),
+                body,
+                binding,
+                from,
+                table,
+            );
             let renderer = emit_for_renderer(
                 binding,
                 body,
@@ -12629,6 +12588,9 @@ fn plan_dynamic_entry(
                 from,
                 table,
                 &item_trait,
+                collection_resolution
+                    .as_ref()
+                    .and_then(|resolved| resolved.collection_item_type()),
                 rc_identity,
                 environment_scope,
             );
@@ -17948,7 +17910,7 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
 ) -> TokenStream {
     let ctx = ViewCtx {
         closure_param: None,
-        closure_param_is_rc_identity: false,
+        closure_param_type: None,
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
         property_dependencies: HashMap::new(),
@@ -17961,7 +17923,7 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
         target: format_ident!("__ElwinduiTemplateTarget"),
         template_parent: Some(parent.clone()),
         template_property_bounds: Some(property_bounds.clone()),
-        template_target: Some(template_target),
+        template_target: Some(template_target.clone()),
         template_bare_parent_fields: bare_parent_fields,
         storage: ViewStorage::Template {
             environment: format_ident!("__environment"),
@@ -17969,6 +17931,7 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
         },
         environment_scope_bindings_are_lexical: true,
         dynamic_slots_are_lexical: true,
+        template_parent_type: Some(ResolvedTypeRef::new(template_target.to_string())),
     };
     emit_on_event_closure_body(body, closure_params, &ctx, &EmitMode::Construction)
 }
@@ -21090,6 +21053,131 @@ struct NotepadWindow {
             items: vec![Item::ViewModel(def)],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn nested_plain_collection_does_not_inherit_outer_rc_identity() {
+        let module = multi_item_module(&[
+            TestItem::ViewModel(r#"mod nested_plain_child_mod { struct NestedPlainChild { } }"#),
+            TestItem::ViewModel(
+                r#"
+                mod nested_plain_outer_mod {
+                    struct NestedPlainOuter {
+                        #[observable(default = Vec::new())]
+                        children: Vec<String>,
+                    }
+                }
+                "#,
+            ),
+            TestItem::ViewModel(
+                r#"
+                mod nested_plain_root_mod {
+                    struct NestedPlainRoot {
+                        #[observable(default = Vec::new())]
+                        items: Vec<NestedPlainOuter>,
+                    }
+                }
+                "#,
+            ),
+            TestItem::Component(
+                Some("VerticalLayout"),
+                r#"
+                struct NestedPlainHost {
+                    #[bindable]
+                    vm: Rc<NestedPlainRoot>,
+
+                    body: view! {
+                        VerticalLayout {
+                            for outer_item in vm.items {
+                                VerticalLayout {
+                                    for child in outer_item.children {
+                                        TextBlock { text: child }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+                "#,
+            ),
+        ]);
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("nested_plain_collection_identity", &generated);
+        let rendered = generated.to_string();
+        assert_eq!(rendered.matches("replace_rc_items").count(), 1);
+        let nested_rebuild_calls = rendered
+            .match_indices("replace_items")
+            .filter(|(index, _)| rendered[*index..].contains("outer_item . children"))
+            .count();
+        assert!(nested_rebuild_calls > 0, "nested rebuild call: {rendered}");
+    }
+
+    #[test]
+    fn nested_generated_model_collection_retains_rc_identity() {
+        let module = multi_item_module(&[
+            TestItem::ViewModel(
+                r#"
+                mod nested_rc_child_mod {
+                    struct NestedRcChild {
+                        #[observable(default = String::new())]
+                        label: String,
+                    }
+                }
+                "#,
+            ),
+            TestItem::ViewModel(
+                r#"
+                mod nested_rc_outer_mod {
+                    struct NestedRcOuter {
+                        #[observable(default = Vec::new())]
+                        children: Vec<NestedRcChild>,
+                    }
+                }
+                "#,
+            ),
+            TestItem::ViewModel(
+                r#"
+                mod nested_rc_root_mod {
+                    struct NestedRcRoot {
+                        #[observable(default = Vec::new())]
+                        items: Vec<NestedRcOuter>,
+                    }
+                }
+                "#,
+            ),
+            TestItem::Component(
+                Some("VerticalLayout"),
+                r#"
+                struct NestedRcHost {
+                    #[bindable]
+                    vm: Rc<NestedRcRoot>,
+
+                    body: view! {
+                        VerticalLayout {
+                            for outer_item in vm.items {
+                                VerticalLayout {
+                                    for child in outer_item.children {
+                                        TextBlock { text: child.label }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+                "#,
+            ),
+        ]);
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("nested_generated_model_collection_identity", &generated);
+        let rendered = generated.to_string();
+        assert_eq!(rendered.matches("replace_items (").count(), 0);
+        let nested_rc_calls = rendered
+            .match_indices("replace_rc_items")
+            .filter(|(index, _)| rendered[*index..].contains("outer_item . children"))
+            .count();
+        assert!(nested_rc_calls > 0, "nested Rc call: {rendered}");
     }
 
     /// Regression test for the real `examples/notepad` bug this session root-caused: a `for` loop

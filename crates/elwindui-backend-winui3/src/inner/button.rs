@@ -558,17 +558,19 @@ mod hosted_xaml_regression_tests {
         let pass_count_after_drain = RELAYOUT_PASS_COUNT_AFTER_DRAIN
             .with(|slot| *slot.borrow())
             .expect("pass count after drain should have been recorded");
-        // Each host settles in exactly 2 real passes here (confirmed independent of burst size --
-        // 20 vs. 500 `set_text` calls against `probe` both produce the same total), matching
-        // `RelayoutCycleState::run_coalesced`'s own already-tested contract
-        // (`run_coalesced_same_host_reentry_reruns_once_without_recursing`): setting real text
-        // content mid-measure legitimately dirties the same host once more (real text metrics are
-        // only available after the first attach-driven pass), producing one coalesced rerun of
-        // `relayout_static_pass` before this per-turn scheduling layer's own queued job resolves --
-        // never a separate additional `DispatcherQueue` job. 4 total (2 per host, both hosts
-        // independent) is therefore the correct, bounded value, not a per-invalidation count.
+        // Each host settles in exactly 1 real pass here (confirmed independent of burst size --
+        // 20 vs. 500 `set_text` calls against `probe` both produce the same total: 2). This value
+        // dropped from an earlier-measured 4 once Issue #261 review remediation §2.4 routed
+        // `Canvas.SizeChanged` through this same per-host scheduler instead of calling
+        // `relayout_static` directly: previously, a native `SizeChanged` fired by this burst's own
+        // arrange work ran an *unconditional*, un-coalesced extra pass regardless of `pending`/
+        // `in_progress` state (what looked like a legitimate `run_coalesced` mid-measure rerun was
+        // actually this bypass). Now that event is scheduled through the same pending/ticket state
+        // machine as everything else, so it either gets absorbed into the in-flight cycle or
+        // properly deferred to a later turn -- it no longer forces a same-turn duplicate. 2 total
+        // (1 per host, both hosts independent) is therefore the correct, bounded value.
         assert_eq!(
-            pass_count_after_drain, 4,
+            pass_count_after_drain, 2,
             "the coalesced burst against the first host and the independent invalidation against \
              the sibling host must each settle in the same small, bounded number of real passes \
              once this UI-turn drains, regardless of how many invalidations were coalesced into \

@@ -136,6 +136,51 @@ impl UiCallbackRegistryOwner {
         id
     }
 
+    /// Removes a single `Event`-kind registration by id, ahead of this owner's own `Drop`/`clear`.
+    /// Used by relayout scheduling (Issue #261 review remediation) to release a queued dispatcher
+    /// job's callback as soon as it either fires or is superseded, instead of letting it accumulate
+    /// in the TLS map (and in this owner's own `registrations` bookkeeping) until the whole host
+    /// drops. A already-removed id is a safe no-op, matching every `invoke_ui_*` fallback.
+    pub(crate) fn unregister_event(&self, id: usize) {
+        remove_ui_callback(UiCallbackKind::Event, id);
+        self.0
+            .registrations
+            .borrow_mut()
+            .retain(|&(kind, entry_id)| !(matches!(kind, UiCallbackKind::Event) && entry_id == id));
+    }
+
+    /// Registers a no-argument callback that removes its own registration the moment it fires,
+    /// *before* running `callback` — safe because `invoke_ui_event_callback` already clones the
+    /// `Rc` out of the map and drops that borrow before calling it (see that function's own doc
+    /// comment on the same re-entrancy hazard). Used for one-shot dispatcher-queue relayout jobs
+    /// (Issue #261 review remediation) so a burst of separate relayout bursts doesn't leave a
+    /// linearly growing trail of already-fired callback entries behind in either the TLS map or
+    /// this owner's own `registrations` bookkeeping.
+    pub(crate) fn register_one_shot_event(&self, callback: Rc<dyn Fn()>) -> usize {
+        let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
+        let weak_inner = Rc::downgrade(&self.0);
+        let wrapped: Rc<dyn Fn()> = Rc::new(move || {
+            remove_ui_callback(UiCallbackKind::Event, id);
+            if let Some(inner) = weak_inner.upgrade() {
+                inner
+                    .registrations
+                    .borrow_mut()
+                    .retain(|&(kind, entry_id)| {
+                        !(matches!(kind, UiCallbackKind::Event) && entry_id == id)
+                    });
+            }
+            callback();
+        });
+        UI_EVENT_CALLBACKS.with(|callbacks| {
+            callbacks.borrow_mut().insert(id, wrapped);
+        });
+        self.0
+            .registrations
+            .borrow_mut()
+            .push((UiCallbackKind::Event, id));
+        id
+    }
+
     /// Registers a no-argument boolean callback owned by this lifetime group.
     pub(crate) fn register_bool_event(&self, callback: Rc<dyn Fn() -> bool>) -> usize {
         let id = register_ui_bool_event_callback(callback);
@@ -866,6 +911,59 @@ mod tests {
             invoke_ui_event_callback(id);
             assert_eq!(calls.get(), 1);
         }
+    }
+
+    /// R3 (Issue #261 review remediation): a one-shot callback removes itself from both the TLS
+    /// map and the owning `UiCallbackRegistryOwner`'s own bookkeeping the moment it fires, so many
+    /// separate register/invoke cycles against one long-lived owner (mirroring a `TreeHost` firing
+    /// many separate relayout bursts over its lifetime) never grow `ui_event_callback_count()`
+    /// past baseline once each cycle's callback has run.
+    #[test]
+    fn one_shot_event_callback_returns_to_baseline_across_many_cycles() {
+        let baseline = ui_event_callback_count();
+        let owner = UiCallbackRegistryOwner::default();
+        let calls = Rc::new(Cell::new(0));
+
+        for _ in 0..50 {
+            let calls_for_callback = calls.clone();
+            let id = owner.register_one_shot_event(Rc::new(move || {
+                calls_for_callback.set(calls_for_callback.get() + 1);
+            }));
+            assert_eq!(ui_event_callback_count(), baseline + 1);
+            invoke_ui_event_callback(id);
+            // Firing again after it already ran must be a safe no-op, not a double call.
+            invoke_ui_event_callback(id);
+            assert_eq!(ui_event_callback_count(), baseline);
+        }
+
+        assert_eq!(calls.get(), 50);
+        // The owner's own `registrations` bookkeeping must also have been drained by each firing,
+        // not just the TLS map — dropping it now must not attempt to remove anything further.
+        drop(owner);
+        assert_eq!(ui_event_callback_count(), baseline);
+    }
+
+    /// R3: `unregister_event` removes a still-pending (never-fired) registration immediately,
+    /// used when a queued relayout job is superseded before it ever runs.
+    #[test]
+    fn unregister_event_removes_a_pending_registration_before_it_fires() {
+        let baseline = ui_event_callback_count();
+        let owner = UiCallbackRegistryOwner::default();
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_callback = calls.clone();
+        let id = owner.register_event(Rc::new(move || {
+            calls_for_callback.set(calls_for_callback.get() + 1);
+        }));
+        assert_eq!(ui_event_callback_count(), baseline + 1);
+
+        owner.unregister_event(id);
+        assert_eq!(ui_event_callback_count(), baseline);
+        invoke_ui_event_callback(id);
+        assert_eq!(calls.get(), 0, "unregistered callback must not fire");
+
+        // Dropping the owner afterward must not double-remove or panic.
+        drop(owner);
+        assert_eq!(ui_event_callback_count(), baseline);
     }
 
     #[test]

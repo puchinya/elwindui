@@ -42,6 +42,7 @@ use elwindui_core::ui::{
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
 use windows::Foundation::{EventHandler, TypedEventHandler};
 use windows::core::{IInspectable, Interface};
 
@@ -239,6 +240,20 @@ pub struct TreeHostPanel {
     animation_runtime: Rc<AnimationRuntime>,
     rendering: Rc<WinUI3RenderingState>,
     accessibility: Rc<WinUI3AccessibilityState>,
+    /// Weak route to whichever `WinUI3RelayoutHost` `set_tree()` most recently installed — lets
+    /// `Canvas.SizeChanged` and `force_relayout()` schedule through that host's own
+    /// pending/queue-ticket state machine instead of calling `relayout_static` directly and
+    /// bypassing it (Issue #261 review remediation §2.4/§2.5). `Rc<RefCell<..>>`, not a plain
+    /// `RefCell<..>` field, so it can be independently downgraded and captured weakly by the
+    /// `SizeChanged` closure below, the same pattern every other field here already uses.
+    /// Replaced wholesale (not mutated in place) each time `set_tree()` installs a new host; the
+    /// old `Weak` simply stops upgrading once nothing else holds its target's `Rc` — no explicit
+    /// teardown needed.
+    relayout_host: Rc<RefCell<Weak<WinUI3RelayoutHost>>>,
+    /// Bit-exact `(width, height)` last actually applied by `set_viewport_size` — see that
+    /// method's own doc comment (Issue #261 review remediation §3.4). `None` before the first
+    /// call, so the first push is never suppressed.
+    last_viewport_size: Cell<Option<(u64, u64)>>,
 }
 
 #[cfg(test)]
@@ -274,7 +289,37 @@ pub(crate) fn reset_relayout_static_pass_count_for_test() {
 /// This is a distinct layer from `RelayoutCycleState::run_coalesced`, which continues to own
 /// same-host reentrancy *within* one already-running pass (see `relayout_static`'s own doc
 /// comment) — `pending`/`queue_ticket` below own coalescing *across* separate turns instead.
+/// Identifies why a given relayout cycle was scheduled/realized — attached to the
+/// `ELWINDUI_PERF_TRACE` diagnostic line emitted per real cycle (see `run_relayout_now`) so a
+/// live run's actual pass count can be attributed back to its originating call sites instead of
+/// only being visible as one opaque total (Issue #261 review remediation §3.3).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RelayoutSource {
+    /// A general `elwindui_core::ui::RelayoutHost::request_relayout` invalidation (an element's
+    /// own `invalidate_measure`/`invalidate_arrange`/`invalidate_render`).
+    QueuedRequest,
+    /// The native `Canvas.SizeChanged` event.
+    CanvasSizeChanged,
+    /// `TreeHostPanel::force_relayout()` called directly by an owner (e.g. `TabView`/`ScrollView`
+    /// pushing an explicit content-area size ad hoc).
+    ForceRelayout,
+    /// `TreeHostPanel::set_tree()`'s own initial relayout of newly attached content.
+    SetTreeInitial,
+    /// `TreeHostPanel::set_active(true)` reactivating a previously suspended host.
+    SetActiveReactivate,
+    /// `TreeHostPanel::set_viewport_size()` pushing an owner-supplied logical viewport.
+    ViewportSync,
+    /// `RelayoutHost::flush_interactive_relayout()` realizing an already-queued batch early.
+    InteractiveFlush,
+}
+
+static NEXT_RELAYOUT_HOST_DIAGNOSTIC_ID: AtomicU64 = AtomicU64::new(1);
+
 pub(crate) struct WinUI3RelayoutHost {
+    /// Stable, process-local id for `ELWINDUI_PERF_TRACE` diagnostics — lets a live run's log
+    /// attribute every real relayout cycle to one specific host instance (Issue #261 review
+    /// remediation §3.3), since two sibling hosts otherwise look identical in a raw log.
+    diagnostic_id: u64,
     canvas: Canvas,
     composition: Weak<RefCell<CompositionRenderer>>,
     tree: Weak<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
@@ -297,12 +342,21 @@ pub(crate) struct WinUI3RelayoutHost {
     /// start of the first `request_relayout` in a burst; cleared exactly once, by whichever of the
     /// queued job or an interactive flush realizes the pass first.
     pending: Cell<bool>,
-    /// The strongest `InvalidationKind` observed since `pending` last transitioned from `false` to
-    /// `true` — kept so a future `InvalidationKind::Render` fast path can consult it without
-    /// changing this coalescing layer's own contract; this backend still always performs a full
-    /// `relayout_static` pass regardless of the recorded kind (see `request_relayout`'s own
-    /// `_kind`-unused note below).
+    /// The strongest `InvalidationKind` observed *within the current batch* — reset to
+    /// `InvalidationKind::default()` every time a batch is claimed (by the queued job, by
+    /// `flush_interactive_relayout`, or by `force_relayout`'s synchronous path), so a previous
+    /// `Measure` batch can never permanently upgrade a later, unrelated `Render`-only batch
+    /// (Issue #261 review remediation §2.2 — the original version of this field never reset and
+    /// so only ever grew monotonically for a host's whole lifetime). Kept so a future
+    /// `InvalidationKind::Render` fast path can consult it without changing this coalescing
+    /// layer's own contract; this backend still always performs a full `relayout_static` pass
+    /// regardless of the recorded kind.
     pending_kind: Cell<elwindui_core::ui::InvalidationKind>,
+    /// The `RelayoutSource` that started the *current* batch (first-wins: later calls folded into
+    /// the same batch via `pending_kind`'s strongest-wins merge do not overwrite this) — recorded
+    /// purely for the `ELWINDUI_PERF_TRACE` diagnostic emitted when the batch is realized (Issue
+    /// #261 review remediation §3.3).
+    pending_source: Cell<RelayoutSource>,
     /// Bumped every time the currently-queued `DispatcherQueue` job is superseded — either because
     /// it already ran (see `run_queued_relayout`) or because `flush_interactive_relayout` realized
     /// the pass first. The queued job's closure captures the ticket value valid at enqueue time and
@@ -336,15 +390,17 @@ pub(crate) struct WinUI3RelayoutHost {
 
 impl WinUI3RelayoutHost {
     /// The actual measure/arrange/composition-reconcile realization, shared by the queued
-    /// dispatcher job and `flush_interactive_relayout`. Caller is responsible for having already
-    /// cleared `pending` (and bumped `queue_ticket`, if superseding a queued job) before calling
-    /// this — this method only upgrades every weakly-held field and runs the pass.
-    fn run_relayout_now(&self) {
-        // A reentrant call (see `request_relayout`'s `in_progress` branch) must not clear
-        // `in_progress` when it returns — only the outermost call, which is the one that actually
-        // set it from `false`, may do that. `RelayoutCycleState::run_coalesced` itself already
-        // guarantees a reentrant call here never runs `relayout_static_pass` a second time; this
-        // only protects `in_progress`'s own bookkeeping around that.
+    /// dispatcher job, `flush_interactive_relayout`, and `force_relayout`'s synchronous path.
+    /// Caller is responsible for having already cleared `pending`/`pending_kind` (and bumped
+    /// `queue_ticket`, if superseding a queued job) before calling this — this method only
+    /// upgrades every weakly-held field, emits the `ELWINDUI_PERF_TRACE` cycle-attribution line,
+    /// and runs the pass.
+    fn run_relayout_now(&self, source: RelayoutSource) {
+        // A reentrant call (see `schedule`'s `in_progress` branch) must not clear `in_progress`
+        // when it returns — only the outermost call, which is the one that actually set it from
+        // `false`, may do that. `RelayoutCycleState::run_coalesced` itself already guarantees a
+        // reentrant call here never runs `relayout_static_pass` a second time; this only protects
+        // `in_progress`'s own bookkeeping around that.
         let was_in_progress = self.in_progress.replace(true);
         let upgraded: (
             Option<Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>>,
@@ -376,6 +432,12 @@ impl WinUI3RelayoutHost {
             Some(relayout_cycle),
         ) = upgraded
         {
+            if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
+                eprintln!(
+                    "[perf] relayout_cycle host={} source={:?}",
+                    self.diagnostic_id, source
+                );
+            }
             TreeHostPanel::relayout_static(
                 &self.canvas,
                 &composition,
@@ -393,24 +455,104 @@ impl WinUI3RelayoutHost {
         }
     }
 
+    /// Supersedes any queued dispatcher job and claims the current batch (resetting
+    /// `pending`/`pending_kind` exactly once), then realizes it synchronously right now — the
+    /// single shared path `flush_interactive_relayout` and `force_relayout` both use so neither
+    /// leaves a stale queued job to fire a redundant second pass afterward (Issue #261 review
+    /// remediation §2.5). Unlike `flush_interactive_relayout`, callers may invoke this
+    /// unconditionally regardless of whether anything was actually pending.
+    fn realize_synchronously(&self, source: RelayoutSource) {
+        self.queue_ticket
+            .set(self.queue_ticket.get().wrapping_add(1));
+        self.pending.set(false);
+        self.pending_kind
+            .set(elwindui_core::ui::InvalidationKind::default());
+        self.run_relayout_now(source);
+    }
+
     /// Realizes the queued relayout, but only if `ticket` still matches this host's live
     /// `queue_ticket` — see `queue_ticket`'s own doc comment for why a stale job must be a no-op.
     fn run_queued_relayout(&self, ticket: u64) {
         if !self.pending.get() || self.queue_ticket.get() != ticket {
             return;
         }
+        let source = self.pending_source.get();
         self.queue_ticket
             .set(self.queue_ticket.get().wrapping_add(1));
         self.pending.set(false);
-        self.run_relayout_now();
+        self.pending_kind
+            .set(elwindui_core::ui::InvalidationKind::default());
+        self.run_relayout_now(source);
+    }
+
+    /// The per-host, per-UI-turn coalescing layer shared by `RelayoutHost::request_relayout` (via
+    /// the `RelayoutSource::QueuedRequest`/general-invalidation path) and `Canvas.SizeChanged`
+    /// (via `RelayoutSource::CanvasSizeChanged`) — the two top-level entry points that both need
+    /// "coalesce a burst within one UI turn into exactly one queued job" semantics without either
+    /// one requiring the other's own arguments (a `SizeChanged` event has no dirty render group to
+    /// mark). `RelayoutHost::request_relayout` marks its render group dirty *before* calling this;
+    /// this method owns everything from there on (Issue #261 review remediation §2.4).
+    fn schedule(&self, kind: elwindui_core::ui::InvalidationKind, source: RelayoutSource) {
+        let Some(active) = self.active.upgrade() else {
+            return;
+        };
+        if !active.get() {
+            return;
+        }
+        self.pending_kind.set(self.pending_kind.get().max(kind));
+        if self.in_progress.get() {
+            // A structural change made mid-measure, synchronously nested inside this same host's
+            // own currently-running pass — hand it straight to `relayout_static` so
+            // `RelayoutCycleState::run_coalesced`'s own reentrancy coalescing owns it, exactly as
+            // it did before this per-turn scheduling layer existed. `run_relayout_now` upgrades
+            // everything itself, so a dead host is already handled there.
+            self.run_relayout_now(source);
+            return;
+        }
+        if self.pending.replace(true) {
+            return; // a job is already queued for this UI-turn — it will pick up this call's changes too
+        }
+        self.pending_source.set(source);
+        let this: Option<Rc<WinUI3RelayoutHost>> = self.weak_self.borrow().upgrade();
+        let Some(this) = this else {
+            self.pending.set(false);
+            return;
+        };
+        let Ok(queue) = Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread() else {
+            // No dispatcher available on this thread (shouldn't normally happen — `schedule` only
+            // ever runs on the UI thread once a `DispatcherQueue` already exists). Realize
+            // immediately rather than silently dropping the relayout.
+            this.realize_synchronously(source);
+            return;
+        };
+        let ticket = self.queue_ticket.get();
+        let weak_this = Rc::downgrade(&this);
+        let callback_id = this
+            .callback_owner
+            .register_one_shot_event(Rc::new(move || {
+                if let Some(this) = weak_this.upgrade() {
+                    this.run_queued_relayout(ticket);
+                }
+            }));
+        let handler = Microsoft::UI::Dispatching::DispatcherQueueHandler::new(move || {
+            invoke_ui_event_callback(callback_id);
+            Ok(())
+        });
+        if queue.TryEnqueue(&handler).is_err() {
+            // Posting failed — unregister the now-unused one-shot callback (it will never fire)
+            // and realize immediately rather than leaving `pending` permanently stuck.
+            this.callback_owner.unregister_event(callback_id);
+            this.realize_synchronously(source);
+        }
     }
 }
 
 impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
     // This backend has no `InvalidationKind::Render` fast path yet (every relayout is a full
     // `relayout_static` rebuild regardless of what was invalidated) — `kind` is folded into
-    // `pending_kind` (strongest-wins) purely so a future fast path can consult it without changing
-    // this coalescing layer's contract; seeing `Render` calls here does not itself skip anything.
+    // `pending_kind` (strongest-wins within the current batch) purely so a future fast path can
+    // consult it without changing this coalescing layer's contract; seeing `Render` calls here
+    // does not itself skip anything.
     fn request_relayout(&self, dirty_group_id: u64, kind: elwindui_core::ui::InvalidationKind) {
         let active: Option<Rc<Cell<bool>>> = self.active.upgrade();
         let Some(active) = active else {
@@ -427,48 +569,7 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
                 render_tree.mark_dirty(dirty_group_id);
             }
         }
-        self.pending_kind.set(self.pending_kind.get().max(kind));
-        if self.in_progress.get() {
-            // A structural change made mid-measure, synchronously nested inside this same host's
-            // own currently-running pass — hand it straight to `relayout_static` so
-            // `RelayoutCycleState::run_coalesced`'s own reentrancy coalescing owns it, exactly as
-            // it did before this per-turn scheduling layer existed. `run_relayout_now` upgrades
-            // everything itself, so a dead host is already handled there.
-            self.run_relayout_now();
-            return;
-        }
-        if self.pending.replace(true) {
-            return; // a job is already queued for this UI-turn — it will pick up this call's changes too
-        }
-        let this: Option<Rc<WinUI3RelayoutHost>> = self.weak_self.borrow().upgrade();
-        let Some(this) = this else {
-            self.pending.set(false);
-            return;
-        };
-        let Ok(queue) = Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread() else {
-            // No dispatcher available on this thread (shouldn't normally happen — `request_relayout`
-            // only ever runs on the UI thread once a `DispatcherQueue` already exists). Realize
-            // immediately rather than silently dropping the relayout.
-            this.pending.set(false);
-            this.run_relayout_now();
-            return;
-        };
-        let ticket = self.queue_ticket.get();
-        let weak_this = Rc::downgrade(&this);
-        let callback_id = this.callback_owner.register_event(Rc::new(move || {
-            if let Some(this) = weak_this.upgrade() {
-                this.run_queued_relayout(ticket);
-            }
-        }));
-        let handler = Microsoft::UI::Dispatching::DispatcherQueueHandler::new(move || {
-            invoke_ui_event_callback(callback_id);
-            Ok(())
-        });
-        if queue.TryEnqueue(&handler).is_err() {
-            // Posting failed — realize immediately rather than leaving `pending` permanently stuck.
-            this.pending.set(false);
-            this.run_relayout_now();
-        }
+        self.schedule(kind, RelayoutSource::QueuedRequest);
     }
 
     fn flush_interactive_relayout(&self) {
@@ -482,13 +583,7 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
         if !self.pending.get() {
             return; // nothing queued or in flight — an interactive flush with no pending work is a no-op
         }
-        // Supersede whichever job is currently queued (if any) before realizing synchronously, so
-        // that job's own `run_queued_relayout` sees a stale ticket and safely no-ops if it still
-        // fires afterward — see `queue_ticket`'s own doc comment.
-        self.queue_ticket
-            .set(self.queue_ticket.get().wrapping_add(1));
-        self.pending.set(false);
-        self.run_relayout_now();
+        self.realize_synchronously(RelayoutSource::InteractiveFlush);
     }
 }
 
@@ -611,6 +706,8 @@ impl TreeHostPanel {
             animation_runtime: AnimationRuntime::new(),
             rendering: Rc::new(WinUI3RenderingState::default()),
             accessibility,
+            relayout_host: Rc::new(RefCell::new(Weak::new())),
+            last_viewport_size: Cell::new(None),
         };
         #[cfg(windows)]
         this.accessibility.bind_canvas(&this.canvas);
@@ -941,57 +1038,19 @@ impl TreeHostPanel {
             }));
         }
         {
-            let weak = Rc::downgrade(&this.tree);
-            let weak_render_tree = Rc::downgrade(&this.render_tree);
-            let weak_native_children = Rc::downgrade(&this.native_children);
-            let weak_composition = Rc::downgrade(&this.composition);
-            let weak_keyboard = Rc::downgrade(&this.keyboard);
-            let weak_unconstrained_axes = Rc::downgrade(&this.unconstrained_axes);
-            let weak_active = Rc::downgrade(&this.active);
-            let weak_relayout_cycle = Rc::downgrade(&this.relayout_cycle);
-            let canvas_for_handler = this.canvas.clone();
+            // Issue #261 review remediation §2.4: routed through the current `WinUI3RelayoutHost`'s
+            // own per-turn scheduler instead of calling `relayout_static` directly, so a native
+            // resize burst coalesces with (and is superseded/coalesced the same way as) every other
+            // relayout source instead of always forcing an immediate, unbatched full pass.
+            let weak_relayout_host = Rc::downgrade(&this.relayout_host);
             let callback_id = this.callback_owner.register_event(Rc::new(move || {
-                let state: (
-                    Option<Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>>,
-                    Option<Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>>,
-                    Option<Rc<RefCell<NativeChildMap>>>,
-                    Option<Rc<RefCell<CompositionRenderer>>>,
-                    Option<Rc<KeyboardDispatcher>>,
-                    Option<Rc<Cell<(bool, bool)>>>,
-                    Option<Rc<Cell<bool>>>,
-                    Option<Rc<RelayoutCycleState>>,
-                ) = (
-                    weak.upgrade(),
-                    weak_render_tree.upgrade(),
-                    weak_native_children.upgrade(),
-                    weak_composition.upgrade(),
-                    weak_keyboard.upgrade(),
-                    weak_unconstrained_axes.upgrade(),
-                    weak_active.upgrade(),
-                    weak_relayout_cycle.upgrade(),
-                );
-                if let (
-                    Some(tree),
-                    Some(render_tree),
-                    Some(native_children),
-                    Some(composition),
-                    Some(keyboard),
-                    Some(unconstrained_axes),
-                    Some(active),
-                    Some(relayout_cycle),
-                ) = (
-                    state.0, state.1, state.2, state.3, state.4, state.5, state.6, state.7,
-                ) {
-                    Self::relayout_static(
-                        &canvas_for_handler,
-                        &composition,
-                        &tree,
-                        &render_tree,
-                        &native_children,
-                        &keyboard,
-                        unconstrained_axes.get(),
-                        &active,
-                        &relayout_cycle,
+                if let Some(host) = weak_relayout_host
+                    .upgrade()
+                    .and_then(|slot| slot.borrow().upgrade())
+                {
+                    host.schedule(
+                        elwindui_core::ui::InvalidationKind::Measure,
+                        RelayoutSource::CanvasSizeChanged,
                     );
                 }
             }));
@@ -1279,23 +1338,41 @@ impl TreeHostPanel {
     /// `InvalidateMeasure`/`InvalidateArrange`) on such a `Canvas` does not, in practice, make its
     /// `SizeChanged` fire on any later frame either — logged and observed directly, not assumed.
     pub(crate) fn force_relayout(&self) {
+        self.force_relayout_with_source(RelayoutSource::ForceRelayout);
+    }
+
+    /// Shared body of `force_relayout()`, parameterized by the `RelayoutSource` diagnostic tag so
+    /// internal callers with a more specific reason (`set_tree`'s initial layout,
+    /// `set_active(true)`'s reactivation, `set_viewport_size`'s explicit push) attribute
+    /// correctly. Issue #261 review remediation §2.5: routed through the currently-installed
+    /// `WinUI3RelayoutHost`'s own `realize_synchronously` (supersede queued ticket, consume
+    /// pending state, run) instead of calling `relayout_static` directly and bypassing that state
+    /// machine — without this, a queued dispatcher job already pending for this host would still
+    /// fire afterward and run a second, redundant pass.
+    fn force_relayout_with_source(&self, source: RelayoutSource) {
         if !self.active.get() {
             if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
                 eprintln!("[elwindui-winui3] skipped relayout for inactive TreeHostPanel");
             }
             return;
         }
-        Self::relayout_static(
-            &self.canvas,
-            &self.composition,
-            &self.tree,
-            &self.render_tree,
-            &self.native_children,
-            &self.keyboard,
-            self.unconstrained_axes.get(),
-            &self.active,
-            &self.relayout_cycle,
-        );
+        if let Some(host) = self.relayout_host.borrow().upgrade() {
+            host.realize_synchronously(source);
+        } else {
+            // No `WinUI3RelayoutHost` installed yet (called before any `set_tree()`) — fall back
+            // to the raw pass directly; there is no queued job to supersede in this case.
+            Self::relayout_static(
+                &self.canvas,
+                &self.composition,
+                &self.tree,
+                &self.render_tree,
+                &self.native_children,
+                &self.keyboard,
+                self.unconstrained_axes.get(),
+                &self.active,
+                &self.relayout_cycle,
+            );
+        }
         self.accessibility.rebuild();
     }
 
@@ -1316,10 +1393,21 @@ impl TreeHostPanel {
         } else {
             0.0
         };
+        // Issue #261 review remediation §3.4: bit-exact comparison (not `==`) against the last
+        // *applied* value, so a repeated identical push (observed in practice during docking-demo's
+        // startup/relayout storm) is a true no-op — no native setter call, no forced relayout —
+        // instead of unconditionally re-arranging every time. Bit-exact rather than `==` purely as
+        // a robustness match for `f64`'s general non-reflexive-equality hazard (`NaN`), even though
+        // both values here are already normalized to a finite, non-negative number above.
+        let key = (width.to_bits(), height.to_bits());
+        if self.last_viewport_size.get() == Some(key) {
+            return;
+        }
+        self.last_viewport_size.set(Some(key));
         let element = self.as_element();
         let _ = element.SetWidth(width);
         let _ = element.SetHeight(height);
-        self.force_relayout();
+        self.force_relayout_with_source(RelayoutSource::ViewportSync);
     }
 
     /// Activates or suspends this host's layout and rendering lifecycle.
@@ -1335,7 +1423,7 @@ impl TreeHostPanel {
             eprintln!("[elwindui-winui3] TreeHostPanel active={active}");
         }
         if active {
-            self.force_relayout();
+            self.force_relayout_with_source(RelayoutSource::SetActiveReactivate);
             return;
         }
 
@@ -1374,6 +1462,7 @@ impl TreeHostPanel {
     pub(crate) fn set_tree(&self, tree: Rc<dyn elwindui_core::ui::UIElementExt>) {
         self.cancel_and_unregister_current_tree();
         let host = Rc::new(WinUI3RelayoutHost {
+            diagnostic_id: NEXT_RELAYOUT_HOST_DIAGNOSTIC_ID.fetch_add(1, Ordering::Relaxed),
             canvas: self.canvas.clone(),
             composition: Rc::downgrade(&self.composition),
             tree: Rc::downgrade(&self.tree),
@@ -1385,6 +1474,7 @@ impl TreeHostPanel {
             relayout_cycle: Rc::downgrade(&self.relayout_cycle),
             pending: Cell::new(false),
             pending_kind: Cell::new(elwindui_core::ui::InvalidationKind::default()),
+            pending_source: Cell::new(RelayoutSource::SetTreeInitial),
             queue_ticket: Cell::new(0),
             in_progress: Cell::new(false),
             callback_owner: UiCallbackRegistryOwner::default(),
@@ -1393,6 +1483,7 @@ impl TreeHostPanel {
             rendering: Rc::downgrade(&self.rendering),
         });
         *host.weak_self.borrow_mut() = Rc::downgrade(&host);
+        *self.relayout_host.borrow_mut() = Rc::downgrade(&host);
         self.rendering.set_host(Rc::downgrade(&host));
         tree.as_ui_element()
             .set_invalidate_host(Some(Rc::clone(&host) as Rc<dyn RelayoutHost>));
@@ -1425,7 +1516,7 @@ impl TreeHostPanel {
         self.keyboard.shortcuts().collect_from_tree(&tree);
         *self.tree.borrow_mut() = Some(tree);
         *self.render_tree.borrow_mut() = None;
-        self.force_relayout();
+        self.force_relayout_with_source(RelayoutSource::SetTreeInitial);
     }
 
     /// Clears this host's tree, cleans up native composition and children, and closes any active popup.

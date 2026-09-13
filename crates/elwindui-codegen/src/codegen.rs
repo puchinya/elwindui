@@ -6,7 +6,7 @@
 use crate::ast::{
     AssignmentKind, Attr, ChildEntry, ClosureBody, ComponentDef, DeferredViewExpr, ElementNode,
     EnumDef, FieldDef, FieldKind, Initializer, Item, MethodDef, Module, ShortcutScope, StoreDef,
-    ViewAttribute, ViewBody, ViewDef, ViewExpr, ViewModelDef, ViewModifier,
+    UseDecl, ViewAttribute, ViewBody, ViewDef, ViewExpr, ViewModelDef, ViewModifier,
 };
 use crate::type_resolution::{
     CollectionIdentity, ResolutionContext, ResolvedCollection, ResolvedTypeRef,
@@ -29,9 +29,21 @@ use syn::visit_mut::VisitMut;
 /// different modules never collide, and a lookup must go through `resolve` (i.e. through a `use`,
 /// or be in the same module) instead of being visible from anywhere in the compilation unit. See
 /// docs/specs/dsl_spec.md §11, docs/design/tools/codegen_design.md
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ResolvedTypeKey {
+    pub(crate) module_path: Vec<String>,
+    pub(crate) item_name: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModuleResolutionContext {
+    uses: Vec<UseDecl>,
+}
+
 #[derive(Clone)]
 pub struct SymbolTable {
     types: HashMap<(Vec<String>, String), TypeInfo>,
+    module_contexts: HashMap<Vec<String>, ModuleResolutionContext>,
 }
 
 #[derive(Clone)]
@@ -1578,20 +1590,17 @@ fn dsl_concrete_type_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStre
 }
 
 impl SymbolTable {
-    /// Resolves `name` as seen from `from` to its symbol-table key: a type defined locally in
-    /// `from` (same real path), or brought into scope by one of `from`'s `use` declarations,
-    /// matched by real path exactly like Rust's own name resolution (`use`'s last path segment is
-    /// the item name; the segments before it — with a leading `crate` keyword stripped, since
-    /// `Module::path` never includes it — must equal some module's real path). `resolve` (below)
-    /// is the public, common-case wrapper; `resolve_is_native` needs the key itself so it can
-    /// recurse into *that* type's own `is_native` computation rather than reading a
-    /// not-yet-finalized `TypeInfo`.
-    fn resolve_key(&self, from: &Module, name: &str) -> Option<(Vec<String>, String)> {
-        let direct = (from.path.clone(), name.to_string());
+    fn resolve_key_with_context(
+        &self,
+        module_path: &[String],
+        uses: &[UseDecl],
+        name: &str,
+    ) -> Option<(Vec<String>, String)> {
+        let direct = (module_path.to_vec(), name.to_string());
         if self.types.contains_key(&direct) {
             return Some(direct);
         }
-        from.uses.iter().find_map(|u| {
+        uses.iter().find_map(|u| {
             let [prefix @ .., last] = u.path.as_slice() else {
                 return None;
             };
@@ -1605,6 +1614,57 @@ impl SymbolTable {
             let key = (real_prefix.to_vec(), name.to_string());
             self.types.contains_key(&key).then_some(key)
         })
+    }
+
+    /// Resolves `name` as seen from `from` to its symbol-table key: a type defined locally in
+    /// `from` (same real path), or brought into scope by one of `from`'s `use` declarations,
+    /// matched by real path exactly like Rust's own name resolution (`use`'s last path segment is
+    /// the item name; the segments before it — with a leading `crate` keyword stripped, since
+    /// `Module::path` never includes it — must equal some module's real path). `resolve` (below)
+    /// is the public, common-case wrapper; `resolve_is_native` needs the key itself so it can
+    /// recurse into *that* type's own `is_native` computation rather than reading a
+    /// not-yet-finalized `TypeInfo`.
+    fn resolve_key(&self, from: &Module, name: &str) -> Option<(Vec<String>, String)> {
+        self.resolve_key_with_context(&from.path, &from.uses, name)
+    }
+
+    pub(crate) fn resolve_type_key(&self, from: &Module, name: &str) -> Option<ResolvedTypeKey> {
+        self.resolve_key(from, name)
+            .map(|(module_path, item_name)| ResolvedTypeKey {
+                module_path,
+                item_name,
+            })
+    }
+
+    pub(crate) fn resolve_unqualified_type_key(&self, name: &str) -> Option<ResolvedTypeKey> {
+        let mut matches = self
+            .types
+            .iter()
+            .filter(|((_, candidate), info)| candidate == name && !info.is_builtin)
+            .map(|((module_path, item_name), _)| ResolvedTypeKey {
+                module_path: module_path.clone(),
+                item_name: item_name.clone(),
+            });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
+    pub(crate) fn type_info_for_key(&self, key: &ResolvedTypeKey) -> Option<&TypeInfo> {
+        self.types
+            .get(&(key.module_path.clone(), key.item_name.clone()))
+    }
+
+    pub(crate) fn resolve_type_key_in_defining_module(
+        &self,
+        owner: &ResolvedTypeKey,
+        name: &str,
+    ) -> Option<ResolvedTypeKey> {
+        let context = self.module_contexts.get(&owner.module_path)?;
+        self.resolve_key_with_context(&owner.module_path, &context.uses, name)
+            .map(|(module_path, item_name)| ResolvedTypeKey {
+                module_path,
+                item_name,
+            })
     }
 
     /// Resolves `name` as seen from `from`. Returns `None` if `name` isn't visible from `from` at
@@ -1621,13 +1681,8 @@ impl SymbolTable {
     /// spelling is present; ambiguous names stay unresolved instead of inventing a type-name
     /// dispatch rule or silently selecting one component from another module.
     pub fn resolve_unqualified(&self, name: &str) -> Option<&TypeInfo> {
-        let mut matches = self
-            .types
-            .iter()
-            .filter(|((_, candidate), info)| candidate == name && !info.is_builtin)
-            .map(|(_, info)| info);
-        let first = matches.next()?;
-        matches.next().is_none().then_some(first)
+        let key = self.resolve_unqualified_type_key(name)?;
+        self.type_info_for_key(&key)
     }
 }
 
@@ -1747,6 +1802,17 @@ pub(crate) fn strip_weak_wrapper(ty: &str) -> &str {
 
 pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
     let mut types = HashMap::new();
+    // Keep only the lightweight import context needed to resolve a field type after its owner has
+    // crossed a renderer boundary. The AST and TypeInfo remain owned by their existing callers;
+    // this map is keyed by real module path and stores cloned `use` paths once per module.
+    let mut module_contexts = HashMap::new();
+    for module in modules {
+        module_contexts
+            .entry(module.path.clone())
+            .or_insert_with(|| ModuleResolutionContext {
+                uses: module.uses.clone(),
+            });
+    }
     // `(module index, #[[inherits]] base name, effective view's root element type, #[native])` per
     // `component` key — the raw material `resolve_is_native` (below) needs; not every component has
     // an effective `view` (native leaf builtins and virtual builtins like `VerticalLayout`/`Rectangle`
@@ -2070,7 +2136,10 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
         }
     }
 
-    let table = SymbolTable { types };
+    let table = SymbolTable {
+        types,
+        module_contexts: module_contexts.clone(),
+    };
     let mut memo: HashMap<(Vec<String>, String), bool> = HashMap::new();
     let keys: Vec<(Vec<String>, String)> = table.types.keys().cloned().collect();
     for key in &keys {
@@ -2110,7 +2179,10 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
             .flatten()
             .map(|(name, _)| name);
     }
-    SymbolTable { types }
+    SymbolTable {
+        types,
+        module_contexts,
+    }
 }
 
 /// Resolves `name` as seen from `from` directly against `modules`' raw AST (no `SymbolTable`
@@ -5402,7 +5474,7 @@ fn generate_view(
         template_parent_type: view
             .template_header
             .as_ref()
-            .map(|_| ResolvedTypeRef::new(target_name.clone())),
+            .map(|_| ResolvedTypeRef::from_module(target_name.clone(), from, table)),
     };
 
     // Component default bodies are compiled through the same semantic backend used by standalone
@@ -5430,6 +5502,7 @@ fn generate_view(
                 .iter()
                 .map(|field| field.name.clone())
                 .collect(),
+            false,
         )
         .unwrap_or_else(|error| {
             panic!(
@@ -9226,6 +9299,7 @@ pub(crate) fn lower_template_body(
     target_type: TokenStream,
     parent_alias: String,
     bare_parent_fields: HashSet<String>,
+    template_parent_type: ResolvedTypeRef,
 ) -> Result<LoweredTemplateBody, String> {
     let property_bounds = Rc::new(RefCell::new(BTreeMap::new()));
     let parent_ident = format_ident!("__elwindui_template_parent");
@@ -9254,7 +9328,7 @@ pub(crate) fn lower_template_body(
         },
         environment_scope_bindings_are_lexical: true,
         dynamic_slots_are_lexical: true,
-        template_parent_type: Some(ResolvedTypeRef::new(target_type.to_string())),
+        template_parent_type: Some(template_parent_type),
     };
 
     let mut plan = Vec::new();
@@ -13043,6 +13117,7 @@ fn emit_deferred_view_value(
             target.clone(),
             parent_alias,
             ctx.template_bare_parent_fields.clone(),
+            false,
         )
         .unwrap_or_else(|error| panic!("invalid nested template_view body: {error}"));
         return crate::emit_view_factory(&compiled, target, &parent);
@@ -17905,6 +17980,7 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
     parent: &syn::Ident,
     property_bounds: &Rc<RefCell<BTreeMap<u64, Option<TokenStream>>>>,
     template_target: TokenStream,
+    template_parent_type: ResolvedTypeRef,
     parent_alias: String,
     bare_parent_fields: HashSet<String>,
 ) -> TokenStream {
@@ -17931,7 +18007,7 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
         },
         environment_scope_bindings_are_lexical: true,
         dynamic_slots_are_lexical: true,
-        template_parent_type: Some(ResolvedTypeRef::new(template_target.to_string())),
+        template_parent_type: Some(template_parent_type),
     };
     emit_on_event_closure_body(body, closure_params, &ctx, &EmitMode::Construction)
 }

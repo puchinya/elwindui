@@ -932,8 +932,8 @@ fn resolve_for_item_info<'a>(
         }
     }
 
-    let template_parent_type =
-        template_parent_alias.map(|_| ResolvedTypeRef::new(component.name.clone()));
+    let template_parent_type = template_parent_alias
+        .map(|_| ResolvedTypeRef::from_module(component.name.clone(), from, table));
     let context = ResolutionContext {
         from,
         table,
@@ -993,12 +993,12 @@ fn resolve_for_item_info<'a>(
             ),
         )
     })?;
-    resolve_type_ref_info(item_type, from, table).ok_or_else(|| {
+    resolve_type_ref_info(item_type, table).ok_or_else(|| {
         (
             ValidationDependency::RegistryDependent,
             format!(
                 "cannot resolve `for` item type `{}`",
-                item_type.declared_type
+                item_type.declared_type()
             ),
         )
     })

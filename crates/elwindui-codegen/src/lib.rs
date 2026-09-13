@@ -20,6 +20,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::rc::Rc;
 use syn::visit::Visit as _;
+use type_resolution::ResolvedTypeRef;
 
 fn append_tokens<T: quote::ToTokens>(out: &mut TokenStream, value: &T) {
     quote::ToTokens::to_tokens(value, out);
@@ -290,6 +291,7 @@ pub fn generate_template_view_expression(input: TokenStream) -> Result<TokenStre
         target_type.clone(),
         invocation.header.parent_alias.clone(),
         HashSet::new(),
+        true,
     )?;
     let factory = emit_compiled_template_factory(&compiled, target_type, true);
     Ok(quote! { { #factory } })
@@ -330,6 +332,7 @@ pub(crate) fn compile_template_body(
     target_type: TokenStream,
     parent_alias: String,
     bare_parent_fields: HashSet<String>,
+    context_free_target: bool,
 ) -> Result<CompiledTemplateBody, String> {
     validate_template_parent_alias_shadowing(
         body,
@@ -339,6 +342,11 @@ pub(crate) fn compile_template_body(
         on_update,
         &parent_alias,
     )?;
+    let template_parent_type = if context_free_target {
+        ResolvedTypeRef::from_unqualified(target_type.to_string(), &table)
+    } else {
+        ResolvedTypeRef::from_module(target_type.to_string(), &from, &table)
+    };
     let lowered = codegen::lower_template_body(
         body,
         lets,
@@ -350,6 +358,7 @@ pub(crate) fn compile_template_body(
         target_type.clone(),
         parent_alias.clone(),
         bare_parent_fields.clone(),
+        template_parent_type.clone(),
     )?;
     let captured_names = collect_template_capture_names(
         body,
@@ -368,6 +377,7 @@ pub(crate) fn compile_template_body(
             &template_parent_ident,
             &lowered.property_bounds,
             target_type.clone(),
+            template_parent_type.clone(),
             parent_alias.clone(),
             bare_parent_fields.clone(),
         )
@@ -379,6 +389,7 @@ pub(crate) fn compile_template_body(
             &template_parent_ident,
             &lowered.property_bounds,
             target_type.clone(),
+            template_parent_type.clone(),
             parent_alias.clone(),
             bare_parent_fields.clone(),
         )
@@ -390,6 +401,7 @@ pub(crate) fn compile_template_body(
             &template_parent_ident,
             &lowered.property_bounds,
             target_type.clone(),
+            template_parent_type,
             parent_alias.clone(),
             bare_parent_fields.clone(),
         )

@@ -7,7 +7,7 @@
 //! between the two consumers.
 
 use crate::ast::{FieldKind, Module, ViewExpr};
-use crate::codegen::{SymbolTable, TypeInfo};
+use crate::codegen::{ResolvedTypeKey, SymbolTable, TypeInfo};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,16 +16,63 @@ pub(crate) enum CollectionIdentity {
     Rebuild,
 }
 
-/// A concrete DSL type name carried by a lexical renderer parameter or a resolved field.
+/// A DSL type spelling paired with its canonical symbol identity whenever the spelling was
+/// resolved in a lexical module context. The unresolved variant is intentional: later consumers
+/// must not reconnect it through an unrelated module or a global bare-name search.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedTypeRef {
-    pub(crate) declared_type: String,
+pub(crate) enum ResolvedTypeRef {
+    Known {
+        declared_type: String,
+        key: ResolvedTypeKey,
+    },
+    Unresolved {
+        declared_type: String,
+    },
 }
 
 impl ResolvedTypeRef {
-    pub(crate) fn new(declared_type: impl Into<String>) -> Self {
-        Self {
-            declared_type: declared_type.into(),
+    pub(crate) fn from_module(
+        declared_type: impl Into<String>,
+        from: &Module,
+        table: &SymbolTable,
+    ) -> Self {
+        let declared_type = declared_type.into();
+        match table.resolve_type_key(from, &declared_type) {
+            Some(key) => Self::Known { declared_type, key },
+            None => Self::Unresolved { declared_type },
+        }
+    }
+
+    pub(crate) fn from_unqualified(declared_type: impl Into<String>, table: &SymbolTable) -> Self {
+        let declared_type = declared_type.into();
+        match table.resolve_unqualified_type_key(&declared_type) {
+            Some(key) => Self::Known { declared_type, key },
+            None => Self::Unresolved { declared_type },
+        }
+    }
+
+    fn from_defining_module(
+        declared_type: impl Into<String>,
+        owner: &ResolvedTypeKey,
+        table: &SymbolTable,
+    ) -> Self {
+        let declared_type = declared_type.into();
+        match table.resolve_type_key_in_defining_module(owner, &declared_type) {
+            Some(key) => Self::Known { declared_type, key },
+            None => Self::Unresolved { declared_type },
+        }
+    }
+
+    pub(crate) fn declared_type(&self) -> &str {
+        match self {
+            Self::Known { declared_type, .. } | Self::Unresolved { declared_type } => declared_type,
+        }
+    }
+
+    pub(crate) fn key(&self) -> Option<&ResolvedTypeKey> {
+        match self {
+            Self::Known { key, .. } => Some(key),
+            Self::Unresolved { .. } => None,
         }
     }
 }
@@ -105,7 +152,7 @@ pub(crate) fn resolve_view_expr_type(
             if context.lexical_name == Some(field.as_str()) {
                 if let Some(lexical_type) = context.lexical_type {
                     return Ok(ResolvedExprType {
-                        declared_type: lexical_type.declared_type.clone(),
+                        declared_type: lexical_type.declared_type().to_string(),
                         owner_type: None,
                         origin: ExprTypeOrigin::LexicalParameter,
                         generated_viewmodel_observable: false,
@@ -129,7 +176,11 @@ pub(crate) fn resolve_view_expr_type(
                 (owner_type, ExprTypeOrigin::TemplateParentField)
             } else if let Some(declared_type) = context.own_fields.get(owner) {
                 (
-                    ResolvedTypeRef::new(strip_rc_wrapper(declared_type)),
+                    ResolvedTypeRef::from_module(
+                        strip_rc_wrapper(declared_type),
+                        context.from,
+                        context.table,
+                    ),
                     ExprTypeOrigin::ResolvedField,
                 )
             } else {
@@ -148,14 +199,15 @@ pub(crate) fn resolve_field_type(
     origin: ExprTypeOrigin,
     context: &ResolutionContext<'_>,
 ) -> Result<ResolvedExprType, ResolutionFailure> {
-    let owner_info = resolve_type_ref_info(owner_type, context.from, context.table)
-        .ok_or_else(|| ResolutionFailure::UnknownOwnerType(owner_type.declared_type.clone()))?;
+    let owner_info = resolve_type_ref_info(owner_type, context.table).ok_or_else(|| {
+        ResolutionFailure::UnknownOwnerType(owner_type.declared_type().to_string())
+    })?;
     let declared_type = owner_info
         .value_field_types
         .get(field)
         .or_else(|| owner_info.field_types.get(field))
         .ok_or_else(|| ResolutionFailure::UnknownField {
-            owner: owner_type.declared_type.clone(),
+            owner: owner_type.declared_type().to_string(),
             field: field.to_string(),
         })?;
     let generated_viewmodel_observable = owner_info.is_viewmodel
@@ -174,9 +226,18 @@ pub(crate) fn resolve_collection(
     context: &ResolutionContext<'_>,
 ) -> Result<ResolvedCollection, ResolutionFailure> {
     let expression = resolve_view_expr_type(expr, context)?;
-    let item_type = explicit_rc_vec_item_type(&expression.declared_type)
-        .or_else(|| vec_item_type(&expression.declared_type))
-        .map(ResolvedTypeRef::new);
+    let item_declared_type = explicit_rc_vec_item_type(&expression.declared_type)
+        .or_else(|| vec_item_type(&expression.declared_type));
+    let item_type = item_declared_type.map(|declared_type| {
+        expression
+            .owner_type
+            .as_ref()
+            .and_then(ResolvedTypeRef::key)
+            .map_or_else(
+                || ResolvedTypeRef::from_module(declared_type, context.from, context.table),
+                |owner| ResolvedTypeRef::from_defining_module(declared_type, owner, context.table),
+            )
+    });
     let identity = if explicit_rc_vec_item_type(&expression.declared_type).is_some()
         || expression.generated_viewmodel_observable
     {
@@ -187,7 +248,7 @@ pub(crate) fn resolve_collection(
     let effective_type = if expression.generated_viewmodel_observable {
         item_type.as_ref().map_or_else(
             || expression.declared_type.clone(),
-            |item| format!("Vec<Rc<{}>>", item.declared_type),
+            |item| format!("Vec<Rc<{}>>", item.declared_type()),
         )
     } else {
         expression.declared_type.clone()
@@ -202,12 +263,9 @@ pub(crate) fn resolve_collection(
 
 pub(crate) fn resolve_type_ref_info<'a>(
     type_ref: &ResolvedTypeRef,
-    from: &Module,
     table: &'a SymbolTable,
 ) -> Option<&'a TypeInfo> {
-    table
-        .resolve(from, &type_ref.declared_type)
-        .or_else(|| table.resolve_unqualified(&type_ref.declared_type))
+    type_ref.key().and_then(|key| table.type_info_for_key(key))
 }
 
 /// `Vec<Model>` fields on generated viewmodels use Rc-backed item storage when the item is a DSL
@@ -220,7 +278,7 @@ pub(crate) fn nested_vec_item_type(ty: &str, from: &Module, table: &SymbolTable)
     if explicit_rc_vec_item_type(ty).is_some() {
         return None;
     }
-    let known = table.resolve(from, inner).is_some() || table.resolve_unqualified(inner).is_some();
+    let known = table.resolve(from, inner).is_some();
     let looks_nested = inner.chars().next().is_some_and(|c| c.is_uppercase()) && inner != "String";
     (known || looks_nested).then(|| inner.to_string())
 }
@@ -253,13 +311,27 @@ fn strip_rc_wrapper(ty: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Item, Module};
+    use crate::ast::{Item, Module, UseDecl};
     use crate::attr_frontend::viewmodel_def_from_item_mod;
     use crate::codegen::build_symbol_table;
 
     fn viewmodel_item(src: &str) -> Item {
         let item_mod: syn::ItemMod = syn::parse_str(src).expect("viewmodel module should parse");
         Item::ViewModel(viewmodel_def_from_item_mod(&item_mod).expect("viewmodel should build"))
+    }
+
+    fn viewmodel_module(path: &[&str], uses: &[&str], src: &str) -> Module {
+        Module {
+            path: path.iter().map(|segment| (*segment).to_string()).collect(),
+            uses: uses
+                .iter()
+                .map(|use_path| UseDecl {
+                    path: use_path.split("::").map(str::to_string).collect(),
+                })
+                .collect(),
+            items: vec![viewmodel_item(src)],
+            ..Default::default()
+        }
     }
 
     fn context<'a>(
@@ -313,16 +385,27 @@ mod tests {
 
         let outer = resolve_collection(&ViewExpr::Path(vec!["vm".into(), "items".into()]), &direct)
             .expect("generated observable collection should resolve");
-        assert_eq!(outer.item_type.unwrap().declared_type, "OuterModel");
+        assert_eq!(
+            outer.item_type.as_ref().unwrap().declared_type(),
+            "OuterModel"
+        );
+        assert!(matches!(
+            outer.item_type.as_ref(),
+            Some(ResolvedTypeRef::Known { key, .. }) if key.module_path.is_empty()
+        ));
         assert_eq!(outer.identity, CollectionIdentity::RcIdentity);
         assert_eq!(outer.effective_type, "Vec<Rc<OuterModel>>");
 
         let names = resolve_collection(&ViewExpr::Path(vec!["vm".into(), "names".into()]), &direct)
             .expect("plain observable collection should resolve");
-        assert_eq!(names.item_type.unwrap().declared_type, "String");
+        assert_eq!(names.item_type.as_ref().unwrap().declared_type(), "String");
+        assert!(matches!(
+            names.item_type.as_ref(),
+            Some(ResolvedTypeRef::Unresolved { .. })
+        ));
         assert_eq!(names.identity, CollectionIdentity::Rebuild);
 
-        let lexical_type = ResolvedTypeRef::new("OuterModel");
+        let lexical_type = ResolvedTypeRef::from_module("OuterModel", &module, &table);
         let empty_fields = HashMap::new();
         let lexical = context(
             &module,
@@ -336,7 +419,14 @@ mod tests {
             &lexical,
         )
         .expect("lexical renderer parameter field should resolve");
-        assert_eq!(nested.item_type.unwrap().declared_type, "ChildModel");
+        assert_eq!(
+            nested.item_type.as_ref().unwrap().declared_type(),
+            "ChildModel"
+        );
+        assert!(matches!(
+            nested.item_type.as_ref(),
+            Some(ResolvedTypeRef::Known { key, .. }) if key.module_path.is_empty()
+        ));
         assert_eq!(nested.identity, CollectionIdentity::RcIdentity);
     }
 
@@ -348,7 +438,14 @@ mod tests {
         let context = context(&module, &table, &own_fields, None, None);
         let unresolved = resolve_collection(&ViewExpr::Path(vec!["items".into()]), &context)
             .expect("declared Vec shape is still statically known");
-        assert_eq!(unresolved.item_type.unwrap().declared_type, "Unknown");
+        assert_eq!(
+            unresolved.item_type.as_ref().unwrap().declared_type(),
+            "Unknown"
+        );
+        assert!(matches!(
+            unresolved.item_type.as_ref(),
+            Some(ResolvedTypeRef::Unresolved { .. })
+        ));
         assert_eq!(unresolved.identity, CollectionIdentity::Rebuild);
         assert!(matches!(
             resolve_collection(
@@ -356,6 +453,73 @@ mod tests {
                 &context,
             ),
             Err(ResolutionFailure::UnknownOwner(_))
+        ));
+    }
+
+    #[test]
+    fn preserves_owner_module_and_import_provenance_across_nested_resolution() {
+        let modules = vec![
+            viewmodel_module(
+                &["models_a"],
+                &[],
+                r#"mod child_a { struct ChildModel { #[observable(default = String::new())] label: String } }"#,
+            ),
+            viewmodel_module(
+                &["models_b"],
+                &[],
+                r#"mod child_b { struct ChildModel { #[observable(default = String::new())] label: String } }"#,
+            ),
+            viewmodel_module(
+                &["module_a"],
+                &["crate::models_a::ChildModel"],
+                r#"mod outer_a { struct OuterItem { #[observable(default = Vec::new())] children: Vec<ChildModel> } }"#,
+            ),
+            viewmodel_module(
+                &["module_b"],
+                &["crate::models_b::ChildModel"],
+                r#"mod outer_b { struct OuterItem { #[observable(default = Vec::new())] children: Vec<ChildModel> } }"#,
+            ),
+            viewmodel_module(
+                &["consumer"],
+                &["crate::module_a::OuterItem"],
+                r#"mod root { struct RootModel { #[observable(default = Vec::new())] items: Vec<OuterItem> } }"#,
+            ),
+        ];
+        let table = build_symbol_table(&modules);
+        let consumer = &modules[4];
+        let own_fields = HashMap::from([(String::from("vm"), String::from("Rc<RootModel>"))]);
+        let direct = context(consumer, &table, &own_fields, None, None);
+
+        let outer = resolve_collection(&ViewExpr::Path(vec!["vm".into(), "items".into()]), &direct)
+            .expect("consumer import should resolve the selected outer item");
+        assert!(matches!(
+            outer.item_type.as_ref(),
+            Some(ResolvedTypeRef::Known { key, .. })
+                if key.module_path == vec!["module_a".to_string()] && key.item_name == "OuterItem"
+        ));
+
+        let empty_fields = HashMap::new();
+        let lexical = context(
+            consumer,
+            &table,
+            &empty_fields,
+            Some("outer_item"),
+            outer.item_type.as_ref(),
+        );
+        let nested = resolve_collection(
+            &ViewExpr::Path(vec!["outer_item".into(), "children".into()]),
+            &lexical,
+        )
+        .expect("nested collection should use the owner module context");
+        assert!(matches!(
+            nested.item_type.as_ref(),
+            Some(ResolvedTypeRef::Known { key, .. })
+                if key.module_path == vec!["models_a".to_string()] && key.item_name == "ChildModel"
+        ));
+        assert_eq!(nested.identity, CollectionIdentity::RcIdentity);
+        assert!(matches!(
+            ResolvedTypeRef::from_unqualified("OuterItem", &table),
+            ResolvedTypeRef::Unresolved { .. }
         ));
     }
 }

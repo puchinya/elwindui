@@ -1,6 +1,6 @@
 # Backend status
 
-Snapshot: 2026-09-15. Durable backend architecture is indexed in [`../design/README.md`](../design/README.md). 
+Snapshot: 2026-09-15. Durable backend architecture is indexed in [`../design/README.md`](../design/README.md).
 
 ## Support matrix
 

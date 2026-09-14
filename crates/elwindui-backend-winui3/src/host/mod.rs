@@ -383,6 +383,10 @@ fn record_pending_kind_if_idle(
     true
 }
 
+fn dispatcher_enqueue_accepted(result: windows::core::Result<bool>) -> bool {
+    matches!(result, Ok(true))
+}
+
 pub(crate) struct WinUI3RelayoutHost {
     /// Stable, process-local id for `ELWINDUI_PERF_TRACE` diagnostics — lets a live run's log
     /// attribute every real relayout cycle to one specific host instance (Issue #261 review
@@ -623,9 +627,9 @@ impl WinUI3RelayoutHost {
             invoke_ui_event_callback(callback_id);
             Ok(())
         });
-        if queue.TryEnqueue(&handler).is_err() {
-            // Posting failed — unregister the now-unused one-shot callback (it will never fire)
-            // and realize immediately rather than leaving `pending` permanently stuck.
+        if !dispatcher_enqueue_accepted(queue.TryEnqueue(&handler)) {
+            // Posting failed or was rejected — unregister the now-unused one-shot callback (it
+            // will never fire) and realize immediately rather than leaving `pending` stuck.
             this.callback_owner.unregister_event(callback_id);
             this.realize_synchronously(source, self.pending_kind.get());
         }
@@ -2637,6 +2641,18 @@ mod tests {
             elwindui_core::ui::InvalidationKind::Measure,
             "the next unrelated batch must record its own strongest kind"
         );
+    }
+
+    #[test]
+    fn dispatcher_enqueue_acceptance_requires_ok_true() {
+        assert!(dispatcher_enqueue_accepted(Ok(true)));
+        assert!(!dispatcher_enqueue_accepted(Ok(false)));
+        assert!(!dispatcher_enqueue_accepted(Err(
+            windows::core::Error::new(
+                windows::core::HRESULT(0x80004005u32 as i32),
+                "dispatcher rejected enqueue",
+            )
+        )));
     }
 
     #[test]

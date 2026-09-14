@@ -1,13 +1,13 @@
 # Backend status
 
-Snapshot: 2026-09-12. Durable backend architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-09-14. Durable backend architecture is indexed in [`../design/README.md`](../design/README.md).
 
 ## Support matrix
 
 | Backend | Current implementation | Current verification |
 |---|---|---|
 | AppKit (macOS) | ✅ primary backend | Local builds, workspace tests, screenshots, synthetic Core-backed AX projection, and text/environment paths are supported where listed below. |
-| WinUI 3 (Windows) | 🚧 substantial implementation | Core snapshot and the XAML AutomationPeer bridge skeleton are implemented in source; UIA pattern providers and real Windows build/runtime verification remain incomplete. |
+| WinUI 3 (Windows) | 🚧 substantial implementation | Per-TreeHost/per-UI-turn relayout batching, owner-driven viewport authority, native sizing, and real Windows startup/painted/idle verification are implemented; UIA pattern providers and interactive UIA acceptance remain incomplete. |
 | GTK4 (Linux) | ⬜ stub | No functional backend or toolkit dependency. |
 | UIKit / Android | ⬜ absent | No implementation. |
 
@@ -24,6 +24,8 @@ Snapshot: 2026-09-12. Durable backend architecture is indexed in [`../design/REA
 ## WinUI 3 current state
 
 - Window content-host sizing, retained layout, native controls, graphics, text/environment, and the established input/lifecycle paths are implemented. Window-level sizing is the content-host viewport authority for first show and native resize.
+- Relayout batching is implemented per TreeHost and per UI turn. Window, TabView, ScrollView, and Popup remain explicit viewport authorities; a TreeHost does not consume its own native Canvas size output as a viewport input.
+- Issue #261 final Windows evidence on committed HEAD `2c71bf71fe85d7a45af1d13fe894b85a6c2021fd`: docking-demo launched, painted content was captured, 10-second idle CPU/trace stability and normal termination passed. The required UIA/input interactive checkpoint was blocked because the durable `Document A` selector returned no usable match. Evidence is retained under `.agent-state/issues/261/e2e/2c71bf7/20260914T134743Z/`.
 - Pointer/capture-loss and coordinate-topology rows remain pending real-mouse verification in [#224](https://github.com/puchinya/elwindui/issues/224). The current verification host cannot deliver the required real OS mouse input reliably.
 - Popup teardown, native light-dismiss ordering, close interception, and newer Menu/icon paths are implemented or code-reviewed, but this macOS development environment cannot compile or execute the Windows-only backend; runtime verification remains in [#157](https://github.com/puchinya/elwindui/issues/157).
 - SVG offscreen effect-graph work, full cross-backend parity audit, and the remaining native styling/effect gaps are incomplete.

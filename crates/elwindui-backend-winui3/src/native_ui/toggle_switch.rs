@@ -8,7 +8,7 @@ use elwindui_core::accessibility::{
 };
 use elwindui_core::ui::{ToggleSwitchExt, UIElementExt};
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 #[elwindui_macros::class(struct_only = elwindui_core::ui::ToggleSwitchExt, inherits = crate::NativeControl)]
 pub struct ToggleSwitch {
@@ -108,9 +108,10 @@ impl ToggleSwitch {
             self.as_ui_element().visual_collection.owner_rc().expect(
                 "ToggleSwitch must be Rc-constructed before installing its change callback",
             );
-        let weak = Rc::downgrade(&owner);
-        self.inner.set_on_change(Box::new(move |is_on| {
-            let Some(owner) = weak.upgrade() else { return };
+        let weak: Weak<dyn UIElementExt> = Rc::downgrade(&owner);
+        self.inner.set_on_change(Box::new(move |is_on: bool| {
+            let owner: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+            let Some(owner) = owner else { return };
             let this = owner
                 .as_any()
                 .downcast_ref::<ToggleSwitch>()

@@ -135,7 +135,14 @@ impl Grid {
         final_size
     }
     fn set_rows(&self, rows: Vec<GridLength>) {
-        if *self.rows.borrow() == rows {
+        let changed = *self.rows.borrow() != rows;
+        if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
+            eprintln!(
+                "[perf] grid_writer method=set_rows effective_changed={changed} actual_invalidate={}",
+                changed
+            );
+        }
+        if !changed {
             return;
         }
         *self.rows.borrow_mut() = rows;
@@ -144,7 +151,14 @@ impl Grid {
         self.invalidate_measure();
     }
     fn set_columns(&self, columns: Vec<GridLength>) {
-        if *self.columns.borrow() == columns {
+        let changed = *self.columns.borrow() != columns;
+        if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
+            eprintln!(
+                "[perf] grid_writer method=set_columns effective_changed={changed} actual_invalidate={}",
+                changed
+            );
+        }
+        if !changed {
             return;
         }
         *self.columns.borrow_mut() = columns;

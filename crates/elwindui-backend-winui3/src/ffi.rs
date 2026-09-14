@@ -15,7 +15,7 @@ use crate::bindings::Microsoft::UI::Xaml::FrameworkElement;
 use elwindui_core::input::RawKeyEvent;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use windows::Foundation::PropertyValue;
 use windows::Foundation::Size;
@@ -158,10 +158,11 @@ impl UiCallbackRegistryOwner {
     /// this owner's own `registrations` bookkeeping.
     pub(crate) fn register_one_shot_event(&self, callback: Rc<dyn Fn()>) -> usize {
         let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
-        let weak_inner = Rc::downgrade(&self.0);
+        let weak_inner: Weak<UiCallbackRegistryOwnerInner> = Rc::downgrade(&self.0);
         let wrapped: Rc<dyn Fn()> = Rc::new(move || {
             remove_ui_callback(UiCallbackKind::Event, id);
-            if let Some(inner) = weak_inner.upgrade() {
+            let inner: Option<Rc<UiCallbackRegistryOwnerInner>> = weak_inner.upgrade();
+            if let Some(inner) = inner {
                 inner
                     .registrations
                     .borrow_mut()

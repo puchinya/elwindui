@@ -124,7 +124,7 @@ pub(crate) fn sync_scroll_view_cross_axis(
     scroll_viewer: &ScrollViewer,
     (horizontal, vertical): (bool, bool),
 ) {
-    content_host.set_viewport(TreeHostViewport {
+    let _ = content_host.set_viewport(TreeHostViewport {
         width: if horizontal {
             None
         } else {

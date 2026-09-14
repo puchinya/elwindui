@@ -44,7 +44,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 use windows::Foundation::{EventHandler, TypedEventHandler};
-use windows::core::{IInspectable, Interface};
+use windows::core::{IInspectable, Interface, Ref};
 
 /// The single reusable "reflect an `Rc<dyn elwindui_core::ui::UIElement>` into real XAML
 /// elements" host — the WinUI3 counterpart of `elwindui-backend-appkit`'s `TreeHostView`. A
@@ -130,7 +130,7 @@ impl WinUI3RenderingState {
 
     fn clear_host(&self) {
         self.stop();
-        *self.host.borrow_mut() = Weak::new();
+        *self.host.borrow_mut() = Weak::<WinUI3RelayoutHost>::new();
     }
 
     fn ensure_started(self: &Rc<Self>) {
@@ -138,13 +138,15 @@ impl WinUI3RenderingState {
             return;
         }
         let state_address = Rc::as_ptr(self) as usize;
-        let handler = EventHandler::<IInspectable>::new(move |_, _| {
-            // SAFETY: `TreeHostPanel` unregisters the static event before its last strong
-            // reference to this state is released. The delegate cannot run after that point.
-            let state = unsafe { &*(state_address as *const WinUI3RenderingState) };
-            state.on_rendering();
-            Ok(())
-        });
+        let handler = EventHandler::<IInspectable>::new(
+            move |_: Ref<'_, IInspectable>, _: Ref<'_, IInspectable>| {
+                // SAFETY: `TreeHostPanel` unregisters the static event before its last strong
+                // reference to this state is released. The delegate cannot run after that point.
+                let state = unsafe { &*(state_address as *const WinUI3RenderingState) };
+                state.on_rendering();
+                Ok(())
+            },
+        );
         match CompositionTarget::Rendering(&handler) {
             Ok(token) => {
                 *self.handler.borrow_mut() = Some(handler);
@@ -161,11 +163,13 @@ impl WinUI3RenderingState {
     }
 
     fn on_rendering(&self) {
-        let Some(host) = self.host.borrow().upgrade() else {
+        let host: Option<Rc<WinUI3RelayoutHost>> = self.host.borrow().upgrade();
+        let Some(host) = host else {
             self.stop();
             return;
         };
-        let Some(runtime) = host.animation_runtime.upgrade() else {
+        let runtime: Option<Rc<AnimationRuntime>> = host.animation_runtime.upgrade();
+        let Some(runtime) = runtime else {
             self.stop();
             return;
         };
@@ -187,9 +191,9 @@ impl WinUI3RenderingState {
 impl Default for WinUI3RenderingState {
     fn default() -> Self {
         Self {
-            host: RefCell::new(Weak::new()),
-            token: Cell::new(None),
-            handler: RefCell::new(None),
+            host: RefCell::new(Weak::<WinUI3RelayoutHost>::new()),
+            token: Cell::new(None::<i64>),
+            handler: RefCell::new(None::<EventHandler<IInspectable>>),
         }
     }
 }
@@ -219,6 +223,24 @@ impl TreeHostViewport {
             height: normalize(self.height),
         }
     }
+}
+
+/// Applies the native viewport before publishing the new Core layout input. A failed native
+/// setter therefore leaves `stored` unchanged, so the next owner update retries both dimensions
+/// instead of being suppressed as an unchanged viewport.
+fn apply_native_viewport(
+    stored: &Cell<Option<TreeHostViewport>>,
+    viewport: TreeHostViewport,
+    mut set_width: impl FnMut(f64) -> windows::core::Result<()>,
+    mut set_height: impl FnMut(f64) -> windows::core::Result<()>,
+) -> windows::core::Result<bool> {
+    if stored.get() == Some(viewport) {
+        return Ok(false);
+    }
+    set_width(viewport.width.unwrap_or(f64::NAN))?;
+    set_height(viewport.height.unwrap_or(f64::NAN))?;
+    stored.set(Some(viewport));
+    Ok(true)
 }
 
 #[derive(Clone)]
@@ -330,6 +352,18 @@ pub(crate) enum RelayoutSource {
 
 static NEXT_RELAYOUT_HOST_DIAGNOSTIC_ID: AtomicU64 = AtomicU64::new(1);
 
+fn record_pending_kind_if_idle(
+    in_progress: bool,
+    pending_kind: &Cell<elwindui_core::ui::InvalidationKind>,
+    kind: elwindui_core::ui::InvalidationKind,
+) -> bool {
+    if in_progress {
+        return false;
+    }
+    pending_kind.set(pending_kind.get().max(kind));
+    true
+}
+
 pub(crate) struct WinUI3RelayoutHost {
     /// Stable, process-local id for `ELWINDUI_PERF_TRACE` diagnostics — lets a live run's log
     /// attribute every real relayout cycle to one specific host instance (Issue #261 review
@@ -409,8 +443,10 @@ impl WinUI3RelayoutHost {
     /// Caller is responsible for having already cleared `pending`/`pending_kind` (and bumped
     /// `queue_ticket`, if superseding a queued job) before calling this — this method only
     /// upgrades every weakly-held field, emits the `ELWINDUI_PERF_TRACE` cycle-attribution line,
-    /// and runs the pass.
-    fn run_relayout_now(&self, source: RelayoutSource) {
+    /// and runs the pass. `kind` is the strongest kind claimed for this realization and is
+    /// retained in the diagnostic record even though Part A still performs a full realization
+    /// for every kind.
+    fn run_relayout_now(&self, source: RelayoutSource, kind: elwindui_core::ui::InvalidationKind) {
         // A reentrant call (see `schedule`'s `in_progress` branch) must not clear `in_progress`
         // when it returns — only the outermost call, which is the one that actually set it from
         // `false`, may do that. `RelayoutCycleState::run_coalesced` itself already guarantees a
@@ -449,8 +485,8 @@ impl WinUI3RelayoutHost {
         {
             if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
                 eprintln!(
-                    "[perf] relayout_cycle host={} source={:?}",
-                    self.diagnostic_id, source
+                    "[perf] relayout_cycle host={} source={:?} kind={:?}",
+                    self.diagnostic_id, source, kind
                 );
             }
             TreeHostPanel::relayout_static(
@@ -476,13 +512,17 @@ impl WinUI3RelayoutHost {
     /// leaves a stale queued job to fire a redundant second pass afterward (Issue #261 review
     /// remediation §2.5). Unlike `flush_interactive_relayout`, callers may invoke this
     /// unconditionally regardless of whether anything was actually pending.
-    fn realize_synchronously(&self, source: RelayoutSource) {
+    fn realize_synchronously(
+        &self,
+        source: RelayoutSource,
+        kind: elwindui_core::ui::InvalidationKind,
+    ) {
         self.queue_ticket
             .set(self.queue_ticket.get().wrapping_add(1));
         self.pending.set(false);
         self.pending_kind
             .set(elwindui_core::ui::InvalidationKind::default());
-        self.run_relayout_now(source);
+        self.run_relayout_now(source, kind);
     }
 
     /// Realizes the queued relayout, but only if `ticket` still matches this host's live
@@ -492,12 +532,13 @@ impl WinUI3RelayoutHost {
             return;
         }
         let source = self.pending_source.get();
+        let kind = self.pending_kind.get();
         self.queue_ticket
             .set(self.queue_ticket.get().wrapping_add(1));
         self.pending.set(false);
         self.pending_kind
             .set(elwindui_core::ui::InvalidationKind::default());
-        self.run_relayout_now(source);
+        self.run_relayout_now(source, kind);
     }
 
     /// The per-host, per-UI-turn coalescing layer for `RelayoutHost::request_relayout` (ordinary
@@ -505,20 +546,20 @@ impl WinUI3RelayoutHost {
     /// UI turn into exactly one queued job. `RelayoutHost::request_relayout` marks its render
     /// group dirty *before* calling this; this method owns everything from there on.
     fn schedule(&self, kind: elwindui_core::ui::InvalidationKind, source: RelayoutSource) {
-        let Some(active) = self.active.upgrade() else {
+        let active: Option<Rc<Cell<bool>>> = self.active.upgrade();
+        let Some(active) = active else {
             return;
         };
         if !active.get() {
             return;
         }
-        self.pending_kind.set(self.pending_kind.get().max(kind));
-        if self.in_progress.get() {
+        if !record_pending_kind_if_idle(self.in_progress.get(), &self.pending_kind, kind) {
             // A structural change made mid-measure, synchronously nested inside this same host's
             // own currently-running pass — hand it straight to `relayout_static` so
             // `RelayoutCycleState::run_coalesced`'s own reentrancy coalescing owns it, exactly as
             // it did before this per-turn scheduling layer existed. `run_relayout_now` upgrades
             // everything itself, so a dead host is already handled there.
-            self.run_relayout_now(source);
+            self.run_relayout_now(source, kind);
             return;
         }
         if self.pending.replace(true) {
@@ -534,15 +575,16 @@ impl WinUI3RelayoutHost {
             // No dispatcher available on this thread (shouldn't normally happen — `schedule` only
             // ever runs on the UI thread once a `DispatcherQueue` already exists). Realize
             // immediately rather than silently dropping the relayout.
-            this.realize_synchronously(source);
+            this.realize_synchronously(source, self.pending_kind.get());
             return;
         };
         let ticket = self.queue_ticket.get();
-        let weak_this = Rc::downgrade(&this);
+        let weak_this: Weak<WinUI3RelayoutHost> = Rc::downgrade(&this);
         let callback_id = this
             .callback_owner
             .register_one_shot_event(Rc::new(move || {
-                if let Some(this) = weak_this.upgrade() {
+                let this: Option<Rc<WinUI3RelayoutHost>> = weak_this.upgrade();
+                if let Some(this) = this {
                     this.run_queued_relayout(ticket);
                 }
             }));
@@ -554,7 +596,7 @@ impl WinUI3RelayoutHost {
             // Posting failed — unregister the now-unused one-shot callback (it will never fire)
             // and realize immediately rather than leaving `pending` permanently stuck.
             this.callback_owner.unregister_event(callback_id);
-            this.realize_synchronously(source);
+            this.realize_synchronously(source, self.pending_kind.get());
         }
     }
 }
@@ -595,7 +637,7 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
         if !self.pending.get() {
             return; // nothing queued or in flight — an interactive flush with no pending work is a no-op
         }
-        self.realize_synchronously(RelayoutSource::InteractiveFlush);
+        self.realize_synchronously(RelayoutSource::InteractiveFlush, self.pending_kind.get());
     }
 }
 
@@ -610,7 +652,8 @@ impl AnimationFrameHost for WinUI3RelayoutHost {
     }
 
     fn request_animation_frame(&self) {
-        let Some(rendering) = self.rendering.upgrade() else {
+        let rendering: Option<Rc<WinUI3RenderingState>> = self.rendering.upgrade();
+        let Some(rendering) = rendering else {
             return;
         };
         rendering.ensure_started();
@@ -639,21 +682,12 @@ impl FocusHost for WinUI3FocusHost {
     }
 
     fn clear_focus_in_subtree(&self, subtree: &Rc<dyn elwindui_core::ui::UIElementExt>) -> bool {
-        let Some(keyboard) = self.keyboard.upgrade() else {
+        let keyboard: Option<Rc<KeyboardDispatcher>> = self.keyboard.upgrade();
+        let Some(keyboard) = keyboard else {
             return false;
         };
-        let Some(focused) = keyboard.focus.focused() else {
-            return false;
-        };
-        let mut current = Some(focused);
-        while let Some(element) = current {
-            if Rc::ptr_eq(&element, subtree) {
-                keyboard.focus.clear_focus();
-                return true;
-            }
-            current = element.visual_parent();
-        }
-        false
+        let focus: &elwindui_core::focus::FocusTracker = &keyboard.focus;
+        elwindui_core::focus::FocusTracker::clear_focus_in_subtree(focus, subtree)
     }
 }
 
@@ -718,7 +752,7 @@ impl TreeHostPanel {
             animation_runtime: AnimationRuntime::new(),
             rendering: Rc::new(WinUI3RenderingState::default()),
             accessibility,
-            relayout_host: Rc::new(RefCell::new(Weak::new())),
+            relayout_host: Rc::new(RefCell::new(Weak::<WinUI3RelayoutHost>::new())),
         };
         #[cfg(windows)]
         this.accessibility.bind_canvas(&this.canvas);
@@ -1334,8 +1368,9 @@ impl TreeHostPanel {
             }
             return;
         }
-        if let Some(host) = self.relayout_host.borrow().upgrade() {
-            host.realize_synchronously(source);
+        let host: Option<Rc<WinUI3RelayoutHost>> = self.relayout_host.borrow().upgrade();
+        if let Some(host) = host {
+            host.realize_synchronously(source, elwindui_core::ui::InvalidationKind::Measure);
         } else {
             // No `WinUI3RelayoutHost` installed yet (called before any `set_tree()`) — fall back
             // to the raw pass directly; there is no queued job to supersede in this case.
@@ -1380,16 +1415,20 @@ impl TreeHostPanel {
     /// during popup construction, before `set_tree`) or is currently suspended
     /// (`set_active(false)`), the viewport is still stored so the next `set_tree`/
     /// `set_active(true)` picks it up, but no layout work happens now.
-    pub(crate) fn set_viewport(&self, viewport: TreeHostViewport) {
+    pub(crate) fn set_viewport(&self, viewport: TreeHostViewport) -> windows::core::Result<bool> {
         let viewport = viewport.normalized();
-        if self.viewport.get() == Some(viewport) {
-            return;
-        }
-        self.viewport.set(Some(viewport));
         let element = self.as_element();
-        let _ = element.SetWidth(viewport.width.unwrap_or(f64::NAN));
-        let _ = element.SetHeight(viewport.height.unwrap_or(f64::NAN));
+        let changed = apply_native_viewport(
+            &self.viewport,
+            viewport,
+            |width| element.SetWidth(width),
+            |height| element.SetHeight(height),
+        )?;
+        if !changed {
+            return Ok(false);
+        }
         self.force_relayout_with_source(RelayoutSource::ViewportSync);
+        Ok(true)
     }
 
     /// Activates or suspends this host's layout and rendering lifecycle.
@@ -2538,6 +2577,70 @@ pub(crate) fn close_active_popup_slot(
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn reentrant_invalidation_does_not_contaminate_the_next_pending_kind() {
+        let pending_kind = Cell::new(elwindui_core::ui::InvalidationKind::Render);
+
+        assert!(
+            !record_pending_kind_if_idle(
+                true,
+                &pending_kind,
+                elwindui_core::ui::InvalidationKind::Measure,
+            ),
+            "a reentrant request must be handled by run_coalesced, not the queued batch"
+        );
+        assert_eq!(
+            pending_kind.get(),
+            elwindui_core::ui::InvalidationKind::Render,
+            "reentrant work must not mutate pending_kind"
+        );
+
+        assert!(record_pending_kind_if_idle(
+            false,
+            &pending_kind,
+            elwindui_core::ui::InvalidationKind::Measure,
+        ));
+        assert_eq!(
+            pending_kind.get(),
+            elwindui_core::ui::InvalidationKind::Measure,
+            "the next unrelated batch must record its own strongest kind"
+        );
+    }
+
+    #[test]
+    fn viewport_state_is_not_advanced_when_native_height_application_fails() {
+        let stored = Cell::new(None);
+        let order = Cell::new(0);
+        let viewport = TreeHostViewport {
+            width: Some(320.0),
+            height: Some(240.0),
+        };
+
+        let result = apply_native_viewport(
+            &stored,
+            viewport,
+            |_width| {
+                order.set(1);
+                Ok(())
+            },
+            |_height| {
+                order.set(2);
+                Err(windows::core::Error::new(
+                    windows::core::HRESULT(0x80004005u32 as i32),
+                    "height application failed",
+                ))
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(order.get(), 2, "width must be attempted before height");
+        assert_eq!(
+            stored.get(),
+            None,
+            "failed native application must not publish viewport"
+        );
+    }
 
     /// T1 (Issue #235 review remediation): a same-host reentrant call — `pass` itself
     /// synchronously calling `run_coalesced` again on the *same* `RelayoutCycleState`, mirroring

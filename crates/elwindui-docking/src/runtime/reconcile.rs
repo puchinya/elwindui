@@ -1882,8 +1882,8 @@ impl RuntimeRealization {
             } else {
                 Visibility::Collapsed
             });
-        planned.view.set_attached("Grid", "row", 1i32);
-        planned.view.set_attached("Grid", "column", 0i32);
+        planned.view.set_attached_if_changed("Grid", "row", 1i32);
+        planned.view.set_attached_if_changed("Grid", "column", 0i32);
         planned.host.container.children().add(planned.view.clone());
         planned
             .host
@@ -1972,7 +1972,7 @@ impl RuntimeRealization {
                                 min: element.min_width(),
                                 max: element.max_width(),
                             });
-                            element.as_ui_element().set_attached(
+                            element.as_ui_element().set_attached_if_changed(
                                 "Grid",
                                 "column",
                                 (index * 2) as i32,
@@ -1984,7 +1984,11 @@ impl RuntimeRealization {
                                 let splitter = planned.splitters[index].clone();
                                 splitter.set_resize_direction(GridResizeDirection::Columns);
                                 splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
-                                splitter.set_attached("Grid", "column", (index * 2 + 1) as i32);
+                                splitter.set_attached_if_changed(
+                                    "Grid",
+                                    "column",
+                                    (index * 2 + 1) as i32,
+                                );
                                 self.wire_splitter(&splitter, grid.clone(), address.clone(), index);
                                 grid.children().add(splitter);
                             }
@@ -2012,9 +2016,11 @@ impl RuntimeRealization {
                                 min: element.min_height(),
                                 max: element.max_height(),
                             });
-                            element
-                                .as_ui_element()
-                                .set_attached("Grid", "row", (index * 2) as i32);
+                            element.as_ui_element().set_attached_if_changed(
+                                "Grid",
+                                "row",
+                                (index * 2) as i32,
+                            );
                             grid.children().add(element);
                             if index + 1 < children.len() {
                                 rows.push(GridLength::Fixed(SPLITTER_HIT_SIZE));
@@ -2022,7 +2028,11 @@ impl RuntimeRealization {
                                 let splitter = planned.splitters[index].clone();
                                 splitter.set_resize_direction(GridResizeDirection::Rows);
                                 splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
-                                splitter.set_attached("Grid", "row", (index * 2 + 1) as i32);
+                                splitter.set_attached_if_changed(
+                                    "Grid",
+                                    "row",
+                                    (index * 2 + 1) as i32,
+                                );
                                 self.wire_splitter(&splitter, grid.clone(), address.clone(), index);
                                 grid.children().add(splitter);
                             }
@@ -2111,7 +2121,7 @@ impl RuntimeRealization {
     ) {
         let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let reconciling = self.reconciling.clone();
-        let start_grid = Rc::downgrade(&grid);
+        let start_grid: Weak<Grid> = Rc::downgrade(&grid);
         let start_address = address.clone();
         splitter.set_on_resize_started(Box::new(
             move |args: GridSplitterResizeStartedEventArgs| {
@@ -2119,7 +2129,8 @@ impl RuntimeRealization {
                     return;
                 }
                 let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
-                if let (Some(owner), Some(start_grid)) = (owner, start_grid.upgrade()) {
+                let start_grid: Option<Rc<Grid>> = start_grid.upgrade();
+                if let (Some(owner), Some(start_grid)) = (owner, start_grid) {
                     owner.handle_splitter_started(
                         start_address.clone(),
                         boundary,

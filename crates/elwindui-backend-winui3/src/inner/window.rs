@@ -39,7 +39,7 @@ fn apply_window_viewport(
         let _ = wrapper.SetHeight(height);
     }
     let content_height = (height - top_inset.get()).max(0.0);
-    content_host.set_viewport(TreeHostViewport {
+    let _ = content_host.set_viewport(TreeHostViewport {
         width: Some(width),
         height: Some(content_height),
     });

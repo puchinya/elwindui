@@ -559,16 +559,11 @@ mod hosted_xaml_regression_tests {
             .with(|slot| *slot.borrow())
             .expect("pass count after drain should have been recorded");
         // Each host settles in exactly 1 real pass here (confirmed independent of burst size --
-        // 20 vs. 500 `set_text` calls against `probe` both produce the same total: 2). This value
-        // dropped from an earlier-measured 4 once Issue #261 review remediation §2.4 routed
-        // `Canvas.SizeChanged` through this same per-host scheduler instead of calling
-        // `relayout_static` directly: previously, a native `SizeChanged` fired by this burst's own
-        // arrange work ran an *unconditional*, un-coalesced extra pass regardless of `pending`/
-        // `in_progress` state (what looked like a legitimate `run_coalesced` mid-measure rerun was
-        // actually this bypass). Now that event is scheduled through the same pending/ticket state
-        // machine as everything else, so it either gets absorbed into the in-flight cycle or
-        // properly deferred to a later turn -- it no longer forces a same-turn duplicate. 2 total
-        // (1 per host, both hosts independent) is therefore the correct, bounded value.
+        // 20 vs. 500 `set_text` calls against `probe` both produce the same total: 2). The host
+        // does not observe its own native Canvas size output at all: viewport changes enter only
+        // through the owner-supplied `TreeHostViewport` API. Consequently this assertion covers
+        // only the per-host queued-batch and same-host reentrancy invariants; it does not rely on a
+        // Canvas `SizeChanged` event being routed through the scheduler.
         assert_eq!(
             pass_count_after_drain, 2,
             "the coalesced burst against the first host and the independent invalidation against \

@@ -192,7 +192,7 @@ impl InnerTabView {
         width: f64,
         height: f64,
     ) {
-        content_host.set_viewport(TreeHostViewport {
+        let _ = content_host.set_viewport(TreeHostViewport {
             width: Some(width),
             height: Some(height),
         });

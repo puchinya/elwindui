@@ -719,11 +719,23 @@ impl UIElement {
     }
     fn set_visibility(&self, visibility: Visibility) {
         let base = self.as_ui_element();
+        let perf_trace = std::env::var_os("ELWINDUI_PERF_TRACE").is_some();
+        if perf_trace {
+            eprintln!("[perf] visibility_writer method=entered effective_value={visibility:?}");
+        }
         if base.visibility.get() == visibility {
+            if perf_trace {
+                eprintln!(
+                    "[perf] visibility_writer effective_changed=false actual_invalidate=false"
+                );
+            }
             return;
         }
         base.visibility.set(visibility);
         self.invalidate_measure();
+        if perf_trace {
+            eprintln!("[perf] visibility_writer effective_changed=true actual_invalidate=true");
+        }
         self.request_accessibility_update();
     }
     fn set_opacity(&self, opacity: f32) {
@@ -1282,30 +1294,51 @@ impl UIElement {
     /// which also picks `T` via an explicit turbofish matching the `#[attached]` field's declared
     /// type — never inferred from `value` alone, since a mismatched inferred type here would make
     /// `get_attached`'s `downcast_ref` silently miss and fall back to its caller's default.
-    fn set_attached<T: PartialEq + 'static>(
-        &self,
-        owner: &'static str,
-        field: &'static str,
-        value: T,
-    ) where
+    fn set_attached<T: 'static>(&self, owner: &'static str, field: &'static str, value: T)
+    where
         Self: Sized,
     {
-        let element = self.as_ui_element();
-        if element
-            .attached
-            .borrow()
-            .get(&(owner, field))
-            .and_then(|current| current.downcast_ref::<T>())
-            .is_some_and(|current| current == &value)
-        {
-            return;
-        }
-
-        element
+        self.as_ui_element()
             .attached
             .borrow_mut()
             .insert((owner, field), Box::new(value));
         self.invalidate_measure();
+    }
+    /// Stores a concrete, equality-aware attached-property value only when its effective value
+    /// changes. The generic `set_attached` surface intentionally remains type-erased and accepts
+    /// values that do not implement `PartialEq`; producers with known equality semantics may use
+    /// this narrow helper to suppress repeated layout invalidation.
+    fn set_attached_if_changed<T: PartialEq + 'static>(
+        &self,
+        owner: &'static str,
+        field: &'static str,
+        value: T,
+    ) -> bool
+    where
+        Self: Sized,
+    {
+        let unchanged = self
+            .as_ui_element()
+            .attached
+            .borrow()
+            .get(&(owner, field))
+            .and_then(|current| current.downcast_ref::<T>())
+            .is_some_and(|current| current == &value);
+        if unchanged {
+            if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
+                eprintln!(
+                    "[perf] attached_writer method=set_attached_if_changed owner={owner} field={field} effective_changed=false actual_invalidate=false"
+                );
+            }
+            return false;
+        }
+        self.set_attached(owner, field, value);
+        if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
+            eprintln!(
+                "[perf] attached_writer method=set_attached_if_changed owner={owner} field={field} effective_changed=true actual_invalidate=true"
+            );
+        }
+        true
     }
     /// Reads an attached-property value previously stored under `(owner, field)`, or `default` if
     /// absent (never set on this element, or set with a different `T` — the same `downcast_ref`
@@ -1669,7 +1702,7 @@ fn schedule_scalar_animation(
         return false;
     };
     let runtime = host.animation_runtime();
-    let weak = Rc::downgrade(&owner);
+    let weak: Weak<dyn UIElementExt> = Rc::downgrade(&owner);
     runtime.animate(
         owner.render_group_id(),
         channel,
@@ -1689,11 +1722,12 @@ fn schedule_scalar_animation(
         }),
         AnimatedValue::Scalar(target),
         animation,
-        Box::new(move |value| {
+        Box::new(move |value: AnimatedValue| {
             let AnimatedValue::Scalar(value) = value else {
                 return;
             };
-            if let Some(owner) = weak.upgrade() {
+            let owner: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+            if let Some(owner) = owner {
                 let base = owner.as_ui_element();
                 apply(base, value);
                 request_relayout(base, kind);
@@ -1724,18 +1758,19 @@ fn schedule_transform_animation(
         return false;
     };
     let runtime = host.animation_runtime();
-    let weak = Rc::downgrade(&owner);
+    let weak: Weak<dyn UIElementExt> = Rc::downgrade(&owner);
     runtime.animate(
         owner.render_group_id(),
         AnimationChannel::VisualTransform,
         AnimatedValue::Transform(base.presentation_visual_transform.get()),
         AnimatedValue::Transform(target),
         animation,
-        Box::new(move |value| {
+        Box::new(move |value: AnimatedValue| {
             let AnimatedValue::Transform(value) = value else {
                 return;
             };
-            if let Some(owner) = weak.upgrade() {
+            let owner: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+            if let Some(owner) = owner {
                 let base = owner.as_ui_element();
                 base.presentation_visual_transform.set(value);
                 request_relayout(base, InvalidationKind::Render);
@@ -1791,7 +1826,7 @@ pub fn start_enter_transition(
     base.transition_visual_transform.set(start_transform);
     node.invalidate_render();
     let pending = Rc::new(Cell::new(channels));
-    let weak = Rc::downgrade(node);
+    let weak: Weak<dyn UIElementExt> = Rc::downgrade(node);
     let runtime = host.animation_runtime();
     if (start_opacity - 1.0).abs() > f32::EPSILON {
         let pending = Rc::clone(&pending);
@@ -1802,9 +1837,11 @@ pub fn start_enter_transition(
             AnimatedValue::Scalar(start_opacity),
             AnimatedValue::Scalar(1.0),
             animation,
-            Box::new(move |value, finished| {
-                if let Some(node) = weak.upgrade() {
-                    node.as_ui_element().transition_opacity.set(match value {
+            Box::new(move |value: AnimatedValue, finished: bool| {
+                let node: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+                if let Some(node) = node {
+                    let base: &UIElement = node.as_ui_element();
+                    base.transition_opacity.set(match value {
                         AnimatedValue::Scalar(value) => value,
                         _ => return,
                     });
@@ -1825,14 +1862,14 @@ pub fn start_enter_transition(
             AnimatedValue::Transform(start_transform),
             AnimatedValue::Transform(VisualTransform::IDENTITY),
             animation,
-            Box::new(move |value, finished| {
-                if let Some(node) = weak.upgrade() {
-                    node.as_ui_element()
-                        .transition_visual_transform
-                        .set(match value {
-                            AnimatedValue::Transform(value) => value,
-                            _ => return,
-                        });
+            Box::new(move |value: AnimatedValue, finished: bool| {
+                let node: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+                if let Some(node) = node {
+                    let base: &UIElement = node.as_ui_element();
+                    base.transition_visual_transform.set(match value {
+                        AnimatedValue::Transform(value) => value,
+                        _ => return,
+                    });
                     node.invalidate_render();
                 }
                 if finished {
@@ -1882,7 +1919,7 @@ pub fn start_exit_transition(
         return true;
     };
     let pending = Rc::new(Cell::new(channels));
-    let weak = Rc::downgrade(node);
+    let weak: Weak<dyn UIElementExt> = Rc::downgrade(node);
     let runtime = host.animation_runtime();
     if (target_opacity - 1.0).abs() > f32::EPSILON {
         let pending = Rc::clone(&pending);
@@ -1893,9 +1930,11 @@ pub fn start_exit_transition(
             AnimatedValue::Scalar(base.transition_opacity.get()),
             AnimatedValue::Scalar(target_opacity),
             animation,
-            Box::new(move |value, finished| {
-                if let Some(node) = weak.upgrade() {
-                    node.as_ui_element().transition_opacity.set(match value {
+            Box::new(move |value: AnimatedValue, finished: bool| {
+                let node: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+                if let Some(node) = node {
+                    let base: &UIElement = node.as_ui_element();
+                    base.transition_opacity.set(match value {
                         AnimatedValue::Scalar(value) => value,
                         _ => return,
                     });
@@ -1919,14 +1958,14 @@ pub fn start_exit_transition(
             AnimatedValue::Transform(base.transition_visual_transform.get()),
             AnimatedValue::Transform(target_transform),
             animation,
-            Box::new(move |value, finished| {
-                if let Some(node) = weak.upgrade() {
-                    node.as_ui_element()
-                        .transition_visual_transform
-                        .set(match value {
-                            AnimatedValue::Transform(value) => value,
-                            _ => return,
-                        });
+            Box::new(move |value: AnimatedValue, finished: bool| {
+                let node: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+                if let Some(node) = node {
+                    let base: &UIElement = node.as_ui_element();
+                    base.transition_visual_transform.set(match value {
+                        AnimatedValue::Transform(value) => value,
+                        _ => return,
+                    });
                     node.invalidate_render();
                     if finished && pending.get() == 1 {
                         finish_exit(&node);
@@ -2420,7 +2459,7 @@ mod tests {
     }
 
     #[test]
-    fn setting_attached_property_to_the_effective_value_is_a_no_op() {
+    fn setting_attached_property_if_changed_suppresses_equal_values() {
         struct CountingHost {
             calls: Rc<RefCell<usize>>,
         }
@@ -2438,11 +2477,37 @@ mod tests {
             calls: Rc::clone(&calls),
         })));
 
-        leaf.as_ui_element().set_attached("Grid", "row", 1i32);
+        assert!(
+            leaf.as_ui_element()
+                .set_attached_if_changed("Grid", "row", 1i32)
+        );
         assert_eq!(*calls.borrow(), 1);
-        leaf.as_ui_element().set_attached("Grid", "row", 1i32);
+        assert!(
+            !leaf
+                .as_ui_element()
+                .set_attached_if_changed("Grid", "row", 1i32)
+        );
         assert_eq!(*calls.borrow(), 1);
-        leaf.as_ui_element().set_attached("Grid", "row", 2i32);
+        assert!(
+            leaf.as_ui_element()
+                .set_attached_if_changed("Grid", "row", 2i32)
+        );
         assert_eq!(*calls.borrow(), 2);
+    }
+
+    #[test]
+    fn generic_attached_property_accepts_non_partial_eq_values() {
+        #[derive(Clone)]
+        struct NonComparable(u32);
+
+        let leaf = native("a", size(10.0, 20.0));
+        leaf.as_ui_element()
+            .set_attached("TestOwner", "value", NonComparable(7));
+        assert_eq!(
+            leaf.as_ui_element()
+                .get_attached("TestOwner", "value", NonComparable(0))
+                .0,
+            7
+        );
     }
 }

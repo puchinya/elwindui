@@ -53,10 +53,12 @@ impl InnerPopupSurface {
         // initial layout (step 10, below) will use; `set_viewport` itself is a no-op layout-wise
         // with no tree attached yet (see that method's own doc comment).
         let content_host = TreeHostPanel::new();
-        content_host.set_viewport(TreeHostViewport {
-            width: Some(request.size.width as f64),
-            height: Some(request.size.height as f64),
-        });
+        content_host
+            .set_viewport(TreeHostViewport {
+                width: Some(request.size.width as f64),
+                height: Some(request.size.height as f64),
+            })
+            .ok()?;
 
         // 4. Cast (of the still-empty host's own Canvas, not of `request.content`).
         let canvas = content_host.canvas();

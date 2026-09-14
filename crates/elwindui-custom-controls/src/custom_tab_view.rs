@@ -23,6 +23,8 @@ thread_local! {
         RefCell::new(HashMap::new());
     static PRESENTER_SEARCH_COUNTS: RefCell<HashMap<usize, usize>> =
         RefCell::new(HashMap::new());
+    static PRESENTATION_APPLY_COUNTS: RefCell<HashMap<usize, usize>> =
+        RefCell::new(HashMap::new());
 }
 
 #[derive(Clone, Debug)]
@@ -514,9 +516,19 @@ impl CustomTabView {
         let position = self.tab_strip_position();
         let compact = self.compact();
         let close = self.close_button_presentation();
+        let previous = self.last_presented_selected_index();
+        let presentation_unchanged = previous == Some(selected)
+            && self.last_presented_tab_strip_position() == Some(position)
+            && self.last_presented_compact_tabs() == Some(compact)
+            && self.last_presented_close_button_presentation() == Some(close);
+        if presentation_unchanged {
+            return;
+        }
+        #[cfg(test)]
+        self.note_presentation_apply();
+
         self.sync_grid_rows();
         let (strip_presenter, content_presenter) = self.presenters();
-        let previous = self.last_presented_selected_index();
         let selection_only = self.last_presented_tab_strip_position() == Some(position)
             && self.last_presented_compact_tabs() == Some(compact)
             && self.last_presented_close_button_presentation() == Some(close)
@@ -574,6 +586,20 @@ impl CustomTabView {
         self.set_last_presented_tab_strip_position(Some(position));
         self.set_last_presented_compact_tabs(Some(compact));
         self.set_last_presented_close_button_presentation(Some(close));
+    }
+
+    #[cfg(test)]
+    fn note_presentation_apply(&self) {
+        let key = self as *const Self as usize;
+        PRESENTATION_APPLY_COUNTS.with(|counts| {
+            *counts.borrow_mut().entry(key).or_default() += 1;
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn presentation_apply_count_for_test(&self) -> usize {
+        let key = self as *const Self as usize;
+        PRESENTATION_APPLY_COUNTS.with(|counts| counts.borrow().get(&key).copied().unwrap_or(0))
     }
 
     fn sync_grid_rows(&self) {
@@ -1048,6 +1074,41 @@ mod tests {
             );
             assert_eq!(view.presenter_search_count_for_test(), presenter_searches);
         }
+    }
+
+    #[test]
+    fn unchanged_theme_refresh_does_not_reapply_tab_presentation_or_rebuild_close_glyphs() {
+        let (view, _) = probe_view(4);
+        let root: Rc<dyn UIElementExt> = view.clone();
+        layout_root(
+            &root,
+            Size {
+                width: 320.0,
+                height: 180.0,
+            },
+        );
+        let items = view.children_values();
+        let presentation_before = view.presentation_apply_count_for_test();
+        let glyphs_before = items
+            .iter()
+            .map(|item| item.close_button_glyph_rebuild_count_for_test())
+            .collect::<Vec<_>>();
+
+        view.refresh_theme();
+
+        assert_eq!(
+            view.presentation_apply_count_for_test(),
+            presentation_before,
+            "a theme refresh with unchanged presentation inputs must not rewrite presenters"
+        );
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.close_button_glyph_rebuild_count_for_test())
+                .collect::<Vec<_>>(),
+            glyphs_before,
+            "an unchanged close-glyph presentation must not clear/recreate its child"
+        );
     }
 }
 

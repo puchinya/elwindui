@@ -1245,6 +1245,7 @@ impl UIElement {
     /// `measure_override`/`arrange_override` (font/text/size/margin/visibility changes must stay
     /// `Arrange` or `Measure`; only a provably paint-only change is safe to migrate to
     /// `invalidate_render`). See `InvalidationKind::Render`'s own doc comment.
+    #[track_caller]
     fn invalidate(&self) {
         self.invalidate_arrange();
     }
@@ -1252,6 +1253,7 @@ impl UIElement {
     /// nothing about its measured or arranged geometry is in question, so a host may skip
     /// `layout_root` entirely for this pass. See `InvalidationKind::Render`'s own doc comment on
     /// why callers must self-audit before using this instead of `invalidate()`.
+    #[track_caller]
     fn invalidate_render(&self) {
         request_relayout(self.as_ui_element(), InvalidationKind::Render);
     }
@@ -1259,6 +1261,7 @@ impl UIElement {
     /// `arranged_height`/`arranged_offset` `None` (to be recomputed by the next `arrange` pass) and
     /// asks for a redraw. `measured_size` stays valid — only where this element ends up, not how
     /// big it wants to be, is in question (e.g. `UIElement::set_horizontal_alignment`).
+    #[track_caller]
     fn invalidate_arrange(&self) {
         self.as_ui_element().arranged_width.set(None);
         self.as_ui_element().arranged_height.set(None);
@@ -1270,6 +1273,7 @@ impl UIElement {
     /// can't leave a stale arrangement behind) and asks for a redraw. The strongest of the three —
     /// use whenever a change could affect `measure_override`'s result (e.g. `UIElement::set_margin`,
     /// `set_width`).
+    #[track_caller]
     fn invalidate_measure(&self) {
         self.as_ui_element().measured_size.set(None);
         self.as_ui_element().arranged_width.set(None);
@@ -1660,7 +1664,11 @@ impl UIElement {
 /// (see `UIElement::invalidate_host`), asks it for a fresh layout pass. Takes `&UIElement`
 /// (not `&dyn UIElement`) so the caller — a default trait method, where `Self` isn't known to be
 /// `Sized`. A no-op if the Visual root has no registered host (e.g. a standalone test tree).
+#[track_caller]
 pub(crate) fn request_relayout(base: &UIElement, kind: InvalidationKind) {
+    if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
+        eprintln!("{}", format_invalidation_trace(kind, base.render_group_id));
+    }
     let mut current: Option<Rc<dyn UIElementExt>> = base
         .visual_parent
         .borrow()
@@ -1679,6 +1687,26 @@ pub(crate) fn request_relayout(base: &UIElement, kind: InvalidationKind) {
     if let Some(host) = host {
         host.request_relayout(base.render_group_id, kind);
     }
+}
+
+/// Formats the authoritative invalidation request record only when perf tracing is enabled by
+/// the caller. The `#[track_caller]` boundary is intentionally here rather than in the host
+/// scheduler: the location is the Core producer that requested invalidation, while the host only
+/// knows that it received a request. Paths are reduced to repository-relative names so a live log
+/// never exposes an absolute checkout path.
+#[track_caller]
+fn format_invalidation_trace(kind: InvalidationKind, render_group_id: u64) -> String {
+    let location = std::panic::Location::caller();
+    let file = location.file().replace('\\', "/");
+    let caller = ["crates/", "tests/", "examples/"]
+        .iter()
+        .find_map(|prefix| file.find(prefix).map(|index| file[index..].to_owned()))
+        .unwrap_or_else(|| "<external>".to_owned());
+    format!(
+        "[perf] invalidation_request kind={kind:?} group={render_group_id} caller={caller}:{}:{}",
+        location.line(),
+        location.column()
+    )
 }
 
 fn schedule_scalar_animation(
@@ -2390,6 +2418,22 @@ mod tests {
                 InvalidationKind::Measure,
                 InvalidationKind::Arrange,
             ]
+        );
+    }
+
+    #[test]
+    fn invalidation_trace_reports_the_producer_callsite() {
+        let expected_line = line!() + 1;
+        let trace = format_invalidation_trace(InvalidationKind::Measure, 417);
+
+        assert!(trace.starts_with("[perf] invalidation_request kind=Measure group=417"));
+        assert!(
+            trace.contains("caller=crates/elwindui-core/src/ui/element.rs:"),
+            "trace must use a repository-relative source path: {trace}"
+        );
+        assert!(
+            trace.contains(&format!(":{expected_line}:")),
+            "trace must report the producer callsite line, not the formatter line: {trace}"
         );
     }
 

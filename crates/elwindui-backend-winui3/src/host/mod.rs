@@ -298,6 +298,15 @@ pub struct TreeHostPanel {
 #[cfg(test)]
 thread_local! {
     static RELAYOUT_STATIC_PASS_COUNT: Cell<u32> = const { Cell::new(0) };
+    static RELAYOUT_REALIZATION_HISTORY: RefCell<Vec<RelayoutRealizationRecord>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RelayoutRealizationRecord {
+    pub(crate) diagnostic_id: u64,
+    pub(crate) source: RelayoutSource,
+    pub(crate) kind: elwindui_core::ui::InvalidationKind,
 }
 
 #[cfg(test)]
@@ -308,6 +317,16 @@ pub(crate) fn relayout_static_pass_count_for_test() -> u32 {
 #[cfg(test)]
 pub(crate) fn reset_relayout_static_pass_count_for_test() {
     RELAYOUT_STATIC_PASS_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_relayout_realization_history_for_test() {
+    RELAYOUT_REALIZATION_HISTORY.with(|history| history.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn relayout_realization_history_for_test() -> Vec<RelayoutRealizationRecord> {
+    RELAYOUT_REALIZATION_HISTORY.with(|history| history.borrow().clone())
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostPanel` — wraps a *weak* reference back to the
@@ -335,7 +354,7 @@ pub(crate) fn reset_relayout_static_pass_count_for_test() {
 /// `Canvas.SizeChanged`) — Issue #261 review remediation §2.6 removed that path entirely, since a
 /// `TreeHost` observing its own native size output is exactly the same-host feedback loop that
 /// caused a 595+-cycle cascade on live `docking-demo`; see `set_viewport`'s own doc comment.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RelayoutSource {
     /// A general `elwindui_core::ui::RelayoutHost::request_relayout` invalidation (an element's
     /// own `invalidate_measure`/`invalidate_arrange`/`invalidate_render`).
@@ -489,7 +508,7 @@ impl WinUI3RelayoutHost {
                     self.diagnostic_id, source, kind
                 );
             }
-            TreeHostPanel::relayout_static(
+            let realized = TreeHostPanel::relayout_static(
                 &self.canvas,
                 &composition,
                 &tree,
@@ -500,6 +519,18 @@ impl WinUI3RelayoutHost {
                 &active,
                 &relayout_cycle,
             );
+            #[cfg(test)]
+            if realized {
+                RELAYOUT_REALIZATION_HISTORY.with(|history| {
+                    history.borrow_mut().push(RelayoutRealizationRecord {
+                        diagnostic_id: self.diagnostic_id,
+                        source,
+                        kind,
+                    });
+                });
+            }
+            #[cfg(not(test))]
+            let _ = realized;
         }
         if !was_in_progress {
             self.in_progress.set(false);
@@ -1616,9 +1647,9 @@ impl TreeHostPanel {
         viewport: Option<TreeHostViewport>,
         active: &Cell<bool>,
         relayout_cycle: &RelayoutCycleState,
-    ) {
+    ) -> bool {
         if !active.get() {
-            return;
+            return false;
         }
         relayout_cycle.run_coalesced(|| {
             Self::relayout_static_pass(
@@ -1630,7 +1661,7 @@ impl TreeHostPanel {
                 keyboard,
                 viewport,
             );
-        });
+        })
     }
 
     /// The actual measure/arrange/composition-reconcile traversal for one relayout pass. Never

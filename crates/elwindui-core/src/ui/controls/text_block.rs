@@ -88,6 +88,9 @@ impl TextBlock {
         Some(self)
     }
     fn set_text(&self, text: &str) {
+        if self.text.borrow().as_str() == text {
+            return;
+        }
         *self.text.borrow_mut() = text.to_string();
         self.invalidate_measure();
         self.request_accessibility_update();
@@ -175,5 +178,29 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn equal_text_writes_do_not_request_relayout() {
+        struct CountingHost {
+            requests: Cell<usize>,
+        }
+        impl RelayoutHost for CountingHost {
+            fn request_relayout(&self, _dirty_group_id: u64, _kind: InvalidationKind) {
+                self.requests.set(self.requests.get() + 1);
+            }
+        }
+
+        let text_block = TextBlock::new();
+        let host = Rc::new(CountingHost {
+            requests: Cell::new(0),
+        });
+        text_block.set_invalidate_host(Some(host.clone()));
+        text_block.set_text("a");
+        assert_eq!(host.requests.get(), 1);
+        text_block.set_text("a");
+        assert_eq!(host.requests.get(), 1);
+        text_block.set_text("b");
+        assert_eq!(host.requests.get(), 2);
     }
 }

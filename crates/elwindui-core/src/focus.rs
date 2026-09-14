@@ -112,6 +112,22 @@ impl FocusTracker {
         }
     }
 
+    /// Clears focus only when the currently-focused element belongs to `subtree`.
+    pub fn clear_focus_in_subtree(&self, subtree: &Rc<dyn UIElementExt>) -> bool {
+        let Some(focused) = self.focused() else {
+            return false;
+        };
+        let mut current = Some(focused);
+        while let Some(element) = current {
+            if Rc::ptr_eq(&element, subtree) {
+                self.clear_focus();
+                return true;
+            }
+            current = element.visual_parent();
+        }
+        false
+    }
+
     pub fn push_trap(&self, scope: Rc<dyn UIElementExt>) {
         self.trap_stack.borrow_mut().push(scope);
     }

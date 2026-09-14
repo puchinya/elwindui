@@ -8,7 +8,7 @@ use crate::ffi::{
     UiCallbackRegistryOwner, invoke_ui_bool_event_callback, invoke_ui_bounds_event_callback,
     invoke_ui_size_event_callback,
 };
-use crate::host::TreeHostPanel;
+use crate::host::{TreeHostPanel, TreeHostViewport};
 use elwindui_core::base::Rect;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -39,7 +39,10 @@ fn apply_window_viewport(
         let _ = wrapper.SetHeight(height);
     }
     let content_height = (height - top_inset.get()).max(0.0);
-    content_host.set_viewport_size(width, content_height);
+    let _ = content_host.set_viewport(TreeHostViewport {
+        width: Some(width),
+        height: Some(content_height),
+    });
 }
 
 /// PR #165 review remediation, A1/T22-T24: pure decision logic for a native `AppWindow.Closing`

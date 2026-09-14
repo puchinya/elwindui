@@ -229,6 +229,20 @@ impl CustomTabViewItem {
     }
 
     #[cfg(test)]
+    pub(crate) fn close_button_glyph_rebuild_count_for_test(&self) -> usize {
+        core::visual_tree::find_all::<CustomTabCloseButton>(self)
+            .into_iter()
+            .next()
+            .and_then(|button| {
+                button
+                    .as_any()
+                    .downcast_ref::<CustomTabCloseButton>()
+                    .map(|button| button.glyph_rebuild_count_for_test())
+            })
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
     fn note_presentation_update(&self) {
         let key = self as *const Self as usize;
         PRESENTATION_UPDATE_COUNTS.with(|counts| {

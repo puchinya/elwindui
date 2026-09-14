@@ -156,6 +156,7 @@ fn lookup_resource<T: Interface>(key: &str) -> Option<T> {
 #[cfg(test)]
 mod hosted_xaml_regression_tests {
     use super::*;
+    use crate::bindings::Microsoft;
     use crate::bindings::Microsoft::UI::Xaml::Controls::{
         Canvas, Control, TextBlock, TextBox as XamlTextBox, ToolTip as XamlToolTip, ToolTipService,
     };
@@ -174,8 +175,59 @@ mod hosted_xaml_regression_tests {
         Brush, CascadedTextStyle, Color, ComputedTextStyle, FontFamily, FontStretch, FontStyle,
         FontWeight, TextBackend, TextMeasureRequest, TextWrapping,
     };
+    use elwindui_core::ui::{UIElement, UIElementExt};
+    use std::cell::{Cell, RefCell};
+    use std::rc::{Rc, Weak};
     use windows::Foundation::IPropertyValue;
     use windows::core::{HSTRING, Interface};
+
+    thread_local! {
+        static TEST_CALLBACK_OWNERS: RefCell<Vec<crate::ffi::UiCallbackRegistryOwner>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[elwindui_macros::class(inherits = elwindui_core::ui::UIElement)]
+    struct ReentrantMeasureProbe {
+        reentered: Cell<bool>,
+        self_weak: RefCell<Weak<dyn ReentrantMeasureProbeExt>>,
+    }
+
+    #[elwindui_macros::class]
+    impl ReentrantMeasureProbe {
+        #[overrides]
+        fn measure_override(&self, _available: CoreSize) -> CoreSize {
+            if !self.reentered.replace(true) {
+                if let Some(probe) = self.self_weak.borrow().upgrade() {
+                    let element: Rc<dyn UIElementExt> = probe;
+                    element.invalidate_measure();
+                }
+            }
+            CoreSize {
+                width: 160.0,
+                height: 48.0,
+            }
+        }
+
+        fn construct() -> Self {
+            Self {
+                base: UIElement::construct(),
+                reentered: Cell::new(false),
+                self_weak: RefCell::new(__self_weak.clone()),
+            }
+        }
+    }
+
+    fn enqueue_test_callback(callback: Rc<dyn Fn()>) {
+        let owner = crate::ffi::UiCallbackRegistryOwner::default();
+        let callback_id = owner.register_one_shot_event(callback);
+        TEST_CALLBACK_OWNERS.with(|owners| owners.borrow_mut().push(owner));
+        let queue = Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread()
+            .expect("DispatcherQueue::GetForCurrentThread");
+        let handler = Microsoft::UI::Dispatching::DispatcherQueueHandler::new(move || {
+            invoke_ui_event_callback(callback_id);
+            Ok(())
+        });
+        let _ = queue.TryEnqueue(&handler);
+    }
 
     fn assert_text_style_round_trip(canvas: &Canvas) {
         let style = ComputedTextStyle {
@@ -345,6 +397,20 @@ mod hosted_xaml_regression_tests {
         thread_local! {
             static VIEW: RefCell<Option<AnyView>> = const { RefCell::new(None) };
             static WIDTH: RefCell<Option<f32>> = const { RefCell::new(None) };
+            static RELAYOUT_PASS_COUNT_BEFORE_DRAIN: RefCell<Option<u32>> = const { RefCell::new(None) };
+            static RELAYOUT_PASS_COUNT_AFTER_DRAIN: RefCell<Option<u32>> = const { RefCell::new(None) };
+            static RELAYOUT_PASS_COUNT_AFTER_500: RefCell<Option<u32>> = const { RefCell::new(None) };
+            static LIFECYCLE_VISIBLE_AFTER_CLOSE: RefCell<Option<bool>> = const { RefCell::new(None) };
+            static RETAINED_COUNT_AFTER_CLOSE: RefCell<Option<usize>> = const { RefCell::new(None) };
+            static RELEASE_CALL_COUNT_AFTER_CLOSE: RefCell<Option<usize>> = const { RefCell::new(None) };
+            static SCHEDULER_INITIAL_HISTORY: RefCell<Option<Vec<crate::host::RelayoutRealizationRecord>>> = const { RefCell::new(None) };
+            static SCHEDULER_STRONGEST_HISTORY: RefCell<Option<Vec<crate::host::RelayoutRealizationRecord>>> = const { RefCell::new(None) };
+            static SCHEDULER_RENDER_HISTORY: RefCell<Option<Vec<crate::host::RelayoutRealizationRecord>>> = const { RefCell::new(None) };
+            static SCHEDULER_FLUSH_HISTORY: RefCell<Option<Vec<crate::host::RelayoutRealizationRecord>>> = const { RefCell::new(None) };
+            static SCHEDULER_CALLBACK_BASELINE: RefCell<Option<usize>> = const { RefCell::new(None) };
+            static SCHEDULER_CALLBACK_COUNT_AFTER_QUEUE: RefCell<Option<usize>> = const { RefCell::new(None) };
+            static SCHEDULER_CALLBACK_COUNT_AFTER_FLUSH: RefCell<Option<usize>> = const { RefCell::new(None) };
+            static SCHEDULER_CALLBACK_COUNT_AFTER_STALE: RefCell<Option<usize>> = const { RefCell::new(None) };
         }
 
         crate::init().expect("elwindui_backend_winui3::init");
@@ -439,7 +505,7 @@ mod hosted_xaml_regression_tests {
                     failed_icon_conversion_does_not_remove_the_action();
 
                 crate::app::reset_window_lifecycle_test_state();
-                let lifecycle_window = InnerWindow::new();
+                let lifecycle_window = Rc::new(InnerWindow::new());
 
                 lifecycle_window.show();
                 assert!(
@@ -470,26 +536,139 @@ mod hosted_xaml_regression_tests {
                     "re-showing must not retain the same native window twice"
                 );
 
-                lifecycle_window.close();
-                assert!(
-                    !lifecycle_window.is_visible_for_test(),
-                    "close() must leave no visible native window"
-                );
-                assert_eq!(
-                    crate::app::retained_window_count_for_test(),
-                    0,
-                    "the Closed handler must release the retained native window"
-                );
-                assert_eq!(
-                    crate::app::release_window_call_count_for_test(),
-                    1,
-                    "programmatic close() must reach release_window exactly once"
-                );
+                // Scheduler-level Issue #261 regressions. The probe's first measure raises one
+                // same-host invalidation while the host is already in progress; the host must own
+                // that rerun through `run_coalesced`, without contaminating the next queued batch.
+                // All assertions remain outside native callbacks below.
+                let scheduler_probe = ReentrantMeasureProbe::new();
+                crate::host::reset_relayout_realization_history_for_test();
+                lifecycle_window.set_content(scheduler_probe.clone());
+                SCHEDULER_INITIAL_HISTORY.with(|slot| {
+                    *slot.borrow_mut() = Some(crate::host::relayout_realization_history_for_test())
+                });
+
+                let callback_baseline = crate::ffi::ui_event_callback_count();
+                SCHEDULER_CALLBACK_BASELINE
+                    .with(|slot| *slot.borrow_mut() = Some(callback_baseline));
+                scheduler_probe.invalidate_render();
+                scheduler_probe.invalidate_arrange();
+                scheduler_probe.invalidate_render();
+                scheduler_probe.invalidate_measure();
+                scheduler_probe.invalidate_arrange();
+                SCHEDULER_CALLBACK_COUNT_AFTER_QUEUE
+                    .with(|slot| *slot.borrow_mut() = Some(crate::ffi::ui_event_callback_count()));
+
+                let scheduler_probe_for_render = scheduler_probe.clone();
+                let lifecycle_window_for_scheduler = lifecycle_window.clone();
+                enqueue_test_callback(Rc::new(move || {
+                    SCHEDULER_STRONGEST_HISTORY.with(|slot| {
+                        *slot.borrow_mut() =
+                            Some(crate::host::relayout_realization_history_for_test())
+                    });
+
+                    // The previous batch has been consumed/reset. A new Render-only request must
+                    // not inherit the reentrant/strongest Measure claim from that earlier batch.
+                    scheduler_probe_for_render.invalidate_render();
+                    let scheduler_probe_for_flush = scheduler_probe_for_render.clone();
+                    let lifecycle_window_for_flush = lifecycle_window_for_scheduler.clone();
+                    enqueue_test_callback(Rc::new(move || {
+                        SCHEDULER_RENDER_HISTORY.with(|slot| {
+                            *slot.borrow_mut() =
+                                Some(crate::host::relayout_realization_history_for_test())
+                        });
+
+                        // Queue one ordinary batch, consume it synchronously, and then enqueue a
+                        // follow-up callback after the stale dispatcher ticket. That callback can
+                        // assert both one realization and one-shot callback cleanup.
+                        let flush_baseline = crate::ffi::ui_event_callback_count();
+                        SCHEDULER_CALLBACK_BASELINE
+                            .with(|slot| *slot.borrow_mut() = Some(flush_baseline));
+                        scheduler_probe_for_flush.invalidate_measure();
+                        SCHEDULER_CALLBACK_COUNT_AFTER_QUEUE.with(|slot| {
+                            *slot.borrow_mut() = Some(crate::ffi::ui_event_callback_count())
+                        });
+                        scheduler_probe_for_flush.flush_interactive_relayout();
+                        SCHEDULER_FLUSH_HISTORY.with(|slot| {
+                            *slot.borrow_mut() =
+                                Some(crate::host::relayout_realization_history_for_test())
+                        });
+                        SCHEDULER_CALLBACK_COUNT_AFTER_FLUSH.with(|slot| {
+                            *slot.borrow_mut() = Some(crate::ffi::ui_event_callback_count())
+                        });
+
+                        let lifecycle_window_for_burst = lifecycle_window_for_flush.clone();
+                        enqueue_test_callback(Rc::new(move || {
+                            SCHEDULER_CALLBACK_COUNT_AFTER_STALE.with(|slot| {
+                                *slot.borrow_mut() = Some(crate::ffi::ui_event_callback_count())
+                            });
+
+                            // Existing hosted burst/sibling coverage is deliberately kept in the
+                            // same real Application test. Run it once with 20 writes and again
+                            // with 500 writes; each host must still realize exactly one pass.
+                            use elwindui_core::ui::TextBlockExt;
+                            let probe = elwindui_core::ui::TextBlock::new();
+                            lifecycle_window_for_burst.set_content(probe.clone());
+                            let sibling_window = Rc::new(InnerWindow::new());
+                            sibling_window.show();
+                            let sibling_probe = elwindui_core::ui::TextBlock::new();
+                            sibling_window.set_content(sibling_probe.clone());
+
+                            crate::host::reset_relayout_static_pass_count_for_test();
+                            for i in 0..20 {
+                                probe.set_text(&format!("probe {i}"));
+                            }
+                            sibling_probe.set_text("sibling probe");
+                            let pass_count_before_drain =
+                                crate::host::relayout_static_pass_count_for_test();
+                            RELAYOUT_PASS_COUNT_BEFORE_DRAIN
+                                .with(|slot| *slot.borrow_mut() = Some(pass_count_before_drain));
+
+                            let lifecycle_window_for_500 = lifecycle_window_for_burst.clone();
+                            enqueue_test_callback(Rc::new(move || {
+                                RELAYOUT_PASS_COUNT_AFTER_DRAIN.with(|slot| {
+                                    *slot.borrow_mut() =
+                                        Some(crate::host::relayout_static_pass_count_for_test())
+                                });
+
+                                crate::host::reset_relayout_static_pass_count_for_test();
+                                for i in 0..500 {
+                                    probe.set_text(&format!("probe-500 {i}"));
+                                }
+                                sibling_probe.set_text("sibling probe 500");
+
+                                let sibling_window_for_close = sibling_window.clone();
+                                let lifecycle_window_for_close = lifecycle_window_for_500.clone();
+                                enqueue_test_callback(Rc::new(move || {
+                                    RELAYOUT_PASS_COUNT_AFTER_500.with(|slot| {
+                                        *slot.borrow_mut() =
+                                            Some(crate::host::relayout_static_pass_count_for_test())
+                                    });
+                                    sibling_window_for_close.close();
+                                    lifecycle_window_for_close.close();
+                                    LIFECYCLE_VISIBLE_AFTER_CLOSE.with(|slot| {
+                                        *slot.borrow_mut() =
+                                            Some(lifecycle_window_for_close.is_visible_for_test())
+                                    });
+                                    RETAINED_COUNT_AFTER_CLOSE.with(|slot| {
+                                        *slot.borrow_mut() =
+                                            Some(crate::app::retained_window_count_for_test())
+                                    });
+                                    RELEASE_CALL_COUNT_AFTER_CLOSE.with(|slot| {
+                                        *slot.borrow_mut() =
+                                            Some(crate::app::release_window_call_count_for_test())
+                                    });
+                                }));
+                            }));
+                        }));
+                    }));
+                }));
+
                 Ok(())
             });
             let _ = element.Loaded(&loaded);
             let _ = window.Activate();
         });
+        TEST_CALLBACK_OWNERS.with(|owners| owners.borrow_mut().clear());
 
         let width = WIDTH
             .with(|slot| *slot.borrow())
@@ -497,6 +676,145 @@ mod hosted_xaml_regression_tests {
         assert!(
             width > 10.0,
             "Button must recover a nonzero natural width after a zero-size arrange, got {width}"
+        );
+
+        // Issue #261 regression assertions (deferred from inside native callbacks — see that
+        // code's own comment on why panicking there is unsafe).
+        let pass_count_before_drain = RELAYOUT_PASS_COUNT_BEFORE_DRAIN
+            .with(|slot| *slot.borrow())
+            .expect("pass count before drain should have been recorded");
+        assert_eq!(
+            pass_count_before_drain, 0,
+            "many consecutive invalidations against one host, plus an independent invalidation \
+             against a sibling host, must not run any real relayout pass before this UI-turn drains"
+        );
+        let pass_count_after_drain = RELAYOUT_PASS_COUNT_AFTER_DRAIN
+            .with(|slot| *slot.borrow())
+            .expect("pass count after drain should have been recorded");
+        // Each host settles in exactly 1 real pass here (confirmed independent of burst size --
+        // 20 vs. 500 `set_text` calls against `probe` both produce the same total: 2). The host
+        // does not observe its own native Canvas size output at all: viewport changes enter only
+        // through the owner-supplied `TreeHostViewport` API. Consequently this assertion covers
+        // only the per-host queued-batch and same-host reentrancy invariants; it does not rely on a
+        // Canvas `SizeChanged` event being routed through the scheduler.
+        assert_eq!(
+            pass_count_after_drain, 2,
+            "the coalesced burst against the first host and the independent invalidation against \
+             the sibling host must each settle in the same small, bounded number of real passes \
+             once this UI-turn drains, regardless of how many invalidations were coalesced into \
+             it -- neither host suppresses the other's own pass"
+        );
+        let pass_count_after_500 = RELAYOUT_PASS_COUNT_AFTER_500
+            .with(|slot| *slot.borrow())
+            .expect("500-write pass count should have been recorded");
+        assert_eq!(
+            pass_count_after_500, 2,
+            "a 500-write burst must have the same one-pass-per-host result as the 20-write burst"
+        );
+
+        let initial_history = SCHEDULER_INITIAL_HISTORY
+            .with(|slot| slot.borrow().clone())
+            .expect("initial scheduler realization history should have been recorded");
+        assert!(
+            initial_history.iter().any(|record| {
+                record.source == crate::host::RelayoutSource::SetTreeInitial
+                    && record.kind == elwindui_core::ui::InvalidationKind::Measure
+            }),
+            "initial probe content must realize as SetTreeInitial/Measure: {initial_history:?}"
+        );
+        let strongest_history = SCHEDULER_STRONGEST_HISTORY
+            .with(|slot| slot.borrow().clone())
+            .expect("strongest-kind scheduler history should have been recorded");
+        assert_eq!(
+            strongest_history.len(),
+            initial_history.len() + 1,
+            "Render/Arrange/Render/Measure/Arrange must realize one queued batch"
+        );
+        assert_eq!(
+            strongest_history
+                .last()
+                .map(|record| (record.source, record.kind)),
+            Some((
+                crate::host::RelayoutSource::QueuedRequest,
+                elwindui_core::ui::InvalidationKind::Measure
+            ))
+        );
+        let render_history = SCHEDULER_RENDER_HISTORY
+            .with(|slot| slot.borrow().clone())
+            .expect("render scheduler history should have been recorded");
+        assert_eq!(
+            render_history.len(),
+            strongest_history.len() + 1,
+            "the subsequent Render-only batch must realize exactly once"
+        );
+        assert_eq!(
+            render_history
+                .last()
+                .map(|record| (record.source, record.kind)),
+            Some((
+                crate::host::RelayoutSource::QueuedRequest,
+                elwindui_core::ui::InvalidationKind::Render
+            )),
+            "a reentrant Measure must not contaminate the later Render batch"
+        );
+        let flush_history = SCHEDULER_FLUSH_HISTORY
+            .with(|slot| slot.borrow().clone())
+            .expect("flush scheduler history should have been recorded");
+        assert_eq!(
+            flush_history.len(),
+            render_history.len() + 1,
+            "interactive flush must realize its pending batch exactly once"
+        );
+        assert_eq!(
+            flush_history
+                .last()
+                .map(|record| (record.source, record.kind)),
+            Some((
+                crate::host::RelayoutSource::InteractiveFlush,
+                elwindui_core::ui::InvalidationKind::Measure
+            ))
+        );
+        let callback_baseline = SCHEDULER_CALLBACK_BASELINE
+            .with(|slot| *slot.borrow())
+            .expect("callback baseline should have been recorded");
+        let callback_count_after_queue = SCHEDULER_CALLBACK_COUNT_AFTER_QUEUE
+            .with(|slot| *slot.borrow())
+            .expect("callback count after queue should have been recorded");
+        let callback_count_after_flush = SCHEDULER_CALLBACK_COUNT_AFTER_FLUSH
+            .with(|slot| *slot.borrow())
+            .expect("callback count after flush should have been recorded");
+        let callback_count_after_stale = SCHEDULER_CALLBACK_COUNT_AFTER_STALE
+            .with(|slot| *slot.borrow())
+            .expect("callback count after stale ticket should have been recorded");
+        assert_eq!(callback_count_after_queue, callback_baseline + 1);
+        assert_eq!(
+            callback_count_after_flush, callback_count_after_queue,
+            "interactive flush leaves the stale one-shot ticket for later consumption"
+        );
+        assert_eq!(
+            callback_count_after_stale, callback_baseline,
+            "the stale callback must be removed without a duplicate realization"
+        );
+        let lifecycle_visible_after_close = LIFECYCLE_VISIBLE_AFTER_CLOSE
+            .with(|slot| *slot.borrow())
+            .expect("lifecycle window visibility after close should have been recorded");
+        assert!(
+            !lifecycle_visible_after_close,
+            "close() must leave no visible native window"
+        );
+        let retained_count_after_close = RETAINED_COUNT_AFTER_CLOSE
+            .with(|slot| *slot.borrow())
+            .expect("retained window count after close should have been recorded");
+        assert_eq!(
+            retained_count_after_close, 0,
+            "the Closed handler must release every retained native window"
+        );
+        let release_call_count_after_close = RELEASE_CALL_COUNT_AFTER_CLOSE
+            .with(|slot| *slot.borrow())
+            .expect("release_window call count after close should have been recorded");
+        assert_eq!(
+            release_call_count_after_close, 2,
+            "programmatic close() on both windows must reach release_window exactly once each"
         );
     }
 }

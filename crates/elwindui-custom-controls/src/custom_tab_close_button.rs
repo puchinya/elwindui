@@ -1,13 +1,23 @@
 use super::core;
 use super::core::base::Point;
 use super::core::environment::application_environment;
+use super::core::graphics::Brush;
 use super::core::input::{MouseButton, PointerEventArgs};
 use super::core::layout::Visibility;
 use super::core::theme::{BrushStyle, ResolvedValue};
 use super::core::ui::{ControlExt, Grid, LayoutExt, UIElementExt};
 use super::weak_self_from_visual_owner;
 use super::{ChromeIcon, chrome_icon};
+#[cfg(test)]
+use std::cell::RefCell;
+#[cfg(test)]
+use std::collections::HashMap;
 use std::rc::Rc;
+
+#[cfg(test)]
+thread_local! {
+    static GLYPH_REBUILD_COUNTS: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+}
 
 /// Private close-slot control used by [`CustomTabViewItem`]'s authored header template.
 #[elwindui::component(inherits Control)]
@@ -22,6 +32,8 @@ pub(crate) struct CustomTabCloseButton {
     pressed: bool,
     #[state(default = false)]
     handlers_bound: bool,
+    #[state(default = None)]
+    last_glyph_signature: Option<(bool, Option<Brush>)>,
     #[computed(expr = if slot_visible { Visibility::Visible } else { Visibility::Collapsed })]
     slot_visibility: Visibility,
     template: template_view!(|this: Self| {
@@ -69,12 +81,35 @@ impl CustomTabCloseButton {
         let Some(slot) = slot_node.as_any().downcast_ref::<Grid>() else {
             return;
         };
+        let signature = (self.glyph_visible(), foreground.clone());
+        let structure_matches = if signature.0 {
+            slot.children().len() == 1
+        } else {
+            slot.children().len() == 0
+        };
+        if self.last_glyph_signature() == Some(signature.clone()) && structure_matches {
+            return;
+        }
         slot.children().clear();
         if self.glyph_visible() {
             let glyph = chrome_icon(ChromeIcon::Close, foreground);
             glyph.set_hit_test_visible(false);
             slot.children().add(glyph);
         }
+        self.set_last_glyph_signature(Some(signature));
+        #[cfg(test)]
+        {
+            let key = self as *const Self as usize;
+            GLYPH_REBUILD_COUNTS.with(|counts| {
+                *counts.borrow_mut().entry(key).or_default() += 1;
+            });
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn glyph_rebuild_count_for_test(&self) -> usize {
+        let key = self as *const Self as usize;
+        GLYPH_REBUILD_COUNTS.with(|counts| counts.borrow().get(&key).copied().unwrap_or(0))
     }
 
     pub(crate) fn set_on_close(&self, callback: Option<Rc<dyn Fn()>>) {

@@ -1,6 +1,6 @@
 use super::core::base::Point;
 use super::core::graphics::{Brush, Color};
-use super::core::input::{Key, KeyEventArgs, MouseButton, PointerEventArgs};
+use super::core::input::{Key, KeyEventArgs, MouseButton, PointerEventArgs, RoutedEventArgs};
 use super::core::layout::{
     GridLength, GridTrackConstraint, HorizontalAlignment, VerticalAlignment,
 };
@@ -206,7 +206,8 @@ pub struct CustomGridSplitter {
             this.sync_visual(true);
             let weak_self = weak_self_from_visual_owner(this.as_ref());
             this.add_unmount_hook(Box::new(move || {
-                if let Some(splitter) = weak_self.upgrade() {
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.set_resize_session(None);
                 }
             }));
@@ -445,15 +446,17 @@ impl CustomGridSplitter {
     }
 
     fn apply_tracks(&self, session: &ResizeSession, tracks: Vec<GridLength>) -> bool {
-        let Some(grid) = session.grid.upgrade() else {
+        let grid: Option<Rc<dyn UIElementExt>> = session.grid.upgrade();
+        let Some(grid) = grid else {
             return false;
         };
-        let Some(grid) = grid.as_any().downcast_ref::<Grid>() else {
+        let grid: Option<&Grid> = grid.as_any().downcast_ref::<Grid>();
+        let Some(grid) = grid else {
             return false;
         };
         match session.direction {
-            GridResizeDirection::Columns => grid.set_columns(tracks),
-            GridResizeDirection::Rows => grid.set_rows(tracks),
+            GridResizeDirection::Columns => GridExt::set_columns(grid, tracks.clone()),
+            GridResizeDirection::Rows => GridExt::set_rows(grid, tracks),
             GridResizeDirection::Auto => return false,
         }
         grid.flush_interactive_relayout();
@@ -671,95 +674,104 @@ impl CustomGridSplitter {
     }
 
     fn bind_input_handlers(&self) {
-        let weak_self = weak_self_from_visual_owner(self);
+        let weak_self: Weak<CustomGridSplitter> = weak_self_from_visual_owner(self);
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_pressed",
-            Box::new(move |event, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+            Box::new(move |event: &PointerEventArgs, _: &RoutedEventArgs| {
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.pointer_pressed(*event);
                 }
             }),
         );
 
-        let weak_self = weak_self_from_visual_owner(self);
+        let weak_self: Weak<CustomGridSplitter> = weak_self_from_visual_owner(self);
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_moved",
-            Box::new(move |event, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+            Box::new(move |event: &PointerEventArgs, _: &RoutedEventArgs| {
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.pointer_moved(*event);
                 }
             }),
         );
 
-        let weak_self = weak_self_from_visual_owner(self);
+        let weak_self: Weak<CustomGridSplitter> = weak_self_from_visual_owner(self);
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
-            Box::new(move |event, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+            Box::new(move |event: &PointerEventArgs, _: &RoutedEventArgs| {
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.pointer_released(*event);
                 }
             }),
         );
 
-        let weak_self = weak_self_from_visual_owner(self);
+        let weak_self: Weak<CustomGridSplitter> = weak_self_from_visual_owner(self);
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_canceled",
-            Box::new(move |_, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+            Box::new(move |_: &PointerEventArgs, _: &RoutedEventArgs| {
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.pointer_canceled();
                 }
             }),
         );
 
-        let weak_self = weak_self_from_visual_owner(self);
+        let weak_self: Weak<CustomGridSplitter> = weak_self_from_visual_owner(self);
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_entered",
-            Box::new(move |_, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+            Box::new(move |_: &PointerEventArgs, _: &RoutedEventArgs| {
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.set_pointer_over(true);
                     splitter.sync_visual(false);
                 }
             }),
         );
 
-        let weak_self = weak_self_from_visual_owner(self);
+        let weak_self: Weak<CustomGridSplitter> = weak_self_from_visual_owner(self);
         self.register_routed_handler::<PointerEventArgs>(
             "on_pointer_exited",
-            Box::new(move |_, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+            Box::new(move |_: &PointerEventArgs, _: &RoutedEventArgs| {
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.set_pointer_over(false);
                     splitter.sync_visual(false);
                 }
             }),
         );
 
-        let weak_self = weak_self_from_visual_owner(self);
+        let weak_self: Weak<CustomGridSplitter> = weak_self_from_visual_owner(self);
         self.register_routed_handler::<()>(
             "on_got_focus",
-            Box::new(move |_, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+            Box::new(move |_: &(), _: &RoutedEventArgs| {
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.set_focused(true);
                     splitter.sync_visual(false);
                 }
             }),
         );
 
-        let weak_self = weak_self_from_visual_owner(self);
+        let weak_self: Weak<CustomGridSplitter> = weak_self_from_visual_owner(self);
         self.register_routed_handler::<()>(
             "on_lost_focus",
-            Box::new(move |_, _| {
-                if let Some(splitter) = weak_self.upgrade() {
+            Box::new(move |_: &(), _: &RoutedEventArgs| {
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     splitter.set_focused(false);
                     splitter.sync_visual(false);
                 }
             }),
         );
 
-        let weak_self = weak_self_from_visual_owner(self);
+        let weak_self: Weak<CustomGridSplitter> = weak_self_from_visual_owner(self);
         self.register_routed_handler::<KeyEventArgs>(
             "on_key_down",
-            Box::new(move |event, routed| {
-                if let Some(splitter) = weak_self.upgrade() {
+            Box::new(move |event: &KeyEventArgs, routed: &RoutedEventArgs| {
+                let splitter: Option<Rc<CustomGridSplitter>> = weak_self.upgrade();
+                if let Some(splitter) = splitter {
                     if splitter.key_down(*event) {
                         routed.handled.set(true);
                     }

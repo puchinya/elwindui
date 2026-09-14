@@ -26,3 +26,5 @@ Inactive subtrees do not schedule independent layout. Reactivation invalidates f
 ## Host boundary
 
 Every root or independently hosted subtree has one layout host that owns the current viewport, pending invalidation, and backend application of final rectangles. Container implementations such as `TabView` delegate page layout to those boundaries instead of mixing two root coordinate systems.
+
+A host consumes a viewport supplied by its owner. Native size changes produced by that same host's own layout/presentation must never feed back as a viewport invalidation to itself. Nested hosts receive viewport changes only from their parent/native-container authority (e.g. a window, a tab strip, a scroll viewport, a popup placement) — never from observing their own native output. A backend that lets a host's own presentation size double as its next layout input creates a same-host feedback cascade: each layout's own size output re-triggers another layout of the same host, one step per event-loop turn, with no natural termination.

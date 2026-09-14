@@ -10,7 +10,7 @@ use crate::bindings::Microsoft::UI::Xaml::SizeChangedEventHandler;
 use crate::ffi::{
     AnyView, UiCallbackRegistryOwner, invoke_ui_event_callback, invoke_ui_index_event_callback,
 };
-use crate::host::TreeHostPanel;
+use crate::host::{TreeHostPanel, TreeHostViewport};
 use std::cell::RefCell;
 use std::rc::Rc;
 use windows::Foundation::{PropertyValue, TypedEventHandler};
@@ -182,19 +182,20 @@ impl InnerTabView {
         content_size(&self.xaml)
     }
 
-    /// Applies a viewport to one host and requests its synchronous layout. Suppressed hosts still
-    /// retain the explicit size but make `force_relayout` a no-op, so selection can size first and
-    /// activate second without doing a wasted pass.
+    /// Applies a viewport to one host — the tab content viewport authority (Issue #261 review
+    /// remediation §2.4). Suppressed hosts still store the viewport but skip the layout (see
+    /// `TreeHostPanel::set_viewport`'s own doc comment), so selection can size first and activate
+    /// second without doing a wasted pass.
     pub(crate) fn resize_content_host(
         &self,
         content_host: &TreeHostPanel,
         width: f64,
         height: f64,
     ) {
-        let element = content_host.as_element();
-        let _ = element.SetWidth(width);
-        let _ = element.SetHeight(height);
-        content_host.force_relayout();
+        let _ = content_host.set_viewport(TreeHostViewport {
+            width: Some(width),
+            height: Some(height),
+        });
     }
 
     pub(crate) fn insert_tab(&self, index: usize, title: &str, closable: bool) -> TreeHostPanel {

@@ -8,7 +8,8 @@ use super::*;
 use crate::ffi::{AnyView, UiCallbackRegistryOwner};
 use crate::render::xaml_text_alignment;
 
-use crate::bindings::Microsoft::UI::Xaml::Automation::{AccessibilityView, AutomationProperties};
+use crate::bindings::Microsoft::UI::Xaml::Automation::AutomationProperties;
+use crate::bindings::Microsoft::UI::Xaml::Automation::Peers::AccessibilityView;
 use crate::bindings::Microsoft::UI::Xaml::Controls::{Canvas, Control, TextBlock};
 use crate::bindings::Microsoft::UI::Xaml::Media::{CompositeTransform, Transform};
 use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, RoutedEventHandler, UIElement};

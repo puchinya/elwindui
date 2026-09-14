@@ -718,8 +718,24 @@ impl UIElement {
         self.invalidate_arrange();
     }
     fn set_visibility(&self, visibility: Visibility) {
-        self.as_ui_element().visibility.set(visibility);
+        let base = self.as_ui_element();
+        let perf_trace = std::env::var_os("ELWINDUI_PERF_TRACE").is_some();
+        if perf_trace {
+            eprintln!("[perf] visibility_writer method=entered effective_value={visibility:?}");
+        }
+        if base.visibility.get() == visibility {
+            if perf_trace {
+                eprintln!(
+                    "[perf] visibility_writer effective_changed=false actual_invalidate=false"
+                );
+            }
+            return;
+        }
+        base.visibility.set(visibility);
         self.invalidate_measure();
+        if perf_trace {
+            eprintln!("[perf] visibility_writer effective_changed=true actual_invalidate=true");
+        }
         self.request_accessibility_update();
     }
     fn set_opacity(&self, opacity: f32) {
@@ -1229,6 +1245,7 @@ impl UIElement {
     /// `measure_override`/`arrange_override` (font/text/size/margin/visibility changes must stay
     /// `Arrange` or `Measure`; only a provably paint-only change is safe to migrate to
     /// `invalidate_render`). See `InvalidationKind::Render`'s own doc comment.
+    #[track_caller]
     fn invalidate(&self) {
         self.invalidate_arrange();
     }
@@ -1236,6 +1253,7 @@ impl UIElement {
     /// nothing about its measured or arranged geometry is in question, so a host may skip
     /// `layout_root` entirely for this pass. See `InvalidationKind::Render`'s own doc comment on
     /// why callers must self-audit before using this instead of `invalidate()`.
+    #[track_caller]
     fn invalidate_render(&self) {
         request_relayout(self.as_ui_element(), InvalidationKind::Render);
     }
@@ -1243,6 +1261,7 @@ impl UIElement {
     /// `arranged_height`/`arranged_offset` `None` (to be recomputed by the next `arrange` pass) and
     /// asks for a redraw. `measured_size` stays valid — only where this element ends up, not how
     /// big it wants to be, is in question (e.g. `UIElement::set_horizontal_alignment`).
+    #[track_caller]
     fn invalidate_arrange(&self) {
         self.as_ui_element().arranged_width.set(None);
         self.as_ui_element().arranged_height.set(None);
@@ -1254,6 +1273,7 @@ impl UIElement {
     /// can't leave a stale arrangement behind) and asks for a redraw. The strongest of the three —
     /// use whenever a change could affect `measure_override`'s result (e.g. `UIElement::set_margin`,
     /// `set_width`).
+    #[track_caller]
     fn invalidate_measure(&self) {
         self.as_ui_element().measured_size.set(None);
         self.as_ui_element().arranged_width.set(None);
@@ -1287,6 +1307,42 @@ impl UIElement {
             .borrow_mut()
             .insert((owner, field), Box::new(value));
         self.invalidate_measure();
+    }
+    /// Stores a concrete, equality-aware attached-property value only when its effective value
+    /// changes. The generic `set_attached` surface intentionally remains type-erased and accepts
+    /// values that do not implement `PartialEq`; producers with known equality semantics may use
+    /// this narrow helper to suppress repeated layout invalidation.
+    fn set_attached_if_changed<T: PartialEq + 'static>(
+        &self,
+        owner: &'static str,
+        field: &'static str,
+        value: T,
+    ) -> bool
+    where
+        Self: Sized,
+    {
+        let unchanged = self
+            .as_ui_element()
+            .attached
+            .borrow()
+            .get(&(owner, field))
+            .and_then(|current| current.downcast_ref::<T>())
+            .is_some_and(|current| current == &value);
+        if unchanged {
+            if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
+                eprintln!(
+                    "[perf] attached_writer method=set_attached_if_changed owner={owner} field={field} effective_changed=false actual_invalidate=false"
+                );
+            }
+            return false;
+        }
+        self.set_attached(owner, field, value);
+        if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
+            eprintln!(
+                "[perf] attached_writer method=set_attached_if_changed owner={owner} field={field} effective_changed=true actual_invalidate=true"
+            );
+        }
+        true
     }
     /// Reads an attached-property value previously stored under `(owner, field)`, or `default` if
     /// absent (never set on this element, or set with a different `T` — the same `downcast_ref`
@@ -1608,7 +1664,11 @@ impl UIElement {
 /// (see `UIElement::invalidate_host`), asks it for a fresh layout pass. Takes `&UIElement`
 /// (not `&dyn UIElement`) so the caller — a default trait method, where `Self` isn't known to be
 /// `Sized`. A no-op if the Visual root has no registered host (e.g. a standalone test tree).
+#[track_caller]
 pub(crate) fn request_relayout(base: &UIElement, kind: InvalidationKind) {
+    if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
+        eprintln!("{}", format_invalidation_trace(kind, base.render_group_id));
+    }
     let mut current: Option<Rc<dyn UIElementExt>> = base
         .visual_parent
         .borrow()
@@ -1627,6 +1687,26 @@ pub(crate) fn request_relayout(base: &UIElement, kind: InvalidationKind) {
     if let Some(host) = host {
         host.request_relayout(base.render_group_id, kind);
     }
+}
+
+/// Formats the authoritative invalidation request record only when perf tracing is enabled by
+/// the caller. The `#[track_caller]` boundary is intentionally here rather than in the host
+/// scheduler: the location is the Core producer that requested invalidation, while the host only
+/// knows that it received a request. Paths are reduced to repository-relative names so a live log
+/// never exposes an absolute checkout path.
+#[track_caller]
+fn format_invalidation_trace(kind: InvalidationKind, render_group_id: u64) -> String {
+    let location = std::panic::Location::caller();
+    let file = location.file().replace('\\', "/");
+    let caller = ["crates/", "tests/", "examples/"]
+        .iter()
+        .find_map(|prefix| file.find(prefix).map(|index| file[index..].to_owned()))
+        .unwrap_or_else(|| "<external>".to_owned());
+    format!(
+        "[perf] invalidation_request kind={kind:?} group={render_group_id} caller={caller}:{}:{}",
+        location.line(),
+        location.column()
+    )
 }
 
 fn schedule_scalar_animation(
@@ -1650,7 +1730,7 @@ fn schedule_scalar_animation(
         return false;
     };
     let runtime = host.animation_runtime();
-    let weak = Rc::downgrade(&owner);
+    let weak: Weak<dyn UIElementExt> = Rc::downgrade(&owner);
     runtime.animate(
         owner.render_group_id(),
         channel,
@@ -1670,11 +1750,12 @@ fn schedule_scalar_animation(
         }),
         AnimatedValue::Scalar(target),
         animation,
-        Box::new(move |value| {
+        Box::new(move |value: AnimatedValue| {
             let AnimatedValue::Scalar(value) = value else {
                 return;
             };
-            if let Some(owner) = weak.upgrade() {
+            let owner: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+            if let Some(owner) = owner {
                 let base = owner.as_ui_element();
                 apply(base, value);
                 request_relayout(base, kind);
@@ -1705,18 +1786,19 @@ fn schedule_transform_animation(
         return false;
     };
     let runtime = host.animation_runtime();
-    let weak = Rc::downgrade(&owner);
+    let weak: Weak<dyn UIElementExt> = Rc::downgrade(&owner);
     runtime.animate(
         owner.render_group_id(),
         AnimationChannel::VisualTransform,
         AnimatedValue::Transform(base.presentation_visual_transform.get()),
         AnimatedValue::Transform(target),
         animation,
-        Box::new(move |value| {
+        Box::new(move |value: AnimatedValue| {
             let AnimatedValue::Transform(value) = value else {
                 return;
             };
-            if let Some(owner) = weak.upgrade() {
+            let owner: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+            if let Some(owner) = owner {
                 let base = owner.as_ui_element();
                 base.presentation_visual_transform.set(value);
                 request_relayout(base, InvalidationKind::Render);
@@ -1772,7 +1854,7 @@ pub fn start_enter_transition(
     base.transition_visual_transform.set(start_transform);
     node.invalidate_render();
     let pending = Rc::new(Cell::new(channels));
-    let weak = Rc::downgrade(node);
+    let weak: Weak<dyn UIElementExt> = Rc::downgrade(node);
     let runtime = host.animation_runtime();
     if (start_opacity - 1.0).abs() > f32::EPSILON {
         let pending = Rc::clone(&pending);
@@ -1783,9 +1865,11 @@ pub fn start_enter_transition(
             AnimatedValue::Scalar(start_opacity),
             AnimatedValue::Scalar(1.0),
             animation,
-            Box::new(move |value, finished| {
-                if let Some(node) = weak.upgrade() {
-                    node.as_ui_element().transition_opacity.set(match value {
+            Box::new(move |value: AnimatedValue, finished: bool| {
+                let node: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+                if let Some(node) = node {
+                    let base: &UIElement = node.as_ui_element();
+                    base.transition_opacity.set(match value {
                         AnimatedValue::Scalar(value) => value,
                         _ => return,
                     });
@@ -1806,14 +1890,14 @@ pub fn start_enter_transition(
             AnimatedValue::Transform(start_transform),
             AnimatedValue::Transform(VisualTransform::IDENTITY),
             animation,
-            Box::new(move |value, finished| {
-                if let Some(node) = weak.upgrade() {
-                    node.as_ui_element()
-                        .transition_visual_transform
-                        .set(match value {
-                            AnimatedValue::Transform(value) => value,
-                            _ => return,
-                        });
+            Box::new(move |value: AnimatedValue, finished: bool| {
+                let node: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+                if let Some(node) = node {
+                    let base: &UIElement = node.as_ui_element();
+                    base.transition_visual_transform.set(match value {
+                        AnimatedValue::Transform(value) => value,
+                        _ => return,
+                    });
                     node.invalidate_render();
                 }
                 if finished {
@@ -1863,7 +1947,7 @@ pub fn start_exit_transition(
         return true;
     };
     let pending = Rc::new(Cell::new(channels));
-    let weak = Rc::downgrade(node);
+    let weak: Weak<dyn UIElementExt> = Rc::downgrade(node);
     let runtime = host.animation_runtime();
     if (target_opacity - 1.0).abs() > f32::EPSILON {
         let pending = Rc::clone(&pending);
@@ -1874,9 +1958,11 @@ pub fn start_exit_transition(
             AnimatedValue::Scalar(base.transition_opacity.get()),
             AnimatedValue::Scalar(target_opacity),
             animation,
-            Box::new(move |value, finished| {
-                if let Some(node) = weak.upgrade() {
-                    node.as_ui_element().transition_opacity.set(match value {
+            Box::new(move |value: AnimatedValue, finished: bool| {
+                let node: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+                if let Some(node) = node {
+                    let base: &UIElement = node.as_ui_element();
+                    base.transition_opacity.set(match value {
                         AnimatedValue::Scalar(value) => value,
                         _ => return,
                     });
@@ -1900,14 +1986,14 @@ pub fn start_exit_transition(
             AnimatedValue::Transform(base.transition_visual_transform.get()),
             AnimatedValue::Transform(target_transform),
             animation,
-            Box::new(move |value, finished| {
-                if let Some(node) = weak.upgrade() {
-                    node.as_ui_element()
-                        .transition_visual_transform
-                        .set(match value {
-                            AnimatedValue::Transform(value) => value,
-                            _ => return,
-                        });
+            Box::new(move |value: AnimatedValue, finished: bool| {
+                let node: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+                if let Some(node) = node {
+                    let base: &UIElement = node.as_ui_element();
+                    base.transition_visual_transform.set(match value {
+                        AnimatedValue::Transform(value) => value,
+                        _ => return,
+                    });
                     node.invalidate_render();
                     if finished && pending.get() == 1 {
                         finish_exit(&node);
@@ -2336,6 +2422,22 @@ mod tests {
     }
 
     #[test]
+    fn invalidation_trace_reports_the_producer_callsite() {
+        let expected_line = line!() + 1;
+        let trace = format_invalidation_trace(InvalidationKind::Measure, 417);
+
+        assert!(trace.starts_with("[perf] invalidation_request kind=Measure group=417"));
+        assert!(
+            trace.contains("caller=crates/elwindui-core/src/ui/element.rs:"),
+            "trace must use a repository-relative source path: {trace}"
+        );
+        assert!(
+            trace.contains(&format!(":{expected_line}:")),
+            "trace must report the producer callsite line, not the formatter line: {trace}"
+        );
+    }
+
+    #[test]
     fn invalidate_render_leaves_measured_and_arranged_state_untouched() {
         let leaf = native("a", size(10.0, 20.0));
         let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
@@ -2368,6 +2470,88 @@ mod tests {
         assert_eq!(
             InvalidationKind::Render.max(InvalidationKind::Measure),
             InvalidationKind::Measure
+        );
+    }
+
+    #[test]
+    fn setting_visibility_to_the_effective_value_is_a_no_op() {
+        struct CountingHost {
+            calls: Rc<RefCell<usize>>,
+        }
+
+        impl RelayoutHost for CountingHost {
+            fn request_relayout(&self, _dirty_group_id: u64, _kind: InvalidationKind) {
+                *self.calls.borrow_mut() += 1;
+            }
+        }
+
+        let leaf = native("a", size(10.0, 20.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        let calls = Rc::new(RefCell::new(0));
+        root.set_invalidate_host(Some(Rc::new(CountingHost {
+            calls: Rc::clone(&calls),
+        })));
+
+        leaf.set_visibility(Visibility::Visible);
+        assert_eq!(*calls.borrow(), 0);
+        leaf.set_visibility(Visibility::Collapsed);
+        assert_eq!(*calls.borrow(), 1);
+        leaf.set_visibility(Visibility::Collapsed);
+        assert_eq!(*calls.borrow(), 1);
+        leaf.set_visibility(Visibility::Visible);
+        assert_eq!(*calls.borrow(), 2);
+    }
+
+    #[test]
+    fn setting_attached_property_if_changed_suppresses_equal_values() {
+        struct CountingHost {
+            calls: Rc<RefCell<usize>>,
+        }
+
+        impl RelayoutHost for CountingHost {
+            fn request_relayout(&self, _dirty_group_id: u64, _kind: InvalidationKind) {
+                *self.calls.borrow_mut() += 1;
+            }
+        }
+
+        let leaf = native("a", size(10.0, 20.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        let calls = Rc::new(RefCell::new(0));
+        root.set_invalidate_host(Some(Rc::new(CountingHost {
+            calls: Rc::clone(&calls),
+        })));
+
+        assert!(
+            leaf.as_ui_element()
+                .set_attached_if_changed("Grid", "row", 1i32)
+        );
+        assert_eq!(*calls.borrow(), 1);
+        assert!(
+            !leaf
+                .as_ui_element()
+                .set_attached_if_changed("Grid", "row", 1i32)
+        );
+        assert_eq!(*calls.borrow(), 1);
+        assert!(
+            leaf.as_ui_element()
+                .set_attached_if_changed("Grid", "row", 2i32)
+        );
+        assert_eq!(*calls.borrow(), 2);
+    }
+
+    #[test]
+    fn generic_attached_property_accepts_non_partial_eq_values() {
+        #[derive(Clone)]
+        struct NonComparable(u32);
+
+        let leaf = native("a", size(10.0, 20.0));
+        leaf.as_ui_element()
+            .set_attached("TestOwner", "value", NonComparable(7));
+        assert_eq!(
+            leaf.as_ui_element()
+                .get_attached("TestOwner", "value", NonComparable(0))
+                .0,
+            7
         );
     }
 }

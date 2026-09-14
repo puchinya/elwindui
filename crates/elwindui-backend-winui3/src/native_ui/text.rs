@@ -6,9 +6,9 @@ use crate::inner::{InnerPasswordBox, InnerTextArea, InnerTextBox};
 use elwindui_core::accessibility::{
     AccessibilityAction, AccessibilityActionKind, AccessibilityRole,
 };
-use elwindui_core::ui::UIElementExt;
+use elwindui_core::ui::{TextAreaExt, TextBoxExt, UIElementExt};
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 #[elwindui_macros::class(struct_only = elwindui_core::ui::TextAreaExt, inherits = crate::NativeControl)]
 pub struct TextArea {
@@ -97,9 +97,10 @@ impl TextArea {
             .visual_collection
             .owner_rc()
             .expect("TextArea must be Rc-constructed before installing its text callback");
-        let weak = Rc::downgrade(&owner);
-        self.inner.set_on_change(Box::new(move |text| {
-            let Some(owner) = weak.upgrade() else { return };
+        let weak: Weak<dyn UIElementExt> = Rc::downgrade(&owner);
+        self.inner.set_on_change(Box::new(move |text: String| {
+            let owner: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+            let Some(owner) = owner else { return };
             let this = owner
                 .as_any()
                 .downcast_ref::<TextArea>()
@@ -235,9 +236,10 @@ impl TextBox {
             .visual_collection
             .owner_rc()
             .expect("TextBox must be Rc-constructed before installing its text callback");
-        let weak = Rc::downgrade(&owner);
-        self.inner.set_on_change(Box::new(move |text| {
-            let Some(owner) = weak.upgrade() else { return };
+        let weak: Weak<dyn UIElementExt> = Rc::downgrade(&owner);
+        self.inner.set_on_change(Box::new(move |text: String| {
+            let owner: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+            let Some(owner) = owner else { return };
             let this = owner
                 .as_any()
                 .downcast_ref::<TextBox>()

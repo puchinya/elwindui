@@ -9,7 +9,7 @@ use elwindui_core::accessibility::{
 };
 use elwindui_core::ui::{SliderExt, UIElementExt};
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 #[elwindui_macros::class(struct_only = elwindui_core::ui::SliderExt, inherits = crate::NativeControl)]
 pub struct Slider {
@@ -183,9 +183,10 @@ impl Slider {
             .visual_collection
             .owner_rc()
             .expect("Slider must be Rc-constructed before installing its value callback");
-        let weak = Rc::downgrade(&owner);
-        self.inner.set_on_change(Box::new(move |value| {
-            let Some(owner) = weak.upgrade() else { return };
+        let weak: Weak<dyn UIElementExt> = Rc::downgrade(&owner);
+        self.inner.set_on_change(Box::new(move |value: f32| {
+            let owner: Option<Rc<dyn UIElementExt>> = weak.upgrade();
+            let Some(owner) = owner else { return };
             let this = owner
                 .as_any()
                 .downcast_ref::<Slider>()

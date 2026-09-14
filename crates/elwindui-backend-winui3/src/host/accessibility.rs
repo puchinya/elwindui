@@ -118,7 +118,8 @@ impl WinUI3AccessibilityState {
     }
 
     pub(crate) fn rebuild(&self) {
-        let Some(tree) = self.tree.upgrade().and_then(|tree| tree.borrow().clone()) else {
+        let tree: Option<Rc<RefCell<Option<Rc<dyn UIElementExt>>>>> = self.tree.upgrade();
+        let Some(tree) = tree.and_then(|tree| tree.borrow().clone()) else {
             self.runtime.clear();
             return;
         };
@@ -145,7 +146,8 @@ impl WinUI3AccessibilityHost {
 
 impl AccessibilityHost for WinUI3AccessibilityHost {
     fn request_accessibility_update(&self) {
-        if let Some(state) = self.state.upgrade() {
+        let state: Option<Rc<WinUI3AccessibilityState>> = self.state.upgrade();
+        if let Some(state) = state {
             state.rebuild();
         }
     }

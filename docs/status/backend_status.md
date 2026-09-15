@@ -1,6 +1,6 @@
 # Backend status
 
-Snapshot: 2026-09-15. Durable backend architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-09-16. Durable backend architecture is indexed in [`../design/README.md`](../design/README.md).
 
 ## Support matrix
 
@@ -24,11 +24,11 @@ Snapshot: 2026-09-15. Durable backend architecture is indexed in [`../design/REA
 
 ## WinUI 3 current state
 
-- Window content-host sizing, retained layout, native controls, graphics, text/environment, and the established input/lifecycle paths are implemented. Window-level sizing is the content-host viewport authority for first show and native resize.
+- Window content-host sizing, retained layout, native controls, graphics, text/environment, and the established input/lifecycle paths are implemented. Every `TreeHost` owns one permanent transparent hit-testable input surface at the root Canvas z-bottom; Window-level sizing remains the content-host viewport authority for first show and native resize.
 - Relayout batching is implemented per TreeHost and per UI turn. Window, TabView, ScrollView, and Popup remain explicit viewport authorities; a TreeHost does not consume its own native Canvas size output as a viewport input.
-- PR #262 is merged into `master` and is the authoritative relayout/viewport base for PR #257. PR #257 implements the #254 Window-lifetime/TreeHost work. The attempted WinUI3 Docking T9 native-close/removal verification remained BLOCKED because the floating setup could not be observed; that native Docking acceptance is tracked by #226 and is not a #254 closure criterion. Evidence is retained under `.agent-state/issues/254/e2e/6ff8627/20260915T034754Z/`. AppKit real-host verification is tracked by #259. T10 is already PASS from the prior real-input #241 integration; PR #241 remains an independent follow-up.
-- Issue #261 final Windows evidence on committed executable HEAD `2f134f4b59151bb76fdd546320b8e42a6bbfbf1b`: docking-demo launched, painted content was captured, 10-second idle CPU/trace stability and normal termination passed. The run recorded 230 total relayout cycles (229 ordinary: 106 Measure and 123 Arrange, plus one SetTreeInitial Measure), 2,008 invalidation requests, and 5,600 text-measure calls / 870.8 ms cumulative. The required UIA/input interactive checkpoint was blocked because the durable `Document A` selector returned no usable match. Evidence is retained under `.agent-state/issues/261/e2e/2f134f4/20260914T154151Z/`.
-- Pointer/capture-loss and coordinate-topology rows remain pending real-mouse verification in [#224](https://github.com/puchinya/elwindui/issues/224). The current verification host cannot deliver the required real OS mouse input reliably.
+- The input surface accepts only the exact root Canvas or exact surface as Core self-drawn sources; native XAML children remain native input owners. Root Canvas hit testing is disabled after cancellation/capture release for inactive hosts and restored before reactivation relayout. `Window.transparent` remains visual-only.
+- The durable WinUI3 real-pointer acceptance case is [`../../tests/e2e/self-drawn-pointer-input.md`](../../tests/e2e/self-drawn-pointer-input.md). SDP-01 through SDP-05 have not yet been executed on the final #236 implementation HEAD, so no self-drawn real-input PASS is claimed here.
+- Pointer/capture-loss and coordinate-topology rows remain pending real-mouse verification in [#224](https://github.com/puchinya/elwindui/issues/224).
 - Popup teardown, native light-dismiss ordering, close interception, and newer Menu/icon paths are implemented or code-reviewed, but this macOS development environment cannot compile or execute the Windows-only backend; runtime verification remains in [#157](https://github.com/puchinya/elwindui/issues/157).
 - SVG offscreen effect-graph work, full cross-backend parity audit, and the remaining native styling/effect gaps are incomplete.
 - The Windows App Runtime registration limitation observed in the current sandbox is an environment constraint, not evidence of a product regression; Windows acceptance must run on a normal Windows host.

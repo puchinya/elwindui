@@ -186,12 +186,7 @@ impl InnerTabView {
     /// remediation §2.4). Suppressed hosts still store the viewport but skip the layout (see
     /// `TreeHost::set_viewport`'s own doc comment), so selection can size first and activate
     /// second without doing a wasted pass.
-    pub(crate) fn resize_content_host(
-        &self,
-        content_host: &TreeHost,
-        width: f64,
-        height: f64,
-    ) {
+    pub(crate) fn resize_content_host(&self, content_host: &TreeHost, width: f64, height: f64) {
         let _ = content_host.set_viewport(TreeHostViewport {
             width: Some(width),
             height: Some(height),

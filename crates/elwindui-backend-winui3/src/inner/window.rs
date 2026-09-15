@@ -470,6 +470,13 @@ impl InnerWindow {
         self.framework_initiated_close.set(false);
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_visible_for_test(&self) -> bool {
+        self.app_window()
+            .and_then(|window| window.IsVisible().ok())
+            .unwrap_or(false)
+    }
+
     /// Issue #162 §3.18: closes this window's own active custom popup/context-menu surface, if
     /// any — the owner-Window-close half of the popup-before-owner-content teardown ordering
     /// (`Window::unmount_override`, `native_ui::window.rs`).

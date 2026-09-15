@@ -381,7 +381,7 @@ manually-authored `ViewFactory`) popups is still open must close that popup — 
 `unmount_subtree` teardown — *before* the Window's own content unmounts, not leave it to be
 orphaned by the native surface disappearing out from under it. `Window::unmount_override`
 (`docs/design/runtime/component_lifecycle_design.md`'s "Window mount_override/unmount_override
-hooks") calls the backend's own `close_active_popup` (`TreeHostView`/`TreeHostPanel`, both a thin
+hooks") calls the backend's own `close_active_popup` (`TreeHost`, a thin
 `take()`-then-`close()` on the same `active_popup` slot §6's Build/Mount/Unmount Sequence already
 tracks) at exactly this point, ahead of the owner's own content teardown — the same portable
 invariant this section already establishes for popup dismissal in isolation now also holds across an
@@ -394,21 +394,21 @@ owning-Window close.
 ### AppKit Backend
 - **Native Context Menu**: `NSMenu` を `NSMenu::popUpContextMenu:withEvent:forView:` または `popUpMenuPositioningItem:atLocation:inView:` でポップアップ表示。
 - **PopupSurface**: `NSPanel`（`NSWindowStyleMaskBorderless`, `NSFloatingWindowLevel`, `isFloatingPanel = true`, `hasShadow = true`）。
-  - ContentView として `TreeHostView` を配置し、メイン Window と全く同じ layout / render / input / focus パイプラインを再利用。
+  - ContentView として `TreeHost` を配置し、メイン Window と全く同じ layout / render / input / focus パイプラインを再利用。
   - `NSEvent::addLocalMonitorForEventsMatchingMask:` または `makeFirstResponder` を用いて Outside Click を検出し、自動 dismiss。
 
 ### WinUI 3 Backend
 - **Native Context Menu**: `MenuFlyout` の `ShowAt(target_element, point)` を使用。
-- **PopupSurface**: `Microsoft.UI.Xaml.Controls.Primitives.Popup` を使用して `TreeHostPanel` をホスト。
+- **PopupSurface**: `Microsoft.UI.Xaml.Controls.Primitives.Popup` を使用して `TreeHost` をホスト。
 - **Coordinate Conversion**:
   - `canvas_to_screen_point`: Canvas ローカル DIP -> `TransformToVisual(XamlRoot.Content)` による Window Client Local DIP -> `ContentCoordinateConverter::ConvertLocalToScreen` (または `+ (AppWindow.Position / scale)` fallback) による Desktop Screen Logical DIP。
   - `screen_logical_to_xaml_local`: Desktop Screen Logical DIP -> Screen Physical Px -> `ContentCoordinateConverter::ConvertScreenToLocal` (または `- (AppWindow.Position / scale)` fallback) による XamlRoot / Window Client Local DIP -> `Popup.SetHorizontalOffset` / `SetVerticalOffset`。
   - 変換失敗時に screen 座標を XAML ローカルオフセットとして誤認・再利用することは禁止し、安全にポップアップ表示を中断（`Option::None`）する。
 - **Work Area**: `DisplayArea::GetFromPoint` -> `DisplayArea::GetFromWindowId` -> 明示的 screen 変換済み XamlRoot bounds の優先順で取得し、`display_area_to_core_work_area` (`outer_x + work_x`, `outer_y + work_y`) により必ずグローバル Screen Logical Rect (`Option<Rect>`) として返す。未変換のローカル Rect をスクリーン Rect として偽装返却することは禁止。
-- **Focus & Lifetime**: `PopupFocusPolicy::Root` にて開いた popup の root UIElement にフォーカスを設定。`TreeHostPanel` / `InnerPopupSurface` が `active_popup` として handle を保持し、新規 popup open 時に既存 popup を安全にクローズ。
+- **Focus & Lifetime**: `PopupFocusPolicy::Root` にて開いた popup の root UIElement にフォーカスを設定。`TreeHost` / `InnerPopupSurface` が `active_popup` として handle を保持し、新規 popup open 時に既存 popup を安全にクローズ。
 - **Menu Realization Ownership**: `Menu` / `MenuItem` は論理セマンティックモデルであり、Context Menu 表示時は `InnerMenu::create_flyout` により専用の `MenuFlyoutItem` インスタンスを生成することで `MenuBarItem` とのネイティブインスタンス競合を回避。
 - Outside pointer press および `ProcessKeyboardAccelerators` (Escape) で dismiss。
-- **Native light-dismiss の close 経路（Issue #161 レビューで確定した例外）**: `Popup.IsLightDismissEnabled = true` の場合、outside pointer press や Escape での dismiss は WinUI 自身が検出して自動的に `Popup.IsOpen` を `false` にする——ElwindUI はこの遷移を制御も事前通知も受けない。`Popup.Closed` イベントは `IsOpen` が `false` になった**後**にのみ発火する（[`Popup`](https://learn.microsoft.com/en-us/windows/windows-app-sdk/api/winrt/microsoft.ui.xaml.controls.primitives.popup)・[`Popup.Closed`](https://learn.microsoft.com/en-us/windows/windows-app-sdk/api/winrt/microsoft.ui.xaml.controls.primitives.popup.closed) 参照）。したがって `InnerPopupSurface` は native-originated close 用に専用の内部ハンドラ（`on_native_closed`、`crates/elwindui-backend-winui3/src/inner/popup.rs`）を持つ: `Popup.Closed` はこのハンドラへルーティングされ、`unmount_subtree` と `TreeHostPanel::clear_tree()` のみを実行し、`SetIsOpen(false)` は呼ばない（WinUI が既に行っているため）。ElwindUI 主導の close（`PopupDismissAction` 等）が使う `close()` はこれとは別に、`unmount_subtree` を native visibility 変更（`SetIsOpen(false)`）より前に実行する、より強い順序を維持する。両者は同一の exactly-once guard（`begin_close`）を共有し、どちらの経路からも teardown は1回だけ実行される。**`Popup.Closed` を「close 前」に発火するイベントとして扱ってはならない** — 常に事後通知である。
+- **Native light-dismiss の close 経路（Issue #161 レビューで確定した例外）**: `Popup.IsLightDismissEnabled = true` の場合、outside pointer press や Escape での dismiss は WinUI 自身が検出して自動的に `Popup.IsOpen` を `false` にする——ElwindUI はこの遷移を制御も事前通知も受けない。`Popup.Closed` イベントは `IsOpen` が `false` になった**後**にのみ発火する（[`Popup`](https://learn.microsoft.com/en-us/windows/windows-app-sdk/api/winrt/microsoft.ui.xaml.controls.primitives.popup)・[`Popup.Closed`](https://learn.microsoft.com/en-us/windows/windows-app-sdk/api/winrt/microsoft.ui.xaml.controls.primitives.popup.closed) 参照）。したがって `InnerPopupSurface` は native-originated close 用に専用の内部ハンドラ（`on_native_closed`、`crates/elwindui-backend-winui3/src/inner/popup.rs`）を持つ: `Popup.Closed` はこのハンドラへルーティングされ、`unmount_subtree` と `TreeHost::clear_tree()` のみを実行し、`SetIsOpen(false)` は呼ばない（WinUI が既に行っているため）。ElwindUI 主導の close（`PopupDismissAction` 等）が使う `close()` はこれとは別に、`unmount_subtree` を native visibility 変更（`SetIsOpen(false)`）より前に実行する、より強い順序を維持する。両者は同一の exactly-once guard（`begin_close`）を共有し、どちらの経路からも teardown は1回だけ実行される。**`Popup.Closed` を「close 前」に発火するイベントとして扱ってはならない** — 常に事後通知である。
 - **GUI 実機検証**: Windows 実機環境での描画・マルチモニター・DPI・タッチ操作、および上記 native light-dismiss の順序保証の検証は Issue [#157](https://github.com/puchinya/elwindui/issues/157) にて管理。
 
 ### GTK4 Backend

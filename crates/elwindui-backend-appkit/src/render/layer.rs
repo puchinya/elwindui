@@ -16,7 +16,7 @@
 //! creation sites: every attachment site already has the parent (and therefore its resolved
 //! scale) in hand, and several helpers build a multi-layer subtree before it has a parent at all
 //! (e.g. `build_image_container_layer`, `place_offscreen_image`), so a creation-time stamp would
-//! miss those inner layers. See `host::TreeHostView::backing_scale_factor` for where the
+//! miss those inner layers. See `host::TreeHost::backing_scale_factor` for where the
 //! authoritative scale value comes from.
 
 use objc2::rc::Retained;
@@ -41,7 +41,7 @@ pub(crate) fn paint_layer_name() -> Retained<NSString> {
 /// animates implicitly — harmless for a genuinely new value, but a visible "smear" on every
 /// no-op-content, layout-only relayout (a window resize, a theme repaint) where nothing the user
 /// asked to animate actually changed. Always `Drop`-based, never a bare `begin()`/`commit()` pair,
-/// because the caller (`TreeHostView::relayout_inner`) has several early `return`s.
+/// because the caller (`TreeHost::relayout_inner`) has several early `return`s.
 pub(crate) struct ImplicitAnimationGuard;
 
 impl ImplicitAnimationGuard {

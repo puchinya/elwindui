@@ -47,8 +47,8 @@ use windows::Foundation::{EventHandler, TypedEventHandler};
 use windows::core::{IInspectable, Interface, Ref};
 
 /// The single reusable "reflect an `Rc<dyn elwindui_core::ui::UIElement>` into real XAML
-/// elements" host — the WinUI3 counterpart of `elwindui-backend-appkit`'s `TreeHostView`. A
-/// `Canvas` needs no custom `MeasureOverride`/`ArrangeOverride` subclass (unlike `TreeHostView`'s
+/// elements" host — the WinUI3 counterpart of `elwindui-backend-appkit`'s `TreeHost`. A
+/// `Canvas` needs no custom `MeasureOverride`/`ArrangeOverride` subclass (unlike `TreeHost`'s
 /// `NSView` subclass) since `Canvas`'s own built-in layout already just measures every child with
 /// an unconstrained size and positions it from the `Canvas.Left`/`Canvas.Top` attached properties —
 /// exactly the "trust `elwindui_core::ui::layout_root`'s own absolute-rect computation, don't
@@ -57,7 +57,7 @@ use windows::core::{IInspectable, Interface, Ref};
 /// elements appended to `Canvas.Children` in traversal order (`Canvas` z-orders by collection
 /// order — a parent's own paint is appended before its children's, so it stays behind them),
 /// rather than AppKit's separate `CAShapeLayer`/`CATextLayer` sublayer mechanism.
-/// Issue #235 review remediation: per-`TreeHostPanel` relayout-reentrancy state. A thread-local
+/// Issue #235 review remediation: per-`TreeHost` relayout-reentrancy state. A thread-local
 /// guard would suppress every *other* host's relayout while this one's pass is in progress, but
 /// `docs/design/runtime/layout_design.md` treats each hosted subtree as owning its own layout
 /// host/viewport/pending-invalidation state — one host's synchronous pass must never block a
@@ -112,7 +112,7 @@ impl RelayoutCycleState {
 ///
 /// `CompositionTarget.Rendering` is a process-wide XAML event. The generated WinRT delegate is
 /// `Send`, while the hosted tree is intentionally UI-thread-local and uses `Rc`; the delegate
-/// therefore captures only this state object's stable address. The `TreeHostPanel` owns the
+/// therefore captures only this state object's stable address. The `TreeHost` owns the
 /// `Rc`, unregisters the event before clearing the host, and drops the delegate after revocation.
 /// The callback itself only runs on the XAML UI thread, so no Core animation state is touched from
 /// a worker thread.
@@ -140,7 +140,7 @@ impl WinUI3RenderingState {
         let state_address = Rc::as_ptr(self) as usize;
         let handler = EventHandler::<IInspectable>::new(
             move |_: Ref<'_, IInspectable>, _: Ref<'_, IInspectable>| {
-                // SAFETY: `TreeHostPanel` unregisters the static event before its last strong
+                // SAFETY: `TreeHost` unregisters the static event before its last strong
                 // reference to this state is released. The delegate cannot run after that point.
                 let state = unsafe { &*(state_address as *const WinUI3RenderingState) };
                 state.on_rendering();
@@ -198,14 +198,14 @@ impl Default for WinUI3RenderingState {
     }
 }
 
-/// The explicit viewport a `TreeHostPanel` measures/arranges its logical tree against — the only
+/// The explicit viewport a `TreeHost` measures/arranges its logical tree against — the only
 /// source of `layout_root`'s available size (Issue #261 review remediation §2.2). `Some(width)`/
 /// `Some(height)` is a constrained axis (normalized finite, non-negative); `None` is unconstrained
 /// (Core receives `f32::INFINITY` on that axis, and the axis grows to the tree's own natural size
 /// after layout — see `relayout_static_pass`). This single value replaces the previous three-way
 /// split model (a separate `unconstrained_axes` flag pair, a native `Canvas.Width`/`Height` used
 /// as *both* a presentation property and a layout input, and a bit-exact `last_viewport_size`
-/// dedup cache) — see `TreeHostPanel::set_viewport`'s own doc comment for why that split model was
+/// dedup cache) — see `TreeHost::set_viewport`'s own doc comment for why that split model was
 /// itself the root cause of a same-host self-feedback cascade.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TreeHostViewport {
@@ -244,7 +244,7 @@ fn apply_native_viewport(
 }
 
 #[derive(Clone)]
-pub struct TreeHostPanel {
+pub struct TreeHost {
     canvas: Canvas,
     /// See `RelayoutCycleState`'s own doc comment. Owned here (not a thread-local) so reentrancy
     /// coalescing is scoped to exactly this host.
@@ -270,7 +270,7 @@ pub struct TreeHostPanel {
     pointer: Rc<PointerDispatcher>,
     /// This host's current explicit viewport, supplied exclusively by its owner (Window/TabView/
     /// ScrollView/Popup — see `set_viewport`'s own doc comment) — `None` until the first call.
-    /// `Rc<Cell<..>>`, not a plain `Cell<..>` field on `TreeHostPanel` itself, because
+    /// `Rc<Cell<..>>`, not a plain `Cell<..>` field on `TreeHost` itself, because
     /// `relayout_static`'s own weakly-captured closures need their own handle to read it at fire
     /// time, the same pattern `render_tree`/`native_children` already use.
     viewport: Rc<Cell<Option<TreeHostViewport>>>,
@@ -329,8 +329,8 @@ pub(crate) fn relayout_realization_history_for_test() -> Vec<RelayoutRealization
     RELAYOUT_REALIZATION_HISTORY.with(|history| history.borrow().clone())
 }
 
-/// `elwindui_core::ui::RelayoutHost` for `TreeHostPanel` — wraps a *weak* reference back to the
-/// panel's own tree storage (not a full owned `TreeHostPanel` clone) since a strong one would
+/// `elwindui_core::ui::RelayoutHost` for `TreeHost` — wraps a *weak* reference back to the
+/// panel's own tree storage (not a full owned `TreeHost` clone) since a strong one would
 /// create a reference cycle: this panel's own `tree` strongly holds the hosted tree's root, and
 /// that root's own `UIElementImpl::invalidate_host` would then strongly hold this, right back to
 /// the panel. `canvas` is captured strongly, weak `tree`.
@@ -359,11 +359,11 @@ pub(crate) enum RelayoutSource {
     /// A general `elwindui_core::ui::RelayoutHost::request_relayout` invalidation (an element's
     /// own `invalidate_measure`/`invalidate_arrange`/`invalidate_render`).
     QueuedRequest,
-    /// `TreeHostPanel::set_tree()`'s own initial relayout of newly attached content.
+    /// `TreeHost::set_tree()`'s own initial relayout of newly attached content.
     SetTreeInitial,
-    /// `TreeHostPanel::set_active(true)` reactivating a previously suspended host.
+    /// `TreeHost::set_active(true)` reactivating a previously suspended host.
     SetActiveReactivate,
-    /// `TreeHostPanel::set_viewport()` pushing an owner-supplied viewport change.
+    /// `TreeHost::set_viewport()` pushing an owner-supplied viewport change.
     ViewportSync,
     /// `RelayoutHost::flush_interactive_relayout()` realizing an already-queued batch early.
     InteractiveFlush,
@@ -401,12 +401,12 @@ pub(crate) struct WinUI3RelayoutHost {
     /// child discovered during this relayout pass can wire its own `GotFocus`/`LostFocus` — see
     /// `reconcile_native_children`'s own doc comment on that wiring.
     keyboard: Weak<KeyboardDispatcher>,
-    /// See `TreeHostPanel::viewport`'s own doc comment.
+    /// See `TreeHost::viewport`'s own doc comment.
     viewport: Weak<Cell<Option<TreeHostViewport>>>,
-    /// See `TreeHostPanel::active`.
+    /// See `TreeHost::active`.
     active: Weak<Cell<bool>>,
     /// See `RelayoutCycleState`'s own doc comment — this host's own reentrancy-coalescing state,
-    /// never a thread-local, so it never suppresses a different `TreeHostPanel`'s relayout.
+    /// never a thread-local, so it never suppresses a different `TreeHost`'s relayout.
     relayout_cycle: Weak<RelayoutCycleState>,
     /// `true` while a relayout obligation exists for this host that has not yet been realized —
     /// either a `DispatcherQueue` job is queued to realize it on the next UI-turn, or
@@ -436,7 +436,7 @@ pub(crate) struct WinUI3RelayoutHost {
     /// to fire after its work was already realized elsewhere is a guaranteed no-op rather than a
     /// second, duplicate pass.
     queue_ticket: Cell<u64>,
-    /// `true` for the exact duration of `run_relayout_now`'s call to `TreeHostPanel::relayout_static`
+    /// `true` for the exact duration of `run_relayout_now`'s call to `TreeHost::relayout_static`
     /// — lets a same-host `request_relayout` call arriving *during* that pass (a structural change
     /// made mid-measure) route straight into `relayout_static` again instead of being deferred,
     /// preserving `RelayoutCycleState::run_coalesced`'s own reentrancy coalescing exactly as before
@@ -453,7 +453,7 @@ pub(crate) struct WinUI3RelayoutHost {
     callback_owner: UiCallbackRegistryOwner,
     /// Lets `request_relayout` (which only ever sees `&self`) upgrade to an owned `Rc<Self>` so it
     /// can read every other weakly-held backend field through one consistent handle — set once,
-    /// right after this host is `Rc`-wrapped (see `TreeHostPanel::set_tree`), the same
+    /// right after this host is `Rc`-wrapped (see `TreeHost::set_tree`), the same
     /// self-referential-`Weak` pattern `InnerTabView`'s own event wiring uses for the same reason.
     weak_self: RefCell<Weak<WinUI3RelayoutHost>>,
     animation_runtime: Weak<AnimationRuntime>,
@@ -512,7 +512,7 @@ impl WinUI3RelayoutHost {
                     self.diagnostic_id, source, kind
                 );
             }
-            let realized = TreeHostPanel::relayout_static(
+            let realized = TreeHost::relayout_static(
                 &self.canvas,
                 &composition,
                 &tree,
@@ -695,7 +695,7 @@ impl AnimationFrameHost for WinUI3RelayoutHost {
     }
 }
 
-/// `elwindui_core::ui::FocusHost` for `TreeHostPanel` — the `FocusHost` counterpart to
+/// `elwindui_core::ui::FocusHost` for `TreeHost` — the `FocusHost` counterpart to
 /// `WinUI3RelayoutHost`, same weak-back-reference shape (a strong one would create the same
 /// `tree` -> `focus_host` -> panel reference cycle `WinUI3RelayoutHost`'s own doc comment
 /// describes). Delegates straight to `keyboard.focus`, the single source of truth for this panel's
@@ -734,11 +734,11 @@ pub(crate) struct WinUI3CoordinateHost {
 
 impl CoordinateHost for WinUI3CoordinateHost {
     fn root_to_screen(&self, point: Point) -> Option<Point> {
-        TreeHostPanel::canvas_to_screen_point(&self.canvas.upgrade()?, point)
+        TreeHost::canvas_to_screen_point(&self.canvas.upgrade()?, point)
     }
 
     fn screen_to_root(&self, point: Point) -> Option<Point> {
-        TreeHostPanel::screen_to_canvas_point(&self.canvas.upgrade()?, point)
+        TreeHost::screen_to_canvas_point(&self.canvas.upgrade()?, point)
     }
 }
 
@@ -765,7 +765,7 @@ impl PointerGestureHost for WinUI3PointerGestureHost {
     }
 }
 
-impl TreeHostPanel {
+impl TreeHost {
     pub(crate) fn new() -> Self {
         let canvas = accessibility::create_canvas();
         let composition = CompositionRenderer::new(&canvas).expect("CompositionRenderer::new");
@@ -792,7 +792,7 @@ impl TreeHostPanel {
         #[cfg(windows)]
         this.accessibility.bind_canvas(&this.canvas);
         // WinUI3's `Control.IsTabStop` gate. Once the WinRT event projection is restored this
-        // allows the host to receive OS keyboard focus, mirroring AppKit's TreeHostView.
+        // allows the host to receive OS keyboard focus, mirroring AppKit's TreeHost.
         let _ = this.canvas.SetIsTabStop(true);
         {
             let tree_for_key = Rc::downgrade(&this.tree);
@@ -1195,7 +1195,7 @@ impl TreeHostPanel {
                         .unwrap_or(false);
                     let request = if is_pointer {
                         let local_pt = elwindui_core::base::Point { x: pt.X, y: pt.Y };
-                        TreeHostPanel::canvas_to_screen_point(&canvas_for_ctx, local_pt).map(
+                        TreeHost::canvas_to_screen_point(&canvas_for_ctx, local_pt).map(
                             |screen_pt| {
                                 elwindui_core::ui::ContextRequest::pointer(local_pt, screen_pt)
                             },
@@ -1209,7 +1209,7 @@ impl TreeHostPanel {
                                     .unwrap_or(Point { x: 0.0, y: 0.0 });
                                 let w = focused.arranged_width().unwrap_or(0.0);
                                 let h = focused.arranged_height().unwrap_or(0.0);
-                                TreeHostPanel::canvas_to_screen_point(&canvas_for_ctx, offset).map(
+                                TreeHost::canvas_to_screen_point(&canvas_for_ctx, offset).map(
                                     |screen_pt| {
                                         elwindui_core::ui::popup::PopupAnchor::Rect(
                                             elwindui_core::base::Rect {
@@ -1399,7 +1399,7 @@ impl TreeHostPanel {
     fn force_relayout_with_source(&self, source: RelayoutSource) {
         if !self.active.get() {
             if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
-                eprintln!("[elwindui-winui3] skipped relayout for inactive TreeHostPanel");
+                eprintln!("[elwindui-winui3] skipped relayout for inactive TreeHost");
             }
             return;
         }
@@ -1476,7 +1476,7 @@ impl TreeHostPanel {
             return;
         }
         if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
-            eprintln!("[elwindui-winui3] TreeHostPanel active={active}");
+            eprintln!("[elwindui-winui3] TreeHost active={active}");
         }
         if active {
             self.force_relayout_with_source(RelayoutSource::SetActiveReactivate);
@@ -1706,7 +1706,7 @@ impl TreeHostPanel {
         elwindui_core::ui::layout_root(tree, available);
         // Grows `canvas`'s native *presentation* size to the resulting natural size on any
         // unconstrained axis — the WinUI3-side counterpart of AppKit's own post-`layout_root`
-        // `setFrame` in `TreeHostView::relayout`. This is presentation output only: it must never
+        // `setFrame` in `TreeHost::relayout`. This is presentation output only: it must never
         // be read back as this host's own layout input (that self-observation is exactly the
         // same-host feedback loop `set_viewport`'s own doc comment describes) — this host has no
         // `canvas.SizeChanged` listener, so it structurally cannot be.
@@ -2588,8 +2588,8 @@ pub fn screen_logical_to_xaml_local_pure(
 }
 
 /// PR #165 rereview remediation round 2, A6/T25 (Layer 2): closes `slot`'s own active custom
-/// popup/context-menu surface, if any — extracted out of `TreeHostPanel::close_active_popup` as a
-/// free function over a bare `&RefCell<..>` (no `TreeHostPanel`/native host construction needed)
+/// popup/context-menu surface, if any — extracted out of `TreeHost::close_active_popup` as a
+/// free function over a bare `&RefCell<..>` (no `TreeHost`/native host construction needed)
 /// so it is unit-testable in isolation, mirroring `elwindui-backend-appkit`'s own identical
 /// extraction (`host::close_active_popup_slot`). `take()`s the slot *before* calling `close()` so
 /// a reentrant close triggered from within `close()` itself (e.g. the popup's own `on_unmount`

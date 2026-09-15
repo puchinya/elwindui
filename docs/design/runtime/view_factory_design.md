@@ -275,7 +275,7 @@ Independent of the DSL question above, this revision:
   is closed immediately rather than published. Verified by `elwindui-core`'s
   `open_custom_popup_dismiss_during_show_popup_is_not_lost_or_reopened`.
 - Rewrote WinUI3's `InnerPopupSurface::show` to defer attaching `request.content`
-  (`TreeHostPanel::set_tree`) until every fallible structural native setup step — coordinate
+  (`TreeHost::set_tree`) until every fallible structural native setup step — coordinate
   conversion, `Popup::new()`, casts, every `FrameworkElement`/`Popup` property setter, `Closed`
   handler registration, and `SetIsOpen(true)` itself — has already succeeded, propagating every one
   of those failures as `None` instead of silently discarding them with `.ok()`. Previously

@@ -10,11 +10,13 @@ Application hosting intentionally uses the small C++/WinRT `ApplicationT<App, IX
 
 This boundary is load-bearing: replacing the shim requires a separately approved design demonstrating correct WinRT composable-class behavior and `Application.Resources` initialization.
 
+`crate::app`'s `WINDOWS` registry (Issue #254) is the application-layer strong lifetime authority for the final most-derived `Rc<dyn WindowExt>` once a `Window` has been shown for the first time — retained via `retain_window` on first `show()` (keyed off `__self_weak`, captured at `Window::construct()`), released reactively from the native `Window.Closed` event, with `Application::Exit()` called only once the registry is freshly observed empty after the release. See `docs/design/runtime/component_lifecycle_design.md` §4j for the full cross-backend invariant and rationale.
+
 ## Native hosting and layout
 
 Tree hosts own XAML roots, ElwindUI owner mappings, viewport layout, activation, and native child reconciliation. WinUI widgets remain leaves selected by the common NativeControl design.
 
-`TreeHostPanel` is a viewport *consumer*, never its own viewport producer (Issue #261 review remediation): it stores one explicit `TreeHostViewport` (`Some(width)`/`Some(height)` constrained, `None` unconstrained), set exclusively by its owner through `TreeHostPanel::set_viewport`, and `relayout_static_pass` measures/arranges against that stored value alone — never against `Canvas.Width`/`Height`/`ActualWidth`/`ActualHeight`, and `TreeHostPanel` does not observe its own `Canvas.SizeChanged`. A host self-observing the native size its own layout just produced is a same-host feedback cascade, not a legitimate relayout trigger — confirmed directly: routing `Canvas.SizeChanged` back into the same host's own scheduling produced 595+ queued relayout cycles and 112.5s+ of cumulative text-measurement time on one host during live `docking-demo` testing before this was fixed.
+`TreeHost` is a viewport *consumer*, never its own viewport producer (Issue #261 review remediation): it stores one explicit `TreeHostViewport` (`Some(width)`/`Some(height)` constrained, `None` unconstrained), set exclusively by its owner through `TreeHost::set_viewport`, and `relayout_static_pass` measures/arranges against that stored value alone — never against `Canvas.Width`/`Height`/`ActualWidth`/`ActualHeight`, and `TreeHost` does not observe its own `Canvas.SizeChanged`. A host self-observing the native size its own layout just produced is a same-host feedback cascade, not a legitimate relayout trigger — confirmed directly: routing `Canvas.SizeChanged` back into the same host's own scheduling produced 595+ queued relayout cycles and 112.5s+ of cumulative text-measurement time on one host during live `docking-demo` testing before this was fixed.
 
 Each backend host boundary has exactly one declared viewport authority that calls `set_viewport`:
 
@@ -23,9 +25,9 @@ Each backend host boundary has exactly one declared viewport authority that call
 - a `ScrollView` content host — `sync_scroll_view_cross_axis`, driven by the native `ScrollViewer`'s own viewport; the non-scrolling axis is constrained, the scrolling axis is `None` (unconstrained), and the resulting natural-size growth on that axis is presentation output only, never fed back as a new viewport;
 - a `Popup` host — `PopupRequest.size`, pushed once before the popup's content tree is attached.
 
-Any future native control that owns a nested `TreeHostPanel` must declare its own viewport authority the same way and update its child only through `set_viewport` — never through a native size-change notification on that same child.
+Any future native control that owns a nested `TreeHost` must declare its own viewport authority the same way and update its child only through `set_viewport` — never through a native size-change notification on that same child.
 
-`Window.transparent` sets or clears a transparent background on the root `TreeHostPanel` without changing decorations. `Window.always_on_top` is retained by `InnerWindow` and applied to the `AppWindow`'s `OverlappedPresenter`; `show()` reapplies it so a pre-activation setter is not lost while the native presenter is being established.
+`Window.transparent` sets or clears a transparent background on the root `TreeHost` without changing decorations. `Window.always_on_top` is retained by `InnerWindow` and applied to the `AppWindow`'s `OverlappedPresenter`; `show()` reapplies it so a pre-activation setter is not lost while the native presenter is being established.
 
 Arrange writes explicit `Width` / `Height` for Canvas positioning. Before every natural `Measure`, the adapter resets both values to `NaN` (`Auto`), invalidates native measure, and then measures with the current constraint. This prevents arrange-time sizes from becoming a self-reinforcing natural-size cache.
 
@@ -60,7 +62,7 @@ retain an interactive outgoing native child.
 ## Accessibility projection
 
 WinUI accessibility is a projection of the Core semantic snapshot, not a read of
-native child control state. The actual `TreeHostPanel` backing element is a
+native child control state. The actual `TreeHost` backing element is a
 Canvas-compatible C++/WinRT XAML subclass whose `OnCreateAutomationPeer` returns
 the custom root peer. `GetChildrenCore` and virtual child peers read Core values
 through the narrow Rust C ABI; peers are cached by integer `AccessibilityId`.

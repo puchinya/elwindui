@@ -279,7 +279,7 @@ fn fitted_image_rect_none_draws_at_intrinsic_size_and_honors_alignment() {
 
 // The remaining tests below extend coverage toward painter design doc §20.2's ~19-scene
 // checklist (only the 4 tests above existed before this pass). Not covered by this lightweight
-// harness (a bare `CALayer` fed straight to the drawing helpers, no `TreeHostView`/real window):
+// harness (a bare `CALayer` fed straight to the drawing helpers, no `TreeHost`/real window):
 // native-control/painted-content Z-order interleaving — that needs a real `NSView` subview
 // hierarchy, out of reach here without much heavier test infrastructure. Also not covered:
 // clockwise/counterclockwise arc sweep — `path_to_cgpath`'s own doc comment already documents
@@ -984,8 +984,8 @@ fn draw_image_source_crop_only_shows_the_cropped_region() {
 }
 
 // The two tests below exercise nested `PushTransform`/`PushOpacity` *composition* — but not
-// through `replay_commands`'s own Push/Pop recursion itself: that needs a real `&TreeHostView`
-// (its `NativeControl` arm touches `host.ivars()`), and constructing one (`TreeHostView::new`)
+// through `replay_commands`'s own Push/Pop recursion itself: that needs a real `&TreeHost`
+// (its `NativeControl` arm touches `host.ivars()`), and constructing one (`TreeHost::new`)
 // asserts the calling thread is the app's main thread, which `cargo test`'s worker-thread pool
 // never is. Instead, each test computes the exact composed `AffineTransform`/`opacity`
 // `replay_commands`' `PushTransform`/`PushOpacity` arms would produce (`transform.concat

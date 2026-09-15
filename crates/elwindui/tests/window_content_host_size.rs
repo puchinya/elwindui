@@ -1,7 +1,7 @@
 //! Issue #225: a `Window`'s content host must give a real, non-zero logical viewport to the Core
 //! layout root before/at first show, and keep it synchronized across resize. Before the fix, the
-//! root `TreeHostPanel` `Canvas`'s own `SizeChanged` never fired for a plain (no-menu-bar)
-//! `Window.Content`, so `TreeHostPanel::relayout_static` only ever ran once, with
+//! root `TreeHost` `Canvas`'s own `SizeChanged` never fired for a plain (no-menu-bar)
+//! `Window.Content`, so `TreeHost::relayout_static` only ever ran once, with
 //! `available = 0x0` — every descendant, including a bare self-drawn `UIElement` leaf with no
 //! `measure_override` beyond honoring its own explicit `width`/`height`, stayed permanently
 //! `arranged_width == 0` and un-hit-testable.

@@ -34,6 +34,7 @@ impl elwindui_core::task::Dispatcher for WinUI3Dispatcher {
 use crate::bindings;
 use elwindui_core::task::LocalExecutor;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 thread_local! {
     // The generated callback wrapper requires its closure to be `Send`, whereas startup is
@@ -48,7 +49,13 @@ thread_local! {
 
 pub(crate) struct RetainedWindow {
     id: u64,
-    _window: bindings::Microsoft::UI::Xaml::Window,
+    /// Issue #254: the final most-derived Rust `Window` owner (`Rc<dyn WindowExt>`, obtained via
+    /// `__self_weak` at construction time) — the application layer is the strong lifetime
+    /// authority for this until native close is observed. `InnerWindow` itself stores only the
+    /// matching `Weak`. Retaining this (rather than only the native XAML `Window`, as before)
+    /// keeps the whole Rust-side component tree — including `TreeHost`'s callback registry —
+    /// alive for as long as the native window is shown.
+    _owner: Rc<dyn elwindui_core::ui::WindowExt>,
 }
 
 // Hosting `Application` itself (composing it, registering `XamlControlsResources` into
@@ -86,7 +93,14 @@ extern "C" fn startup_trampoline() {
     });
 }
 
-pub(crate) fn retain_window(window: &bindings::Microsoft::UI::Xaml::Window) {
+/// Issue #254: becomes the application-layer strong lifetime authority for `owner` (the final
+/// most-derived generated/backend `Window`) until native close is observed via `xaml`'s `Closed`
+/// event. The `Closed` closure captures only the numeric `id`, never `owner` itself — so this
+/// registry, not any native callback, is what keeps `owner` alive.
+pub(crate) fn retain_window(
+    owner: Rc<dyn elwindui_core::ui::WindowExt>,
+    xaml: &bindings::Microsoft::UI::Xaml::Window,
+) -> u64 {
     let id = NEXT_WINDOW_ID.with(|next| {
         let id = next.get();
         next.set(id.wrapping_add(1));
@@ -96,27 +110,33 @@ pub(crate) fn retain_window(window: &bindings::Microsoft::UI::Xaml::Window) {
         release_window(id);
         Ok(())
     });
-    window
-        .Closed(&closed)
+    xaml.Closed(&closed)
         .expect("Window::Closed event registration");
     WINDOWS.with(|windows| {
-        windows.borrow_mut().push(RetainedWindow {
-            id,
-            _window: window.clone(),
-        });
+        windows
+            .borrow_mut()
+            .push(RetainedWindow { id, _owner: owner });
     });
+    id
 }
 
+/// Issue #254 §2.4/§2.7: the removed `RetainedWindow` (and the `Rc<dyn WindowExt>` owner it
+/// holds) is dropped only after `WINDOWS`'s `RefCell` borrow has ended, and registry emptiness is
+/// re-checked with a fresh borrow afterward — owner destruction can synchronously re-enter Window
+/// logic, which must never observe `WINDOWS` still mutably borrowed.
 pub(crate) fn release_window(id: u64) {
     #[cfg(test)]
     RELEASE_WINDOW_CALLS.with(|calls| calls.set(calls.get() + 1));
 
-    let has_windows = WINDOWS.with(|windows| {
+    let removed = WINDOWS.with(|windows| {
         let mut windows = windows.borrow_mut();
-        windows.retain(|entry| entry.id != id);
-        !windows.is_empty()
+        let index = windows.iter().position(|entry| entry.id == id);
+        index.map(|index| windows.remove(index))
     });
-    if !has_windows {
+    drop(removed);
+
+    let is_empty = WINDOWS.with(|windows| windows.borrow().is_empty());
+    if is_empty {
         bindings::Microsoft::UI::Xaml::Application::Current()
             .expect("Microsoft.UI.Xaml.Application::Current")
             .Exit()

@@ -105,6 +105,26 @@ struct MountHideCloseWindowWithPopup {
 #[elwindui::component]
 impl MountHideCloseWindowWithPopup {}
 
+/// Issue #254 / PR #257 review remediation (A2): a dedicated, minimal `inherits Window` fixture
+/// with no `#[prop]`, no `on_mount`/`on_unmount`, no ViewModel/binding, and no subscription of any
+/// kind — nothing that could itself hold an incidental strong reference back to the Window and
+/// mask whether `crate::app`'s application-layer registry (not some other accidental owner) is
+/// what actually keeps the *final generated* component alive after every caller-side `Rc` drops.
+/// `elwindui-backend-winui3::app::window_lifecycle_tests::window_registry_retention_lifecycle`
+/// proves the same mechanism at the bare `backend::Window` level (necessary but not sufficient —
+/// it never touches `__self_weak`'s coercion through a real generated `WindowExt` implementor);
+/// this fixture is what proves the mechanism for the actual final most-derived generated owner.
+#[elwindui::component(inherits Window)]
+struct WindowLifetimeProbe {
+    body: view! {
+        title: "window lifetime probe"
+        content: TextBlock { text: "probe" }
+    },
+}
+
+#[elwindui::component]
+impl WindowLifetimeProbe {}
+
 /// Type-checked, not executed (see module doc comment). Demonstrates the target usage shape from
 /// spec §10/§11 and Issue #126: `new()` performs no build; a property set between `new()` and `show()`
 /// is observed by the initial build; `show()` mounts+builds exactly once; `show(); hide(); show();`
@@ -261,6 +281,40 @@ fn winui3_show_hide_show_builds_once_and_close_cascades_unmount() {
             get_unmount_events().len(),
             0,
             "re-show must not trigger unmount"
+        );
+
+        // Issue #254 / PR #257 review remediation (A2, then B1): the *final generated* Window
+        // owner (not merely its backend base `Window`) must survive the caller's own `Rc`
+        // dropping, and must actually drop once native close is observed. Every operation after
+        // the initial drop goes through a freshly-upgraded, explicitly scoped temporary `Rc` --
+        // never a lingering local binding -- so the final `weak.upgrade().is_none()` assertion
+        // genuinely proves the application registry (not a leftover test-local strong reference)
+        // was the only thing keeping this alive.
+        //
+        // B1: this block runs here -- while `window` (above) is still shown and therefore still
+        // retained by `crate::app::WINDOWS` -- rather than after `window.close()` below. WinUI3's
+        // `release_window` calls `Application::Exit()` once the retained-window registry becomes
+        // empty; running the probe after `window.close()` would let its own retain/release cycle
+        // interact with (or depend on) that shutdown request instead of testing Window ownership
+        // in isolation against a stable, already-retained sibling Window.
+        let probe: Rc<WindowLifetimeProbe> = WindowLifetimeProbe::new();
+        let probe_weak = Rc::downgrade(&probe);
+        probe.show();
+        drop(probe);
+        assert!(
+            probe_weak.upgrade().is_some(),
+            "generated Window owner must still be alive after the caller's own Rc drops"
+        );
+        {
+            let retained = probe_weak
+                .upgrade()
+                .expect("generated Window retained after caller Rc drop");
+            retained.close();
+        }
+        assert!(
+            probe_weak.upgrade().is_none(),
+            "generated Window owner must actually drop once native close is observed and the \
+             temporary upgrade used to close it is gone"
         );
 
         window.close();

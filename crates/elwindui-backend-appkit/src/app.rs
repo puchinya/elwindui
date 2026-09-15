@@ -10,7 +10,8 @@ use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{NSApplication, NSApplicationDelegate};
 use objc2_foundation::NSObjectProtocol;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 /// AppKit's `Dispatcher` (docs/design/runtime/state_management_design.md): hops back to the main thread via GCD's
 /// main queue, which `NSApplication.run()` (`application::run()` below) actively services as part
@@ -30,6 +31,76 @@ thread_local! {
     /// `NSApplication.delegate` is an unretained (weak) reference, so this keeps it alive for the
     /// process's lifetime.
     static APP_DELEGATE: RefCell<Option<Retained<AppDelegate>>> = const { RefCell::new(None) };
+    static WINDOWS: RefCell<Vec<RetainedWindow>> = const { RefCell::new(Vec::new()) };
+    static NEXT_WINDOW_ID: Cell<u64> = const { Cell::new(0) };
+    #[cfg(test)]
+    static RELEASE_WINDOW_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Issue #254: the application-layer registry that becomes the strong lifetime authority for the
+/// final most-derived Rust `Window` owner (`Rc<dyn WindowExt>`, obtained via `__self_weak` at
+/// construction time) once it has been shown for the first time — mirrors
+/// `elwindui-backend-winui3::app::RetainedWindow`. `InnerWindow` itself stores only a matching
+/// `Weak`; the native close hook (`ElwinduiWindow::windowWillClose:`) is what calls
+/// `release_window` — never a strong native-callback capture.
+struct RetainedWindow {
+    id: u64,
+    _owner: Rc<dyn elwindui_core::ui::WindowExt>,
+}
+
+/// Allocates a retention id, registers `owner` as strongly retained until `release_window(id)` is
+/// called, and returns the id for the caller (`InnerWindow::show`) to store on
+/// `ElwinduiWindowIvars::retention_id`.
+pub(crate) fn retain_window(owner: Rc<dyn elwindui_core::ui::WindowExt>) -> u64 {
+    let id = NEXT_WINDOW_ID.with(|next| {
+        let id = next.get();
+        next.set(id.wrapping_add(1));
+        id
+    });
+    WINDOWS.with(|windows| {
+        windows
+            .borrow_mut()
+            .push(RetainedWindow { id, _owner: owner });
+    });
+    id
+}
+
+/// Issue #254 §2.4: removes the entry under a short `RefCell` borrow, then drops the removed
+/// owner only after that borrow has ended — owner destruction can synchronously re-enter Window
+/// logic (e.g. via `Drop` on content still mounted), which must never observe `WINDOWS` still
+/// mutably borrowed. Unlike WinUI3, application termination stays entirely policy-driven through
+/// `AppDelegate::should_terminate_after_last_window_closed` (§2.12) — no exit call belongs here.
+pub(crate) fn release_window(id: u64) {
+    #[cfg(test)]
+    RELEASE_WINDOW_CALLS.with(|calls| calls.set(calls.get() + 1));
+
+    let removed = WINDOWS.with(|windows| {
+        let mut windows = windows.borrow_mut();
+        let index = windows.iter().position(|entry| entry.id == id);
+        index.map(|index| windows.remove(index))
+    });
+    drop(removed);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_window_lifecycle_test_state() {
+    WINDOWS.with(|windows| {
+        assert!(
+            windows.borrow().is_empty(),
+            "window lifecycle test must start without retained windows"
+        );
+    });
+    RELEASE_WINDOW_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn retained_window_count_for_test() -> usize {
+    WINDOWS.with(|windows| windows.borrow().len())
+}
+
+#[cfg(test)]
+pub(crate) fn release_window_call_count_for_test() -> usize {
+    RELEASE_WINDOW_CALLS.with(Cell::get)
 }
 
 define_class!(

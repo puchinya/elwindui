@@ -33,7 +33,7 @@ pub(crate) fn constrain<T: UIElementExt + ?Sized>(elem: &T, size: Size) -> Size 
 
 /// This element's natural (unconstrained) size — e.g. for a container that must report an
 /// `intrinsicContentSize` to an Auto-Layout-managed ancestor (see `elwindui-backend-appkit`'s
-/// `TreeHostView`) before it has ever actually been given a frame to lay out into.
+/// `TreeHost`) before it has ever actually been given a frame to lay out into.
 pub fn natural_size(elem: &dyn UIElementExt) -> Size {
     elem.measure(Size {
         width: 0.0,
@@ -439,7 +439,7 @@ fn hit_test_at(
     }
 }
 
-/// Hit-tests `root` at `at` (absolute coordinates, e.g. the hosting `TreeHostView`'s own local
+/// Hit-tests `root` at `at` (absolute coordinates, e.g. the hosting `TreeHost`'s own local
 /// point). Returns the deepest (topmost) hit element, or `None` if `at` falls outside `root`'s own
 /// bounds entirely. Requires `root` to have already been laid out (e.g. via `layout_root`) — reads
 /// cached `arranged_width`/`arranged_height`/`arranged_offset`, doesn't recompute them.
@@ -492,7 +492,7 @@ pub(crate) fn invoke_handlers_at<T: 'static>(
 }
 
 /// Bubbles a routed event starting at `target` (e.g. `hit_test`'s return value, or a native leaf's
-/// own tree node — see `elwindui-backend-appkit`'s `TreeHostView`): calls `target`'s own handlers
+/// own tree node — see `elwindui-backend-appkit`'s `TreeHost`): calls `target`'s own handlers
 /// registered under `name`, then its parent's, and so on up to the root (`UIElement::visual_parent`
 /// — matching real WinUI3, where routed events bubble along the Visual tree, not the Logical one),
 /// stopping as soon as one sets `args.handled`. Works identically whether `target`'s tree was built

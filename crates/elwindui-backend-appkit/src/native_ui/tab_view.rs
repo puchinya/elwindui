@@ -17,7 +17,7 @@ use std::rc::{Rc, Weak};
 /// ordinary `inherits = NativeControl` class with its own backend-local auto-generated trait — this
 /// only swaps which trait path `TabViewExt` resolves to. `insert_tab`/`remove_tab`/
 /// `set_tab_content_visible` are plain `InnerTabView` methods, not a separate cross-backend trait,
-/// since a real tab content host type differs per backend (AppKit's `Retained<TreeHostView>`/
+/// since a real tab content host type differs per backend (AppKit's `Retained<TreeHost>`/
 /// `TabChipImpl` have no common shape with WinUI3's own equivalents worth sharing without
 /// associated types this crate doesn't need yet).
 #[elwindui_macros::class(struct_only = elwindui_core::ui::TabViewExt, inherits = crate::NativeControl)]
@@ -27,7 +27,7 @@ pub struct TabView {
     selected_index: Cell<usize>,
     /// Parallel to `displayed` below — each currently-displayed entry's chip + persistent content
     /// host, in the same order.
-    chips: RefCell<Vec<(TabChipImpl, Retained<crate::host::TreeHostView>)>>,
+    chips: RefCell<Vec<(TabChipImpl, Retained<crate::host::TreeHost>)>>,
     /// Pointer identities (`Rc::as_ptr`, as `usize`) of the entries currently reflected as real
     /// chips/hosts, in display order — the "before" side of `rebuild`'s diff against `entries`'
     /// current pointers (the "after" side). Mirrors `winui3::tab_view`'s `displayed`.
@@ -51,7 +51,7 @@ pub struct TabView {
 pub struct TabViewItem {
     header: RefCell<String>,
     on_header_changed: RefCell<Option<Box<dyn Fn()>>>,
-    // Handed to this entry's persistent content host (`TreeHostView::set_tree`) the first time
+    // Handed to this entry's persistent content host (`TreeHost::set_tree`) the first time
     // it's actually inserted as a real tab.
     content: RefCell<Option<Rc<dyn UIElementExt>>>,
     closable: Cell<bool>,

@@ -175,7 +175,7 @@ mod hosted_xaml_regression_tests {
         Brush, CascadedTextStyle, Color, ComputedTextStyle, FontFamily, FontStretch, FontStyle,
         FontWeight, TextBackend, TextMeasureRequest, TextWrapping,
     };
-    use elwindui_core::ui::{UIElement, UIElementExt};
+    use elwindui_core::ui::{UIElement, UIElementExt, WindowExt};
     use std::cell::{Cell, RefCell};
     use std::rc::{Rc, Weak};
     use windows::Foundation::IPropertyValue;
@@ -403,6 +403,9 @@ mod hosted_xaml_regression_tests {
             static LIFECYCLE_VISIBLE_AFTER_CLOSE: RefCell<Option<bool>> = const { RefCell::new(None) };
             static RETAINED_COUNT_AFTER_CLOSE: RefCell<Option<usize>> = const { RefCell::new(None) };
             static RELEASE_CALL_COUNT_AFTER_CLOSE: RefCell<Option<usize>> = const { RefCell::new(None) };
+            static SIBLING_RETAINED_COUNT_AFTER_CLOSE: RefCell<Option<usize>> = const { RefCell::new(None) };
+            static SIBLING_A_ALIVE_AFTER_CLOSE: RefCell<Option<bool>> = const { RefCell::new(None) };
+            static SIBLING_B_ALIVE_AFTER_CLOSE: RefCell<Option<bool>> = const { RefCell::new(None) };
             static SCHEDULER_INITIAL_HISTORY: RefCell<Option<Vec<crate::host::RelayoutRealizationRecord>>> = const { RefCell::new(None) };
             static SCHEDULER_STRONGEST_HISTORY: RefCell<Option<Vec<crate::host::RelayoutRealizationRecord>>> = const { RefCell::new(None) };
             static SCHEDULER_RENDER_HISTORY: RefCell<Option<Vec<crate::host::RelayoutRealizationRecord>>> = const { RefCell::new(None) };
@@ -505,14 +508,24 @@ mod hosted_xaml_regression_tests {
                     failed_icon_conversion_does_not_remove_the_action();
 
                 crate::app::reset_window_lifecycle_test_state();
-                let lifecycle_window = Rc::new(InnerWindow::new());
+                // Issue #254: `InnerWindow` stores only the final owner's `Weak<dyn WindowExt>`;
+                // the application registry becomes the strong lifetime authority after show().
+                let lifecycle_owner: Rc<dyn elwindui_core::ui::WindowExt> =
+                    crate::native_ui::Window::new();
+                let weak_owner_a = Rc::downgrade(&lifecycle_owner);
+                let lifecycle_window = Rc::new(InnerWindow::new(weak_owner_a.clone()));
 
                 lifecycle_window.show();
+                drop(lifecycle_owner);
                 assert!(
                     lifecycle_window.is_visible_for_test(),
                     "show() must make the AppWindow visible"
                 );
                 assert_eq!(crate::app::retained_window_count_for_test(), 1);
+                assert!(
+                    weak_owner_a.upgrade().is_some(),
+                    "the application registry must keep A alive after the caller drops its Rc"
+                );
 
                 lifecycle_window.hide();
                 assert!(
@@ -536,10 +549,59 @@ mod hosted_xaml_regression_tests {
                     "re-showing must not retain the same native window twice"
                 );
 
+                // Exercise the actual bare backend Window path: its own InnerWindow receives the
+                // final self weak reference from the generated class constructor, so this caller
+                // drop must be survived by the application registry rather than by a separate
+                // test-created InnerWindow.
+                let bare_window = crate::native_ui::Window::new();
+                let bare_weak = Rc::downgrade(&bare_window);
+                bare_window.show();
+                drop(bare_window);
+                assert!(
+                    bare_weak.upgrade().is_some(),
+                    "bare backend Window must survive its caller Rc drop after show()"
+                );
+                assert_eq!(crate::app::retained_window_count_for_test(), 2);
+                {
+                    let retained = bare_weak
+                        .upgrade()
+                        .expect("bare backend Window retained after caller Rc drop");
+                    retained.hide();
+                    retained.show();
+                }
+                assert_eq!(
+                    crate::app::retained_window_count_for_test(),
+                    2,
+                    "bare backend Window hide/show must keep one registry entry"
+                );
+
+                // A never-shown backend Window must not create or release a registry entry or
+                // affect the unrelated shown windows.
+                let never_shown = crate::native_ui::Window::new();
+                let never_shown_weak = Rc::downgrade(&never_shown);
+                let releases_before_never_shown = crate::app::release_window_call_count_for_test();
+                never_shown.close();
+                assert_eq!(
+                    crate::app::release_window_call_count_for_test(),
+                    releases_before_never_shown,
+                    "closing a never-shown Window must not release another Window"
+                );
+                drop(never_shown);
+                assert!(never_shown_weak.upgrade().is_none());
+
+                {
+                    let retained = bare_weak
+                        .upgrade()
+                        .expect("bare backend Window must remain isolated from never-shown close");
+                    retained.close();
+                }
+                assert!(bare_weak.upgrade().is_none());
+                assert_eq!(crate::app::retained_window_count_for_test(), 1);
+
                 // Scheduler-level Issue #261 regressions. The probe's first measure raises one
                 // same-host invalidation while the host is already in progress; the host must own
                 // that rerun through `run_coalesced`, without contaminating the next queued batch.
-                // All assertions remain outside native callbacks below.
+                // Scheduler assertions remain outside native callbacks below.
                 let scheduler_probe = ReentrantMeasureProbe::new();
                 crate::host::reset_relayout_realization_history_for_test();
                 lifecycle_window.set_content(scheduler_probe.clone());
@@ -560,6 +622,7 @@ mod hosted_xaml_regression_tests {
 
                 let scheduler_probe_for_render = scheduler_probe.clone();
                 let lifecycle_window_for_scheduler = lifecycle_window.clone();
+                let weak_owner_a_for_scheduler = weak_owner_a.clone();
                 enqueue_test_callback(Rc::new(move || {
                     SCHEDULER_STRONGEST_HISTORY.with(|slot| {
                         *slot.borrow_mut() =
@@ -571,6 +634,7 @@ mod hosted_xaml_regression_tests {
                     scheduler_probe_for_render.invalidate_render();
                     let scheduler_probe_for_flush = scheduler_probe_for_render.clone();
                     let lifecycle_window_for_flush = lifecycle_window_for_scheduler.clone();
+                    let weak_owner_a_for_render = weak_owner_a_for_scheduler.clone();
                     enqueue_test_callback(Rc::new(move || {
                         SCHEDULER_RENDER_HISTORY.with(|slot| {
                             *slot.borrow_mut() =
@@ -597,6 +661,7 @@ mod hosted_xaml_regression_tests {
                         });
 
                         let lifecycle_window_for_burst = lifecycle_window_for_flush.clone();
+                        let weak_owner_a_for_stale = weak_owner_a_for_render.clone();
                         enqueue_test_callback(Rc::new(move || {
                             SCHEDULER_CALLBACK_COUNT_AFTER_STALE.with(|slot| {
                                 *slot.borrow_mut() = Some(crate::ffi::ui_event_callback_count())
@@ -608,8 +673,17 @@ mod hosted_xaml_regression_tests {
                             use elwindui_core::ui::TextBlockExt;
                             let probe = elwindui_core::ui::TextBlock::new();
                             lifecycle_window_for_burst.set_content(probe.clone());
-                            let sibling_window = Rc::new(InnerWindow::new());
+                            let sibling_owner: Rc<dyn elwindui_core::ui::WindowExt> =
+                                crate::native_ui::Window::new();
+                            let weak_owner_b = Rc::downgrade(&sibling_owner);
+                            let sibling_window = Rc::new(InnerWindow::new(weak_owner_b.clone()));
                             sibling_window.show();
+                            drop(sibling_owner);
+                            assert_eq!(
+                                crate::app::retained_window_count_for_test(),
+                                2,
+                                "a second shown window must be retained independently"
+                            );
                             let sibling_probe = elwindui_core::ui::TextBlock::new();
                             sibling_window.set_content(sibling_probe.clone());
 
@@ -624,6 +698,7 @@ mod hosted_xaml_regression_tests {
                                 .with(|slot| *slot.borrow_mut() = Some(pass_count_before_drain));
 
                             let lifecycle_window_for_500 = lifecycle_window_for_burst.clone();
+                            let weak_owner_a_for_burst = weak_owner_a_for_stale.clone();
                             enqueue_test_callback(Rc::new(move || {
                                 RELAYOUT_PASS_COUNT_AFTER_DRAIN.with(|slot| {
                                     *slot.borrow_mut() =
@@ -636,14 +711,34 @@ mod hosted_xaml_regression_tests {
                                 }
                                 sibling_probe.set_text("sibling probe 500");
 
-                                let sibling_window_for_close = sibling_window.clone();
+                                let sibling_window_for_close =
+                                    Rc::new(RefCell::new(Some(sibling_window.clone())));
+                                let weak_owner_a_for_close = weak_owner_a_for_burst.clone();
+                                let weak_owner_b_for_close = weak_owner_b.clone();
                                 let lifecycle_window_for_close = lifecycle_window_for_500.clone();
                                 enqueue_test_callback(Rc::new(move || {
                                     RELAYOUT_PASS_COUNT_AFTER_500.with(|slot| {
                                         *slot.borrow_mut() =
                                             Some(crate::host::relayout_static_pass_count_for_test())
                                     });
-                                    sibling_window_for_close.close();
+                                    if let Some(sibling_window_for_close) =
+                                        sibling_window_for_close.borrow_mut().take()
+                                    {
+                                        sibling_window_for_close.close();
+                                        drop(sibling_window_for_close);
+                                    }
+                                    SIBLING_RETAINED_COUNT_AFTER_CLOSE.with(|slot| {
+                                        *slot.borrow_mut() =
+                                            Some(crate::app::retained_window_count_for_test())
+                                    });
+                                    SIBLING_B_ALIVE_AFTER_CLOSE.with(|slot| {
+                                        *slot.borrow_mut() =
+                                            Some(weak_owner_b_for_close.upgrade().is_some())
+                                    });
+                                    SIBLING_A_ALIVE_AFTER_CLOSE.with(|slot| {
+                                        *slot.borrow_mut() =
+                                            Some(weak_owner_a_for_close.upgrade().is_some())
+                                    });
                                     lifecycle_window_for_close.close();
                                     LIFECYCLE_VISIBLE_AFTER_CLOSE.with(|slot| {
                                         *slot.borrow_mut() =
@@ -795,6 +890,27 @@ mod hosted_xaml_regression_tests {
             callback_count_after_stale, callback_baseline,
             "the stale callback must be removed without a duplicate realization"
         );
+        let sibling_retained_count_after_close = SIBLING_RETAINED_COUNT_AFTER_CLOSE
+            .with(|slot| *slot.borrow())
+            .expect("sibling retention count after close should have been recorded");
+        assert_eq!(
+            sibling_retained_count_after_close, 1,
+            "closing B must release only B while A remains retained"
+        );
+        let sibling_b_alive_after_close = SIBLING_B_ALIVE_AFTER_CLOSE
+            .with(|slot| *slot.borrow())
+            .expect("sibling B lifetime after close should have been recorded");
+        assert!(
+            !sibling_b_alive_after_close,
+            "B's owner must drop after its registry entry is released"
+        );
+        let sibling_a_alive_after_close = SIBLING_A_ALIVE_AFTER_CLOSE
+            .with(|slot| *slot.borrow())
+            .expect("sibling A lifetime after B close should have been recorded");
+        assert!(
+            sibling_a_alive_after_close,
+            "A must remain alive while B is closed"
+        );
         let lifecycle_visible_after_close = LIFECYCLE_VISIBLE_AFTER_CLOSE
             .with(|slot| *slot.borrow())
             .expect("lifecycle window visibility after close should have been recorded");
@@ -813,8 +929,8 @@ mod hosted_xaml_regression_tests {
             .with(|slot| *slot.borrow())
             .expect("release_window call count after close should have been recorded");
         assert_eq!(
-            release_call_count_after_close, 2,
-            "programmatic close() on both windows must reach release_window exactly once each"
+            release_call_count_after_close, 3,
+            "programmatic close() on all retained test windows must release exactly once each"
         );
     }
 }

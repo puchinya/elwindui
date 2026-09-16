@@ -442,6 +442,22 @@ fn main() {
         std::fs::read_to_string(&interop_path).expect("read generated XAML interop bindings");
     std::fs::write(&interop_path, interop.replacen("#![allow(", "#[allow(", 1))
         .expect("write generated XAML interop bindings");
+    // rust-analyzer's batch diagnostics do not propagate arbitrary `cargo:rustc-env` values
+    // into its source analysis, even though rustc receives them for a normal build. Keep an
+    // ignored copy at a stable source-relative path so `bindings.rs` can use the standard
+    // `CARGO_MANIFEST_DIR` environment value and expose the exact same generated projection to
+    // both rustc and rust-analyzer. The OUT_DIR copies remain authoritative for runtime resources
+    // and native host generation.
+    let analysis_dir = std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR")
+            .expect("CARGO_MANIFEST_DIR is required to publish rust-analyzer WinUI bindings"),
+    )
+    .join(".generated");
+    std::fs::create_dir_all(&analysis_dir).expect("create rust-analyzer WinUI binding directory");
+    std::fs::copy(&out_path, analysis_dir.join("bindings.rs"))
+        .expect("publish rust-analyzer WinUI bindings");
+    std::fs::copy(&interop_path, analysis_dir.join("xaml_interop.rs"))
+        .expect("publish rust-analyzer XAML interop bindings");
     copy_win2d_runtime(&out_dir);
     generate_resources_pri(&out_dir);
     build_cpp_app_host(&out_dir, &winmd_inputs);
@@ -451,7 +467,6 @@ fn main() {
             warnings.len()
         );
     }
-    println!("cargo:rustc-env=ELWINDUI_WINUI3_BINDINGS={out_path}");
 }
 
 #[cfg(target_os = "windows")]

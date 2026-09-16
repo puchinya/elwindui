@@ -46,12 +46,12 @@ The Windows UI driver and deterministic adapter-contract tests are implemented. 
 shared product case is [`tests/e2e/self-drawn-pointer-input.md`](../../tests/e2e/self-drawn-pointer-input.md)
 and is executed through this driver for WinUI3 Issue #236. The final remediation run against
 implementation HEAD `98e5f9e204bfc0b5ae120c56b5a72f57e674fcde` reports SDP-01 `PASS`, SDP-02
-`PASS`, SDP-03 `PASS`, SDP-04 `PASS`, and SDP-05 `BLOCKED`. SDP-05 was not clicked because a
-fresh screenshot and current window geometry did not reliably identify the visible `Normal`
-native Button, while UIA returned no match; the attempted scroll was not available in the
-current driver's command set, and no coordinate was guessed. Issue #260 UIA
-discoverability is not an Issue #236 acceptance dependency. Raw evidence is under
-`.agent-state/issues/236/e2e/98e5f9e204bfc0b5ae120c56b5a72f57e674fcde/20260916T124325Z/`.
+`PASS`, SDP-03 `PASS`, SDP-04 `PASS`, and SDP-05 `PASS`. For SDP-05, the requested `1100x850`
+resize did not fit the usable desktop, so the largest safe `908x476` window was used; a fresh
+post-resize screenshot and one-Tab focus location identified `Normal` at local `(50,120)` / screen
+`(102,172)`, and one real mouse click appended exactly one `Normal clicked` line. UIA returned no
+match, but Issue #260 UIA discoverability is not an Issue #236 acceptance dependency. Raw evidence
+is under `.agent-state/issues/236/e2e/98e5f9e204bfc0b5ae120c56b5a72f57e674fcde/20260916T142131Z/`.
 This does not claim the shared runner/compiler/cache or complete acceptance.
 
 For PR #241 remediation, the comparable `rust-analyzer diagnostics .` run with the repository

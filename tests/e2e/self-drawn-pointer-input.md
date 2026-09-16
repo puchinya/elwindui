@@ -118,10 +118,20 @@ Application: `target/debug/controls-demo.exe`.
 
 Navigate to the visible native `TabViewItem` whose header is `Button`, using a real native pointer
 action or another repository-approved native-control action. Confirm that page is visible and the
-event log is empty. Capture a fresh screenshot and current window geometry, identify the visible
-native `Normal` button, record its window-local center, and perform exactly one real coordinate
-`point-click` on its derived screen point. Do not modify accessibility exposure merely to locate
-the button.
+event log is empty. If the initial Button-page screenshot does not expose the complete `Normal`
+button clearly, resize the current window with the existing `resize-window` command until the
+page has sufficient visible vertical and horizontal space. Capture a fresh screenshot and refresh
+the current window geometry after every resize; do not reuse a coordinate from before the resize.
+An approximately `1100x850` window may be a practical first attempt on a sufficiently large
+desktop, but it is not an invariant and the window must remain within the usable desktop area.
+
+Identify the visible native `Normal` button from the fresh post-resize screenshot and record its
+window-local center before deriving its screen point. If the button is still difficult to
+distinguish, existing keyboard navigation may move native focus until the focus visual makes the
+button bounds unambiguous; keyboard input is for location only and must not activate the control
+with Enter or Space. Capture another fresh screenshot after focus navigation, then perform exactly
+one real coordinate `point-click` on the recorded screen point. Do not modify accessibility
+exposure merely to locate the button and do not add a driver `scroll` command for this case.
 
 PASS requires the application event log to contain exactly one appended line:
 
@@ -129,9 +139,11 @@ PASS requires the application event log to contain exactly one appended line:
 Normal clicked
 ```
 
-Two lines after one gesture is a `FAIL`: it indicates duplicate ownership between the native
+Verify that `button_log` is empty immediately before the acceptance click. Two or more newly
+appended lines after one gesture is a `FAIL`: it indicates duplicate ownership between the native
 control and Core. A missing UIA match for the native Button is not by itself a #236 failure; if the
-button cannot be identified reliably from the fresh screenshot, classify the case as `BLOCKED`.
+button cannot be identified reliably after the required resize/fresh-screenshot procedure and
+optional focus-visual location fallback, classify the case as `BLOCKED`.
 The direct hosted source-classification assertion for a real XAML `Button` is required alongside
 this runtime isolation case.
 

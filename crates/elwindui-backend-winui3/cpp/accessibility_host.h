@@ -47,4 +47,6 @@ extern "C" __declspec(dllexport) void* elwindui_winui3_accessibility_canvas_crea
 extern "C" __declspec(dllexport) std::uint32_t elwindui_winui3_accessibility_canvas_set_callbacks(
     void* bridge_key,
     const ElwinduiAccessibilityCallbacks* callbacks);
+extern "C" __declspec(dllexport) void elwindui_winui3_accessibility_canvas_notify_tree_changed(
+    void* bridge_key);
 extern "C" __declspec(dllexport) void elwindui_winui3_accessibility_canvas_detach(void* bridge_key);

@@ -58,6 +58,7 @@ unsafe extern "C" {
         bridge_key: *mut c_void,
         callbacks: *const AccessibilityCallbacks,
     ) -> u32;
+    fn elwindui_winui3_accessibility_canvas_notify_tree_changed(bridge_key: *mut c_void);
     fn elwindui_winui3_accessibility_canvas_detach(bridge_key: *mut c_void);
 }
 
@@ -141,13 +142,27 @@ impl WinUI3AccessibilityState {
         let tree: Option<Rc<RefCell<Option<Rc<dyn UIElementExt>>>>> = self.tree.upgrade();
         let Some(tree) = tree.and_then(|tree| tree.borrow().clone()) else {
             self.runtime.clear();
+            #[cfg(windows)]
+            self.notify_tree_changed();
             return;
         };
         self.runtime.rebuild(&tree);
+        #[cfg(windows)]
+        self.notify_tree_changed();
     }
 
     pub(crate) fn clear(&self) {
         self.runtime.clear();
+        #[cfg(windows)]
+        self.notify_tree_changed();
+    }
+
+    #[cfg(windows)]
+    fn notify_tree_changed(&self) {
+        let bridge_key = self.cpp_bridge.bridge_key.get();
+        if !bridge_key.is_null() {
+            unsafe { elwindui_winui3_accessibility_canvas_notify_tree_changed(bridge_key) };
+        }
     }
 }
 

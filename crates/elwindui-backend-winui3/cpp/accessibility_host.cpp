@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,6 +30,7 @@ namespace {
 struct CanvasBridgeState {
     ElwinduiAccessibilityCallbacks callbacks{};
     std::map<std::uint64_t, AutomationPeer> peers;
+    std::optional<AutomationPeer> root_peer;
 };
 
 std::map<void*, std::shared_ptr<CanvasBridgeState>> g_bridges;
@@ -61,6 +63,11 @@ struct SemanticPeer : AutomationPeerT<SemanticPeer> {
     SemanticPeer(void* bridge_key, std::uint64_t id) : m_bridge_key(bridge_key), m_id(id) {}
 
     hstring GetClassNameCore() { return L"ElwindUI.Semantic"; }
+    // SemanticPeer is intentionally virtual rather than backed by a XAML FrameworkElement. The
+    // AutomationPeer base defaults both flags to false, which would make an otherwise valid
+    // virtual peer disappear from UIA's control/content views.
+    bool IsControlElementCore() { return true; }
+    bool IsContentElementCore() { return true; }
 
     hstring GetNameCore() {
         auto bridge = bridge_for(m_bridge_key);
@@ -124,6 +131,7 @@ struct SemanticPeer : AutomationPeerT<SemanticPeer> {
         }
         auto count = bridge->callbacks.child_count(bridge->callbacks.context, m_id);
         children.reserve(count);
+        auto parent = get_strong().as<AutomationPeer>();
         for (std::uint32_t index = 0; index < count; ++index) {
             auto child = bridge->callbacks.child_id(bridge->callbacks.context, m_id, index);
             if (child == 0) continue;
@@ -131,6 +139,8 @@ struct SemanticPeer : AutomationPeerT<SemanticPeer> {
             if (it == bridge->peers.end()) {
                 it = bridge->peers.emplace(child, make<SemanticPeer>(m_bridge_key, child)).first;
             }
+            // Virtual peers have no visual owner from which WinUI can infer this relationship.
+            it->second.SetParent(parent);
             children.push_back(it->second);
         }
         return single_threaded_vector<AutomationPeer>(std::move(children));
@@ -161,6 +171,7 @@ struct SemanticRootPeer : FrameworkElementAutomationPeerT<SemanticRootPeer> {
         }
         auto count = bridge->callbacks.child_count(bridge->callbacks.context, 0);
         children.reserve(count);
+        auto parent = get_strong().as<AutomationPeer>();
         for (std::uint32_t index = 0; index < count; ++index) {
             auto id = bridge->callbacks.child_id(bridge->callbacks.context, 0, index);
             if (id == 0) continue;
@@ -168,6 +179,9 @@ struct SemanticRootPeer : FrameworkElementAutomationPeerT<SemanticRootPeer> {
             if (it == bridge->peers.end()) {
                 it = bridge->peers.emplace(id, make<SemanticPeer>(m_bridge_key, id)).first;
             }
+            // Keep the virtual peer graph connected even though semantic nodes are not native
+            // XAML children.
+            it->second.SetParent(parent);
             children.push_back(it->second);
         }
         return single_threaded_vector<AutomationPeer>(std::move(children));
@@ -180,7 +194,12 @@ private:
 struct AccessibilityCanvas : CanvasT<AccessibilityCanvas> {
     AutomationPeer OnCreateAutomationPeer() {
         auto inspectable = get_strong().as<Windows::Foundation::IInspectable>();
-        return make<SemanticRootPeer>(*this, get_abi(inspectable));
+        auto key = get_abi(inspectable);
+        auto peer = make<SemanticRootPeer>(*this, key);
+        if (auto bridge = bridge_for(key)) {
+            bridge->root_peer = peer;
+        }
+        return peer;
     }
 };
 
@@ -205,6 +224,21 @@ extern "C" __declspec(dllexport) std::uint32_t elwindui_winui3_accessibility_can
     if (!bridge) return 0;
     bridge->callbacks = callbacks ? *callbacks : ElwinduiAccessibilityCallbacks{};
     return 1;
+}
+
+extern "C" __declspec(dllexport) void elwindui_winui3_accessibility_canvas_notify_tree_changed(
+    void* bridge_key) {
+    auto bridge = bridge_for(bridge_key);
+    if (!bridge || !bridge->root_peer) return;
+    try {
+        // The initial peer can be queried while the TreeHost still has no Core tree. Invalidate
+        // that cached empty result before announcing the rebuilt virtual structure.
+        bridge->root_peer->InvalidatePeer();
+        bridge->root_peer->RaiseStructureChangedEvent(
+            AutomationStructureChangeType::ChildrenInvalidated, nullptr);
+    } catch (...) {
+        // Accessibility notifications are best effort and must never affect the render/input path.
+    }
 }
 
 extern "C" __declspec(dllexport) void elwindui_winui3_accessibility_canvas_detach(void* bridge_key) {

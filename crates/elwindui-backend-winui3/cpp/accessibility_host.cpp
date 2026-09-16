@@ -35,6 +35,11 @@ struct CanvasBridgeState {
 
 std::map<void*, std::shared_ptr<CanvasBridgeState>> g_bridges;
 
+constexpr std::uint32_t kStateDisabled = 1u << 0;
+constexpr std::uint32_t kStateFocused = 1u << 1;
+constexpr std::uint32_t kStateCheckedOn = 1u << 2;
+constexpr std::uint32_t kActionFocus = 1u << 5;
+
 std::shared_ptr<CanvasBridgeState> bridge_for(void* bridge_key) {
     auto it = g_bridges.find(bridge_key);
     return it == g_bridges.end() ? nullptr : it->second;
@@ -65,59 +70,53 @@ struct SemanticPeer : AutomationPeerT<SemanticPeer> {
     hstring GetClassNameCore() { return L"ElwindUI.Semantic"; }
     // SemanticPeer is intentionally virtual rather than backed by a XAML FrameworkElement. The
     // AutomationPeer base defaults both flags to false, which would make an otherwise valid
-    // virtual peer disappear from UIA's control/content views.
-    bool IsControlElementCore() { return true; }
-    bool IsContentElementCore() { return true; }
+    // virtual peer disappear from UIA's control/content views. A stale peer must not remain
+    // visible after its Core record is removed, so participation is queried on every call.
+    bool IsControlElementCore() {
+        ElwinduiAccessibilityNodeRecord record{};
+        return TryGetCurrentRecord(record);
+    }
+    bool IsContentElementCore() {
+        ElwinduiAccessibilityNodeRecord record{};
+        return TryGetCurrentRecord(record);
+    }
 
     hstring GetNameCore() {
-        auto bridge = bridge_for(m_bridge_key);
         ElwinduiAccessibilityNodeRecord record{};
-        if (!bridge || !bridge->callbacks.get_node ||
-            !bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record)) {
+        if (!TryGetCurrentRecord(record)) {
             return {};
         }
         return hstring(copied_text(record.label, record.label_length));
     }
 
     AutomationControlType GetAutomationControlTypeCore() {
-        auto bridge = bridge_for(m_bridge_key);
         ElwinduiAccessibilityNodeRecord record{};
-        if (!bridge || !bridge->callbacks.get_node ||
-            !bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record)) {
+        if (!TryGetCurrentRecord(record)) {
             return AutomationControlType::Group;
         }
         return control_type(record.role);
     }
 
     bool IsEnabledCore() {
-        auto bridge = bridge_for(m_bridge_key);
         ElwinduiAccessibilityNodeRecord record{};
-        return bridge && bridge->callbacks.get_node &&
-               bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record) &&
-               (record.state_flags & (1u << 0)) == 0;
+        return TryGetCurrentRecord(record) && (record.state_flags & kStateDisabled) == 0;
     }
 
     bool IsKeyboardFocusableCore() {
-        auto bridge = bridge_for(m_bridge_key);
         ElwinduiAccessibilityNodeRecord record{};
-        return bridge && bridge->callbacks.get_node &&
-               bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record) &&
-               (record.state_flags & (1u << 1)) != 0;
+        // Focusability is an advertised Core action, not the node's current focus state.
+        return TryGetCurrentRecord(record) && (record.actions_mask & kActionFocus) != 0;
     }
 
     bool HasKeyboardFocusCore() {
-        auto bridge = bridge_for(m_bridge_key);
         ElwinduiAccessibilityNodeRecord record{};
-        return bridge && bridge->callbacks.get_node &&
-               bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record) &&
-               (record.state_flags & (1u << 2)) != 0;
+        // Checked-On is kStateCheckedOn (bit 2); only the focused state (bit 1) means focused.
+        return TryGetCurrentRecord(record) && (record.state_flags & kStateFocused) != 0;
     }
 
     Windows::Foundation::Rect GetBoundingRectangleCore() {
-        auto bridge = bridge_for(m_bridge_key);
         ElwinduiAccessibilityNodeRecord record{};
-        if (!bridge || !bridge->callbacks.get_node ||
-            !bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record)) {
+        if (!TryGetCurrentRecord(record)) {
             return {};
         }
         return {record.x, record.y, record.width, record.height};
@@ -146,11 +145,17 @@ struct SemanticPeer : AutomationPeerT<SemanticPeer> {
         return single_threaded_vector<AutomationPeer>(std::move(children));
     }
 
+private:
+    bool TryGetCurrentRecord(ElwinduiAccessibilityNodeRecord& record) {
+        auto bridge = bridge_for(m_bridge_key);
+        return bridge && bridge->callbacks.get_node &&
+               bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record);
+    }
+
     // Pattern providers remain in the generated peer surface and are enabled by the same copied
     // action bits in a follow-up projection. This peer never fabricates a provider for an action
     // that Core did not advertise.
 
-private:
     void* m_bridge_key;
     std::uint64_t m_id;
 };
@@ -226,18 +231,21 @@ extern "C" __declspec(dllexport) std::uint32_t elwindui_winui3_accessibility_can
     return 1;
 }
 
-extern "C" __declspec(dllexport) void elwindui_winui3_accessibility_canvas_notify_tree_changed(
-    void* bridge_key) {
+extern "C" __declspec(dllexport) void elwindui_winui3_accessibility_canvas_refresh(
+    void* bridge_key,
+    std::uint32_t structure_changed) {
     auto bridge = bridge_for(bridge_key);
     if (!bridge || !bridge->root_peer) return;
     try {
-        // The initial peer can be queried while the TreeHost still has no Core tree. Invalidate
-        // that cached empty result before announcing the rebuilt virtual structure.
+        // Every effective snapshot change may invalidate cached property values. Only an actual
+        // semantic topology change is announced as a structure mutation.
         bridge->root_peer->InvalidatePeer();
-        bridge->root_peer->RaiseStructureChangedEvent(
-            AutomationStructureChangeType::ChildrenInvalidated, nullptr);
+        if (structure_changed != 0) {
+            bridge->root_peer->RaiseStructureChangedEvent(
+                AutomationStructureChangeType::ChildrenInvalidated, nullptr);
+        }
     } catch (...) {
-        // Accessibility notifications are best effort and must never affect the render/input path.
+        // Refresh is best effort and must never affect the render/input path.
     }
 }
 

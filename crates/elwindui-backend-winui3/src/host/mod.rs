@@ -24,6 +24,7 @@ use crate::bindings::Microsoft::UI::Xaml::Input::{
     CharacterReceivedRoutedEventArgs, KeyEventHandler, PointerEventHandler, PointerRoutedEventArgs,
 };
 use crate::bindings::Microsoft::UI::Xaml::Media::CompositionTarget;
+use crate::bindings::Microsoft::UI::Xaml::Shapes::Rectangle;
 use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, UIElement};
 use crate::render::composition::{
     CompositionClipSpec, CompositionPrimitive, CompositionRenderer, DesiredCompositionIsland,
@@ -246,6 +247,9 @@ fn apply_native_viewport(
 #[derive(Clone)]
 pub struct TreeHost {
     canvas: Canvas,
+    /// Permanent transparent, hit-testable source for blank self-drawn content. It is appended
+    /// once at construction and is never part of dynamic child reconciliation.
+    input_surface: Rectangle,
     /// See `RelayoutCycleState`'s own doc comment. Owned here (not a thread-local) so reentrancy
     /// coalescing is scoped to exactly this host.
     relayout_cycle: Rc<RelayoutCycleState>,
@@ -393,6 +397,8 @@ pub(crate) struct WinUI3RelayoutHost {
     /// remediation §3.3), since two sibling hosts otherwise look identical in a raw log.
     diagnostic_id: u64,
     canvas: Canvas,
+    /// Strongly retains the host's permanent input surface through queued relayouts.
+    input_surface: Rectangle,
     composition: Weak<RefCell<CompositionRenderer>>,
     tree: Weak<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
     render_tree: Weak<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
@@ -514,6 +520,7 @@ impl WinUI3RelayoutHost {
             }
             let realized = TreeHost::relayout_static(
                 &self.canvas,
+                &self.input_surface,
                 &composition,
                 &tree,
                 &render_tree,
@@ -769,10 +776,14 @@ impl TreeHost {
     pub(crate) fn new() -> Self {
         let canvas = accessibility::create_canvas();
         let composition = CompositionRenderer::new(&canvas).expect("CompositionRenderer::new");
+        // Keep a native hit-test source permanently attached for blank self-drawn content. This
+        // must precede every dynamic projection child so it remains Canvas.Children()[0].
+        let input_surface = Self::create_input_surface(&canvas);
         let tree = Rc::new(RefCell::new(None));
         let accessibility = WinUI3AccessibilityState::new(Rc::downgrade(&tree));
         let this = Self {
             canvas,
+            input_surface,
             relayout_cycle: Rc::new(RelayoutCycleState::default()),
             composition: Rc::new(RefCell::new(composition)),
             tree,
@@ -973,6 +984,7 @@ impl TreeHost {
             let keyboard = Rc::downgrade(&this.keyboard);
             let canvas = this.canvas.clone();
             let canvas_for_callback = canvas.clone();
+            let input_surface_for_callback = this.input_surface.clone();
             let callback_id = this
                 .callback_owner
                 .register_pointer_event(Rc::new(move |args| {
@@ -985,6 +997,7 @@ impl TreeHost {
                         &pointer,
                         &keyboard,
                         &canvas_for_callback,
+                        &input_surface_for_callback,
                         args,
                         kind,
                     ) {
@@ -1007,6 +1020,7 @@ impl TreeHost {
             let keyboard = Rc::downgrade(&this.keyboard);
             let canvas = this.canvas.clone();
             let canvas_for_callback = canvas.clone();
+            let input_surface_for_callback = this.input_surface.clone();
             let callback_id = this
                 .callback_owner
                 .register_pointer_event(Rc::new(move |args| {
@@ -1015,6 +1029,7 @@ impl TreeHost {
                         &pointer,
                         &keyboard,
                         &canvas_for_callback,
+                        &input_surface_for_callback,
                         args,
                         RawPointerEventKind::Moved,
                     ) {
@@ -1034,6 +1049,7 @@ impl TreeHost {
             let keyboard = Rc::downgrade(&this.keyboard);
             let canvas = this.canvas.clone();
             let canvas_for_callback = canvas.clone();
+            let input_surface_for_callback = this.input_surface.clone();
             let callback_id = this
                 .callback_owner
                 .register_pointer_event(Rc::new(move |args| {
@@ -1046,6 +1062,7 @@ impl TreeHost {
                         &pointer,
                         &keyboard,
                         &canvas_for_callback,
+                        &input_surface_for_callback,
                         args,
                         kind,
                     ) {
@@ -1068,6 +1085,7 @@ impl TreeHost {
             let keyboard = Rc::downgrade(&this.keyboard);
             let canvas = this.canvas.clone();
             let canvas_for_callback = canvas.clone();
+            let input_surface_for_callback = this.input_surface.clone();
             let callback_id = this
                 .callback_owner
                 .register_pointer_event(Rc::new(move |args| {
@@ -1076,6 +1094,7 @@ impl TreeHost {
                         &pointer,
                         &keyboard,
                         &canvas_for_callback,
+                        &input_surface_for_callback,
                         args,
                         RawPointerEventKind::Canceled,
                     ) {
@@ -1096,6 +1115,7 @@ impl TreeHost {
             let keyboard = Rc::downgrade(&this.keyboard);
             let canvas = this.canvas.clone();
             let canvas_for_callback = canvas.clone();
+            let input_surface_for_callback = this.input_surface.clone();
             let callback_id = this
                 .callback_owner
                 .register_pointer_event(Rc::new(move |args| {
@@ -1104,6 +1124,7 @@ impl TreeHost {
                         &pointer,
                         &keyboard,
                         &canvas_for_callback,
+                        &input_surface_for_callback,
                         args,
                         RawPointerEventKind::Canceled,
                     ) {
@@ -1275,13 +1296,34 @@ impl TreeHost {
         this
     }
 
-    /// `Canvas` receives bubbled events from native XAML children too. Only events whose original
-    /// XAML source is the Canvas itself belong to the self-drawn core tree.
-    fn pointer_originates_from_canvas(canvas: &Canvas, args: &PointerRoutedEventArgs) -> bool {
-        args.OriginalSource()
-            .ok()
-            .and_then(|source| source.cast::<Canvas>().ok())
-            .is_some_and(|source| source == *canvas)
+    /// `Canvas` receives bubbled events from native XAML children too. Only the exact root Canvas
+    /// or this host's exact input surface belongs to the self-drawn Core tree; native children and
+    /// unrelated XAML descendants remain their own input owners.
+    fn pointer_originates_from_canvas(
+        canvas: &Canvas,
+        input_surface: &Rectangle,
+        args: &PointerRoutedEventArgs,
+    ) -> bool {
+        let Ok(source) = args.OriginalSource() else {
+            return false;
+        };
+        Self::is_self_drawn_pointer_source(canvas, input_surface, &source)
+    }
+
+    /// Classifies a routed event by exact native object identity. In particular, accepting any
+    /// Rectangle or any XAML descendant would forward native-control input into Core as well.
+    fn is_self_drawn_pointer_source(
+        canvas: &Canvas,
+        input_surface: &Rectangle,
+        source: &impl Interface,
+    ) -> bool {
+        if let Ok(canvas_source) = source.cast::<Canvas>() {
+            return canvas_source == *canvas;
+        }
+        if let Ok(surface_source) = source.cast::<Rectangle>() {
+            return surface_source == *input_surface;
+        }
+        false
     }
 
     fn pointer_button_kind(
@@ -1317,10 +1359,11 @@ impl TreeHost {
         pointer: &Weak<PointerDispatcher>,
         keyboard: &Weak<KeyboardDispatcher>,
         canvas: &Canvas,
+        input_surface: &Rectangle,
         args: &PointerRoutedEventArgs,
         kind: RawPointerEventKind,
     ) -> bool {
-        if !Self::pointer_originates_from_canvas(canvas, args) {
+        if !Self::pointer_originates_from_canvas(canvas, input_surface, args) {
             return false;
         }
         let tree_storage: Option<Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>> =
@@ -1366,6 +1409,35 @@ impl TreeHost {
 
     pub(crate) fn canvas(&self) -> &Canvas {
         &self.canvas
+    }
+
+    fn create_input_surface(canvas: &Canvas) -> Rectangle {
+        use crate::bindings::Microsoft::UI::Xaml::Media::SolidColorBrush;
+        use windows::UI::Color;
+
+        let surface = Rectangle::new().expect("Shapes::Rectangle::new");
+        let fill = SolidColorBrush::new().expect("SolidColorBrush::new");
+        fill.SetColor(Color {
+            A: 0,
+            R: 0,
+            G: 0,
+            B: 0,
+        })
+        .expect("SolidColorBrush::SetColor");
+        surface.SetFill(&fill).expect("Rectangle::SetFill");
+
+        let surface_ui: UIElement = surface.clone().cast().expect("Rectangle is a UIElement");
+        surface_ui
+            .SetIsHitTestVisible(true)
+            .expect("UIElement::SetIsHitTestVisible");
+        Canvas::SetLeft(&surface_ui, 0.0).expect("Canvas::SetLeft");
+        Canvas::SetTop(&surface_ui, 0.0).expect("Canvas::SetTop");
+        canvas
+            .Children()
+            .expect("Canvas::Children")
+            .Append(&surface_ui)
+            .expect("append permanent TreeHost input surface");
+        surface
     }
 
     pub(crate) fn set_transparent_background(&self, transparent: bool) {
@@ -1414,6 +1486,7 @@ impl TreeHost {
             // `set_tree`).
             Self::relayout_static(
                 &self.canvas,
+                &self.input_surface,
                 &self.composition,
                 &self.tree,
                 &self.render_tree,
@@ -1479,15 +1552,19 @@ impl TreeHost {
             eprintln!("[elwindui-winui3] TreeHost active={active}");
         }
         if active {
+            let canvas_ui: UIElement = self.canvas.clone().cast().expect("Canvas is a UIElement");
+            let _ = canvas_ui.SetIsHitTestVisible(true);
             self.force_relayout_with_source(RelayoutSource::SetActiveReactivate);
             return;
         }
 
         self.accessibility.clear();
-        self.rendering.stop();
         if self.pointer.cancel() {
             let _ = self.canvas.ReleasePointerCaptures();
         }
+        let canvas_ui: UIElement = self.canvas.clone().cast().expect("Canvas is a UIElement");
+        let _ = canvas_ui.SetIsHitTestVisible(false);
+        self.rendering.stop();
         self.keyboard.as_ref().focus.clear_focus();
         let _ = self
             .composition
@@ -1512,6 +1589,7 @@ impl TreeHost {
         let host = Rc::new(WinUI3RelayoutHost {
             diagnostic_id: NEXT_RELAYOUT_HOST_DIAGNOSTIC_ID.fetch_add(1, Ordering::Relaxed),
             canvas: self.canvas.clone(),
+            input_surface: self.input_surface.clone(),
             composition: Rc::downgrade(&self.composition),
             tree: Rc::downgrade(&self.tree),
             render_tree: Rc::downgrade(&self.render_tree),
@@ -1643,6 +1721,7 @@ impl TreeHost {
     /// previous iteration, until a full pass leaves no rerun pending.
     fn relayout_static(
         canvas: &Canvas,
+        input_surface: &Rectangle,
         composition: &Rc<RefCell<CompositionRenderer>>,
         tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
         retained_tree: &Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
@@ -1658,6 +1737,7 @@ impl TreeHost {
         relayout_cycle.run_coalesced(|| {
             Self::relayout_static_pass(
                 canvas,
+                input_surface,
                 composition,
                 tree,
                 retained_tree,
@@ -1673,6 +1753,7 @@ impl TreeHost {
     /// coalescing (see that method's own doc comment).
     fn relayout_static_pass(
         canvas: &Canvas,
+        input_surface: &Rectangle,
         composition: &Rc<RefCell<CompositionRenderer>>,
         tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
         retained_tree: &Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
@@ -1720,10 +1801,30 @@ impl TreeHost {
         } else {
             available.height as f64
         };
+        let final_width = if final_width.is_finite() {
+            final_width.max(0.0)
+        } else {
+            0.0
+        };
+        let final_height = if final_height.is_finite() {
+            final_height.max(0.0)
+        } else {
+            0.0
+        };
         if unconstrained_width || unconstrained_height {
             let _ = canvas.SetWidth(final_width);
             let _ = canvas.SetHeight(final_height);
         }
+        // The permanent input surface is presentation output from this final Core layout pass.
+        // It never feeds a viewport back into this host and is always kept at the root origin.
+        let input_surface_element: FrameworkElement = input_surface
+            .clone()
+            .cast()
+            .expect("Rectangle is a FrameworkElement");
+        let _ = input_surface_element.SetWidth(final_width);
+        let _ = input_surface_element.SetHeight(final_height);
+        let _ = Canvas::SetLeft(&input_surface_element, 0.0);
+        let _ = Canvas::SetTop(&input_surface_element, 0.0);
         {
             let mut retained_tree = retained_tree.borrow_mut();
             if retained_tree
@@ -2605,6 +2706,225 @@ pub(crate) fn close_active_popup_slot(
     let popup = slot.borrow_mut().take();
     if let Some(popup) = popup {
         popup.close();
+    }
+}
+
+/// Hosted structural regressions for the permanent self-drawn input surface. This helper is
+/// called by the existing single-Application XAML regression test in `inner::button`; it must not
+/// bootstrap another XAML `Application` in the same process.
+#[cfg(test)]
+pub(crate) mod live_input_surface_tests {
+    use super::*;
+
+    fn assert_surface_is_first(panel: &TreeHost, surface: &UIElement) {
+        let children = panel.canvas().Children().expect("Canvas.Children");
+        let child = children.GetAt(0).expect("Children.GetAt(0)");
+        assert_eq!(child, *surface, "the input surface must remain at index 0");
+        let mut surface_count = 0;
+        for index in 0..children.Size().expect("Children.Size") {
+            if children.GetAt(index).expect("Children.GetAt(index)") == *surface {
+                surface_count += 1;
+            }
+        }
+        assert_eq!(
+            surface_count, 1,
+            "exactly one permanent input surface must remain attached"
+        );
+    }
+
+    pub(crate) fn live_input_surface_creation_persistence_viewport_and_source_classification() {
+        let panel = TreeHost::new();
+        let surface_ui: UIElement = panel
+            .input_surface
+            .clone()
+            .cast()
+            .expect("Rectangle is a UIElement");
+        assert_surface_is_first(&panel, &surface_ui);
+        assert!(
+            surface_ui.IsHitTestVisible().expect("IsHitTestVisible"),
+            "the input surface must be hit-testable"
+        );
+        assert_eq!(
+            Canvas::GetLeft(&surface_ui).expect("Canvas.GetLeft"),
+            0.0,
+            "the input surface must start at Canvas.Left=0"
+        );
+        assert_eq!(
+            Canvas::GetTop(&surface_ui).expect("Canvas.GetTop"),
+            0.0,
+            "the input surface must start at Canvas.Top=0"
+        );
+        let fill = panel
+            .input_surface
+            .Fill()
+            .expect("Rectangle.Fill must be non-null");
+        let solid_fill: crate::bindings::Microsoft::UI::Xaml::Media::SolidColorBrush = fill
+            .cast()
+            .expect("the input surface Fill must be a SolidColorBrush");
+        assert_eq!(
+            solid_fill.Color().expect("SolidColorBrush.Color").A,
+            0,
+            "the input surface Fill must be fully transparent"
+        );
+
+        // H3: constrained dimensions come from the owner-supplied final viewport.
+        panel
+            .set_viewport(TreeHostViewport {
+                width: Some(320.0),
+                height: Some(180.0),
+            })
+            .expect("set constrained viewport");
+        let first_tree = elwindui_core::ui::Rectangle::new();
+        first_tree.set_width(160.0);
+        first_tree.set_height(96.0);
+        panel.set_tree(first_tree);
+        assert_eq!(panel.input_surface.Width().expect("Rectangle.Width"), 320.0);
+        assert_eq!(
+            panel.input_surface.Height().expect("Rectangle.Height"),
+            180.0
+        );
+        assert_surface_is_first(&panel, &surface_ui);
+
+        // H3: unconstrained dimensions come from the post-layout natural extent, not from a
+        // requested viewport or the native Canvas output fed back into layout.
+        let natural_panel = TreeHost::new();
+        natural_panel
+            .set_viewport(TreeHostViewport {
+                width: None,
+                height: None,
+            })
+            .expect("set unconstrained viewport");
+        let natural_probe = elwindui_core::ui::Rectangle::new();
+        natural_probe.set_width(96.0);
+        natural_probe.set_height(48.0);
+        let natural_probe_for_assert = natural_probe.clone();
+        natural_panel.set_tree(natural_probe);
+        let natural_width = natural_probe_for_assert
+            .arranged_width()
+            .expect("natural arranged width");
+        let natural_height = natural_probe_for_assert
+            .arranged_height()
+            .expect("natural arranged height");
+        assert!(natural_width > 0.0, "natural width must be non-zero");
+        assert!(natural_height > 0.0, "natural height must be non-zero");
+        assert_eq!(
+            natural_panel.input_surface.Width().expect("natural Width"),
+            natural_width as f64
+        );
+        assert_eq!(
+            natural_panel
+                .input_surface
+                .Height()
+                .expect("natural Height"),
+            natural_height as f64
+        );
+
+        // H2: replacement, clear, and visual transparency changes never recreate or remove the
+        // permanent surface.
+        let replacement = elwindui_core::ui::Rectangle::new();
+        replacement.set_width(128.0);
+        replacement.set_height(64.0);
+        panel.set_tree(replacement);
+        assert_surface_is_first(&panel, &surface_ui);
+        panel.clear_tree();
+        assert_surface_is_first(&panel, &surface_ui);
+        for transparent in [true, false, true] {
+            panel.set_transparent_background(transparent);
+            assert_surface_is_first(&panel, &surface_ui);
+            assert!(
+                surface_ui.IsHitTestVisible().expect("IsHitTestVisible"),
+                "transparency must not disable the input surface"
+            );
+            assert_eq!(
+                panel
+                    .input_surface
+                    .Fill()
+                    .expect("persistent Rectangle.Fill")
+                    .cast::<crate::bindings::Microsoft::UI::Xaml::Media::SolidColorBrush>()
+                    .expect("persistent SolidColorBrush")
+                    .Color()
+                    .expect("persistent brush color")
+                    .A,
+                0
+            );
+        }
+
+        // H4: only the exact root Canvas and exact host surface are accepted. Both another
+        // Rectangle and a real native Button must be rejected.
+        assert!(TreeHost::is_self_drawn_pointer_source(
+            panel.canvas(),
+            &panel.input_surface,
+            panel.canvas()
+        ));
+        assert!(TreeHost::is_self_drawn_pointer_source(
+            panel.canvas(),
+            &panel.input_surface,
+            &panel.input_surface
+        ));
+        let other_rectangle = Rectangle::new().expect("other Rectangle::new");
+        assert!(!TreeHost::is_self_drawn_pointer_source(
+            panel.canvas(),
+            &panel.input_surface,
+            &other_rectangle
+        ));
+        let unrelated_text = crate::bindings::Microsoft::UI::Xaml::Controls::TextBlock::new()
+            .expect("native TextBlock::new");
+        assert!(!TreeHost::is_self_drawn_pointer_source(
+            panel.canvas(),
+            &panel.input_surface,
+            &unrelated_text
+        ));
+        let native_button = crate::bindings::Microsoft::UI::Xaml::Controls::Button::new()
+            .expect("native Button::new");
+        assert!(!TreeHost::is_self_drawn_pointer_source(
+            panel.canvas(),
+            &panel.input_surface,
+            &native_button
+        ));
+
+        // H5: only the root Canvas is gated for host activation. The permanent surface stays
+        // attached, hit-testable, and correctly sized across the transition.
+        let canvas_ui: UIElement = panel
+            .canvas()
+            .clone()
+            .cast()
+            .expect("Canvas is a UIElement");
+        assert!(
+            canvas_ui
+                .IsHitTestVisible()
+                .expect("active Canvas hit testing")
+        );
+        let active_tree = elwindui_core::ui::Rectangle::new();
+        active_tree.set_width(160.0);
+        active_tree.set_height(96.0);
+        panel.set_tree(active_tree);
+        panel.set_active(false);
+        assert!(
+            !canvas_ui
+                .IsHitTestVisible()
+                .expect("inactive Canvas hit testing")
+        );
+        assert_surface_is_first(&panel, &surface_ui);
+        assert!(
+            surface_ui
+                .IsHitTestVisible()
+                .expect("inactive surface remains hit-testable")
+        );
+        panel.set_active(true);
+        assert!(
+            canvas_ui
+                .IsHitTestVisible()
+                .expect("reactivated Canvas hit testing")
+        );
+        assert_surface_is_first(&panel, &surface_ui);
+        assert_eq!(
+            panel.input_surface.Width().expect("reactivated Width"),
+            320.0
+        );
+        assert_eq!(
+            panel.input_surface.Height().expect("reactivated Height"),
+            180.0
+        );
     }
 }
 

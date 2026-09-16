@@ -1,6 +1,6 @@
 # Tooling status
 
-Snapshot: 2026-09-12. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-09-16. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
 
 ## Current capability matrix
 
@@ -42,10 +42,26 @@ command catalog is [`../../tools/windows-ui-driver/README.md`](../../tools/windo
 the architecture is [`../design/tools/windows_ui_driver_design.md`](../design/tools/windows_ui_driver_design.md),
 and the operational procedure is [`../agents/winui3-e2e.md`](../agents/winui3-e2e.md).
 
-The Windows UI driver and deterministic adapter-contract tests are implemented. Durable product
-E2E scenarios are intentionally deferred to the shared [`tests/e2e/`](../../tests/e2e/README.md)
-suite so AppKit and WinUI3 can consume common case definitions; no permanent Windows product E2E
-coverage is claimed yet.
+The Windows UI driver and deterministic adapter-contract tests are implemented. The first durable
+shared product case is [`tests/e2e/self-drawn-pointer-input.md`](../../tests/e2e/self-drawn-pointer-input.md)
+and is executed through this driver for WinUI3 Issue #236. The final remediation run against
+implementation HEAD `98e5f9e204bfc0b5ae120c56b5a72f57e674fcde` reports SDP-01 `PASS`, SDP-02
+`PASS`, SDP-03 `PASS`, SDP-04 `PASS`, and SDP-05 `PASS`. For SDP-05, the requested `1100x850`
+resize did not fit the usable desktop, so the largest safe `908x476` window was used; a fresh
+post-resize screenshot and one-Tab focus location identified `Normal` at local `(50,120)` / screen
+`(102,172)`, and one real mouse click appended exactly one `Normal clicked` line. UIA returned no
+match, but Issue #260 UIA discoverability is not an Issue #236 acceptance dependency. Raw evidence
+is under `.agent-state/issues/236/e2e/98e5f9e204bfc0b5ae120c56b5a72f57e674fcde/20260916T142131Z/`.
+This does not claim the shared runner/compiler/cache, which is separate from the durable case
+acceptance recorded above.
+
+For PR #241 remediation, the comparable `rust-analyzer diagnostics .` run with the repository
+Visual Studio environment passed on both base `766c2a9ab24632e639e02e232fd2e861d834caad` and
+implementation HEAD: base had 248 allowed `Ra("inactive-code", WeakWarning)` records and the
+implementation had 249, with no Error or Warning diagnostics. The hosted-XAML focused test
+passed on both base and implementation after the implementation's narrow test-only lifecycle
+cleanup. `cargo check --workspace`, `cargo build --workspace`, the three package test commands,
+and `cargo test --workspace` all passed.
 
 A genuine host-level `SetForegroundWindow`/`CreateProcess` handle-inheritance issue was found and
 fixed during this driver's own development: a launched long-lived GUI process could keep a caller's

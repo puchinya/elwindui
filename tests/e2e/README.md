@@ -47,9 +47,12 @@ Do not add permanent product E2E cases under `tools/`.
 
 ## Current state
 
-The first shared durable case is
-[`accessibility-semantics/scenario.md`](accessibility-semantics/scenario.md). It is designed for
-both AppKit and WinUI3 and is executed through the platform tester procedures. The former
+The shared durable cases include
+[`self-drawn-pointer-input.md`](self-drawn-pointer-input.md), the first backend-neutral product
+scenario for real self-drawn pointer input. WinUI3 execution is required for Issue #236; AppKit
+can consume the same semantics when that scenario is scheduled there. The accessibility case is
+also designed for both AppKit and WinUI3 and is executed through the platform tester procedures.
+The former
 `tools/windows-ui-driver/tests/theme-demo-e2e.ps1` (a Windows-only, product-specific smoke script)
 was removed rather than kept as a placeholder. See
 [`docs/agents/winui3-e2e.md`](../../docs/agents/winui3-e2e.md) and

@@ -2715,7 +2715,6 @@ pub(crate) fn close_active_popup_slot(
 #[cfg(test)]
 pub(crate) mod live_input_surface_tests {
     use super::*;
-    use elwindui_core::ui::TextBlockExt;
 
     fn assert_surface_is_first(panel: &TreeHost, surface: &UIElement) {
         let children = panel.canvas().Children().expect("Canvas.Children");
@@ -2775,8 +2774,9 @@ pub(crate) mod live_input_surface_tests {
                 height: Some(180.0),
             })
             .expect("set constrained viewport");
-        let first_tree = elwindui_core::ui::TextBlock::new();
-        first_tree.set_text("tree A");
+        let first_tree = elwindui_core::ui::Rectangle::new();
+        first_tree.set_width(160.0);
+        first_tree.set_height(96.0);
         panel.set_tree(first_tree);
         assert_eq!(panel.input_surface.Width().expect("Rectangle.Width"), 320.0);
         assert_eq!(
@@ -2794,8 +2794,9 @@ pub(crate) mod live_input_surface_tests {
                 height: None,
             })
             .expect("set unconstrained viewport");
-        let natural_probe = elwindui_core::ui::TextBlock::new();
-        natural_probe.set_text("non-zero natural input surface width probe");
+        let natural_probe = elwindui_core::ui::Rectangle::new();
+        natural_probe.set_width(96.0);
+        natural_probe.set_height(48.0);
         let natural_probe_for_assert = natural_probe.clone();
         natural_panel.set_tree(natural_probe);
         let natural_width = natural_probe_for_assert
@@ -2820,8 +2821,9 @@ pub(crate) mod live_input_surface_tests {
 
         // H2: replacement, clear, and visual transparency changes never recreate or remove the
         // permanent surface.
-        let replacement = elwindui_core::ui::TextBlock::new();
-        replacement.set_text("tree B");
+        let replacement = elwindui_core::ui::Rectangle::new();
+        replacement.set_width(128.0);
+        replacement.set_height(64.0);
         panel.set_tree(replacement);
         assert_surface_is_first(&panel, &surface_ui);
         panel.clear_tree();
@@ -2892,7 +2894,10 @@ pub(crate) mod live_input_surface_tests {
                 .IsHitTestVisible()
                 .expect("active Canvas hit testing")
         );
-        panel.set_tree(elwindui_core::ui::TextBlock::new());
+        let active_tree = elwindui_core::ui::Rectangle::new();
+        active_tree.set_width(160.0);
+        active_tree.set_height(96.0);
+        panel.set_tree(active_tree);
         panel.set_active(false);
         assert!(
             !canvas_ui

@@ -419,6 +419,12 @@ mod hosted_xaml_regression_tests {
         crate::init().expect("elwindui_backend_winui3::init");
 
         crate::application::run(move || {
+            // Run the hosted structural TreeHost coverage inside this existing single
+            // Application session; WinUI 3 must not be bootstrapped a second time in this test
+            // process.
+            crate::host::live_input_surface_tests::
+                live_input_surface_creation_persistence_viewport_and_source_classification();
+
             // A bare, unparented `FrameworkElement` never resolves real text metrics (no
             // `XamlRoot`) — attach it to a real `Window.Content` first, exactly like
             // `reconcile_native_children` does in the real render path, so `Measure()` here
@@ -506,9 +512,6 @@ mod hosted_xaml_regression_tests {
                     create_flyout_snapshots_icon_onto_a_distinct_realization();
                 crate::inner::menu::live_menu_item_icon_tests::
                     failed_icon_conversion_does_not_remove_the_action();
-                crate::host::live_input_surface_tests::
-                    live_input_surface_creation_persistence_viewport_and_source_classification();
-
                 crate::app::reset_window_lifecycle_test_state();
                 // Issue #254: `InnerWindow` stores only the final owner's `Weak<dyn WindowExt>`;
                 // the application registry becomes the strong lifetime authority after show().
@@ -754,6 +757,15 @@ mod hosted_xaml_regression_tests {
                                         *slot.borrow_mut() =
                                             Some(crate::app::release_window_call_count_for_test())
                                     });
+                                    // `release_window` also requests application exit when the
+                                    // registry becomes empty. Repeat that idempotent request after
+                                    // the final close so this one-Application regression test does
+                                    // not depend on whether WinUI delivers the Closed callback's
+                                    // exit request before or after the enclosing dispatcher turn.
+                                    crate::bindings::Microsoft::UI::Xaml::Application::Current()
+                                        .expect("Application::Current")
+                                        .Exit()
+                                        .expect("Application::Exit");
                                 }));
                             }));
                         }));

@@ -52,7 +52,8 @@ post-resize screenshot and one-Tab focus location identified `Normal` at local `
 `(102,172)`, and one real mouse click appended exactly one `Normal clicked` line. UIA returned no
 match, but Issue #260 UIA discoverability is not an Issue #236 acceptance dependency. Raw evidence
 is under `.agent-state/issues/236/e2e/98e5f9e204bfc0b5ae120c56b5a72f57e674fcde/20260916T142131Z/`.
-This does not claim the shared runner/compiler/cache or complete acceptance.
+This does not claim the shared runner/compiler/cache, which is separate from the durable case
+acceptance recorded above.
 
 For PR #241 remediation, the comparable `rust-analyzer diagnostics .` run with the repository
 Visual Studio environment passed on both base `766c2a9ab24632e639e02e232fd2e861d834caad` and

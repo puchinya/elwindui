@@ -1,10 +1,8 @@
 //! The generated WinRT projection.
 //!
 //! `build.rs` runs `windows-bindgen` over the Windows App SDK / Windows SDK `.winmd` files and
-//! writes both halves to `$OUT_DIR` and mirrors them into the ignored crate-local `.generated`
-//! directory; the stable mirror is `include!`d here rather than checked in. Keeping the source
-//! path stable lets rust-analyzer inspect the same generated projection as rustc. Kept out of
-//! `lib.rs` so the crate root stays pure wiring.
+//! writes both halves to `$OUT_DIR`; they are `include!`d here rather than checked in. Kept out
+//! of `lib.rs` so the crate root stays pure wiring.
 
 #[allow(
     non_snake_case,
@@ -14,10 +12,7 @@
     clippy::all
 )]
 mod generated {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/.generated/bindings.rs"
-    ));
+    include!(env!("ELWINDUI_WINUI3_BINDINGS"));
 }
 pub(crate) use generated::*;
 // The generated WinUI projection and the separately-generated XAML interop projection both expose
@@ -32,10 +27,7 @@ pub(crate) use generated::Windows::UI::Text as winui_text;
     dead_code
 )]
 pub(crate) mod xaml_interop {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/.generated/xaml_interop.rs"
-    ));
+    include!(concat!(env!("OUT_DIR"), "/xaml_interop.rs"));
 }
 #[allow(unused_imports)]
 pub(crate) use xaml_interop::Windows;

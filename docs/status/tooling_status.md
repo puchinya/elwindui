@@ -48,7 +48,8 @@ and is executed through this driver for WinUI3 Issue #236. The final remediation
 implementation HEAD `98e5f9e204bfc0b5ae120c56b5a72f57e674fcde` reports SDP-01 `PASS`, SDP-02
 `PASS`, SDP-03 `PASS`, SDP-04 `PASS`, and SDP-05 `BLOCKED`. SDP-05 was not clicked because a
 fresh screenshot and current window geometry did not reliably identify the visible `Normal`
-native Button, while UIA returned no match; no coordinate was guessed. Issue #260 UIA
+native Button, while UIA returned no match; the attempted scroll was not available in the
+current driver's command set, and no coordinate was guessed. Issue #260 UIA
 discoverability is not an Issue #236 acceptance dependency. Raw evidence is under
 `.agent-state/issues/236/e2e/98e5f9e204bfc0b5ae120c56b5a72f57e674fcde/20260916T124325Z/`.
 This does not claim the shared runner/compiler/cache or complete acceptance.

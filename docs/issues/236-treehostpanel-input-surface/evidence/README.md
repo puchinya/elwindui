@@ -26,9 +26,10 @@ surface change. Raw command output and run artifacts remain under
   is valid under the revised contract. See `SDP-04/result.json`.
 - SDP-05: `BLOCKED`; after one real navigation click, fresh screenshots and current window
   geometry did not reliably identify the visible Normal native Button, and UIA searches returned
-  zero matches. The acceptance click was not performed, so exactly-once native action is not
-  claimed. See `SDP-05/result.json`. Issue #260 UIA discoverability is not an Issue #236
-  acceptance dependency and was not changed by this remediation.
+  zero matches. An attempted scroll was rejected because `scroll` is not in the current driver's
+  command set. The acceptance click was not performed, so exactly-once native action is not
+  claimed. See `SDP-05/result.json` and `scroll.stderr.log`. Issue #260 UIA discoverability is
+  not an Issue #236 acceptance dependency and was not changed by this remediation.
 
 The earlier `711bbf5f292655bb524715ed0e8946c77db71af9` run at
 `.agent-state/issues/236/e2e/711bbf5f292655bb524715ed0e8946c77db71af9/20260916T020000Z/` is

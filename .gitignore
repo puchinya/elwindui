@@ -1,6 +1,7 @@
 /target/
 /.idea/
 .nuget/
+.generated/
 .build/
 .DS_Store
 *.DS_Store

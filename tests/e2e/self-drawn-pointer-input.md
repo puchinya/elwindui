@@ -13,6 +13,12 @@ Refresh HWND, window geometry, UIA bounds, and DPI immediately before every real
 ElwindUI logical offsets with `screen_delta = logical_delta * dpi / 96.0`; do not use desktop-global
 constants.
 
+For WinUI3 acceptance, resolve the repository root with `git rev-parse --show-toplevel` and launch
+each application through `tools/windows-ui-driver` using its absolute executable path,
+`--cwd <repository-root>`, and `--wait-window-timeout 30`. The acceptance run must not depend on an
+application asynchronously started outside the driver; a one-off external launch is diagnostic
+only and is not evidence. Wait for the PID/HWND returned by `launch` before querying or acting.
+
 Each case is classified as `PASS`, `FAIL`, `NOT RUN`, or `BLOCKED` according to
 [`docs/agents/winui3-e2e.md`](../../docs/agents/winui3-e2e.md). A successful driver command is
 not a product PASS without its required state or geometry postcondition.

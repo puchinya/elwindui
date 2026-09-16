@@ -42,10 +42,11 @@ command catalog is [`../../tools/windows-ui-driver/README.md`](../../tools/windo
 the architecture is [`../design/tools/windows_ui_driver_design.md`](../design/tools/windows_ui_driver_design.md),
 and the operational procedure is [`../agents/winui3-e2e.md`](../agents/winui3-e2e.md).
 
-The Windows UI driver and deterministic adapter-contract tests are implemented. Durable product
-E2E scenarios are intentionally deferred to the shared [`tests/e2e/`](../../tests/e2e/README.md)
-suite so AppKit and WinUI3 can consume common case definitions; no permanent Windows product E2E
-coverage is claimed yet.
+The Windows UI driver and deterministic adapter-contract tests are implemented. The first durable
+shared product case is [`tests/e2e/self-drawn-pointer-input.md`](../../tests/e2e/self-drawn-pointer-input.md)
+and is executed through this driver for WinUI3 Issue #236. Its current evidence passes SDP-01
+through SDP-03; SDP-04 is a Docking behavior conflict and SDP-05 remains blocked by native Button
+UIA discoverability. This does not claim the shared runner/compiler/cache or complete acceptance.
 
 A genuine host-level `SetForegroundWindow`/`CreateProcess` handle-inheritance issue was found and
 fixed during this driver's own development: a launched long-lived GUI process could keep a caller's

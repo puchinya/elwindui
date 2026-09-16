@@ -25,8 +25,9 @@ surface change. Raw command output and run artifacts remain under
   UIA searches for `Button` and `Normal` returned zero elements. The required native click and
   exactly-once `Normal clicked` observation were not performed because guessing coordinates would
   invalidate the case.
-- Screenshots for the executed run remain in the immutable Issue-scoped evidence directory; no
-  product PASS is claimed for the incomplete cases.
+- Reviewer-facing final-state screenshots from the run: `sdp01-after.png`, `sdp02-after.png`,
+  `sdp03-after.png`, `sdp04-after.png`, and `sdp05-button-page.png`. These show the observed
+  visible state; they do not turn the FAIL/BLOCKED cases into PASS.
 
 The durable case definition is [`tests/e2e/self-drawn-pointer-input.md`](../../../../tests/e2e/self-drawn-pointer-input.md).
 The case must be rerun on a normal, non-elevated, unlocked Windows desktop through

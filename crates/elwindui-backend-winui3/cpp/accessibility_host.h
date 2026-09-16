@@ -44,7 +44,7 @@ struct ElwinduiAccessibilityCallbacks {
 };
 
 extern "C" __declspec(dllexport) void* elwindui_winui3_accessibility_canvas_create();
-extern "C" __declspec(dllexport) void elwindui_winui3_accessibility_canvas_set_callbacks(
-    void* canvas,
+extern "C" __declspec(dllexport) std::uint32_t elwindui_winui3_accessibility_canvas_set_callbacks(
+    void* bridge_key,
     const ElwinduiAccessibilityCallbacks* callbacks);
-extern "C" __declspec(dllexport) void elwindui_winui3_accessibility_canvas_detach(void* canvas);
+extern "C" __declspec(dllexport) void elwindui_winui3_accessibility_canvas_detach(void* bridge_key);

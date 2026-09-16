@@ -801,7 +801,7 @@ impl TreeHost {
             relayout_host: Rc::new(RefCell::new(Weak::<WinUI3RelayoutHost>::new())),
         };
         #[cfg(windows)]
-        this.accessibility.bind_canvas(&this.canvas);
+        let _ = this.accessibility.bind_canvas(&this.canvas);
         // WinUI3's `Control.IsTabStop` gate. Once the WinRT event projection is restored this
         // allows the host to receive OS keyboard focus, mirroring AppKit's TreeHost.
         let _ = this.canvas.SetIsTabStop(true);
@@ -2924,6 +2924,46 @@ pub(crate) mod live_input_surface_tests {
         assert_eq!(
             panel.input_surface.Height().expect("reactivated Height"),
             180.0
+        );
+    }
+}
+
+/// Hosted accessibility bridge regressions. This helper is called by the existing
+/// single-Application XAML regression test in `inner::button`; it must not bootstrap another XAML
+/// `Application` in the same process.
+#[cfg(test)]
+pub(crate) mod accessibility_tests {
+    use super::*;
+    use elwindui_core::ui::{TextBlock, TextBlockExt};
+
+    pub(crate) fn bridge_binding_and_core_snapshot() {
+        let tree: Rc<RefCell<Option<Rc<dyn UIElementExt>>>> = Rc::new(RefCell::new(None));
+        let state = WinUI3AccessibilityState::new(Rc::downgrade(&tree));
+        let canvas = accessibility::create_canvas();
+
+        assert!(
+            state.bind_canvas(&canvas),
+            "WinUI3 accessibility callbacks must bind through the canonical bridge key"
+        );
+
+        let text = TextBlock::new();
+        text.set_text("semantic bridge probe");
+        let text: Rc<dyn UIElementExt> = text;
+        *tree.borrow_mut() = Some(text);
+        state.rebuild();
+
+        let snapshot = state.runtime.snapshot();
+        assert!(
+            !snapshot.roots.is_empty(),
+            "Core accessibility snapshot is empty"
+        );
+        assert_eq!(
+            snapshot.roots[0].semantics.label.as_deref(),
+            Some("semantic bridge probe")
+        );
+        assert_eq!(
+            snapshot.roots[0].semantics.value.as_deref(),
+            Some("semantic bridge probe")
         );
     }
 }

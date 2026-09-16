@@ -15,6 +15,8 @@ use std::rc::{Rc, Weak};
 
 #[cfg(windows)]
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
+#[cfg(windows)]
+use windows::core::{IInspectable, Interface};
 
 #[cfg(windows)]
 #[repr(C)]
@@ -53,22 +55,22 @@ struct AccessibilityCallbacks {
 unsafe extern "C" {
     fn elwindui_winui3_accessibility_canvas_create() -> *mut c_void;
     fn elwindui_winui3_accessibility_canvas_set_callbacks(
-        canvas: *mut c_void,
+        bridge_key: *mut c_void,
         callbacks: *const AccessibilityCallbacks,
-    );
-    fn elwindui_winui3_accessibility_canvas_detach(canvas: *mut c_void);
+    ) -> u32;
+    fn elwindui_winui3_accessibility_canvas_detach(bridge_key: *mut c_void);
 }
 
 #[cfg(windows)]
 struct CppAccessibilityBridge {
-    canvas: std::cell::Cell<*mut c_void>,
+    bridge_key: std::cell::Cell<*mut c_void>,
 }
 
 #[cfg(windows)]
 impl CppAccessibilityBridge {
     fn new() -> Self {
         Self {
-            canvas: std::cell::Cell::new(std::ptr::null_mut()),
+            bridge_key: std::cell::Cell::new(std::ptr::null_mut()),
         }
     }
 }
@@ -76,11 +78,11 @@ impl CppAccessibilityBridge {
 #[cfg(windows)]
 impl Drop for CppAccessibilityBridge {
     fn drop(&mut self) {
-        let canvas = self.canvas.replace(std::ptr::null_mut());
-        if !canvas.is_null() {
+        let bridge_key = self.bridge_key.replace(std::ptr::null_mut());
+        if !bridge_key.is_null() {
             // The C++ side only erases a map entry here; it does not dereference the released
             // XAML object. This remains safe even when the final Canvas clone is dropped first.
-            unsafe { elwindui_winui3_accessibility_canvas_detach(canvas) };
+            unsafe { elwindui_winui3_accessibility_canvas_detach(bridge_key) };
         }
     }
 }
@@ -90,6 +92,12 @@ pub(crate) struct WinUI3AccessibilityState {
     tree: Weak<RefCell<Option<Rc<dyn UIElementExt>>>>,
     #[cfg(windows)]
     cpp_bridge: CppAccessibilityBridge,
+}
+
+#[cfg(windows)]
+fn canonical_bridge_key(canvas: &Canvas) -> Option<*mut c_void> {
+    let inspectable: IInspectable = canvas.cast().ok()?;
+    Some(Interface::as_raw(&inspectable) as *mut c_void)
 }
 
 impl WinUI3AccessibilityState {
@@ -103,9 +111,15 @@ impl WinUI3AccessibilityState {
     }
 
     #[cfg(windows)]
-    pub(crate) fn bind_canvas(self: &Rc<Self>, canvas: &Canvas) {
-        let raw = windows::core::Interface::as_raw(canvas) as *mut c_void;
-        self.cpp_bridge.canvas.set(raw);
+    pub(crate) fn bind_canvas(self: &Rc<Self>, canvas: &Canvas) -> bool {
+        self.cpp_bridge.bridge_key.set(std::ptr::null_mut());
+        let Some(bridge_key) = canonical_bridge_key(canvas) else {
+            if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+                eprintln!("[elwindui-winui3] accessibility Canvas -> IInspectable cast failed");
+            }
+            return false;
+        };
+        self.cpp_bridge.bridge_key.set(bridge_key);
         let callbacks = AccessibilityCallbacks {
             context: Rc::as_ptr(self) as *mut c_void,
             revision: callback_revision,
@@ -114,7 +128,13 @@ impl WinUI3AccessibilityState {
             get_node: callback_get_node,
             dispatch_action: callback_dispatch_action,
         };
-        unsafe { elwindui_winui3_accessibility_canvas_set_callbacks(raw, &callbacks) };
+        let result =
+            unsafe { elwindui_winui3_accessibility_canvas_set_callbacks(bridge_key, &callbacks) };
+        let bound = result == 1;
+        if !bound && std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+            eprintln!("[elwindui-winui3] accessibility callback binding failed");
+        }
+        bound
     }
 
     pub(crate) fn rebuild(&self) {

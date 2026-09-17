@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,12 +30,18 @@ namespace {
 struct CanvasBridgeState {
     ElwinduiAccessibilityCallbacks callbacks{};
     std::map<std::uint64_t, AutomationPeer> peers;
+    std::optional<AutomationPeer> root_peer;
 };
 
 std::map<void*, std::shared_ptr<CanvasBridgeState>> g_bridges;
 
-std::shared_ptr<CanvasBridgeState> bridge_for(void* canvas) {
-    auto it = g_bridges.find(canvas);
+constexpr std::uint32_t kStateDisabled = 1u << 0;
+constexpr std::uint32_t kStateFocused = 1u << 1;
+constexpr std::uint32_t kStateCheckedOn = 1u << 2;
+constexpr std::uint32_t kActionFocus = 1u << 5;
+
+std::shared_ptr<CanvasBridgeState> bridge_for(void* bridge_key) {
+    auto it = g_bridges.find(bridge_key);
     return it == g_bridges.end() ? nullptr : it->second;
 }
 
@@ -58,59 +65,58 @@ AutomationControlType control_type(std::uint32_t role) {
 }
 
 struct SemanticPeer : AutomationPeerT<SemanticPeer> {
-    SemanticPeer(void* canvas, std::uint64_t id) : m_canvas(canvas), m_id(id) {}
+    SemanticPeer(void* bridge_key, std::uint64_t id) : m_bridge_key(bridge_key), m_id(id) {}
 
     hstring GetClassNameCore() { return L"ElwindUI.Semantic"; }
+    // SemanticPeer is intentionally virtual rather than backed by a XAML FrameworkElement. The
+    // AutomationPeer base defaults both flags to false, which would make an otherwise valid
+    // virtual peer disappear from UIA's control/content views. A stale peer must not remain
+    // visible after its Core record is removed, so participation is queried on every call.
+    bool IsControlElementCore() {
+        ElwinduiAccessibilityNodeRecord record{};
+        return TryGetCurrentRecord(record);
+    }
+    bool IsContentElementCore() {
+        ElwinduiAccessibilityNodeRecord record{};
+        return TryGetCurrentRecord(record);
+    }
 
     hstring GetNameCore() {
-        auto bridge = bridge_for(m_canvas);
         ElwinduiAccessibilityNodeRecord record{};
-        if (!bridge || !bridge->callbacks.get_node ||
-            !bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record)) {
+        if (!TryGetCurrentRecord(record)) {
             return {};
         }
         return hstring(copied_text(record.label, record.label_length));
     }
 
     AutomationControlType GetAutomationControlTypeCore() {
-        auto bridge = bridge_for(m_canvas);
         ElwinduiAccessibilityNodeRecord record{};
-        if (!bridge || !bridge->callbacks.get_node ||
-            !bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record)) {
+        if (!TryGetCurrentRecord(record)) {
             return AutomationControlType::Group;
         }
         return control_type(record.role);
     }
 
     bool IsEnabledCore() {
-        auto bridge = bridge_for(m_canvas);
         ElwinduiAccessibilityNodeRecord record{};
-        return bridge && bridge->callbacks.get_node &&
-               bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record) &&
-               (record.state_flags & (1u << 0)) == 0;
+        return TryGetCurrentRecord(record) && (record.state_flags & kStateDisabled) == 0;
     }
 
     bool IsKeyboardFocusableCore() {
-        auto bridge = bridge_for(m_canvas);
         ElwinduiAccessibilityNodeRecord record{};
-        return bridge && bridge->callbacks.get_node &&
-               bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record) &&
-               (record.state_flags & (1u << 1)) != 0;
+        // Focusability is an advertised Core action, not the node's current focus state.
+        return TryGetCurrentRecord(record) && (record.actions_mask & kActionFocus) != 0;
     }
 
     bool HasKeyboardFocusCore() {
-        auto bridge = bridge_for(m_canvas);
         ElwinduiAccessibilityNodeRecord record{};
-        return bridge && bridge->callbacks.get_node &&
-               bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record) &&
-               (record.state_flags & (1u << 2)) != 0;
+        // Checked-On is kStateCheckedOn (bit 2); only the focused state (bit 1) means focused.
+        return TryGetCurrentRecord(record) && (record.state_flags & kStateFocused) != 0;
     }
 
     Windows::Foundation::Rect GetBoundingRectangleCore() {
-        auto bridge = bridge_for(m_canvas);
         ElwinduiAccessibilityNodeRecord record{};
-        if (!bridge || !bridge->callbacks.get_node ||
-            !bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record)) {
+        if (!TryGetCurrentRecord(record)) {
             return {};
         }
         return {record.x, record.y, record.width, record.height};
@@ -118,36 +124,45 @@ struct SemanticPeer : AutomationPeerT<SemanticPeer> {
 
     Windows::Foundation::Collections::IVector<AutomationPeer> GetChildrenCore() {
         std::vector<AutomationPeer> children;
-        auto bridge = bridge_for(m_canvas);
+        auto bridge = bridge_for(m_bridge_key);
         if (!bridge || !bridge->callbacks.child_count || !bridge->callbacks.child_id) {
             return single_threaded_vector<AutomationPeer>(std::move(children));
         }
         auto count = bridge->callbacks.child_count(bridge->callbacks.context, m_id);
         children.reserve(count);
+        auto parent = get_strong().as<AutomationPeer>();
         for (std::uint32_t index = 0; index < count; ++index) {
             auto child = bridge->callbacks.child_id(bridge->callbacks.context, m_id, index);
             if (child == 0) continue;
             auto it = bridge->peers.find(child);
             if (it == bridge->peers.end()) {
-                it = bridge->peers.emplace(child, make<SemanticPeer>(m_canvas, child)).first;
+                it = bridge->peers.emplace(child, make<SemanticPeer>(m_bridge_key, child)).first;
             }
+            // Virtual peers have no visual owner from which WinUI can infer this relationship.
+            it->second.SetParent(parent);
             children.push_back(it->second);
         }
         return single_threaded_vector<AutomationPeer>(std::move(children));
+    }
+
+private:
+    bool TryGetCurrentRecord(ElwinduiAccessibilityNodeRecord& record) {
+        auto bridge = bridge_for(m_bridge_key);
+        return bridge && bridge->callbacks.get_node &&
+               bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record);
     }
 
     // Pattern providers remain in the generated peer surface and are enabled by the same copied
     // action bits in a follow-up projection. This peer never fabricates a provider for an action
     // that Core did not advertise.
 
-private:
-    void* m_canvas;
+    void* m_bridge_key;
     std::uint64_t m_id;
 };
 
 struct SemanticRootPeer : FrameworkElementAutomationPeerT<SemanticRootPeer> {
-    SemanticRootPeer(FrameworkElement const& owner, void* canvas)
-        : FrameworkElementAutomationPeerT<SemanticRootPeer>(owner), m_canvas(canvas) {}
+    SemanticRootPeer(FrameworkElement const& owner, void* bridge_key)
+        : FrameworkElementAutomationPeerT<SemanticRootPeer>(owner), m_bridge_key(bridge_key) {}
 
     hstring GetClassNameCore() { return L"ElwindUI.SemanticRoot"; }
     hstring GetNameCore() { return {}; }
@@ -155,32 +170,41 @@ struct SemanticRootPeer : FrameworkElementAutomationPeerT<SemanticRootPeer> {
 
     Windows::Foundation::Collections::IVector<AutomationPeer> GetChildrenCore() {
         std::vector<AutomationPeer> children;
-        auto bridge = bridge_for(m_canvas);
+        auto bridge = bridge_for(m_bridge_key);
         if (!bridge || !bridge->callbacks.child_count || !bridge->callbacks.child_id) {
             return single_threaded_vector<AutomationPeer>(std::move(children));
         }
         auto count = bridge->callbacks.child_count(bridge->callbacks.context, 0);
         children.reserve(count);
+        auto parent = get_strong().as<AutomationPeer>();
         for (std::uint32_t index = 0; index < count; ++index) {
             auto id = bridge->callbacks.child_id(bridge->callbacks.context, 0, index);
             if (id == 0) continue;
             auto it = bridge->peers.find(id);
             if (it == bridge->peers.end()) {
-                it = bridge->peers.emplace(id, make<SemanticPeer>(m_canvas, id)).first;
+                it = bridge->peers.emplace(id, make<SemanticPeer>(m_bridge_key, id)).first;
             }
+            // Keep the virtual peer graph connected even though semantic nodes are not native
+            // XAML children.
+            it->second.SetParent(parent);
             children.push_back(it->second);
         }
         return single_threaded_vector<AutomationPeer>(std::move(children));
     }
 
 private:
-    void* m_canvas;
+    void* m_bridge_key;
 };
 
 struct AccessibilityCanvas : CanvasT<AccessibilityCanvas> {
     AutomationPeer OnCreateAutomationPeer() {
         auto inspectable = get_strong().as<Windows::Foundation::IInspectable>();
-        return make<SemanticRootPeer>(*this, get_abi(inspectable));
+        auto key = get_abi(inspectable);
+        auto peer = make<SemanticRootPeer>(*this, key);
+        if (auto bridge = bridge_for(key)) {
+            bridge->root_peer = peer;
+        }
+        return peer;
     }
 };
 
@@ -198,14 +222,33 @@ extern "C" __declspec(dllexport) void* elwindui_winui3_accessibility_canvas_crea
     }
 }
 
-extern "C" __declspec(dllexport) void elwindui_winui3_accessibility_canvas_set_callbacks(
-    void* canvas,
+extern "C" __declspec(dllexport) std::uint32_t elwindui_winui3_accessibility_canvas_set_callbacks(
+    void* bridge_key,
     ElwinduiAccessibilityCallbacks const* callbacks) {
-    auto bridge = bridge_for(canvas);
-    if (!bridge) return;
+    auto bridge = bridge_for(bridge_key);
+    if (!bridge) return 0;
     bridge->callbacks = callbacks ? *callbacks : ElwinduiAccessibilityCallbacks{};
+    return 1;
 }
 
-extern "C" __declspec(dllexport) void elwindui_winui3_accessibility_canvas_detach(void* canvas) {
-    g_bridges.erase(canvas);
+extern "C" __declspec(dllexport) void elwindui_winui3_accessibility_canvas_refresh(
+    void* bridge_key,
+    std::uint32_t structure_changed) {
+    auto bridge = bridge_for(bridge_key);
+    if (!bridge || !bridge->root_peer) return;
+    try {
+        // Every effective snapshot change may invalidate cached property values. Only an actual
+        // semantic topology change is announced as a structure mutation.
+        bridge->root_peer->InvalidatePeer();
+        if (structure_changed != 0) {
+            bridge->root_peer->RaiseStructureChangedEvent(
+                AutomationStructureChangeType::ChildrenInvalidated, nullptr);
+        }
+    } catch (...) {
+        // Refresh is best effort and must never affect the render/input path.
+    }
+}
+
+extern "C" __declspec(dllexport) void elwindui_winui3_accessibility_canvas_detach(void* bridge_key) {
+    g_bridges.erase(bridge_key);
 }

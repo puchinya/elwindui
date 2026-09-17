@@ -6,7 +6,8 @@
 
 use elwindui_core::accessibility::{
     AccessibilityAction, AccessibilityActionKind, AccessibilityCheckState, AccessibilityHost,
-    AccessibilityId, AccessibilityRole, AccessibilityRuntime,
+    AccessibilityId, AccessibilityRole, AccessibilityRuntime, AccessibilitySnapshot,
+    AccessibilitySnapshotNode,
 };
 use elwindui_core::ui::UIElementExt;
 use std::cell::RefCell;
@@ -15,6 +16,8 @@ use std::rc::{Rc, Weak};
 
 #[cfg(windows)]
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
+#[cfg(windows)]
+use windows::core::{IInspectable, Interface};
 
 #[cfg(windows)]
 #[repr(C)]
@@ -53,22 +56,26 @@ struct AccessibilityCallbacks {
 unsafe extern "C" {
     fn elwindui_winui3_accessibility_canvas_create() -> *mut c_void;
     fn elwindui_winui3_accessibility_canvas_set_callbacks(
-        canvas: *mut c_void,
+        bridge_key: *mut c_void,
         callbacks: *const AccessibilityCallbacks,
+    ) -> u32;
+    fn elwindui_winui3_accessibility_canvas_refresh(
+        bridge_key: *mut c_void,
+        structure_changed: u32,
     );
-    fn elwindui_winui3_accessibility_canvas_detach(canvas: *mut c_void);
+    fn elwindui_winui3_accessibility_canvas_detach(bridge_key: *mut c_void);
 }
 
 #[cfg(windows)]
 struct CppAccessibilityBridge {
-    canvas: std::cell::Cell<*mut c_void>,
+    bridge_key: std::cell::Cell<*mut c_void>,
 }
 
 #[cfg(windows)]
 impl CppAccessibilityBridge {
     fn new() -> Self {
         Self {
-            canvas: std::cell::Cell::new(std::ptr::null_mut()),
+            bridge_key: std::cell::Cell::new(std::ptr::null_mut()),
         }
     }
 }
@@ -76,11 +83,11 @@ impl CppAccessibilityBridge {
 #[cfg(windows)]
 impl Drop for CppAccessibilityBridge {
     fn drop(&mut self) {
-        let canvas = self.canvas.replace(std::ptr::null_mut());
-        if !canvas.is_null() {
+        let bridge_key = self.bridge_key.replace(std::ptr::null_mut());
+        if !bridge_key.is_null() {
             // The C++ side only erases a map entry here; it does not dereference the released
             // XAML object. This remains safe even when the final Canvas clone is dropped first.
-            unsafe { elwindui_winui3_accessibility_canvas_detach(canvas) };
+            unsafe { elwindui_winui3_accessibility_canvas_detach(bridge_key) };
         }
     }
 }
@@ -90,6 +97,12 @@ pub(crate) struct WinUI3AccessibilityState {
     tree: Weak<RefCell<Option<Rc<dyn UIElementExt>>>>,
     #[cfg(windows)]
     cpp_bridge: CppAccessibilityBridge,
+}
+
+#[cfg(windows)]
+fn canonical_bridge_key(canvas: &Canvas) -> Option<*mut c_void> {
+    let inspectable: IInspectable = canvas.cast().ok()?;
+    Some(Interface::as_raw(&inspectable) as *mut c_void)
 }
 
 impl WinUI3AccessibilityState {
@@ -103,9 +116,15 @@ impl WinUI3AccessibilityState {
     }
 
     #[cfg(windows)]
-    pub(crate) fn bind_canvas(self: &Rc<Self>, canvas: &Canvas) {
-        let raw = windows::core::Interface::as_raw(canvas) as *mut c_void;
-        self.cpp_bridge.canvas.set(raw);
+    pub(crate) fn bind_canvas(self: &Rc<Self>, canvas: &Canvas) -> bool {
+        self.cpp_bridge.bridge_key.set(std::ptr::null_mut());
+        let Some(bridge_key) = canonical_bridge_key(canvas) else {
+            if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+                eprintln!("[elwindui-winui3] accessibility Canvas -> IInspectable cast failed");
+            }
+            return false;
+        };
+        self.cpp_bridge.bridge_key.set(bridge_key);
         let callbacks = AccessibilityCallbacks {
             context: Rc::as_ptr(self) as *mut c_void,
             revision: callback_revision,
@@ -114,21 +133,85 @@ impl WinUI3AccessibilityState {
             get_node: callback_get_node,
             dispatch_action: callback_dispatch_action,
         };
-        unsafe { elwindui_winui3_accessibility_canvas_set_callbacks(raw, &callbacks) };
+        let result =
+            unsafe { elwindui_winui3_accessibility_canvas_set_callbacks(bridge_key, &callbacks) };
+        let bound = result == 1;
+        if !bound && std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+            eprintln!("[elwindui-winui3] accessibility callback binding failed");
+        }
+        bound
     }
 
     pub(crate) fn rebuild(&self) {
+        let old_revision = self.runtime.revision();
+        let old_snapshot = self.runtime.snapshot();
         let tree: Option<Rc<RefCell<Option<Rc<dyn UIElementExt>>>>> = self.tree.upgrade();
         let Some(tree) = tree.and_then(|tree| tree.borrow().clone()) else {
             self.runtime.clear();
+            self.refresh_after_update(old_revision, old_snapshot);
             return;
         };
         self.runtime.rebuild(&tree);
+        self.refresh_after_update(old_revision, old_snapshot);
     }
 
     pub(crate) fn clear(&self) {
+        let old_revision = self.runtime.revision();
+        let old_snapshot = self.runtime.snapshot();
         self.runtime.clear();
+        self.refresh_after_update(old_revision, old_snapshot);
     }
+
+    fn refresh_after_update(&self, old_revision: u64, old_snapshot: AccessibilitySnapshot) {
+        let new_snapshot = self.runtime.snapshot();
+        let Some(structure_changed) = refresh_decision(
+            old_revision,
+            self.runtime.revision(),
+            &old_snapshot,
+            &new_snapshot,
+        ) else {
+            return;
+        };
+
+        #[cfg(windows)]
+        self.refresh_tree(structure_changed);
+        #[cfg(not(windows))]
+        let _ = structure_changed;
+    }
+
+    #[cfg(windows)]
+    fn refresh_tree(&self, structure_changed: bool) {
+        let bridge_key = self.cpp_bridge.bridge_key.get();
+        if !bridge_key.is_null() {
+            unsafe {
+                elwindui_winui3_accessibility_canvas_refresh(
+                    bridge_key,
+                    u32::from(structure_changed),
+                )
+            };
+        }
+    }
+}
+
+fn same_semantic_structure(old: &AccessibilitySnapshot, new: &AccessibilitySnapshot) -> bool {
+    fn same_nodes(old: &[AccessibilitySnapshotNode], new: &[AccessibilitySnapshotNode]) -> bool {
+        old.len() == new.len()
+            && old
+                .iter()
+                .zip(new)
+                .all(|(old, new)| old.id == new.id && same_nodes(&old.children, &new.children))
+    }
+
+    same_nodes(&old.roots, &new.roots)
+}
+
+fn refresh_decision(
+    old_revision: u64,
+    new_revision: u64,
+    old_snapshot: &AccessibilitySnapshot,
+    new_snapshot: &AccessibilitySnapshot,
+) -> Option<bool> {
+    (old_revision != new_revision).then(|| !same_semantic_structure(old_snapshot, new_snapshot))
 }
 
 /// Weak host capability installed on the Core root. A Core property mutation can therefore
@@ -243,14 +326,40 @@ fn fill_record(
     record: &mut AccessibilityNodeRecord,
     node: &elwindui_core::accessibility::AccessibilitySnapshotNode,
 ) {
+    const STATE_DISABLED: u32 = 1 << 0;
+    const STATE_FOCUSED: u32 = 1 << 1;
+    const STATE_CHECKED_ON: u32 = 1 << 2;
+    const STATE_EXPANDED: u32 = 1 << 3;
+    const STATE_SELECTED: u32 = 1 << 4;
+    const STATE_READ_ONLY: u32 = 1 << 5;
+
     record.id = node.id.raw();
     record.role = role_code(node.semantics.role);
-    record.state_flags = u32::from(node.semantics.state.disabled)
-        | (u32::from(node.semantics.state.focused) << 1)
-        | (u32::from(node.semantics.state.checked == Some(AccessibilityCheckState::On)) << 2)
-        | (u32::from(node.semantics.state.expanded == Some(true)) << 3)
-        | (u32::from(node.semantics.state.selected == Some(true)) << 4)
-        | (u32::from(node.semantics.state.read_only) << 5);
+    record.state_flags = if node.semantics.state.disabled {
+        STATE_DISABLED
+    } else {
+        0
+    } | if node.semantics.state.focused {
+        STATE_FOCUSED
+    } else {
+        0
+    } | if node.semantics.state.checked == Some(AccessibilityCheckState::On) {
+        STATE_CHECKED_ON
+    } else {
+        0
+    } | if node.semantics.state.expanded == Some(true) {
+        STATE_EXPANDED
+    } else {
+        0
+    } | if node.semantics.state.selected == Some(true) {
+        STATE_SELECTED
+    } else {
+        0
+    } | if node.semantics.state.read_only {
+        STATE_READ_ONLY
+    } else {
+        0
+    };
     record.actions_mask = node.semantics.actions.iter().fold(0u32, |mask, action| {
         mask | (1u32 << action_kind_code(*action))
     });
@@ -375,4 +484,126 @@ pub(crate) fn create_canvas() -> Canvas {
     );
     unsafe { windows::core::Type::from_abi(raw) }
         .expect("elwindui_winui3_accessibility_canvas_create returned invalid Canvas")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use elwindui_core::accessibility::AccessibilitySemantics;
+    use elwindui_core::base::Rect;
+
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn node(id: u64, children: Vec<AccessibilitySnapshotNode>) -> AccessibilitySnapshotNode {
+        AccessibilitySnapshotNode {
+            id: AccessibilityId::from_raw(id),
+            semantics: AccessibilitySemantics::new(AccessibilityRole::StaticText),
+            bounds_in_root: rect(0.0, 0.0, 10.0, 10.0),
+            children,
+        }
+    }
+
+    fn snapshot(roots: Vec<AccessibilitySnapshotNode>) -> AccessibilitySnapshot {
+        AccessibilitySnapshot { roots }
+    }
+
+    #[test]
+    fn semantic_structure_ignores_non_topology_changes() {
+        let old = snapshot(vec![node(1, vec![node(2, vec![])])]);
+        let mut changed = old.clone();
+        changed.roots[0].semantics.label = Some("updated label".to_owned());
+        changed.roots[0].semantics.value = Some("updated value".to_owned());
+        changed.roots[0].semantics.state.focused = true;
+        changed.roots[0].bounds_in_root = rect(5.0, 6.0, 20.0, 21.0);
+        changed.roots[0]
+            .semantics
+            .actions
+            .push(AccessibilityActionKind::Focus);
+
+        assert!(same_semantic_structure(&old, &old));
+        assert!(same_semantic_structure(&old, &changed));
+    }
+
+    #[test]
+    fn refresh_decision_skips_noop_and_refreshes_effective_non_structural_change() {
+        let old = snapshot(vec![node(1, vec![])]);
+        let mut changed = old.clone();
+        changed.roots[0].semantics.label = Some("updated label".to_owned());
+        let mut structural = old.clone();
+        structural.roots[0].children.push(node(2, vec![]));
+
+        assert_eq!(refresh_decision(7, 7, &old, &old), None);
+        assert_eq!(refresh_decision(7, 8, &old, &old), Some(false));
+        assert_eq!(refresh_decision(7, 8, &old, &changed), Some(false));
+        assert_eq!(refresh_decision(7, 8, &old, &structural), Some(true));
+    }
+
+    #[test]
+    fn semantic_structure_detects_child_add_remove_and_reorder() {
+        let old = snapshot(vec![node(1, vec![node(2, vec![]), node(3, vec![])])]);
+
+        let mut added = old.clone();
+        added.roots[0].children.push(node(4, vec![]));
+        assert!(!same_semantic_structure(&old, &added));
+
+        let mut removed = old.clone();
+        removed.roots[0].children.remove(1);
+        assert!(!same_semantic_structure(&old, &removed));
+
+        let mut reordered = old.clone();
+        reordered.roots[0].children.swap(0, 1);
+        assert!(!same_semantic_structure(&old, &reordered));
+    }
+
+    #[test]
+    fn semantic_structure_detects_nested_reparenting() {
+        let old = snapshot(vec![node(
+            1,
+            vec![node(2, vec![node(3, vec![])]), node(4, vec![])],
+        )]);
+        let new = snapshot(vec![node(
+            1,
+            vec![node(2, vec![]), node(4, vec![node(3, vec![])])],
+        )]);
+
+        assert!(!same_semantic_structure(&old, &new));
+    }
+
+    #[test]
+    fn semantic_structure_detects_clear_but_not_repeated_empty_state() {
+        let non_empty = snapshot(vec![node(1, vec![])]);
+        let empty = AccessibilitySnapshot::default();
+
+        assert!(!same_semantic_structure(&non_empty, &empty));
+        assert!(same_semantic_structure(&empty, &empty));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fill_record_keeps_focus_checked_and_focus_action_bits_independent() {
+        let mut node = node(42, vec![]);
+        node.semantics.state.checked = Some(AccessibilityCheckState::On);
+        node.semantics.actions = vec![AccessibilityActionKind::Focus];
+
+        let mut record: AccessibilityNodeRecord = unsafe { std::mem::zeroed() };
+        fill_record(&mut record, &node);
+
+        assert_eq!(record.state_flags & (1 << 1), 0);
+        assert_ne!(record.state_flags & (1 << 2), 0);
+        assert_ne!(record.actions_mask & (1 << 5), 0);
+
+        node.semantics.state.focused = true;
+        let mut focused_record: AccessibilityNodeRecord = unsafe { std::mem::zeroed() };
+        fill_record(&mut focused_record, &node);
+        assert_ne!(focused_record.state_flags & (1 << 1), 0);
+        assert_ne!(focused_record.state_flags & (1 << 2), 0);
+        assert_ne!(focused_record.actions_mask & (1 << 5), 0);
+    }
 }

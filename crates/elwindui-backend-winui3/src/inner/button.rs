@@ -424,6 +424,7 @@ mod hosted_xaml_regression_tests {
             // process.
             crate::host::live_input_surface_tests::
                 live_input_surface_creation_persistence_viewport_and_source_classification();
+            crate::host::accessibility_tests::bridge_binding_and_core_snapshot();
 
             // A bare, unparented `FrameworkElement` never resolves real text metrics (no
             // `XamlRoot`) — attach it to a real `Window.Content` first, exactly like

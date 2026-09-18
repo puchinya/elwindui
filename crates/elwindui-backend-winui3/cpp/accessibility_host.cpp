@@ -6,6 +6,7 @@
 // becoming a second public automation tree.
 
 #include "accessibility_host.h"
+#include "Elwindui/WinUI3/Accessibility/SemanticPeer.g.h"
 
 #include <algorithm>
 #include <limits>
@@ -93,14 +94,11 @@ AutomationControlType control_type(std::uint32_t role) {
     }
 }
 
-struct SemanticPeer : AutomationPeerT<
-                          SemanticPeer,
-                          XamlProvider::IInvokeProvider,
-                          XamlProvider::IToggleProvider,
-                          XamlProvider::IRangeValueProvider,
-                          XamlProvider::IValueProvider,
-                          XamlProvider::ISelectionItemProvider,
-                          XamlProvider::IExpandCollapseProvider> {
+}  // namespace
+
+namespace winrt::Elwindui::WinUI3::Accessibility::implementation {
+
+struct SemanticPeer : SemanticPeerT<SemanticPeer> {
     SemanticPeer(void* bridge_key, std::uint64_t id) : m_bridge_key(bridge_key), m_id(id) {}
 
     hstring GetClassNameCore() { return L"ElwindUI.Semantic"; }
@@ -310,15 +308,19 @@ struct SemanticPeer : AutomationPeerT<
         DispatchAction(kPatternExpandCollapse, kActionExpand);
     }
 
-    Windows::Foundation::Collections::IVector<AutomationPeer> GetChildrenCore() {
-        std::vector<AutomationPeer> children;
+    Windows::Foundation::Collections::IVector<
+        winrt::Microsoft::UI::Xaml::Automation::Peers::AutomationPeer>
+    GetChildrenCore() {
+        std::vector<winrt::Microsoft::UI::Xaml::Automation::Peers::AutomationPeer> children;
         auto bridge = bridge_for(m_bridge_key);
         if (!bridge || !bridge->callbacks.child_count || !bridge->callbacks.child_id) {
-            return single_threaded_vector<AutomationPeer>(std::move(children));
+            return single_threaded_vector<
+                winrt::Microsoft::UI::Xaml::Automation::Peers::AutomationPeer>(
+                std::move(children));
         }
         auto count = bridge->callbacks.child_count(bridge->callbacks.context, m_id);
         children.reserve(count);
-        auto parent = get_strong().as<AutomationPeer>();
+        auto parent = get_strong().as<winrt::Microsoft::UI::Xaml::Automation::Peers::AutomationPeer>();
         for (std::uint32_t index = 0; index < count; ++index) {
             auto child = bridge->callbacks.child_id(bridge->callbacks.context, m_id, index);
             if (child == 0) continue;
@@ -330,7 +332,8 @@ struct SemanticPeer : AutomationPeerT<
             it->second.SetParent(parent);
             children.push_back(it->second);
         }
-        return single_threaded_vector<AutomationPeer>(std::move(children));
+        return single_threaded_vector<
+            winrt::Microsoft::UI::Xaml::Automation::Peers::AutomationPeer>(std::move(children));
     }
 
 private:
@@ -426,6 +429,12 @@ private:
     void* m_bridge_key;
     std::uint64_t m_id;
 };
+
+}  // namespace winrt::Elwindui::WinUI3::Accessibility::implementation
+
+namespace {
+
+using SemanticPeer = winrt::Elwindui::WinUI3::Accessibility::implementation::SemanticPeer;
 
 struct SemanticRootPeer : FrameworkElementAutomationPeerT<SemanticRootPeer> {
     SemanticRootPeer(FrameworkElement const& owner, void* bridge_key)

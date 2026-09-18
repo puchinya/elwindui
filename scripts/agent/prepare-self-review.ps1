@@ -75,18 +75,12 @@ function Extract-CanonicalChecklist([string] $Text, [string] $Source) {
     for ($index = $beginIndices[0] + 1; $index -lt $endIndices[0]; $index++) {
         $trimmed = $lines[$index].Trim()
         if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
-        if ($trimmed.StartsWith('REVIEW_ITEM:', [System.StringComparison]::Ordinal)) {
-            $rawItem = $trimmed.Substring('REVIEW_ITEM:'.Length)
-        }
-        elseif ($trimmed -match '^[-*][ \t]+\[[ xX]\][ \t]+(.+?)\s*$') {
-            $rawItem = $Matches[1]
-        }
-        else {
+        if (-not $trimmed.StartsWith('REVIEW_ITEM:', [System.StringComparison]::Ordinal)) {
             Stop-Workflow 'canonical-checklist-malformed' "$Source canonical checklist contains an unexpected line"
         }
-        $item = Normalize-ChecklistText $rawItem
+        $item = Normalize-ChecklistText $trimmed.Substring('REVIEW_ITEM:'.Length)
         if ([string]::IsNullOrWhiteSpace($item)) {
-            Stop-Workflow 'canonical-checklist-empty' "$Source canonical checklist contains an empty item"
+            Stop-Workflow 'canonical-checklist-empty' "$Source canonical checklist contains an empty REVIEW_ITEM"
         }
         [void] $items.Add($item)
     }

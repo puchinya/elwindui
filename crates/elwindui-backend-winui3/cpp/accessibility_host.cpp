@@ -273,6 +273,9 @@ struct SemanticPeer : SemanticPeerT<SemanticPeer> {
 
     // IInvokeProvider
     void Invoke() {
+        diagnostics_log(
+            "[elwindui-winui3][uia] SemanticPeer::Invoke id=%llu\n",
+            static_cast<unsigned long long>(m_id));
         DispatchAction(kPatternInvoke, kActionActivate);
     }
 
@@ -498,7 +501,13 @@ private:
         std::uint32_t action_kind,
         double numeric_value = 0.0) {
         const auto action = ActionFor(pattern, action_kind);
-        if (action.callback(action.context, m_id, action_kind, numeric_value, nullptr, 0) == 0) {
+        const auto dispatched = action.callback(action.context, m_id, action_kind, numeric_value, nullptr, 0);
+        diagnostics_log(
+            "[elwindui-winui3][uia] Core dispatch id=%llu action=%u result=%u\n",
+            static_cast<unsigned long long>(m_id),
+            action_kind,
+            dispatched);
+        if (dispatched == 0) {
             throw_uia(kUiaInvalidOperation);
         }
     }

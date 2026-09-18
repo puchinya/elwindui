@@ -9,11 +9,14 @@
 #include "Elwindui/WinUI3/Accessibility/SemanticPeer.g.h"
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -98,6 +101,27 @@ AutomationControlType control_type(std::uint32_t role) {
 
 bool diagnostics_enabled() {
     return std::getenv("ELWINDUI_WINUI3_DIAGNOSTICS") != nullptr;
+}
+
+void diagnostics_log(char const* format, ...) {
+    if (!diagnostics_enabled()) {
+        return;
+    }
+    char buffer[2048]{};
+    va_list arguments;
+    va_start(arguments, format);
+    std::vsnprintf(buffer, sizeof(buffer), format, arguments);
+    va_end(arguments);
+
+    static std::mutex mutex;
+    std::lock_guard lock(mutex);
+    std::fputs(buffer, stderr);
+    if (auto* path = std::getenv("ELWINDUI_WINUI3_DIAGNOSTICS_FILE"); path && *path) {
+        std::ofstream file(path, std::ios::app);
+        if (file) {
+            file << buffer;
+        }
+    }
 }
 
 char const* pattern_name(PatternInterface const& pattern_interface) {
@@ -204,51 +228,42 @@ struct SemanticPeer : SemanticPeerT<SemanticPeer> {
     Windows::Foundation::IInspectable GetPatternCore(PatternInterface const& pattern_interface) {
         ElwinduiAccessibilityNodeRecord record{};
         if (!TryGetCurrentRecord(record)) {
-            if (diagnostics_enabled()) {
-                std::fprintf(
-                    stderr,
-                    "[elwindui-winui3][uia] GetPatternCore id=%llu pattern=%s record=missing "
-                    "patterns_mask=0x%08x requested_bit=0x%08x bit_present=0 "
-                    "returned=null provider_qi=not-tested\n",
-                    static_cast<unsigned long long>(m_id),
-                    pattern_name(pattern_interface),
-                    0u,
-                    pattern_bit(pattern_interface));
-            }
+            diagnostics_log(
+                "[elwindui-winui3][uia] GetPatternCore id=%llu pattern=%s record=missing "
+                "patterns_mask=0x%08x requested_bit=0x%08x bit_present=0 "
+                "returned=null provider_qi=not-tested\n",
+                static_cast<unsigned long long>(m_id),
+                pattern_name(pattern_interface),
+                0u,
+                pattern_bit(pattern_interface));
             return {};
         }
         const auto pattern = pattern_bit(pattern_interface);
         const bool bit_present = pattern != 0 && (record.patterns_mask & pattern) != 0;
         if (!bit_present) {
-            if (diagnostics_enabled()) {
-                std::fprintf(
-                    stderr,
-                    "[elwindui-winui3][uia] GetPatternCore id=%llu pattern=%s record=present "
-                    "patterns_mask=0x%08x requested_bit=0x%08x bit_present=0 "
-                    "returned=null provider_qi=not-tested\n",
-                    static_cast<unsigned long long>(m_id),
-                    pattern_name(pattern_interface),
-                    record.patterns_mask,
-                    pattern);
-            }
+            diagnostics_log(
+                "[elwindui-winui3][uia] GetPatternCore id=%llu pattern=%s record=present "
+                "patterns_mask=0x%08x requested_bit=0x%08x bit_present=0 "
+                "returned=null provider_qi=not-tested\n",
+                static_cast<unsigned long long>(m_id),
+                pattern_name(pattern_interface),
+                record.patterns_mask,
+                pattern);
             return {};
         }
         // Return the peer itself so the UIA bridge can query the provider interface implemented by
         // this semantic peer. This is the same object shape used by WinUI's custom-peer contract.
         auto result = get_strong().as<Windows::Foundation::IInspectable>();
         const bool provider_qi = try_provider_qi(result, pattern_interface);
-        if (diagnostics_enabled()) {
-            std::fprintf(
-                stderr,
-                "[elwindui-winui3][uia] GetPatternCore id=%llu pattern=%s record=present "
-                "patterns_mask=0x%08x requested_bit=0x%08x bit_present=1 "
-                "returned=provider_object provider_qi=%s\n",
-                static_cast<unsigned long long>(m_id),
-                pattern_name(pattern_interface),
-                record.patterns_mask,
-                pattern,
-                provider_qi ? "succeeded" : "failed");
-        }
+        diagnostics_log(
+            "[elwindui-winui3][uia] GetPatternCore id=%llu pattern=%s record=present "
+            "patterns_mask=0x%08x requested_bit=0x%08x bit_present=1 "
+            "returned=provider_object provider_qi=%s\n",
+            static_cast<unsigned long long>(m_id),
+            pattern_name(pattern_interface),
+            record.patterns_mask,
+            pattern,
+            provider_qi ? "succeeded" : "failed");
         return result;
     }
 

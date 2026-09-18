@@ -9,6 +9,8 @@
 #include "Elwindui/WinUI3/Accessibility/SemanticPeer.g.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <memory>
@@ -91,6 +93,22 @@ AutomationControlType control_type(std::uint32_t role) {
         case 8: return AutomationControlType::Slider;
         case 9: return AutomationControlType::ComboBox;
         default: return AutomationControlType::Group;
+    }
+}
+
+bool diagnostics_enabled() {
+    return std::getenv("ELWINDUI_WINUI3_DIAGNOSTICS") != nullptr;
+}
+
+char const* pattern_name(PatternInterface const& pattern_interface) {
+    switch (pattern_interface) {
+        case PatternInterface::Invoke: return "Invoke";
+        case PatternInterface::Toggle: return "Toggle";
+        case PatternInterface::RangeValue: return "RangeValue";
+        case PatternInterface::Value: return "Value";
+        case PatternInterface::SelectionItem: return "SelectionItem";
+        case PatternInterface::ExpandCollapse: return "ExpandCollapse";
+        default: return "Unknown";
     }
 }
 
@@ -186,15 +204,52 @@ struct SemanticPeer : SemanticPeerT<SemanticPeer> {
     Windows::Foundation::IInspectable GetPatternCore(PatternInterface const& pattern_interface) {
         ElwinduiAccessibilityNodeRecord record{};
         if (!TryGetCurrentRecord(record)) {
+            if (diagnostics_enabled()) {
+                std::fprintf(
+                    stderr,
+                    "[elwindui-winui3][uia] GetPatternCore id=%llu pattern=%s record=missing "
+                    "patterns_mask=0x%08x requested_bit=0x%08x bit_present=0 "
+                    "returned=null provider_qi=not-tested\n",
+                    static_cast<unsigned long long>(m_id),
+                    pattern_name(pattern_interface),
+                    0u,
+                    pattern_bit(pattern_interface));
+            }
             return {};
         }
         const auto pattern = pattern_bit(pattern_interface);
-        if (pattern == 0 || (record.patterns_mask & pattern) == 0) {
+        const bool bit_present = pattern != 0 && (record.patterns_mask & pattern) != 0;
+        if (!bit_present) {
+            if (diagnostics_enabled()) {
+                std::fprintf(
+                    stderr,
+                    "[elwindui-winui3][uia] GetPatternCore id=%llu pattern=%s record=present "
+                    "patterns_mask=0x%08x requested_bit=0x%08x bit_present=0 "
+                    "returned=null provider_qi=not-tested\n",
+                    static_cast<unsigned long long>(m_id),
+                    pattern_name(pattern_interface),
+                    record.patterns_mask,
+                    pattern);
+            }
             return {};
         }
         // Return the peer itself so the UIA bridge can query the provider interface implemented by
         // this semantic peer. This is the same object shape used by WinUI's custom-peer contract.
-        return *this;
+        auto result = get_strong().as<Windows::Foundation::IInspectable>();
+        const bool provider_qi = try_provider_qi(result, pattern_interface);
+        if (diagnostics_enabled()) {
+            std::fprintf(
+                stderr,
+                "[elwindui-winui3][uia] GetPatternCore id=%llu pattern=%s record=present "
+                "patterns_mask=0x%08x requested_bit=0x%08x bit_present=1 "
+                "returned=provider_object provider_qi=%s\n",
+                static_cast<unsigned long long>(m_id),
+                pattern_name(pattern_interface),
+                record.patterns_mask,
+                pattern,
+                provider_qi ? "succeeded" : "failed");
+        }
+        return result;
     }
 
     void SetFocusCore() {
@@ -337,6 +392,30 @@ struct SemanticPeer : SemanticPeerT<SemanticPeer> {
     }
 
 private:
+    static bool try_provider_qi(
+        Windows::Foundation::IInspectable const& object,
+        PatternInterface const& pattern_interface) {
+        try {
+            switch (pattern_interface) {
+                case PatternInterface::Invoke:
+                    return object.try_as<XamlProvider::IInvokeProvider>() != nullptr;
+                case PatternInterface::Toggle:
+                    return object.try_as<XamlProvider::IToggleProvider>() != nullptr;
+                case PatternInterface::RangeValue:
+                    return object.try_as<XamlProvider::IRangeValueProvider>() != nullptr;
+                case PatternInterface::Value:
+                    return object.try_as<XamlProvider::IValueProvider>() != nullptr;
+                case PatternInterface::SelectionItem:
+                    return object.try_as<XamlProvider::ISelectionItemProvider>() != nullptr;
+                case PatternInterface::ExpandCollapse:
+                    return object.try_as<XamlProvider::IExpandCollapseProvider>() != nullptr;
+                default: return false;
+            }
+        } catch (...) {
+            return false;
+        }
+    }
+
     static std::uint32_t pattern_bit(PatternInterface const& pattern_interface) {
         switch (pattern_interface) {
             case PatternInterface::Invoke: return kPatternInvoke;

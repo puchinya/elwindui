@@ -656,6 +656,23 @@ fn generate_resources_pri(out_dir: &str) {
         .expect("copy resources.pri beside test binaries");
 }
 
+#[cfg(target_os = "windows")]
+fn deploy_accessibility_winmd(out_dir: &str, component_winmd: &std::path::Path) {
+    let profile_dir = std::path::Path::new(out_dir)
+        .ancestors()
+        .nth(3)
+        .expect("target profile directory");
+    let deps_dir = profile_dir.join("deps");
+    std::fs::create_dir_all(&deps_dir).expect("create target/<profile>/deps directory");
+    let filename = component_winmd
+        .file_name()
+        .expect("accessibility component WinMD filename");
+    std::fs::copy(component_winmd, profile_dir.join(filename))
+        .expect("copy accessibility component WinMD beside application binary");
+    std::fs::copy(component_winmd, deps_dir.join(filename))
+        .expect("copy accessibility component WinMD beside test binaries");
+}
+
 /// Generates a C++/WinRT projection (via `cppwinrt.exe`) for just enough of the WinUI 3 surface to
 /// host `Application`, and compiles `cpp/app_host.cpp` against it — see that file's own doc comment
 /// (and `src/composed_application.rs`'s) for why this exists at all (microsoft/windows-rs#3404).
@@ -669,7 +686,7 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String], app_sdk: &std::pat
 
     let component_dir = std::path::Path::new(out_dir).join("accessibility_component");
     std::fs::create_dir_all(&component_dir).expect("create accessibility component output");
-    let component_winmd = component_dir.join("accessibility_semantic_peer.winmd");
+    let component_winmd = component_dir.join("Elwindui.WinUI3.Accessibility.winmd");
     let idl =
         std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
             .join("cpp/accessibility_semantic_peer.idl");
@@ -722,6 +739,7 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String], app_sdk: &std::pat
         "midl.exe did not produce {}",
         component_winmd.display()
     );
+    deploy_accessibility_winmd(out_dir, &component_winmd);
 
     let mut component_args = vec![
         "-input".to_owned(),

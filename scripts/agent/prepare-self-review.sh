@@ -156,11 +156,16 @@ def extract_canonical_checklist(text: str, source: str) -> Optional[list[str]]:
         stripped = line.strip()
         if not stripped:
             continue
-        if not stripped.startswith("REVIEW_ITEM:"):
-            fail(f"{source} canonical checklist contains an unexpected line", "canonical-checklist-malformed")
-        item = normalize_checklist_text(stripped[len("REVIEW_ITEM:") :])
+        if stripped.startswith("REVIEW_ITEM:"):
+            raw_item = stripped[len("REVIEW_ITEM:") :]
+        else:
+            checkbox = re.fullmatch(r"[-*][ \t]+\[[ xX]\][ \t]+(.+?)\s*", stripped)
+            if checkbox is None:
+                fail(f"{source} canonical checklist contains an unexpected line", "canonical-checklist-malformed")
+            raw_item = checkbox.group(1)
+        item = normalize_checklist_text(raw_item)
         if not item:
-            fail(f"{source} canonical checklist contains an empty REVIEW_ITEM", "canonical-checklist-empty")
+            fail(f"{source} canonical checklist contains an empty item", "canonical-checklist-empty")
         items.append(item)
     if not items:
         fail(f"{source} canonical checklist block is empty", "canonical-checklist-empty")

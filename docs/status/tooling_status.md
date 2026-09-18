@@ -12,7 +12,7 @@ Snapshot: 2026-09-16. Tool architecture is indexed in [`../design/README.md`](..
 | `elwindui-hotreload` | 🚧 | Patch/Remount decision helper exists; artifact loading and live replacement are absent. |
 | `elwindui-test` | 🚧 | Render-tree dump exists; canvas/image snapshots are absent. |
 | `macos-ui-driver` | 🚧 | Process/window control, focus, Accessibility queries/actions, screenshots, coordinate clicks, Core-backed identifiers, direct AX text/numeric value setting, real press/drag/release, and native resize gestures are implemented; full keyboard synthesis and every AX action are incomplete. |
-| `windows-ui-driver` | 🚧 | Process/window control, UIA inspect/search/invoke/get-value/get-property/set-focus/wait-for, real mouse click/drag, screenshot (window and screen-capture modes), and move/resize are implemented over the external `winapp` CLI; `send-keys` is implemented but not yet exercised end to end by a live case. |
+| `windows-ui-driver` | 🚧 | Process/window control, UIA inspect/search/invoke/get-value/set-value/get-property/set-focus/wait-for, real mouse click/drag, screenshot (window and screen-capture modes), and move/resize are implemented over the external `winapp` CLI; `send-keys` is implemented but not yet exercised end to end by a live case. |
 | Shared native E2E orchestration | ⬜ | Backend-neutral durable cases, deterministic compilation, reusable local plan cache, batch runner, bounded vision checkpoints, and animation capture sequence are planned but not implemented. |
 
 ## Native E2E orchestration state

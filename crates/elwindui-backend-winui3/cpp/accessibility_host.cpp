@@ -8,12 +8,14 @@
 #include "accessibility_host.h"
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
+#include <winrt/Microsoft.UI.Xaml.Automation.Provider.h>
 #include <winrt/Microsoft.UI.Xaml.Automation.Peers.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.h>
@@ -24,6 +26,9 @@ using namespace winrt;
 using namespace winrt::Microsoft::UI::Xaml;
 using namespace winrt::Microsoft::UI::Xaml::Controls;
 using namespace winrt::Microsoft::UI::Xaml::Automation::Peers;
+
+namespace XamlAutomation = winrt::Microsoft::UI::Xaml::Automation;
+namespace XamlProvider = winrt::Microsoft::UI::Xaml::Automation::Provider;
 
 namespace {
 
@@ -38,7 +43,31 @@ std::map<void*, std::shared_ptr<CanvasBridgeState>> g_bridges;
 constexpr std::uint32_t kStateDisabled = 1u << 0;
 constexpr std::uint32_t kStateFocused = 1u << 1;
 constexpr std::uint32_t kStateCheckedOn = 1u << 2;
+constexpr std::uint32_t kStateSelected = 1u << 4;
+constexpr std::uint32_t kStateReadOnly = 1u << 5;
+constexpr std::uint32_t kStateCheckedMixed = 1u << 6;
+constexpr std::uint32_t kActionActivate = 1u << 0;
+constexpr std::uint32_t kActionSetValue = 1u << 3;
+constexpr std::uint32_t kActionSetText = 1u << 4;
 constexpr std::uint32_t kActionFocus = 1u << 5;
+constexpr std::uint32_t kActionExpand = 1u << 6;
+constexpr std::uint32_t kActionCollapse = 1u << 7;
+constexpr std::uint32_t kActionSelect = 1u << 8;
+
+constexpr std::uint32_t kPatternInvoke = 1u << 0;
+constexpr std::uint32_t kPatternToggle = 1u << 1;
+constexpr std::uint32_t kPatternRangeValue = 1u << 2;
+constexpr std::uint32_t kPatternValue = 1u << 3;
+constexpr std::uint32_t kPatternSelectionItem = 1u << 4;
+constexpr std::uint32_t kPatternExpandCollapse = 1u << 5;
+constexpr std::uint32_t kUiaElementNotEnabled = 0x80040200u;
+constexpr std::uint32_t kUiaElementNotAvailable = 0x80040201u;
+constexpr std::uint32_t kUiaNotSupported = 0x80040204u;
+constexpr std::uint32_t kUiaInvalidOperation = 0x80131509u;
+
+[[noreturn]] void throw_uia(std::uint32_t code) {
+    throw hresult_error(static_cast<hresult>(code));
+}
 
 std::shared_ptr<CanvasBridgeState> bridge_for(void* bridge_key) {
     auto it = g_bridges.find(bridge_key);
@@ -64,7 +93,14 @@ AutomationControlType control_type(std::uint32_t role) {
     }
 }
 
-struct SemanticPeer : AutomationPeerT<SemanticPeer> {
+struct SemanticPeer : AutomationPeerT<
+                          SemanticPeer,
+                          XamlProvider::IInvokeProvider,
+                          XamlProvider::IToggleProvider,
+                          XamlProvider::IRangeValueProvider,
+                          XamlProvider::IValueProvider,
+                          XamlProvider::ISelectionItemProvider,
+                          XamlProvider::IExpandCollapseProvider> {
     SemanticPeer(void* bridge_key, std::uint64_t id) : m_bridge_key(bridge_key), m_id(id) {}
 
     hstring GetClassNameCore() { return L"ElwindUI.Semantic"; }
@@ -119,7 +155,159 @@ struct SemanticPeer : AutomationPeerT<SemanticPeer> {
         if (!TryGetCurrentRecord(record)) {
             return {};
         }
+        // WinUI composes virtual peers under their AutomationPeer parent and applies that
+        // parent's screen origin after GetBoundingRectangleCore returns. Rust has already
+        // converted the copied record to physical screen coordinates, so return the equivalent
+        // parent-relative rect here; the framework then restores the measured parent origin.
+        try {
+            auto parent = GetParent();
+            if (parent) {
+                auto parent_bounds = parent.GetBoundingRectangle();
+                return {
+                    record.x - parent_bounds.X,
+                    record.y - parent_bounds.Y,
+                    record.width,
+                    record.height,
+                };
+            }
+        } catch (...) {
+            // A late/stale parent must not turn a property read into a native exception. The
+            // current record is still the best physical value available to this peer.
+        }
         return {record.x, record.y, record.width, record.height};
+    }
+
+    hstring GetAutomationIdCore() {
+        ElwinduiAccessibilityNodeRecord record{};
+        if (!TryGetCurrentRecord(record)) {
+            return {};
+        }
+        return hstring(copied_text(record.identifier, record.identifier_length));
+    }
+
+    Windows::Foundation::IInspectable GetPatternCore(PatternInterface const& pattern_interface) {
+        ElwinduiAccessibilityNodeRecord record{};
+        if (!TryGetCurrentRecord(record)) {
+            return {};
+        }
+        const auto pattern = pattern_bit(pattern_interface);
+        if (pattern == 0 || (record.patterns_mask & pattern) == 0) {
+            return {};
+        }
+        // Return the peer itself so the UIA bridge can query the provider interface implemented by
+        // this semantic peer. This is the same object shape used by WinUI's custom-peer contract.
+        return *this;
+    }
+
+    void SetFocusCore() {
+        DispatchAction(0, kActionFocus);
+    }
+
+    // IInvokeProvider
+    void Invoke() {
+        DispatchAction(kPatternInvoke, kActionActivate);
+    }
+
+    // IToggleProvider
+    XamlAutomation::ToggleState ToggleState() {
+        const auto record = CurrentRecordForPattern(kPatternToggle);
+        if ((record.state_flags & kStateCheckedMixed) != 0) {
+            return XamlAutomation::ToggleState::Indeterminate;
+        }
+        return (record.state_flags & kStateCheckedOn) != 0 ? XamlAutomation::ToggleState::On
+                                                            : XamlAutomation::ToggleState::Off;
+    }
+
+    void Toggle() {
+        DispatchAction(kPatternToggle, kActionActivate);
+    }
+
+    // IRangeValueProvider and IValueProvider both expose a Value() method with different return
+    // types. The generated C++/WinRT ABI converts this single role-dependent result to the type
+    // required by the interface that invoked it.
+    struct ValueResult {
+        double numeric{};
+        hstring text{};
+
+        operator double() const { return numeric; }
+        operator hstring() const { return text; }
+    };
+
+    // IRangeValueProvider
+    bool IsReadOnly() {
+        return (CurrentValueRecord().state_flags & kStateReadOnly) != 0;
+    }
+
+    double LargeChange() {
+        CurrentRecordForPattern(kPatternRangeValue);
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    double Maximum() {
+        return CurrentRecordForPattern(kPatternRangeValue).maximum;
+    }
+
+    double Minimum() {
+        return CurrentRecordForPattern(kPatternRangeValue).minimum;
+    }
+
+    double SmallChange() {
+        return CurrentRecordForPattern(kPatternRangeValue).step;
+    }
+
+    ValueResult Value() {
+        const auto record = CurrentValueRecord();
+        return ValueResult{record.value, hstring(copied_text(record.value_text, record.value_length))};
+    }
+
+    void SetValue(double value) {
+        DispatchAction(kPatternRangeValue, kActionSetValue, value);
+    }
+
+    // IValueProvider
+    void SetValue(hstring const& value) {
+        DispatchTextAction(kPatternValue, kActionSetText, value);
+    }
+
+    // ISelectionItemProvider
+    bool IsSelected() {
+        return (CurrentRecordForPattern(kPatternSelectionItem).state_flags & kStateSelected) != 0;
+    }
+
+    XamlProvider::IRawElementProviderSimple SelectionContainer() {
+        CurrentRecordForPattern(kPatternSelectionItem);
+        return nullptr;
+    }
+
+    void AddToSelection() {
+        DispatchAction(kPatternSelectionItem, kActionSelect);
+    }
+
+    void RemoveFromSelection() {
+        const auto record = CurrentRecordForPattern(kPatternSelectionItem);
+        if ((record.state_flags & kStateDisabled) != 0) {
+            throw_uia(kUiaElementNotEnabled);
+        }
+        throw_uia(kUiaInvalidOperation);
+    }
+
+    void Select() {
+        DispatchAction(kPatternSelectionItem, kActionSelect);
+    }
+
+    // IExpandCollapseProvider
+    XamlAutomation::ExpandCollapseState ExpandCollapseState() {
+        return CurrentRecordForPattern(kPatternExpandCollapse).state_flags & (1u << 3)
+                   ? XamlAutomation::ExpandCollapseState::Expanded
+                   : XamlAutomation::ExpandCollapseState::Collapsed;
+    }
+
+    void Collapse() {
+        DispatchAction(kPatternExpandCollapse, kActionCollapse);
+    }
+
+    void Expand() {
+        DispatchAction(kPatternExpandCollapse, kActionExpand);
     }
 
     Windows::Foundation::Collections::IVector<AutomationPeer> GetChildrenCore() {
@@ -146,15 +334,94 @@ struct SemanticPeer : AutomationPeerT<SemanticPeer> {
     }
 
 private:
+    static std::uint32_t pattern_bit(PatternInterface const& pattern_interface) {
+        switch (pattern_interface) {
+            case PatternInterface::Invoke: return kPatternInvoke;
+            case PatternInterface::Toggle: return kPatternToggle;
+            case PatternInterface::RangeValue: return kPatternRangeValue;
+            case PatternInterface::Value: return kPatternValue;
+            case PatternInterface::SelectionItem: return kPatternSelectionItem;
+            case PatternInterface::ExpandCollapse: return kPatternExpandCollapse;
+            default: return 0;
+        }
+    }
+
     bool TryGetCurrentRecord(ElwinduiAccessibilityNodeRecord& record) {
         auto bridge = bridge_for(m_bridge_key);
         return bridge && bridge->callbacks.get_node &&
                bridge->callbacks.get_node(bridge->callbacks.context, m_id, &record);
     }
 
-    // Pattern providers remain in the generated peer surface and are enabled by the same copied
-    // action bits in a follow-up projection. This peer never fabricates a provider for an action
-    // that Core did not advertise.
+    ElwinduiAccessibilityNodeRecord CurrentRecordForPattern(std::uint32_t pattern) {
+        ElwinduiAccessibilityNodeRecord record{};
+        if (!TryGetCurrentRecord(record)) {
+            throw_uia(kUiaElementNotAvailable);
+        }
+        if (pattern != 0 && (record.patterns_mask & pattern) == 0) {
+            throw_uia(kUiaNotSupported);
+        }
+        return record;
+    }
+
+    ElwinduiAccessibilityNodeRecord CurrentValueRecord() {
+        const auto record = CurrentRecordForPattern(0);
+        if ((record.patterns_mask & (kPatternRangeValue | kPatternValue)) == 0) {
+            throw_uia(kUiaNotSupported);
+        }
+        return record;
+    }
+
+    struct ActionDispatch {
+        void* context{};
+        decltype(ElwinduiAccessibilityCallbacks::dispatch_action) callback{};
+    };
+
+    ActionDispatch ActionFor(std::uint32_t pattern, std::uint32_t action_kind) {
+        ActionDispatch action{};
+        {
+            const auto record = CurrentRecordForPattern(pattern);
+            if ((record.state_flags & kStateDisabled) != 0) {
+                throw_uia(kUiaElementNotEnabled);
+            }
+            if ((record.actions_mask & (1u << action_kind)) == 0) {
+                throw_uia(kUiaNotSupported);
+            }
+            auto bridge = bridge_for(m_bridge_key);
+            if (!bridge || !bridge->callbacks.dispatch_action) {
+                throw_uia(kUiaInvalidOperation);
+            }
+            action.context = bridge->callbacks.context;
+            action.callback = bridge->callbacks.dispatch_action;
+        }
+        return action;
+    }
+
+    void DispatchAction(
+        std::uint32_t pattern,
+        std::uint32_t action_kind,
+        double numeric_value = 0.0) {
+        const auto action = ActionFor(pattern, action_kind);
+        if (action.callback(action.context, m_id, action_kind, numeric_value, nullptr, 0) == 0) {
+            throw_uia(kUiaInvalidOperation);
+        }
+    }
+
+    void DispatchTextAction(
+        std::uint32_t pattern,
+        std::uint32_t action_kind,
+        hstring const& value) {
+        const auto action = ActionFor(pattern, action_kind);
+        const auto* text = reinterpret_cast<char16_t const*>(value.c_str());
+        if (action.callback(
+                action.context,
+                m_id,
+                action_kind,
+                0.0,
+                text,
+                static_cast<std::uint32_t>(value.size())) == 0) {
+            throw_uia(kUiaInvalidOperation);
+        }
+    }
 
     void* m_bridge_key;
     std::uint64_t m_id;
@@ -167,6 +434,16 @@ struct SemanticRootPeer : FrameworkElementAutomationPeerT<SemanticRootPeer> {
     hstring GetClassNameCore() { return L"ElwindUI.SemanticRoot"; }
     hstring GetNameCore() { return {}; }
     AutomationControlType GetAutomationControlTypeCore() { return AutomationControlType::Group; }
+
+    Windows::Foundation::Rect GetBoundingRectangleCore() {
+        ElwinduiAccessibilityNodeRecord record{};
+        auto bridge = bridge_for(m_bridge_key);
+        if (bridge && bridge->callbacks.get_node &&
+            bridge->callbacks.get_node(bridge->callbacks.context, 0, &record) != 0) {
+            return {record.x, record.y, record.width, record.height};
+        }
+        return {};
+    }
 
     Windows::Foundation::Collections::IVector<AutomationPeer> GetChildrenCore() {
         std::vector<AutomationPeer> children;

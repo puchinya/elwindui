@@ -121,9 +121,23 @@ or unavailable values. UI mutation is scheduled on the WinUI UI thread. The narr
 accessibility-view suppression is applied to native projection children so the custom host peer is
 the public tree. A raw HWND-wide `WM_GETOBJECT` provider is not introduced.
 
-The root exposes name/control type/bounds/enabled/focus/children and focus action. Invoke, Toggle,
-RangeValue, Value, SelectionItem, and ExpandCollapse are advertised only when matching Core action
-kinds are present and executable.
+The root exposes name/control type/bounds/enabled/focus/children and focus action. Rust derives a
+copied `patterns_mask` from the Core role, state, value/range data, and executable action set. The
+cached internal `SemanticPeer` directly implements `IInvokeProvider`, `IToggleProvider`,
+`IRangeValueProvider`, `IValueProvider`, `ISelectionItemProvider`, and
+`IExpandCollapseProvider`; `GetPatternCore` re-reads the current record and returns a provider
+only when its bit is present. Invoke, Toggle, RangeValue, Value, SelectionItem, and
+ExpandCollapse therefore remain Core-gated, with no native XAML peer fallback. Secure text never
+exposes a Value provider, and a RadioButton's SelectionContainer is intentionally null until the
+Core contract supplies group/container semantics.
+
+AutomationId is copied from the Core identifier. Semantic bounds are converted from Canvas/root
+coordinates through the XAML content island's `ContentCoordinateConverter` to desktop physical
+screen pixels; a failed conversion yields an empty rectangle. The synthetic root peer carries the
+physical Canvas frame so WinUI's parent-relative virtual-peer composition does not re-add the
+window origin. The logical-DIP conversion used by input and popup placement is layered on the same
+physical helper. UIA Focus invokes Core Focus, and post-action properties are obtained by fresh
+snapshot queries.
 
 ## Teardown and failure semantics
 

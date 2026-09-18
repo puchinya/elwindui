@@ -54,6 +54,7 @@ pwsh -NoProfile -File $D list-windows --pid <pid>
 pwsh -NoProfile -File $D focus-window --hwnd <hwnd> --timeout 3
 pwsh -NoProfile -File $D search --hwnd <hwnd> --query "Ocean"
 pwsh -NoProfile -File $D invoke --hwnd <hwnd> --selector <selector-from-search>
+pwsh -NoProfile -File $D set-value --hwnd <hwnd> --selector <selector-from-search> --value "text with spaces"
 pwsh -NoProfile -File $D point-click --hwnd <hwnd> --x <screen-x> --y <screen-y>
 pwsh -NoProfile -File $D drag --hwnd <hwnd> --from-x <x1> --from-y <y1> --to-x <x2> --to-y <y2>
 pwsh -NoProfile -File $D capture-window --hwnd <hwnd> --output shot.png
@@ -72,7 +73,7 @@ application's state actually changed -- verify that separately (`search`/`get-va
 
 ## UIA vs. real input
 
-Use a UIA pattern command (`invoke`, `get-value`/`set-focus`, `wait-for`) whenever it tests the
+Use a UIA pattern command (`invoke`, `get-value`, `set-value`, `set-focus`, `wait-for`) whenever it tests the
 intended behavior -- it works headless and needs no foreground. Use real input (`point-click`,
 `drag`, `send-keys`) only when the behavior itself requires it: self-drawn controls, pointer
 routing, drag/drop, splitters, right-click/context requests, or keyboard routing. Real-input

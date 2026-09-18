@@ -66,7 +66,7 @@ in host context.
 - Launch the already-built demo once and reuse one healthy PID/HWND for a compatible batch of
   cases. Refresh window geometry after move, resize, or any topology change (floating window
   create/close, dock/undock, monitor/DPI transition) -- never reuse a stale coordinate.
-- Prefer UIA pattern commands (`invoke`, `get-value`, `wait-for`) over real input wherever they
+- Prefer UIA pattern commands (`invoke`, `get-value`, `set-value`, `wait-for`) over real input wherever they
   test the intended behavior; they need no foreground and run headless. Reserve real input
   (`point-click`, `drag`, `send-keys`) for what actually requires it (see the driver
   [`README.md`](../../tools/windows-ui-driver/README.md)'s "UIA vs. real input" section).

@@ -52,13 +52,25 @@ constexpr std::uint32_t kStateCheckedOn = 1u << 2;
 constexpr std::uint32_t kStateSelected = 1u << 4;
 constexpr std::uint32_t kStateReadOnly = 1u << 5;
 constexpr std::uint32_t kStateCheckedMixed = 1u << 6;
-constexpr std::uint32_t kActionActivate = 1u << 0;
-constexpr std::uint32_t kActionSetValue = 1u << 3;
-constexpr std::uint32_t kActionSetText = 1u << 4;
-constexpr std::uint32_t kActionFocus = 1u << 5;
-constexpr std::uint32_t kActionExpand = 1u << 6;
-constexpr std::uint32_t kActionCollapse = 1u << 7;
-constexpr std::uint32_t kActionSelect = 1u << 8;
+constexpr std::uint32_t kActionActivateCode = 0;
+constexpr std::uint32_t kActionIncrementCode = 1;
+constexpr std::uint32_t kActionDecrementCode = 2;
+constexpr std::uint32_t kActionSetValueCode = 3;
+constexpr std::uint32_t kActionSetTextCode = 4;
+constexpr std::uint32_t kActionFocusCode = 5;
+constexpr std::uint32_t kActionExpandCode = 6;
+constexpr std::uint32_t kActionCollapseCode = 7;
+constexpr std::uint32_t kActionSelectCode = 8;
+
+static_assert(kActionActivateCode == 0);
+static_assert(kActionIncrementCode == 1);
+static_assert(kActionDecrementCode == 2);
+static_assert(kActionSetValueCode == 3);
+static_assert(kActionSetTextCode == 4);
+static_assert(kActionFocusCode == 5);
+static_assert(kActionExpandCode == 6);
+static_assert(kActionCollapseCode == 7);
+static_assert(kActionSelectCode == 8);
 
 constexpr std::uint32_t kPatternInvoke = 1u << 0;
 constexpr std::uint32_t kPatternToggle = 1u << 1;
@@ -181,7 +193,8 @@ struct SemanticPeer : SemanticPeerT<SemanticPeer> {
     bool IsKeyboardFocusableCore() {
         ElwinduiAccessibilityNodeRecord record{};
         // Focusability is an advertised Core action, not the node's current focus state.
-        return TryGetCurrentRecord(record) && (record.actions_mask & kActionFocus) != 0;
+        return TryGetCurrentRecord(record) &&
+               (record.actions_mask & (1u << kActionFocusCode)) != 0;
     }
 
     bool HasKeyboardFocusCore() {
@@ -268,7 +281,7 @@ struct SemanticPeer : SemanticPeerT<SemanticPeer> {
     }
 
     void SetFocusCore() {
-        DispatchAction(0, kActionFocus);
+        DispatchAction(0, kActionFocusCode);
     }
 
     // IInvokeProvider
@@ -276,7 +289,7 @@ struct SemanticPeer : SemanticPeerT<SemanticPeer> {
         diagnostics_log(
             "[elwindui-winui3][uia] SemanticPeer::Invoke id=%llu\n",
             static_cast<unsigned long long>(m_id));
-        DispatchAction(kPatternInvoke, kActionActivate);
+        DispatchAction(kPatternInvoke, kActionActivateCode);
     }
 
     // IToggleProvider
@@ -290,7 +303,7 @@ struct SemanticPeer : SemanticPeerT<SemanticPeer> {
     }
 
     void Toggle() {
-        DispatchAction(kPatternToggle, kActionActivate);
+        DispatchAction(kPatternToggle, kActionActivateCode);
     }
 
     // IRangeValueProvider and IValueProvider both expose a Value() method with different return
@@ -332,12 +345,12 @@ struct SemanticPeer : SemanticPeerT<SemanticPeer> {
     }
 
     void SetValue(double value) {
-        DispatchAction(kPatternRangeValue, kActionSetValue, value);
+        DispatchAction(kPatternRangeValue, kActionSetValueCode, value);
     }
 
     // IValueProvider
     void SetValue(hstring const& value) {
-        DispatchTextAction(kPatternValue, kActionSetText, value);
+        DispatchTextAction(kPatternValue, kActionSetTextCode, value);
     }
 
     // ISelectionItemProvider
@@ -351,7 +364,7 @@ struct SemanticPeer : SemanticPeerT<SemanticPeer> {
     }
 
     void AddToSelection() {
-        DispatchAction(kPatternSelectionItem, kActionSelect);
+        DispatchAction(kPatternSelectionItem, kActionSelectCode);
     }
 
     void RemoveFromSelection() {
@@ -363,7 +376,7 @@ struct SemanticPeer : SemanticPeerT<SemanticPeer> {
     }
 
     void Select() {
-        DispatchAction(kPatternSelectionItem, kActionSelect);
+        DispatchAction(kPatternSelectionItem, kActionSelectCode);
     }
 
     // IExpandCollapseProvider
@@ -374,11 +387,11 @@ struct SemanticPeer : SemanticPeerT<SemanticPeer> {
     }
 
     void Collapse() {
-        DispatchAction(kPatternExpandCollapse, kActionCollapse);
+        DispatchAction(kPatternExpandCollapse, kActionCollapseCode);
     }
 
     void Expand() {
-        DispatchAction(kPatternExpandCollapse, kActionExpand);
+        DispatchAction(kPatternExpandCollapse, kActionExpandCode);
     }
 
     Windows::Foundation::Collections::IVector<
@@ -476,14 +489,14 @@ private:
         decltype(ElwinduiAccessibilityCallbacks::dispatch_action) callback{};
     };
 
-    ActionDispatch ActionFor(std::uint32_t pattern, std::uint32_t action_kind) {
+    ActionDispatch ActionFor(std::uint32_t pattern, std::uint32_t action_code) {
         ActionDispatch action{};
         {
             const auto record = CurrentRecordForPattern(pattern);
             if ((record.state_flags & kStateDisabled) != 0) {
                 throw_uia(kUiaElementNotEnabled);
             }
-            if ((record.actions_mask & (1u << action_kind)) == 0) {
+            if ((record.actions_mask & (1u << action_code)) == 0) {
                 throw_uia(kUiaNotSupported);
             }
             auto bridge = bridge_for(m_bridge_key);
@@ -498,14 +511,14 @@ private:
 
     void DispatchAction(
         std::uint32_t pattern,
-        std::uint32_t action_kind,
+        std::uint32_t action_code,
         double numeric_value = 0.0) {
-        const auto action = ActionFor(pattern, action_kind);
-        const auto dispatched = action.callback(action.context, m_id, action_kind, numeric_value, nullptr, 0);
+        const auto action = ActionFor(pattern, action_code);
+        const auto dispatched = action.callback(action.context, m_id, action_code, numeric_value, nullptr, 0);
         diagnostics_log(
-            "[elwindui-winui3][uia] Core dispatch id=%llu action=%u result=%u\n",
+            "[elwindui-winui3][uia] Core dispatch id=%llu action_code=%u result=%u\n",
             static_cast<unsigned long long>(m_id),
-            action_kind,
+            action_code,
             dispatched);
         if (dispatched == 0) {
             throw_uia(kUiaInvalidOperation);
@@ -514,17 +527,23 @@ private:
 
     void DispatchTextAction(
         std::uint32_t pattern,
-        std::uint32_t action_kind,
+        std::uint32_t action_code,
         hstring const& value) {
-        const auto action = ActionFor(pattern, action_kind);
+        const auto action = ActionFor(pattern, action_code);
         const auto* text = reinterpret_cast<char16_t const*>(value.c_str());
-        if (action.callback(
+        const auto dispatched = action.callback(
                 action.context,
                 m_id,
-                action_kind,
+                action_code,
                 0.0,
                 text,
-                static_cast<std::uint32_t>(value.size())) == 0) {
+                static_cast<std::uint32_t>(value.size()));
+        diagnostics_log(
+            "[elwindui-winui3][uia] Core dispatch id=%llu action_code=%u result=%u\n",
+            static_cast<unsigned long long>(m_id),
+            action_code,
+            dispatched);
+        if (dispatched == 0) {
             throw_uia(kUiaInvalidOperation);
         }
     }

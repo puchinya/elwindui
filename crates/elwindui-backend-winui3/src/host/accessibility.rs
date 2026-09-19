@@ -691,6 +691,43 @@ mod tests {
         AccessibilitySnapshot { roots }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn action_kind_abi_codes_and_masks_are_distinct_and_stable() {
+        let cases = [
+            (AccessibilityActionKind::Activate, 0),
+            (AccessibilityActionKind::Increment, 1),
+            (AccessibilityActionKind::Decrement, 2),
+            (AccessibilityActionKind::SetValue, 3),
+            (AccessibilityActionKind::SetText, 4),
+            (AccessibilityActionKind::Focus, 5),
+            (AccessibilityActionKind::Expand, 6),
+            (AccessibilityActionKind::Collapse, 7),
+            (AccessibilityActionKind::Select, 8),
+        ];
+
+        for (action, expected_code) in cases {
+            assert_eq!(action_kind_code(action), expected_code);
+        }
+
+        let actions_mask = cases.iter().fold(0u32, |mask, (action, _)| {
+            mask | (1u32 << action_kind_code(*action))
+        });
+        assert_eq!(actions_mask, 0x1ff);
+        assert_eq!(action_kind_code(AccessibilityActionKind::Activate), 0);
+        assert_eq!(
+            1u32 << action_kind_code(AccessibilityActionKind::Activate),
+            1
+        );
+        assert_eq!(action_kind_code(AccessibilityActionKind::Focus), 5);
+        assert_eq!(1u32 << action_kind_code(AccessibilityActionKind::Focus), 32);
+        assert_eq!(action_kind_code(AccessibilityActionKind::Select), 8);
+        assert_eq!(
+            1u32 << action_kind_code(AccessibilityActionKind::Select),
+            256
+        );
+    }
+
     #[test]
     fn semantic_structure_ignores_non_topology_changes() {
         let old = snapshot(vec![node(1, vec![node(2, vec![])])]);

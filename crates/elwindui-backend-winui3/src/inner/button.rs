@@ -397,6 +397,7 @@ mod hosted_xaml_regression_tests {
         thread_local! {
             static VIEW: RefCell<Option<AnyView>> = const { RefCell::new(None) };
             static WIDTH: RefCell<Option<f32>> = const { RefCell::new(None) };
+            static NATIVE_MEASURE_COUNT_AFTER_LOADED: RefCell<Option<u32>> = const { RefCell::new(None) };
             static RELAYOUT_PASS_COUNT_BEFORE_DRAIN: RefCell<Option<u32>> = const { RefCell::new(None) };
             static RELAYOUT_PASS_COUNT_AFTER_DRAIN: RefCell<Option<u32>> = const { RefCell::new(None) };
             static RELAYOUT_PASS_COUNT_AFTER_500: RefCell<Option<u32>> = const { RefCell::new(None) };
@@ -440,7 +441,7 @@ mod hosted_xaml_regression_tests {
             // contributing to the measured size (see this test's own history in
             // docs/design/backends/winui3_backend_design.md).
             button.set_text("a very long button label");
-            let view = button.handle();
+            let mut view = button.handle();
             view.set_tooltip(Some("hosted tooltip"))
                 .expect("set hosted tooltip");
             let tooltip: XamlToolTip = ToolTipService::GetToolTip(&view.as_element())
@@ -474,6 +475,28 @@ mod hosted_xaml_regression_tests {
                 VirtualKey::Enter
             );
             let element = view.as_element();
+            assert!(
+                !element.IsLoaded().expect("unparented Button IsLoaded"),
+                "the pre-Loaded probe must remain outside the XAML tree"
+            );
+            crate::ffi::reset_native_measure_call_count_for_test();
+            view.arrange(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            });
+            let provisional = view.measure(CoreSize {
+                width: 500.0,
+                height: 200.0,
+            });
+            assert_eq!(provisional.width, 0.0);
+            assert_eq!(provisional.height, 0.0);
+            assert_eq!(
+                crate::ffi::native_measure_call_count_for_test(),
+                0,
+                "pre-Loaded AnyView::measure must not call native XAML Measure"
+            );
             let _ = canvas.Children().expect("Canvas.Children").Append(&element);
             VIEW.with(|slot| *slot.borrow_mut() = Some(view));
 
@@ -503,6 +526,10 @@ mod hosted_xaml_regression_tests {
                             height: 200.0,
                         });
                         WIDTH.with(|slot| *slot.borrow_mut() = Some(desired.width));
+                        NATIVE_MEASURE_COUNT_AFTER_LOADED.with(|slot| {
+                            *slot.borrow_mut() =
+                                Some(crate::ffi::native_measure_call_count_for_test())
+                        });
                     }
                 });
 
@@ -786,6 +813,13 @@ mod hosted_xaml_regression_tests {
         assert!(
             width > 10.0,
             "Button must recover a nonzero natural width after a zero-size arrange, got {width}"
+        );
+        let native_measure_count_after_loaded = NATIVE_MEASURE_COUNT_AFTER_LOADED
+            .with(|slot| *slot.borrow())
+            .expect("the Loaded handler should have recorded native measure count");
+        assert!(
+            native_measure_count_after_loaded > 0,
+            "post-Loaded natural measurement must call native XAML Measure"
         );
 
         // Issue #261 regression assertions (deferred from inside native callbacks — see that

@@ -38,6 +38,18 @@ thread_local! {
     static UI_BOUNDS_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(f32, f32, f32, f32)>>> = RefCell::new(HashMap::new());
     static UI_KEY_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(RawKeyEvent)>>> = RefCell::new(HashMap::new());
     static UI_TEXT_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(String)>>> = RefCell::new(HashMap::new());
+    #[cfg(test)]
+    static NATIVE_MEASURE_CALL_COUNT: Cell<u32> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn native_measure_call_count_for_test() -> u32 {
+    NATIVE_MEASURE_CALL_COUNT.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_native_measure_call_count_for_test() {
+    NATIVE_MEASURE_CALL_COUNT.with(|count| count.set(0));
 }
 
 #[derive(Clone, Copy)]
@@ -783,6 +795,17 @@ impl AnyView {
         available: elwindui_core::base::Size,
     ) -> elwindui_core::base::Size {
         let element = self.as_element();
+        // A newly projected FrameworkElement can be parented under the host Canvas before it has
+        // joined a loaded XAML tree. WinUI does not promise content-driven DesiredSize until that
+        // point; treating the pre-Loaded value as authoritative would make the bootstrap pass
+        // publish a permanent zero natural size. The host's Loaded barrier requests the one
+        // authoritative Measure relayout after the element becomes ready.
+        if !element.IsLoaded().unwrap_or(false) {
+            return elwindui_core::base::Size {
+                width: 0.0,
+                height: 0.0,
+            };
+        }
         // `arrange` (below) sets an explicit `Width`/`Height` on this same `FrameworkElement` so a
         // plain `Canvas` (which has no native measure-driven arrange of its own) gives it concrete
         // bounds. That explicit size persists across relayout passes and, once set, permanently
@@ -805,6 +828,8 @@ impl AnyView {
         // short-circuiting on a still-cached `DesiredSize` from before the reset — invalidate
         // explicitly so the call below is never skipped.
         let _ = element.InvalidateMeasure();
+        #[cfg(test)]
+        NATIVE_MEASURE_CALL_COUNT.with(|count| count.set(count.get() + 1));
         let _ = element.Measure(Size {
             Width: available.width as f32,
             Height: available.height as f32,

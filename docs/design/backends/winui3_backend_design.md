@@ -31,6 +31,23 @@ Any future native control that owns a nested `TreeHost` must declare its own vie
 
 Arrange writes explicit `Width` / `Height` for Canvas positioning. Before every natural `Measure`, the adapter resets both values to `NaN` (`Auto`), invalidates native measure, and then measures with the current constraint. This prevents arrange-time sizes from becoming a self-reinforcing natural-size cache.
 
+NativeControl natural measurement has a two-stage first-show lifecycle. The initial Core/render pass
+is bootstrap-only: a newly projected FrameworkElement that is not yet `IsLoaded` contributes
+provisional zero natural size while the replay appends it to the real XAML Canvas. Each replay batch
+of genuinely new native controls then owns one explicit Loaded barrier. When the barrier completes,
+one or more controls having reached Loaded causes one root Measure invalidation and interactive
+RelayoutHost flush; all-cancelled batches cause no readiness relayout. A one-control batch and a
+many-control batch therefore have the same one-relayout readiness cost, while retained controls and
+render-only TextBlock projections receive no new Loaded wiring. Native child teardown removes the
+Loaded token and cancels unresolved participation, so tree replacement cannot strand a batch.
+
+The barrier holds only a weak Core root and resolves through the existing per-host pending/ticket
+and `RelayoutCycleState` machinery. Queued, interactive, and dispatcher-fallback realizations report
+whether an actual coalesced pass ran; a successful geometry-affecting pass refreshes the Core-owned
+accessibility snapshot once. The synchronous force path keeps its existing single post-pass rebuild.
+This publication follows realized geometry rather than individual Loaded notifications and adds no
+Canvas-size feedback or recurring layout trigger.
+
 The root Canvas forwards self-drawn pointer press/move/release/canceled events to the common `PointerDispatcher`. Every `TreeHost` permanently owns one transparent, hit-test-visible `Rectangle` at `Canvas.Children()[0]`; it spans the final relayout extent, including an unconstrained axis's natural arranged size, and is never part of dynamic reconciliation. Render-only XAML projections remain input-transparent, so blank/self-drawn hit testing resolves to this surface and bubbles to the root Canvas. The source boundary is exact identity: only the root Canvas or that host's exact input surface is forwarded to Core; native XAML children and unrelated descendants are rejected. A successful press captures the native pointer and release relinquishes it. `PointerCanceled` clears and notifies the Core capture before the Canvas releases its native captures; the resulting `PointerCaptureLost`, or an independently initiated capture loss, enters the same idempotent Core cancellation path. A weak `WinUI3PointerGestureHost` applies the Core-first ordering for subtree unmount, host deactivation, and tree replacement/clear.
 
 Real `NativeControl` children remain native input owners and therefore remain hit-testable. Host activation gates the root Canvas: deactivation performs the existing cancellation/native-capture release first, then disables root hit testing while retaining the permanent surface; reactivation restores root hit testing before the existing relayout. The surface's identity, fill, position, size path, and own hit-testability are independent of `Window.transparent`. `WinUI3CoordinateHost` weakly references the Canvas and promotes the existing `ContentCoordinateConverter`/rasterization-scale path for both root-to-screen and screen-to-root conversion, including transforms between Canvas and XamlRoot content.
@@ -78,3 +95,9 @@ The root peer exposes Core name, control type, root-relative-to-screen bounds,
 enabled state, keyboard focus, semantic children, and focus. Invoke, Toggle,
 RangeValue, Value, SelectionItem, and ExpandCollapse patterns are advertised only
 when the Core node advertises an executable matching action.
+
+The snapshot is rebuilt after a successfully realized geometry-affecting queued or interactive
+relayout, including the immediate fallback used when dispatcher enqueue is unavailable or rejected.
+Loaded notifications are barrier inputs, not accessibility publication triggers; one reconciliation
+batch therefore produces at most one post-layout snapshot refresh. Synchronous TreeHost force paths
+retain their existing single post-pass rebuild so the same geometry change is never published twice.

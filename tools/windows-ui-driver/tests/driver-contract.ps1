@@ -114,6 +114,34 @@ Assert ($r.Json.backend_stderr -like '*simulated broken install*') 'doctor (brok
 Assert ($r.ExitCode -eq 1) 'doctor (broken version) -- exit code 1'
 Remove-Item Env:ELWINDUI_FAKE_WINAPP_VERSION_FAIL -ErrorAction SilentlyContinue
 
+# T2c -- set-value forwards the selector, one value token containing spaces, HWND, and JSON
+# request flag without a send-keys fallback.
+$r = Invoke-Driver @(
+    'set-value', '--hwnd', '4660', '--selector', 'FAKE_SET_VALUE_SELECTOR',
+    '--value', 'value with spaces'
+)
+Assert-OneJsonObject $r 'set-value (success)'
+Assert ($r.Json.success -eq $true) 'set-value (success) -- success:true'
+Assert ($r.Json.backend.forwarded -eq $true) 'set-value (success) -- selector/value/HWND forwarded as exact backend arguments'
+Assert ($r.ExitCode -eq 0) 'set-value (success) -- exit code 0'
+
+# T2d -- required set-value arguments fail closed before the backend is invoked.
+$r = Invoke-Driver @('set-value', '--hwnd', '4660', '--value', 'value')
+Assert-OneJsonObject $r 'set-value (missing selector)'
+Assert ($r.Json.success -eq $false) 'set-value (missing selector) -- success:false'
+Assert ($r.Json.category -eq 'usage_error') 'set-value (missing selector) -- category:usage_error'
+$r = Invoke-Driver @('set-value', '--hwnd', '4660', '--selector', 'FAKE_SET_VALUE_SELECTOR')
+Assert-OneJsonObject $r 'set-value (missing value)'
+Assert ($r.Json.success -eq $false) 'set-value (missing value) -- success:false'
+Assert ($r.Json.category -eq 'usage_error') 'set-value (missing value) -- category:usage_error'
+
+# T2e -- a backend failure is normalized through the same UIA error taxonomy as other patterns.
+$r = Invoke-Driver @('set-value', '--hwnd', '4660', '--selector', 'FAKE_SET_VALUE_BACKEND_ERROR', '--value', 'value')
+Assert-OneJsonObject $r 'set-value (backend error)'
+Assert ($r.Json.success -eq $false) 'set-value (backend error) -- success:false'
+Assert ($r.Json.category -eq 'target_error') 'set-value (backend error) -- category:target_error'
+Assert ($r.ExitCode -eq 1) 'set-value (backend error) -- exit code 1'
+
 # T3 (large-stderr deadlock regression) -- Invoke-WinApp must drain the winapp backend's stdout
 # and stderr concurrently. A fake backend that writes >= 256 KiB to stderr before exiting would
 # deadlock a sequential stdout-then-stderr ReadToEnd() implementation (blocked filling stderr's

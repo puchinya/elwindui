@@ -2354,13 +2354,16 @@ impl TreeHost {
         }
     }
 
-    /// Converts canvas-local logical DIPs to desktop screen logical coordinates.
-    pub(crate) fn canvas_to_screen_point(
+    /// Converts canvas-local logical DIPs to desktop screen physical coordinates.
+    ///
+    /// The XAML root/content transform and ContentCoordinateConverter are the only source of
+    /// screen origin information. In particular, this must not approximate the title-bar or
+    /// window-decoration offset from AppWindow position.
+    pub(crate) fn canvas_to_screen_physical_point(
         canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
         canvas_point: Point,
     ) -> Option<Point> {
         let xaml_root = canvas.XamlRoot().ok()?;
-        let scale = xaml_root.RasterizationScale().unwrap_or(1.0);
         let content = xaml_root.Content().ok()?;
         let uie: crate::bindings::Microsoft::UI::Xaml::UIElement = canvas.cast().ok()?;
         let transform = uie.TransformToVisual(&content).ok()?;
@@ -2370,38 +2373,32 @@ impl TreeHost {
         };
         let local_dip = transform.TransformPoint(pt).ok()?;
 
-        // Primary method: ContentCoordinateConverter
-        if let Ok(island) = xaml_root.ContentIslandEnvironment() {
-            if let Ok(app_window_id) = island.AppWindowId() {
-                if let Ok(converter) = crate::bindings::Microsoft::UI::Content::ContentCoordinateConverter::CreateForWindowId(app_window_id) {
-                    if let Ok(screen_phys) = converter.ConvertLocalToScreenWithPoint(local_dip) {
-                        let scale = if scale <= 0.0 { 1.0 } else { scale };
-                        return Some(Point {
-                            x: (screen_phys.X as f64 / scale) as f32,
-                            y: (screen_phys.Y as f64 / scale) as f32,
-                        });
-                    }
-                }
-                if let Ok(app_window) =
-                    crate::bindings::Microsoft::UI::Windowing::AppWindow::GetFromWindowId(
-                        app_window_id,
-                    )
-                {
-                    if let Ok(pos) = app_window.Position() {
-                        return Some(canvas_local_to_screen_logical_pure(
-                            Point {
-                                x: local_dip.X,
-                                y: local_dip.Y,
-                            },
-                            (pos.X, pos.Y),
-                            scale,
-                        ));
-                    }
-                }
-            }
-        }
+        let island = xaml_root.ContentIslandEnvironment().ok()?;
+        let app_window_id = island.AppWindowId().ok()?;
+        let converter =
+            crate::bindings::Microsoft::UI::Content::ContentCoordinateConverter::CreateForWindowId(
+                app_window_id,
+            )
+            .ok()?;
+        let screen_phys = converter.ConvertLocalToScreenWithPoint(local_dip).ok()?;
+        Some(Point {
+            x: screen_phys.X as f32,
+            y: screen_phys.Y as f32,
+        })
+    }
 
-        None
+    /// Converts canvas-local logical DIPs to desktop screen logical coordinates.
+    pub(crate) fn canvas_to_screen_point(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        canvas_point: Point,
+    ) -> Option<Point> {
+        let scale = canvas.XamlRoot().ok()?.RasterizationScale().unwrap_or(1.0);
+        let scale = if scale <= 0.0 { 1.0 } else { scale };
+        let physical = Self::canvas_to_screen_physical_point(canvas, canvas_point)?;
+        Some(Point {
+            x: physical.x / scale as f32,
+            y: physical.y / scale as f32,
+        })
     }
 
     /// Converts normalized screen logical coordinates to this Canvas's own root-local DIPs.

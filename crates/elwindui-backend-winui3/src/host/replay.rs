@@ -32,19 +32,27 @@ pub(crate) enum NativeChildElement {
 /// projection bookkeeping must never keep a Core tree alive after a host is replaced or cleared.
 struct NativeLoadBatch {
     remaining: Cell<usize>,
+    member_count: usize,
     saw_loaded: Cell<bool>,
     completed: Cell<bool>,
+    host_id: Option<u64>,
     root: Option<Weak<dyn elwindui_core::ui::UIElementExt>>,
     #[cfg(test)]
     ready_completion_count: Cell<u32>,
 }
 
 impl NativeLoadBatch {
-    fn new(remaining: usize, root: Option<Weak<dyn elwindui_core::ui::UIElementExt>>) -> Self {
+    fn new(
+        remaining: usize,
+        root: Option<Weak<dyn elwindui_core::ui::UIElementExt>>,
+        host_id: Option<u64>,
+    ) -> Self {
         Self {
             remaining: Cell::new(remaining),
+            member_count: remaining,
             saw_loaded: Cell::new(false),
             completed: Cell::new(false),
+            host_id,
             root,
             #[cfg(test)]
             ready_completion_count: Cell::new(0),
@@ -76,6 +84,18 @@ impl NativeLoadTicket {
         let Some(batch) = batch else {
             return;
         };
+        let remaining_before = batch.remaining.get();
+        if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "[elwindui-winui3] native_load_member_resolve host={} loaded={} remaining_before={}",
+                batch
+                    .host_id
+                    .map(|host_id| host_id.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                loaded,
+                remaining_before
+            );
+        }
         if loaded {
             batch.saw_loaded.set(true);
         }
@@ -83,6 +103,17 @@ impl NativeLoadTicket {
         batch.remaining.set(remaining);
         if remaining != 0 || batch.completed.replace(true) {
             return;
+        }
+        if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "[elwindui-winui3] native_load_batch_complete host={} members={} saw_loaded={}",
+                batch
+                    .host_id
+                    .map(|host_id| host_id.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                batch.member_count,
+                batch.saw_loaded.get()
+            );
         }
         if !batch.saw_loaded.get() {
             return;
@@ -159,6 +190,58 @@ pub(crate) type NativeChildKey = (u64, usize);
 
 pub(crate) type NativeChildMap = HashMap<NativeChildKey, NativeChildElement>;
 
+type DiagnosticNativeRect = (NativeChildKey, f32, f32, f32, f32);
+
+thread_local! {
+    static LAST_DIAGNOSTIC_NATIVE_RECTS: RefCell<HashMap<u64, Vec<DiagnosticNativeRect>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn emit_diagnostic_native_rects(
+    host_id: Option<u64>,
+    wanted: &[(NativeChildKey, RenderedNativeChild)],
+) {
+    let Some(host_id) = host_id else {
+        return;
+    };
+    if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_none() {
+        return;
+    }
+    let mut rects = wanted
+        .iter()
+        .filter_map(|(key, child)| match child {
+            RenderedNativeChild::Native { rect, .. } => {
+                Some((*key, rect.x, rect.y, rect.width, rect.height))
+            }
+            RenderedNativeChild::Text { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    rects.sort_by_key(|(key, ..)| *key);
+    let changed = LAST_DIAGNOSTIC_NATIVE_RECTS.with(|last| {
+        let mut last = last.borrow_mut();
+        if last.get(&host_id) == Some(&rects) {
+            false
+        } else {
+            last.insert(host_id, rects.clone());
+            true
+        }
+    });
+    if !changed {
+        return;
+    }
+    eprintln!(
+        "[elwindui-winui3] native_projection_snapshot host={} count={}",
+        host_id,
+        rects.len()
+    );
+    for (key, x, y, width, height) in rects {
+        eprintln!(
+            "[elwindui-winui3] native_projection_rect host={} group={} index={} x={} y={} width={} height={}",
+            host_id, key.0, key.1, x, y, width, height
+        );
+    }
+}
+
 /// Projects the same presentation state used by the Composition island onto a XAML child.
 /// `AffineTransform` is currently produced by Core from uniform scale/rotation/translation, so
 /// the decomposition below is lossless for the public visual-transform surface. The matrix is
@@ -223,6 +306,7 @@ pub(crate) fn reconcile_native_children(
     wanted: Vec<(NativeChildKey, RenderedNativeChild)>,
     render_tree: &Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
     keyboard: &Rc<KeyboardDispatcher>,
+    host_id: Option<u64>,
 ) {
     let Ok(children) = canvas.Children() else {
         return;
@@ -240,6 +324,15 @@ pub(crate) fn reconcile_native_children(
     let native_load_batch = if new_native_count == 0 {
         None
     } else {
+        if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "[elwindui-winui3] native_load_batch host={} members={}",
+                host_id
+                    .map(|host_id| host_id.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                new_native_count
+            );
+        }
         let root = {
             let render_tree = render_tree.borrow();
             render_tree.as_ref().and_then(|render_tree| {
@@ -250,8 +343,13 @@ pub(crate) fn reconcile_native_children(
                     .map(|root| Rc::downgrade(&root))
             })
         };
-        Some(Rc::new(NativeLoadBatch::new(new_native_count, root)))
+        Some(Rc::new(NativeLoadBatch::new(
+            new_native_count,
+            root,
+            host_id,
+        )))
     };
+    emit_diagnostic_native_rects(host_id, &wanted);
     let mut still_wanted: std::collections::HashSet<NativeChildKey> =
         std::collections::HashSet::new();
     for (key, wanted_child) in wanted {
@@ -542,7 +640,7 @@ mod tests {
     use super::*;
 
     fn batch(remaining: usize) -> Rc<NativeLoadBatch> {
-        Rc::new(NativeLoadBatch::new(remaining, None))
+        Rc::new(NativeLoadBatch::new(remaining, None, None))
     }
 
     fn ticket(batch: &Rc<NativeLoadBatch>) -> NativeLoadTicket {

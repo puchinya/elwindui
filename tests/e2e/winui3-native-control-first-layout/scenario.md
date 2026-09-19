@@ -2,10 +2,11 @@
 
 ## Scope and ownership
 
-This is the durable Windows/WinUI3 acceptance case for Issue #265. It verifies that the existing
-`accessibility-semantics-demo` reaches its first stable native-control layout from framework
-lifecycle events alone, with no manual resize, hide/show, focus, pointer/keyboard input, synthetic
-`SizeChanged`, recurring `LayoutUpdated`, or arbitrary timer/sleep repair.
+This is the durable Windows/WinUI3 acceptance case for Issue #265. It verifies the first
+NativeControl layout from framework lifecycle events alone. This case is deliberately visual and
+diagnostic: it uses the process, top-level HWND geometry, screenshots, redirected application
+output, and bounded WinUI3 diagnostics. Semantic-accessibility acceptance remains owned by #256 /
+PR #264 after this fix is integrated.
 
 The main agent assigns each complete GUI run to one bounded tester using GPT-5.6 Luna with medium
 reasoning. The tester does not edit product code, this scenario, Git history, or GitHub state; it
@@ -17,73 +18,121 @@ always terminates the launched process.
 
 Run twice from clean launches at the exact final committed Issue #265 HEAD. Build
 `examples/accessibility-semantics-demo` with the canonical Windows environment before the runs.
-Run `doctor` once per session and create a fresh immutable evidence directory for each run:
+Run `doctor` once per session and create a fresh immutable evidence directory for each run. The
+case-owned launcher is required because the driver launch result does not capture application
+stdout/stderr.
 
 ```powershell
 $Root = git rev-parse --show-toplevel
 $Issue = 265
+$Head = git rev-parse HEAD
 $HeadShort = git rev-parse --short=12 HEAD
 $RunId = (Get-Date -AsUTC).ToString('yyyyMMddTHHmmssZ')
 $Run = "$Root\.agent-state\issues\$Issue\e2e\$HeadShort\$RunId"
 New-Item -ItemType Directory -Force -Path $Run | Out-Null
 $Driver = "$Root\tools\windows-ui-driver\windows-ui-driver.ps1"
+$Launcher = "$Root\tests\e2e\winui3-native-control-first-layout\launch-accessibility-semantics.ps1"
 pwsh -NoProfile -File $Driver doctor | Tee-Object "$Run\doctor.json"
-pwsh -NoProfile -File $Driver launch --path "$Root\target\debug\accessibility-semantics-demo.exe" | Tee-Object "$Run\launch.json"
+pwsh -NoProfile -File $Launcher `
+  -Executable "$Root\target\debug\accessibility-semantics-demo.exe" `
+  -EvidenceDirectory $Run | Tee-Object "$Run\launch.json"
 ```
 
-Record `git rev-parse HEAD`, `git rev-parse origin/master`, Windows version/build, driver version,
-session/input-desktop probe, PID, HWND, and process-start UTC timestamp. Do not reuse the PID,
-HWND, UIA identity, or evidence directory between runs.
+Record `$Head`, `origin/master`, Windows version/build, driver version, session/input-desktop
+probe, PID, top-level HWND, process-start UTC timestamp, and the redirected stdout/stderr paths.
+Do not reuse PID, HWND, or evidence directory between runs.
 
 ## Exact actions
 
-1. Launch the clean fixture and resolve the exact top-level window from the launch result or
-   `list-windows --pid <pid>`. Record the first window geometry and require the requested client
-   presentation to be `620x560` within the driver's normal window-reporting convention.
-2. Before any user-generated action, use `wait-for --hwnd <hwnd> --timeout-ms 30000` for the
-   fixture's semantic root and search for `a11y-text-area`, `a11y-check-box`, `a11y-slider`,
-   `a11y-canvas`, and `a11y-exiting-text-area`. Record every JSON result and the first stable
-   checkpoint timestamp. No resize, hide/show, focus, pointer, keyboard, tab, or synthetic event
-   may occur before this checkpoint.
-3. From the immediately preceding search results, inspect the semantic/native properties and bounds
-   for each required identifier. Record screen/root-relative bounds, role, and availability. The
-   TextArea, CheckBox, Slider, Canvas/removal rows must have nonzero required native/semantic bounds,
-   monotonically increasing vertical positions, and no overlapping row intervals. Do not use a
-   delayed screenshot or arbitrary sleep as the condition that makes this pass.
-4. Capture the first stable window with `capture-window --hwnd <hwnd> --output
-   "$Run\first-stable.png"`. Inspect it for complete separated rows in the expected order. If the
-   window-owned capture is blank or suspiciously small, retry once with `--capture-screen` and record
-   both results; a screenshot is supporting evidence, not a substitute for numeric bounds.
-5. After the initial acceptance, perform one normal `resize-window` operation to a bounded larger
-   size, reacquire window geometry, wait for the semantic root, and repeat the bounds/order check.
-   Record that the same rows remain ordered, non-overlapping, and updated for the new viewport.
-6. Terminate with `terminate --pid <pid> --timeout 5`, record the result and whether force was
-   required, then verify normal process exit.
+1. Resolve the exact top-level window from the launcher PID with `list-windows --pid <pid>`. Record
+   the first geometry and require the requested presentation to be `620x560` within the driver's
+   normal window-reporting convention.
+2. Before any user-generated action, poll only the redirected logs and `list-windows` result until
+   the explicit diagnostic record `native_load_batch_complete` is present and the target window is
+   non-empty. Polling is bounded and only waits for those named conditions; it is not a timer-based
+   layout repair. Record each bounded poll result and the first-stable timestamp.
+3. Parse the captured WinUI3 diagnostics. For the startup fixture, identify the one startup batch
+   containing the six genuinely new native controls (Activate Button, TextArea, CheckBox, Slider,
+   removal Button, and exiting TextArea). Require exactly one matching
+   `native_load_batch`/`native_load_batch_complete` pair, one completion with
+   `saw_loaded=true`, and exactly one `relayout_realization` for the same host with
+   `source=InteractiveFlush`, `kind=Measure`, and `realized=true` after the bootstrap record.
+4. Parse the final `native_projection_rect` records for that host. Require positive width and
+   height for all six NativeControl rectangles, monotonically increasing row Y positions, and no
+   overlapping row intervals. The self-drawn Canvas row is checked visually in the screenshot; it
+   is not counted as a native projection rectangle.
+5. Capture the first stable window:
 
-The case does not invoke buttons, focus, text entry, slider actions, or removal actions; those
-behaviors belong to the shared accessibility scenario. The only post-acceptance mutation is the
-single normal Window resize required to preserve #225 viewport tracking coverage.
+   ```powershell
+   pwsh -NoProfile -File $Driver capture-window --hwnd <hwnd> --output "$Run\first-stable.png"
+   ```
+
+   Inspect the image for a complete, non-black presentation: title/result area, separated native
+   rows, the self-drawn Canvas row, removal row, and exiting TextArea must be visible in vertical
+   order. If the window-owned capture is blank or suspiciously small, retry once with
+   `--capture-screen` and record both results. The screenshot is the visual acceptance evidence;
+   no semantic-tree query is part of this case.
+6. After the initial acceptance, perform one normal resize and reacquire the window geometry:
+
+   ```powershell
+   pwsh -NoProfile -File $Driver resize-window --hwnd <hwnd> --width 760 --height 620
+   pwsh -NoProfile -File $Driver list-windows --pid <pid>
+   ```
+
+   Wait only for the explicit post-resize diagnostic/projection change, capture
+   `$Run\after-resize.png`, and require positive ordered non-overlapping rectangles and a coherent
+   screenshot after resize. Record the resize `relayout_realization` source/kind and final
+   projected rectangles.
+7. Terminate normally and verify exit:
+
+   ```powershell
+   pwsh -NoProfile -File $Driver terminate --pid <pid> --timeout 5
+   ```
+
+   Record whether force was required and the final process-exit result.
+
+The case does not invoke controls, set focus, send pointer/keyboard input, hide/show the window,
+or create a synthetic size event. The single post-acceptance mutation is the normal Window resize
+required to preserve #225 viewport tracking coverage.
 
 ## Expected results and classification
 
-PASS requires: clean launch; exact 620x560 requested fixture; first stable checkpoint reached without
-a user-generated second event; nonzero and non-overlapping ordered TextArea/CheckBox/Slider/Canvas/
-removal geometry; a valid complete screenshot; successful normal resize tracking; and normal process
-termination. The evidence must show that readiness caused one settled presentation rather than a
-per-control relayout cascade when diagnostics/counters are enabled by the test harness.
+PASS requires: clean launch at the exact final HEAD; requested 620x560 fixture; one startup
+readiness batch; one readiness-driven authoritative full-host Measure realization; six positive,
+ordered, non-overlapping NativeControl rectangles; a valid complete screenshot; coherent normal
+resize evidence; no recurring relayout cascade; and normal process termination. Correctness must
+be established before the resize and without a user-generated second event.
 
-FAIL means the driver reached the product but initial bounds are zero/overlapping, the expected rows
-are missing, the screenshot is incomplete, resize tracking is wrong, or termination is abnormal.
-BLOCKED means the host/tool/session/security/desktop or UIA surface prevented exercising the product,
-including missing `winapp`, `no_interactive_desktop`, or an unrecoverable foreground/session issue.
+FAIL means the product launched but the diagnostics show a missing/multiple readiness batch, more
+than one readiness-driven full-host Measure realization, zero/overlapping/incorrect projected
+rectangles, an incomplete screenshot, incorrect resize tracking, a relayout storm, or abnormal
+termination.
+
+BLOCKED means the host/tool/session/security/desktop or capture surface prevented exercising the
+product, including missing `winapp`, `no_interactive_desktop`, or an unrecoverable foreground/
+session issue.
+
 NOT RUN means required evidence was never collected.
 
 ## Evidence and cleanup
 
-Store doctor, setup, launch, window, wait/search/property/bounds, screenshot, resize, and termination
-JSON plus a compact `result.md` under `.agent-state/issues/265/e2e/<head-short>/<run-id>/`. Include
-the exact HEAD, fresh PID/HWND/UIA identity, window geometry, first-stable timestamp, numeric row
-bounds, overlap/order calculation, screenshot path, resize result, and process-exit result. Never
-overwrite an earlier run. The main agent may attach a valid screenshot to Issue #265 with `gh
---attach`; raw logs remain Issue-scoped evidence. AppKit is not exercised by this WinUI3-specific
-case.
+Store `doctor.json`, `launch.json`, `list-windows` JSON, redirected stdout/stderr, bounded poll
+records, `first-stable.png`, optional screen-capture retry, `after-resize.png`, resize/window JSON,
+termination JSON, parsed diagnostics, and a compact `result.md` under
+`.agent-state/issues/265/e2e/<head-short>/<run-id>/`. `result.md` must include:
+
+* exact HEAD and requested/observed window geometry;
+* fresh PID/HWND and process-start UTC;
+* startup batch host and member count;
+* readiness completion record;
+* readiness-driven full-host pass count, which must be exactly one;
+* final NativeControl rectangles, positive-size/order/overlap calculations;
+* native leaf measure count as supporting evidence only, never as the full-host pass assertion;
+* screenshot paths and visual inspection result;
+* post-resize diagnostics/screenshot result;
+* termination and force-kill result;
+* `UIA commands used: none` and `semantic-bounds acceptance: deferred to PR #264`.
+
+Never overwrite an earlier run. Raw logs remain Issue-scoped evidence. Attach a valid screenshot to
+Issue #265 only from the main agent after the run has passed. AppKit is not exercised by this
+WinUI3-specific case.

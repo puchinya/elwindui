@@ -537,7 +537,14 @@ impl WinUI3RelayoutHost {
                 viewport.get(),
                 &active,
                 &relayout_cycle,
+                self.diagnostic_id,
             );
+            if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+                eprintln!(
+                    "[elwindui-winui3] relayout_realization host={} source={:?} kind={:?} realized={}",
+                    self.diagnostic_id, source, kind, realized
+                );
+            }
             #[cfg(test)]
             if realized {
                 RELAYOUT_REALIZATION_HISTORY.with(|history| {
@@ -1524,6 +1531,7 @@ impl TreeHost {
                 self.viewport.get(),
                 &self.active,
                 &self.relayout_cycle,
+                0,
             );
         }
         self.accessibility.rebuild();
@@ -1605,6 +1613,7 @@ impl TreeHost {
             Vec::new(),
             &self.render_tree,
             &self.keyboard,
+            None,
         );
         *self.render_tree.borrow_mut() = None;
     }
@@ -1693,6 +1702,7 @@ impl TreeHost {
             Vec::new(),
             &self.render_tree,
             &self.keyboard,
+            None,
         );
         *self.tree.borrow_mut() = None;
         *self.render_tree.borrow_mut() = None;
@@ -1760,6 +1770,7 @@ impl TreeHost {
         viewport: Option<TreeHostViewport>,
         active: &Cell<bool>,
         relayout_cycle: &RelayoutCycleState,
+        diagnostic_id: u64,
     ) -> bool {
         if !active.get() {
             return false;
@@ -1774,6 +1785,7 @@ impl TreeHost {
                 native_children,
                 keyboard,
                 viewport,
+                diagnostic_id,
             );
         })
     }
@@ -1790,6 +1802,7 @@ impl TreeHost {
         native_children: &Rc<RefCell<NativeChildMap>>,
         keyboard: &Rc<KeyboardDispatcher>,
         viewport: Option<TreeHostViewport>,
+        diagnostic_id: u64,
     ) {
         #[cfg(test)]
         RELAYOUT_STATIC_PASS_COUNT.with(|count| count.set(count.get() + 1));
@@ -2371,6 +2384,7 @@ impl TreeHost {
             native_wanted,
             retained_tree,
             keyboard,
+            Some(diagnostic_id),
         );
         {
             let native_children = native_children.borrow();

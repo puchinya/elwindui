@@ -175,7 +175,9 @@ mod hosted_xaml_regression_tests {
         Brush, CascadedTextStyle, Color, ComputedTextStyle, FontFamily, FontStretch, FontStyle,
         FontWeight, TextBackend, TextMeasureRequest, TextWrapping,
     };
-    use elwindui_core::ui::{UIElement, UIElementExt, WindowExt};
+    use elwindui_core::ui::{
+        ButtonExt, LayoutExt, UIElement, UIElementExt, VerticalLayout, VerticalLayoutExt, WindowExt,
+    };
     use std::cell::{Cell, RefCell};
     use std::rc::{Rc, Weak};
     use windows::Foundation::IPropertyValue;
@@ -227,6 +229,29 @@ mod hosted_xaml_regression_tests {
             Ok(())
         });
         let _ = queue.TryEnqueue(&handler);
+    }
+
+    fn native_batch_root(count: usize) -> (Rc<dyn UIElementExt>, Vec<AnyView>) {
+        let root = VerticalLayout::new();
+        root.set_spacing(4.0);
+        let mut views = Vec::with_capacity(count);
+        for index in 0..count {
+            let button = crate::native_ui::Button::new();
+            button.set_text(&format!("Loaded batch button {index}"));
+            views.push(button.into_any_view());
+            root.children().add(button);
+        }
+        (root, views)
+    }
+
+    fn readiness_measure_pass_count(history: &[crate::host::RelayoutRealizationRecord]) -> usize {
+        history
+            .iter()
+            .filter(|record| {
+                record.source == crate::host::RelayoutSource::InteractiveFlush
+                    && record.kind == elwindui_core::ui::InvalidationKind::Measure
+            })
+            .count()
     }
 
     fn assert_text_style_round_trip(canvas: &Canvas) {
@@ -415,6 +440,10 @@ mod hosted_xaml_regression_tests {
             static SCHEDULER_CALLBACK_COUNT_AFTER_QUEUE: RefCell<Option<usize>> = const { RefCell::new(None) };
             static SCHEDULER_CALLBACK_COUNT_AFTER_FLUSH: RefCell<Option<usize>> = const { RefCell::new(None) };
             static SCHEDULER_CALLBACK_COUNT_AFTER_STALE: RefCell<Option<usize>> = const { RefCell::new(None) };
+            static READINESS_ONE_HISTORY: RefCell<Option<Vec<crate::host::RelayoutRealizationRecord>>> = const { RefCell::new(None) };
+            static READINESS_MANY_HISTORY: RefCell<Option<Vec<crate::host::RelayoutRealizationRecord>>> = const { RefCell::new(None) };
+            static READINESS_ONE_NATIVE_MEASURE_COUNT: RefCell<Option<u32>> = const { RefCell::new(None) };
+            static READINESS_MANY_NATIVE_MEASURE_COUNT: RefCell<Option<u32>> = const { RefCell::new(None) };
         }
 
         crate::init().expect("elwindui_backend_winui3::init");
@@ -631,174 +660,332 @@ mod hosted_xaml_regression_tests {
                 assert!(bare_weak.upgrade().is_none());
                 assert_eq!(crate::app::retained_window_count_for_test(), 1);
 
-                // Scheduler-level Issue #261 regressions. The probe's first measure raises one
-                // same-host invalidation while the host is already in progress; the host must own
-                // that rerun through `run_coalesced`, without contaminating the next queued batch.
-                // Scheduler assertions remain outside native callbacks below.
-                let scheduler_probe = ReentrantMeasureProbe::new();
-                crate::host::reset_relayout_realization_history_for_test();
-                lifecycle_window.set_content(scheduler_probe.clone());
-                SCHEDULER_INITIAL_HISTORY.with(|slot| {
-                    *slot.borrow_mut() = Some(crate::host::relayout_realization_history_for_test())
-                });
-
-                let callback_baseline = crate::ffi::ui_event_callback_count();
-                SCHEDULER_CALLBACK_BASELINE
-                    .with(|slot| *slot.borrow_mut() = Some(callback_baseline));
-                scheduler_probe.invalidate_render();
-                scheduler_probe.invalidate_arrange();
-                scheduler_probe.invalidate_render();
-                scheduler_probe.invalidate_measure();
-                scheduler_probe.invalidate_arrange();
-                SCHEDULER_CALLBACK_COUNT_AFTER_QUEUE
-                    .with(|slot| *slot.borrow_mut() = Some(crate::ffi::ui_event_callback_count()));
-
-                let scheduler_probe_for_render = scheduler_probe.clone();
+                // Direct real-TreeHost proof for Issue #265: a one-control and a multi-control
+                // replacement each have one SetTree/bootstrap realization followed by exactly
+                // one InteractiveFlush/Measure realization from their Loaded readiness batch.
+                // This deliberately counts host realizations, not leaf XAML Measure calls. The
+                // actual assertions run after the dispatcher callbacks have allowed Loaded to
+                // settle, and are checked outside the native callback below.
+                // Use a dedicated real XAML Window/TreeHost pair for the pass-count probe. The
+                // lifecycle window above is intentionally also exercised by the existing Window
+                // tests, while this host keeps the readiness probe's native Loaded lifetime
+                // independent from those unrelated window replacements.
+                let readiness_window = XamlWindow::new().expect("readiness Window::new");
+                let readiness_host = Rc::new(crate::host::TreeHost::new());
+                let readiness_element = readiness_host.as_element();
+                readiness_window
+                    .SetContent(&readiness_element)
+                    .expect("readiness Window.SetContent");
+                readiness_host
+                    .set_viewport(crate::host::TreeHostViewport {
+                        width: Some(620.0),
+                        height: Some(560.0),
+                    })
+                    .expect("readiness TreeHost.set_viewport");
+                let readiness_host_for_one = readiness_host.clone();
+                let readiness_window_for_one = readiness_window.clone();
                 let lifecycle_window_for_scheduler = lifecycle_window.clone();
                 let weak_owner_a_for_scheduler = weak_owner_a.clone();
-                enqueue_test_callback(Rc::new(move || {
-                    SCHEDULER_STRONGEST_HISTORY.with(|slot| {
-                        *slot.borrow_mut() =
-                            Some(crate::host::relayout_realization_history_for_test())
-                    });
-
-                    // The previous batch has been consumed/reset. A new Render-only request must
-                    // not inherit the reentrant/strongest Measure claim from that earlier batch.
-                    scheduler_probe_for_render.invalidate_render();
-                    let scheduler_probe_for_flush = scheduler_probe_for_render.clone();
-                    let lifecycle_window_for_flush = lifecycle_window_for_scheduler.clone();
-                    let weak_owner_a_for_render = weak_owner_a_for_scheduler.clone();
+                let (readiness_root, readiness_first_views) = native_batch_root(1);
+                let readiness_first_view = readiness_first_views
+                    .into_iter()
+                    .next()
+                    .expect("one-control readiness view");
+                crate::host::reset_relayout_realization_history_for_test();
+                crate::ffi::reset_native_measure_call_count_for_test();
+                let first_readiness_callback: Rc<dyn Fn()> = Rc::new(move || {
+                    let readiness_host_for_one = readiness_host_for_one.clone();
+                    let readiness_window_for_one = readiness_window_for_one.clone();
+                    let lifecycle_window_for_scheduler = lifecycle_window_for_scheduler.clone();
+                    let weak_owner_a_for_scheduler = weak_owner_a_for_scheduler.clone();
+                    let lifecycle_window_for_many = lifecycle_window_for_scheduler.clone();
+                    let weak_owner_a_for_many = weak_owner_a_for_scheduler.clone();
                     enqueue_test_callback(Rc::new(move || {
-                        SCHEDULER_RENDER_HISTORY.with(|slot| {
+                        let _readiness_host = readiness_host_for_one.clone();
+                        let lifecycle_window_for_many = lifecycle_window_for_many.clone();
+                        let weak_owner_a_for_many = weak_owner_a_for_many.clone();
+                        let _readiness_window = readiness_window_for_one.clone();
+                        READINESS_ONE_HISTORY.with(|slot| {
                             *slot.borrow_mut() =
                                 Some(crate::host::relayout_realization_history_for_test())
                         });
-
-                        // Queue one ordinary batch, consume it synchronously, and then enqueue a
-                        // follow-up callback after the stale dispatcher ticket. That callback can
-                        // assert both one realization and one-shot callback cleanup.
-                        let flush_baseline = crate::ffi::ui_event_callback_count();
-                        SCHEDULER_CALLBACK_BASELINE
-                            .with(|slot| *slot.borrow_mut() = Some(flush_baseline));
-                        scheduler_probe_for_flush.invalidate_measure();
-                        SCHEDULER_CALLBACK_COUNT_AFTER_QUEUE.with(|slot| {
-                            *slot.borrow_mut() = Some(crate::ffi::ui_event_callback_count())
-                        });
-                        scheduler_probe_for_flush.flush_interactive_relayout();
-                        SCHEDULER_FLUSH_HISTORY.with(|slot| {
+                        READINESS_ONE_NATIVE_MEASURE_COUNT.with(|slot| {
                             *slot.borrow_mut() =
-                                Some(crate::host::relayout_realization_history_for_test())
-                        });
-                        SCHEDULER_CALLBACK_COUNT_AFTER_FLUSH.with(|slot| {
-                            *slot.borrow_mut() = Some(crate::ffi::ui_event_callback_count())
+                                Some(crate::ffi::native_measure_call_count_for_test())
                         });
 
-                        let lifecycle_window_for_burst = lifecycle_window_for_flush.clone();
-                        let weak_owner_a_for_stale = weak_owner_a_for_render.clone();
-                        enqueue_test_callback(Rc::new(move || {
-                            SCHEDULER_CALLBACK_COUNT_AFTER_STALE.with(|slot| {
+                        crate::host::reset_relayout_realization_history_for_test();
+                        crate::ffi::reset_native_measure_call_count_for_test();
+                        let readiness_many_window =
+                            XamlWindow::new().expect("multi-readiness Window::new");
+                        let readiness_many_host = Rc::new(crate::host::TreeHost::new());
+                        let readiness_many_element = readiness_many_host.as_element();
+                        readiness_many_window
+                            .SetContent(&readiness_many_element)
+                            .expect("multi-readiness Window.SetContent");
+                        readiness_many_host
+                            .set_viewport(crate::host::TreeHostViewport {
+                                width: Some(620.0),
+                                height: Some(560.0),
+                            })
+                            .expect("multi-readiness TreeHost.set_viewport");
+                        readiness_many_window
+                            .Activate()
+                            .expect("multi-readiness Window.Activate");
+                        let (readiness_many_root, readiness_many_views) = native_batch_root(4);
+                        let readiness_window_for_many = readiness_many_window.clone();
+                        let readiness_host_for_many = readiness_many_host.clone();
+                        let readiness_host_for_callback = readiness_many_host.clone();
+                        let many_ready_callback: Rc<dyn Fn()> = Rc::new(move || {
+                            let _readiness_host = readiness_host_for_callback.clone();
+                            let _readiness_window = readiness_window_for_many.clone();
+                            READINESS_MANY_HISTORY.with(|slot| {
+                                *slot.borrow_mut() =
+                                    Some(crate::host::relayout_realization_history_for_test())
+                            });
+                            READINESS_MANY_NATIVE_MEASURE_COUNT.with(|slot| {
+                                *slot.borrow_mut() =
+                                    Some(crate::ffi::native_measure_call_count_for_test())
+                            });
+
+                            let lifecycle_window = lifecycle_window_for_many.clone();
+                            let weak_owner_a = weak_owner_a_for_many.clone();
+
+                            // Scheduler-level Issue #261 regressions. The probe's first measure raises one
+                            // same-host invalidation while the host is already in progress; the host must own
+                            // that rerun through `run_coalesced`, without contaminating the next queued batch.
+                            // Scheduler assertions remain outside native callbacks below.
+                            let scheduler_probe = ReentrantMeasureProbe::new();
+                            crate::host::reset_relayout_realization_history_for_test();
+                            lifecycle_window.set_content(scheduler_probe.clone());
+                            SCHEDULER_INITIAL_HISTORY.with(|slot| {
+                                *slot.borrow_mut() =
+                                    Some(crate::host::relayout_realization_history_for_test())
+                            });
+
+                            let callback_baseline = crate::ffi::ui_event_callback_count();
+                            SCHEDULER_CALLBACK_BASELINE
+                                .with(|slot| *slot.borrow_mut() = Some(callback_baseline));
+                            scheduler_probe.invalidate_render();
+                            scheduler_probe.invalidate_arrange();
+                            scheduler_probe.invalidate_render();
+                            scheduler_probe.invalidate_measure();
+                            scheduler_probe.invalidate_arrange();
+                            SCHEDULER_CALLBACK_COUNT_AFTER_QUEUE.with(|slot| {
                                 *slot.borrow_mut() = Some(crate::ffi::ui_event_callback_count())
                             });
 
-                            // Existing hosted burst/sibling coverage is deliberately kept in the
-                            // same real Application test. Run it once with 20 writes and again
-                            // with 500 writes; each host must still realize exactly one pass.
-                            use elwindui_core::ui::TextBlockExt;
-                            let probe = elwindui_core::ui::TextBlock::new();
-                            lifecycle_window_for_burst.set_content(probe.clone());
-                            let sibling_owner: Rc<dyn elwindui_core::ui::WindowExt> =
-                                crate::native_ui::Window::new();
-                            let weak_owner_b = Rc::downgrade(&sibling_owner);
-                            let sibling_window = Rc::new(InnerWindow::new(weak_owner_b.clone()));
-                            sibling_window.show();
-                            drop(sibling_owner);
-                            assert_eq!(
-                                crate::app::retained_window_count_for_test(),
-                                2,
-                                "a second shown window must be retained independently"
-                            );
-                            let sibling_probe = elwindui_core::ui::TextBlock::new();
-                            sibling_window.set_content(sibling_probe.clone());
-
-                            crate::host::reset_relayout_static_pass_count_for_test();
-                            for i in 0..20 {
-                                probe.set_text(&format!("probe {i}"));
-                            }
-                            sibling_probe.set_text("sibling probe");
-                            let pass_count_before_drain =
-                                crate::host::relayout_static_pass_count_for_test();
-                            RELAYOUT_PASS_COUNT_BEFORE_DRAIN
-                                .with(|slot| *slot.borrow_mut() = Some(pass_count_before_drain));
-
-                            let lifecycle_window_for_500 = lifecycle_window_for_burst.clone();
-                            let weak_owner_a_for_burst = weak_owner_a_for_stale.clone();
+                            let scheduler_probe_for_render = scheduler_probe.clone();
+                            let lifecycle_window_for_scheduler = lifecycle_window.clone();
+                            let weak_owner_a_for_scheduler = weak_owner_a.clone();
                             enqueue_test_callback(Rc::new(move || {
-                                RELAYOUT_PASS_COUNT_AFTER_DRAIN.with(|slot| {
+                                SCHEDULER_STRONGEST_HISTORY.with(|slot| {
                                     *slot.borrow_mut() =
-                                        Some(crate::host::relayout_static_pass_count_for_test())
+                                        Some(crate::host::relayout_realization_history_for_test())
                                 });
 
-                                crate::host::reset_relayout_static_pass_count_for_test();
-                                for i in 0..500 {
-                                    probe.set_text(&format!("probe-500 {i}"));
-                                }
-                                sibling_probe.set_text("sibling probe 500");
-
-                                let sibling_window_for_close =
-                                    Rc::new(RefCell::new(Some(sibling_window.clone())));
-                                let weak_owner_a_for_close = weak_owner_a_for_burst.clone();
-                                let weak_owner_b_for_close = weak_owner_b.clone();
-                                let lifecycle_window_for_close = lifecycle_window_for_500.clone();
+                                // The previous batch has been consumed/reset. A new Render-only request must
+                                // not inherit the reentrant/strongest Measure claim from that earlier batch.
+                                scheduler_probe_for_render.invalidate_render();
+                                let scheduler_probe_for_flush = scheduler_probe_for_render.clone();
+                                let lifecycle_window_for_flush =
+                                    lifecycle_window_for_scheduler.clone();
+                                let weak_owner_a_for_render = weak_owner_a_for_scheduler.clone();
                                 enqueue_test_callback(Rc::new(move || {
-                                    RELAYOUT_PASS_COUNT_AFTER_500.with(|slot| {
+                                    SCHEDULER_RENDER_HISTORY.with(|slot| {
+                                        *slot.borrow_mut() = Some(
+                                            crate::host::relayout_realization_history_for_test(),
+                                        )
+                                    });
+
+                                    // Queue one ordinary batch, consume it synchronously, and then enqueue a
+                                    // follow-up callback after the stale dispatcher ticket. That callback can
+                                    // assert both one realization and one-shot callback cleanup.
+                                    let flush_baseline = crate::ffi::ui_event_callback_count();
+                                    SCHEDULER_CALLBACK_BASELINE
+                                        .with(|slot| *slot.borrow_mut() = Some(flush_baseline));
+                                    scheduler_probe_for_flush.invalidate_measure();
+                                    SCHEDULER_CALLBACK_COUNT_AFTER_QUEUE.with(|slot| {
                                         *slot.borrow_mut() =
+                                            Some(crate::ffi::ui_event_callback_count())
+                                    });
+                                    scheduler_probe_for_flush.flush_interactive_relayout();
+                                    SCHEDULER_FLUSH_HISTORY.with(|slot| {
+                                        *slot.borrow_mut() = Some(
+                                            crate::host::relayout_realization_history_for_test(),
+                                        )
+                                    });
+                                    SCHEDULER_CALLBACK_COUNT_AFTER_FLUSH.with(|slot| {
+                                        *slot.borrow_mut() =
+                                            Some(crate::ffi::ui_event_callback_count())
+                                    });
+
+                                    let lifecycle_window_for_burst =
+                                        lifecycle_window_for_flush.clone();
+                                    let weak_owner_a_for_stale = weak_owner_a_for_render.clone();
+                                    enqueue_test_callback(Rc::new(move || {
+                                        SCHEDULER_CALLBACK_COUNT_AFTER_STALE.with(|slot| {
+                                            *slot.borrow_mut() =
+                                                Some(crate::ffi::ui_event_callback_count())
+                                        });
+
+                                        // Existing hosted burst/sibling coverage is deliberately kept in the
+                                        // same real Application test. Run it once with 20 writes and again
+                                        // with 500 writes; each host must still realize exactly one pass.
+                                        use elwindui_core::ui::TextBlockExt;
+                                        let probe = elwindui_core::ui::TextBlock::new();
+                                        lifecycle_window_for_burst.set_content(probe.clone());
+                                        let sibling_owner: Rc<dyn elwindui_core::ui::WindowExt> =
+                                            crate::native_ui::Window::new();
+                                        let weak_owner_b = Rc::downgrade(&sibling_owner);
+                                        let sibling_window =
+                                            Rc::new(InnerWindow::new(weak_owner_b.clone()));
+                                        sibling_window.show();
+                                        drop(sibling_owner);
+                                        assert_eq!(
+                                            crate::app::retained_window_count_for_test(),
+                                            2,
+                                            "a second shown window must be retained independently"
+                                        );
+                                        let sibling_probe = elwindui_core::ui::TextBlock::new();
+                                        sibling_window.set_content(sibling_probe.clone());
+
+                                        crate::host::reset_relayout_static_pass_count_for_test();
+                                        for i in 0..20 {
+                                            probe.set_text(&format!("probe {i}"));
+                                        }
+                                        sibling_probe.set_text("sibling probe");
+                                        let pass_count_before_drain =
+                                            crate::host::relayout_static_pass_count_for_test();
+                                        RELAYOUT_PASS_COUNT_BEFORE_DRAIN.with(|slot| {
+                                            *slot.borrow_mut() = Some(pass_count_before_drain)
+                                        });
+
+                                        let lifecycle_window_for_500 =
+                                            lifecycle_window_for_burst.clone();
+                                        let weak_owner_a_for_burst = weak_owner_a_for_stale.clone();
+                                        enqueue_test_callback(Rc::new(move || {
+                                            RELAYOUT_PASS_COUNT_AFTER_DRAIN.with(|slot| {
+                                                *slot.borrow_mut() = Some(
+                                                crate::host::relayout_static_pass_count_for_test(),
+                                            )
+                                            });
+
+                                            crate::host::reset_relayout_static_pass_count_for_test(
+                                            );
+                                            for i in 0..500 {
+                                                probe.set_text(&format!("probe-500 {i}"));
+                                            }
+                                            sibling_probe.set_text("sibling probe 500");
+
+                                            let sibling_window_for_close =
+                                                Rc::new(RefCell::new(Some(sibling_window.clone())));
+                                            let weak_owner_a_for_close =
+                                                weak_owner_a_for_burst.clone();
+                                            let weak_owner_b_for_close = weak_owner_b.clone();
+                                            let lifecycle_window_for_close =
+                                                lifecycle_window_for_500.clone();
+                                            enqueue_test_callback(Rc::new(move || {
+                                                RELAYOUT_PASS_COUNT_AFTER_500.with(|slot| {
+                                                    *slot.borrow_mut() =
                                             Some(crate::host::relayout_static_pass_count_for_test())
-                                    });
-                                    if let Some(sibling_window_for_close) =
-                                        sibling_window_for_close.borrow_mut().take()
-                                    {
-                                        sibling_window_for_close.close();
-                                        drop(sibling_window_for_close);
-                                    }
-                                    SIBLING_RETAINED_COUNT_AFTER_CLOSE.with(|slot| {
-                                        *slot.borrow_mut() =
-                                            Some(crate::app::retained_window_count_for_test())
-                                    });
-                                    SIBLING_B_ALIVE_AFTER_CLOSE.with(|slot| {
-                                        *slot.borrow_mut() =
-                                            Some(weak_owner_b_for_close.upgrade().is_some())
-                                    });
-                                    SIBLING_A_ALIVE_AFTER_CLOSE.with(|slot| {
-                                        *slot.borrow_mut() =
-                                            Some(weak_owner_a_for_close.upgrade().is_some())
-                                    });
-                                    lifecycle_window_for_close.close();
-                                    LIFECYCLE_VISIBLE_AFTER_CLOSE.with(|slot| {
-                                        *slot.borrow_mut() =
-                                            Some(lifecycle_window_for_close.is_visible_for_test())
-                                    });
-                                    RETAINED_COUNT_AFTER_CLOSE.with(|slot| {
-                                        *slot.borrow_mut() =
-                                            Some(crate::app::retained_window_count_for_test())
-                                    });
-                                    RELEASE_CALL_COUNT_AFTER_CLOSE.with(|slot| {
-                                        *slot.borrow_mut() =
-                                            Some(crate::app::release_window_call_count_for_test())
-                                    });
-                                    // `release_window` also requests application exit when the
-                                    // registry becomes empty. Repeat that idempotent request after
-                                    // the final close so this one-Application regression test does
-                                    // not depend on whether WinUI delivers the Closed callback's
-                                    // exit request before or after the enclosing dispatcher turn.
-                                    crate::bindings::Microsoft::UI::Xaml::Application::Current()
+                                                });
+                                                if let Some(sibling_window_for_close) =
+                                                    sibling_window_for_close.borrow_mut().take()
+                                                {
+                                                    sibling_window_for_close.close();
+                                                    drop(sibling_window_for_close);
+                                                }
+                                                SIBLING_RETAINED_COUNT_AFTER_CLOSE.with(|slot| {
+                                                    *slot.borrow_mut() = Some(
+                                                        crate::app::retained_window_count_for_test(
+                                                        ),
+                                                    )
+                                                });
+                                                SIBLING_B_ALIVE_AFTER_CLOSE.with(|slot| {
+                                                    *slot.borrow_mut() = Some(
+                                                        weak_owner_b_for_close.upgrade().is_some(),
+                                                    )
+                                                });
+                                                SIBLING_A_ALIVE_AFTER_CLOSE.with(|slot| {
+                                                    *slot.borrow_mut() = Some(
+                                                        weak_owner_a_for_close.upgrade().is_some(),
+                                                    )
+                                                });
+                                                lifecycle_window_for_close.close();
+                                                LIFECYCLE_VISIBLE_AFTER_CLOSE.with(|slot| {
+                                                    *slot.borrow_mut() = Some(
+                                                        lifecycle_window_for_close
+                                                            .is_visible_for_test(),
+                                                    )
+                                                });
+                                                RETAINED_COUNT_AFTER_CLOSE.with(|slot| {
+                                                    *slot.borrow_mut() = Some(
+                                                        crate::app::retained_window_count_for_test(
+                                                        ),
+                                                    )
+                                                });
+                                                RELEASE_CALL_COUNT_AFTER_CLOSE.with(|slot| {
+                                                    *slot.borrow_mut() = Some(
+                                                    crate::app::release_window_call_count_for_test(
+                                                    ),
+                                                )
+                                                });
+                                                // `release_window` also requests application exit when the
+                                                // registry becomes empty. Repeat that idempotent request after
+                                                // the final close so this one-Application regression test does
+                                                // not depend on whether WinUI delivers the Closed callback's
+                                                // exit request before or after the enclosing dispatcher turn.
+                                                crate::bindings::Microsoft::UI::Xaml::Application::Current()
                                         .expect("Application::Current")
                                         .Exit()
                                         .expect("Application::Exit");
+                                            }));
+                                        }));
+                                    }));
                                 }));
                             }));
-                        }));
+                        });
+                        let many_remaining = Rc::new(Cell::new(readiness_many_views.len()));
+                        let many_owner = crate::ffi::UiCallbackRegistryOwner::default();
+                        for view in readiness_many_views {
+                            let remaining = many_remaining.clone();
+                            let callback = many_ready_callback.clone();
+                            let callback_id =
+                                many_owner.register_one_shot_event(Rc::new(move || {
+                                    let remaining_count = remaining.get().saturating_sub(1);
+                                    remaining.set(remaining_count);
+                                    if remaining_count == 0 {
+                                        enqueue_test_callback(callback.clone());
+                                    }
+                                }));
+                            let loaded_handler = RoutedEventHandler::new(move |_, _| {
+                                invoke_ui_event_callback(callback_id);
+                                Ok(())
+                            });
+                            let _ = view.as_element().Loaded(&loaded_handler);
+                        }
+                        TEST_CALLBACK_OWNERS.with(|owners| owners.borrow_mut().push(many_owner));
+                        readiness_host_for_many.set_tree(readiness_many_root);
                     }));
+                });
+                let loaded_owner = crate::ffi::UiCallbackRegistryOwner::default();
+                let loaded_callback_id = loaded_owner.register_one_shot_event(Rc::new(move || {
+                    enqueue_test_callback(first_readiness_callback.clone());
                 }));
+                let loaded_handler = RoutedEventHandler::new(move |_, _| {
+                    invoke_ui_event_callback(loaded_callback_id);
+                    Ok(())
+                });
+                readiness_first_view
+                    .as_element()
+                    .Loaded(&loaded_handler)
+                    .expect("one-control test Loaded registration");
+                TEST_CALLBACK_OWNERS.with(|owners| owners.borrow_mut().push(loaded_owner));
+                readiness_host.set_tree(readiness_root);
+                readiness_window
+                    .Activate()
+                    .expect("readiness Window.Activate");
 
                 Ok(())
             });
@@ -820,6 +1007,52 @@ mod hosted_xaml_regression_tests {
         assert!(
             native_measure_count_after_loaded > 0,
             "post-Loaded natural measurement must call native XAML Measure"
+        );
+
+        let readiness_one_history = READINESS_ONE_HISTORY
+            .with(|slot| slot.borrow().clone())
+            .expect("one-control readiness history should have been recorded");
+        let readiness_many_history = READINESS_MANY_HISTORY
+            .with(|slot| slot.borrow().clone())
+            .expect("multi-control readiness history should have been recorded");
+        let readiness_one_passes = readiness_measure_pass_count(&readiness_one_history);
+        let readiness_many_passes = readiness_measure_pass_count(&readiness_many_history);
+        assert_eq!(
+            readiness_one_passes, 1,
+            "one new NativeControl must have one readiness-driven full host Measure realization: \
+             {readiness_one_history:?}"
+        );
+        assert_eq!(
+            readiness_many_passes, 1,
+            "multiple new NativeControls must share one readiness-driven full host Measure \
+             realization: {readiness_many_history:?}"
+        );
+        assert_eq!(
+            readiness_many_passes, readiness_one_passes,
+            "readiness-driven full host realization count must remain constant as the batch grows"
+        );
+        assert!(
+            readiness_one_history.iter().any(|record| {
+                record.source == crate::host::RelayoutSource::SetTreeInitial
+                    && record.kind == elwindui_core::ui::InvalidationKind::Measure
+            }),
+            "one-control startup must include its bootstrap SetTreeInitial/Measure realization: \
+             {readiness_one_history:?}"
+        );
+        let readiness_one_native_measure_count = READINESS_ONE_NATIVE_MEASURE_COUNT
+            .with(|slot| *slot.borrow())
+            .expect("one-control native measure count should have been recorded");
+        let readiness_many_native_measure_count = READINESS_MANY_NATIVE_MEASURE_COUNT
+            .with(|slot| *slot.borrow())
+            .expect("multi-control native measure count should have been recorded");
+        assert!(
+            readiness_one_native_measure_count > 0,
+            "one loaded native leaf must be naturally measured during the authoritative pass"
+        );
+        assert!(
+            readiness_many_native_measure_count >= 4,
+            "each loaded native leaf may measure during the one authoritative pass; got \
+             {readiness_many_native_measure_count}"
         );
 
         // Issue #261 regression assertions (deferred from inside native callbacks — see that

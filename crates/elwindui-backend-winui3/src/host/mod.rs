@@ -572,7 +572,8 @@ impl WinUI3RelayoutHost {
         if !realized || kind < elwindui_core::ui::InvalidationKind::Arrange {
             return;
         }
-        if let Some(accessibility) = self.accessibility.upgrade() {
+        let accessibility: Option<Rc<WinUI3AccessibilityState>> = self.accessibility.upgrade();
+        if let Some(accessibility) = accessibility {
             accessibility.rebuild();
         }
     }

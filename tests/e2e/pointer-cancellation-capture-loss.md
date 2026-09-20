@@ -76,7 +76,9 @@ Use the PC-01 or PC-02 gesture only when the host has delivered the first native
 then retain the same window/session long enough to observe any subsequent capture-loss callback.
 
 PASS requires the Core cancellation count to remain exactly one. A driver success without an
-application count/postcondition is not PASS; if PC-01/PC-02 is blocked, this row is `NOT RUN`.
+application count/postcondition is not PASS. If PC-01/PC-02 cannot be delivered because of an
+established driver, host, or tooling limitation, classify this row `BLOCKED`; if the prerequisite
+was merely not executed without such a blocker, classify it `NOT RUN`.
 
 ### PC-04 — Native capture release
 
@@ -86,8 +88,10 @@ After a real native cancellation has been observed, move and click a different v
 self-drawn target using a freshly resolved coordinate. Observe that the old target receives no
 later moved/released/tapped callback and that the new target receives the fresh sequence.
 
-PASS requires both the native cancellation and the post-cancel routing observation. If no native
-cancellation can be delivered, classify `NOT RUN` rather than substituting a synthetic Core call.
+PASS requires both the native cancellation and the post-cancel routing observation. If native
+cancellation cannot be delivered because of an established driver, host, or tooling limitation,
+classify this row `BLOCKED`; if the case was simply not attempted without such a blocker, classify
+it `NOT RUN`. Never substitute a synthetic Core call.
 
 ### PC-05 — No active gesture
 

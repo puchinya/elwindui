@@ -28,6 +28,111 @@ pub(crate) enum NativeChildElement {
     Native(NativeChildState),
 }
 
+/// One reconciliation batch's Loaded readiness barrier. The root is deliberately weak: native
+/// projection bookkeeping must never keep a Core tree alive after a host is replaced or cleared.
+struct NativeLoadBatch {
+    remaining: Cell<usize>,
+    member_count: usize,
+    saw_loaded: Cell<bool>,
+    completed: Cell<bool>,
+    host_id: Option<u64>,
+    root: Option<Weak<dyn elwindui_core::ui::UIElementExt>>,
+    #[cfg(test)]
+    ready_completion_count: Cell<u32>,
+}
+
+impl NativeLoadBatch {
+    fn new(
+        remaining: usize,
+        root: Option<Weak<dyn elwindui_core::ui::UIElementExt>>,
+        host_id: Option<u64>,
+    ) -> Self {
+        Self {
+            remaining: Cell::new(remaining),
+            member_count: remaining,
+            saw_loaded: Cell::new(false),
+            completed: Cell::new(false),
+            host_id,
+            root,
+            #[cfg(test)]
+            ready_completion_count: Cell::new(0),
+        }
+    }
+}
+
+/// A NativeChildState-owned participation handle. The inner option is shared with the Loaded
+/// callback so either the callback or teardown can resolve it exactly once, and resolution drops
+/// the ticket's strong batch reference immediately.
+#[derive(Clone)]
+struct NativeLoadTicket(Rc<RefCell<Option<Rc<NativeLoadBatch>>>>);
+
+impl NativeLoadTicket {
+    fn new(batch: &Rc<NativeLoadBatch>) -> Self {
+        Self(Rc::new(RefCell::new(Some(Rc::clone(batch)))))
+    }
+
+    fn resolve_loaded(&self) {
+        self.resolve(true);
+    }
+
+    fn resolve_cancelled(&self) {
+        self.resolve(false);
+    }
+
+    fn resolve(&self, loaded: bool) {
+        let batch = self.0.borrow_mut().take();
+        let Some(batch) = batch else {
+            return;
+        };
+        let remaining_before = batch.remaining.get();
+        if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "[elwindui-winui3] native_load_member_resolve host={} loaded={} remaining_before={}",
+                batch
+                    .host_id
+                    .map(|host_id| host_id.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                loaded,
+                remaining_before
+            );
+        }
+        if loaded {
+            batch.saw_loaded.set(true);
+        }
+        let remaining = batch.remaining.get().saturating_sub(1);
+        batch.remaining.set(remaining);
+        if remaining != 0 || batch.completed.replace(true) {
+            return;
+        }
+        if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "[elwindui-winui3] native_load_batch_complete host={} members={} saw_loaded={}",
+                batch
+                    .host_id
+                    .map(|host_id| host_id.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                batch.member_count,
+                batch.saw_loaded.get()
+            );
+        }
+        if !batch.saw_loaded.get() {
+            return;
+        }
+        #[cfg(test)]
+        batch
+            .ready_completion_count
+            .set(batch.ready_completion_count.get() + 1);
+        let Some(root) = batch.root.as_ref().and_then(Weak::upgrade) else {
+            return;
+        };
+        // This is intentionally the Core RelayoutHost path, not a direct TreeHost call. It
+        // preserves per-host pending/ticket coalescing and turns a reentrant completion into the
+        // existing RelayoutCycleState rerun.
+        root.invalidate_measure();
+        root.flush_interactive_relayout();
+    }
+}
+
 /// One host-created focus subscription attached to a retained native control.
 ///
 /// The control itself belongs to the core UI tree and survives host suppression, but these
@@ -36,6 +141,8 @@ pub(crate) enum NativeChildElement {
 /// therefore wire one fresh pair without accumulating duplicate focus dispatches.
 pub(crate) struct NativeChildState {
     view: AnyView,
+    loaded_token: Option<i64>,
+    loaded_ticket: Option<NativeLoadTicket>,
     got_focus_token: Option<i64>,
     lost_focus_token: Option<i64>,
     callback_owner: UiCallbackRegistryOwner,
@@ -44,6 +151,12 @@ pub(crate) struct NativeChildState {
 impl Drop for NativeChildState {
     fn drop(&mut self) {
         let element = self.view.as_element();
+        if let Some(token) = self.loaded_token.take() {
+            let _ = element.RemoveLoaded(token);
+        }
+        if let Some(ticket) = self.loaded_ticket.take() {
+            ticket.resolve_cancelled();
+        }
         if let Some(token) = self.got_focus_token.take() {
             let _ = element.RemoveGotFocus(token);
         }
@@ -76,6 +189,58 @@ impl NativeChildElement {
 pub(crate) type NativeChildKey = (u64, usize);
 
 pub(crate) type NativeChildMap = HashMap<NativeChildKey, NativeChildElement>;
+
+type DiagnosticNativeRect = (NativeChildKey, f32, f32, f32, f32);
+
+thread_local! {
+    static LAST_DIAGNOSTIC_NATIVE_RECTS: RefCell<HashMap<u64, Vec<DiagnosticNativeRect>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn emit_diagnostic_native_rects(
+    host_id: Option<u64>,
+    wanted: &[(NativeChildKey, RenderedNativeChild)],
+) {
+    let Some(host_id) = host_id else {
+        return;
+    };
+    if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_none() {
+        return;
+    }
+    let mut rects = wanted
+        .iter()
+        .filter_map(|(key, child)| match child {
+            RenderedNativeChild::Native { rect, .. } => {
+                Some((*key, rect.x, rect.y, rect.width, rect.height))
+            }
+            RenderedNativeChild::Text { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    rects.sort_by_key(|(key, ..)| *key);
+    let changed = LAST_DIAGNOSTIC_NATIVE_RECTS.with(|last| {
+        let mut last = last.borrow_mut();
+        if last.get(&host_id) == Some(&rects) {
+            false
+        } else {
+            last.insert(host_id, rects.clone());
+            true
+        }
+    });
+    if !changed {
+        return;
+    }
+    eprintln!(
+        "[elwindui-winui3] native_projection_snapshot host={} count={}",
+        host_id,
+        rects.len()
+    );
+    for (key, x, y, width, height) in rects {
+        eprintln!(
+            "[elwindui-winui3] native_projection_rect host={} group={} index={} x={} y={} width={} height={}",
+            host_id, key.0, key.1, x, y, width, height
+        );
+    }
+}
 
 /// Projects the same presentation state used by the Composition island onto a XAML child.
 /// `AffineTransform` is currently produced by Core from uniform scale/rotation/translation, so
@@ -141,11 +306,50 @@ pub(crate) fn reconcile_native_children(
     wanted: Vec<(NativeChildKey, RenderedNativeChild)>,
     render_tree: &Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
     keyboard: &Rc<KeyboardDispatcher>,
+    host_id: Option<u64>,
 ) {
     let Ok(children) = canvas.Children() else {
         return;
     };
     let mut existing = existing.borrow_mut();
+    // Count before mutating/appending so every genuinely new NativeControl in this one replay
+    // shares exactly one readiness barrier. TextBlock projections deliberately do not participate.
+    let new_native_count = wanted
+        .iter()
+        .filter(|(key, wanted_child)| {
+            matches!(wanted_child, RenderedNativeChild::Native { .. })
+                && !matches!(existing.get(key), Some(NativeChildElement::Native(_)))
+        })
+        .count();
+    let native_load_batch = if new_native_count == 0 {
+        None
+    } else {
+        if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "[elwindui-winui3] native_load_batch host={} members={}",
+                host_id
+                    .map(|host_id| host_id.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                new_native_count
+            );
+        }
+        let root = {
+            let render_tree = render_tree.borrow();
+            render_tree.as_ref().and_then(|render_tree| {
+                render_tree
+                    .visual_index
+                    .get(&render_tree.root.id)
+                    .and_then(Weak::upgrade)
+                    .map(|root| Rc::downgrade(&root))
+            })
+        };
+        Some(Rc::new(NativeLoadBatch::new(
+            new_native_count,
+            root,
+            host_id,
+        )))
+    };
+    emit_diagnostic_native_rects(host_id, &wanted);
     let mut still_wanted: std::collections::HashSet<NativeChildKey> =
         std::collections::HashSet::new();
     for (key, wanted_child) in wanted {
@@ -321,8 +525,44 @@ pub(crate) fn reconcile_native_children(
                                 Ok(())
                             }))
                             .ok();
+                        let loaded_ticket = native_load_batch
+                            .as_ref()
+                            .map(|batch| NativeLoadTicket::new(batch));
+                        let loaded_callback_id = loaded_ticket.as_ref().map(|ticket| {
+                            let ticket_for_loaded = ticket.clone();
+                            callback_owner.register_one_shot_event(Rc::new(move || {
+                                ticket_for_loaded.resolve_loaded();
+                            }))
+                        });
+                        let loaded_token = match loaded_callback_id {
+                            Some(loaded_callback_id) => {
+                                let loaded_callback = RoutedEventHandler::new(move |_, _| {
+                                    invoke_ui_event_callback(loaded_callback_id);
+                                    Ok(())
+                                });
+                                match element.Loaded(&loaded_callback) {
+                                    Ok(token) => Some(token),
+                                    Err(error) => {
+                                        callback_owner.unregister_event(loaded_callback_id);
+                                        if let Some(ticket) = loaded_ticket.as_ref() {
+                                            ticket.resolve_cancelled();
+                                        }
+                                        if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some()
+                                        {
+                                            eprintln!(
+                                                "[elwindui-winui3] FrameworkElement.Loaded registration failed: {error:?}"
+                                            );
+                                        }
+                                        None
+                                    }
+                                }
+                            }
+                            None => None,
+                        };
                         NativeChildElement::Native(NativeChildState {
                             view,
+                            loaded_token,
+                            loaded_ticket,
                             got_focus_token,
                             lost_focus_token,
                             callback_owner,
@@ -338,7 +578,25 @@ pub(crate) fn reconcile_native_children(
                         let _ = children.RemoveAt(index);
                     }
                 }
-                let _ = children.Append(&element.framework_element());
+                let element_handle = element.framework_element();
+                if let Err(error) = children.Append(&element_handle) {
+                    if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+                        eprintln!(
+                            "[elwindui-winui3] native child append failed; cancelling Loaded participation: {error:?}"
+                        );
+                    }
+                    drop(element);
+                    continue;
+                }
+                // Loaded may have fired synchronously during Append. The explicit check closes
+                // the already-loaded race; NativeLoadTicket makes either order idempotent.
+                if element_handle.IsLoaded().unwrap_or(false) {
+                    if let NativeChildElement::Native(state) = &element {
+                        if let Some(ticket) = state.loaded_ticket.as_ref() {
+                            ticket.resolve_loaded();
+                        }
+                    }
+                }
                 existing.insert(key, element);
             }
         }
@@ -375,4 +633,89 @@ pub(crate) enum RenderedNativeChild {
         opacity: f32,
         input_enabled: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn batch(remaining: usize) -> Rc<NativeLoadBatch> {
+        Rc::new(NativeLoadBatch::new(remaining, None, None))
+    }
+
+    fn ticket(batch: &Rc<NativeLoadBatch>) -> NativeLoadTicket {
+        NativeLoadTicket::new(batch)
+    }
+
+    #[test]
+    fn native_load_ticket_resolves_duplicate_loaded_delivery_once() {
+        let batch = batch(1);
+        let ticket = ticket(&batch);
+
+        ticket.resolve_loaded();
+        ticket.resolve_loaded();
+
+        assert_eq!(batch.remaining.get(), 0);
+        assert!(batch.saw_loaded.get());
+        assert!(batch.completed.get());
+        assert_eq!(batch.ready_completion_count.get(), 1);
+    }
+
+    #[test]
+    fn native_load_batch_mixed_loaded_and_cancelled_members_completes_once() {
+        let batch = batch(3);
+        let loaded = ticket(&batch);
+        let cancelled_a = ticket(&batch);
+        let cancelled_b = ticket(&batch);
+
+        loaded.resolve_loaded();
+        cancelled_a.resolve_cancelled();
+        cancelled_b.resolve_cancelled();
+        loaded.resolve_loaded();
+
+        assert_eq!(batch.remaining.get(), 0);
+        assert!(batch.saw_loaded.get());
+        assert!(batch.completed.get());
+        assert_eq!(batch.ready_completion_count.get(), 1);
+    }
+
+    #[test]
+    fn native_load_batch_all_cancelled_members_do_not_request_readiness_relayout() {
+        let batch = batch(2);
+        let cancelled_a = ticket(&batch);
+        let cancelled_b = ticket(&batch);
+
+        cancelled_a.resolve_cancelled();
+        cancelled_b.resolve_cancelled();
+
+        assert_eq!(batch.remaining.get(), 0);
+        assert!(!batch.saw_loaded.get());
+        assert!(batch.completed.get());
+        assert_eq!(batch.ready_completion_count.get(), 0);
+    }
+
+    #[test]
+    fn native_load_batch_one_or_many_members_have_one_readiness_completion() {
+        for member_count in [1, 20] {
+            let batch = batch(member_count);
+            let tickets: Vec<_> = (0..member_count).map(|_| ticket(&batch)).collect();
+            for ticket in tickets {
+                ticket.resolve_loaded();
+            }
+            assert_eq!(batch.ready_completion_count.get(), 1);
+        }
+    }
+
+    #[test]
+    fn resolved_native_load_ticket_releases_its_batch_reference() {
+        let batch = batch(1);
+        let weak_batch = Rc::downgrade(&batch);
+        let ticket = ticket(&batch);
+        drop(batch);
+        assert!(weak_batch.upgrade().is_some());
+
+        ticket.resolve_cancelled();
+
+        assert!(weak_batch.upgrade().is_none());
+    }
 }

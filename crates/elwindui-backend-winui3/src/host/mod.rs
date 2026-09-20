@@ -464,6 +464,9 @@ pub(crate) struct WinUI3RelayoutHost {
     weak_self: RefCell<Weak<WinUI3RelayoutHost>>,
     animation_runtime: Weak<AnimationRuntime>,
     rendering: Weak<WinUI3RenderingState>,
+    /// Weak route used only after a real geometry-affecting relayout has completed. Keeping this
+    /// route weak preserves the host/tree/accessibility ownership topology.
+    accessibility: Weak<WinUI3AccessibilityState>,
 }
 
 impl WinUI3RelayoutHost {
@@ -475,7 +478,11 @@ impl WinUI3RelayoutHost {
     /// and runs the pass. `kind` is the strongest kind claimed for this realization and is
     /// retained in the diagnostic record even though Part A still performs a full realization
     /// for every kind.
-    fn run_relayout_now(&self, source: RelayoutSource, kind: elwindui_core::ui::InvalidationKind) {
+    fn run_relayout_now(
+        &self,
+        source: RelayoutSource,
+        kind: elwindui_core::ui::InvalidationKind,
+    ) -> bool {
         // A reentrant call (see `schedule`'s `in_progress` branch) must not clear `in_progress`
         // when it returns — only the outermost call, which is the one that actually set it from
         // `false`, may do that. `RelayoutCycleState::run_coalesced` itself already guarantees a
@@ -501,6 +508,7 @@ impl WinUI3RelayoutHost {
             self.active.upgrade(),
             self.relayout_cycle.upgrade(),
         );
+        let mut realized = false;
         if let (
             Some(tree),
             Some(render_tree),
@@ -518,7 +526,7 @@ impl WinUI3RelayoutHost {
                     self.diagnostic_id, source, kind
                 );
             }
-            let realized = TreeHost::relayout_static(
+            realized = TreeHost::relayout_static(
                 &self.canvas,
                 &self.input_surface,
                 &composition,
@@ -529,7 +537,14 @@ impl WinUI3RelayoutHost {
                 viewport.get(),
                 &active,
                 &relayout_cycle,
+                self.diagnostic_id,
             );
+            if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+                eprintln!(
+                    "[elwindui-winui3] relayout_realization host={} source={:?} kind={:?} realized={}",
+                    self.diagnostic_id, source, kind, realized
+                );
+            }
             #[cfg(test)]
             if realized {
                 RELAYOUT_REALIZATION_HISTORY.with(|history| {
@@ -546,6 +561,21 @@ impl WinUI3RelayoutHost {
         if !was_in_progress {
             self.in_progress.set(false);
         }
+        realized
+    }
+
+    fn rebuild_accessibility_after_realization(
+        &self,
+        realized: bool,
+        kind: elwindui_core::ui::InvalidationKind,
+    ) {
+        if !realized || kind < elwindui_core::ui::InvalidationKind::Arrange {
+            return;
+        }
+        let accessibility: Option<Rc<WinUI3AccessibilityState>> = self.accessibility.upgrade();
+        if let Some(accessibility) = accessibility {
+            accessibility.rebuild();
+        }
     }
 
     /// Supersedes any queued dispatcher job and claims the current batch (resetting
@@ -558,13 +588,13 @@ impl WinUI3RelayoutHost {
         &self,
         source: RelayoutSource,
         kind: elwindui_core::ui::InvalidationKind,
-    ) {
+    ) -> bool {
         self.queue_ticket
             .set(self.queue_ticket.get().wrapping_add(1));
         self.pending.set(false);
         self.pending_kind
             .set(elwindui_core::ui::InvalidationKind::default());
-        self.run_relayout_now(source, kind);
+        self.run_relayout_now(source, kind)
     }
 
     /// Realizes the queued relayout, but only if `ticket` still matches this host's live
@@ -580,7 +610,8 @@ impl WinUI3RelayoutHost {
         self.pending.set(false);
         self.pending_kind
             .set(elwindui_core::ui::InvalidationKind::default());
-        self.run_relayout_now(source, kind);
+        let realized = self.run_relayout_now(source, kind);
+        self.rebuild_accessibility_after_realization(realized, kind);
     }
 
     /// The per-host, per-UI-turn coalescing layer for `RelayoutHost::request_relayout` (ordinary
@@ -601,7 +632,7 @@ impl WinUI3RelayoutHost {
             // `RelayoutCycleState::run_coalesced`'s own reentrancy coalescing owns it, exactly as
             // it did before this per-turn scheduling layer existed. `run_relayout_now` upgrades
             // everything itself, so a dead host is already handled there.
-            self.run_relayout_now(source, kind);
+            let _ = self.run_relayout_now(source, kind);
             return;
         }
         if self.pending.replace(true) {
@@ -617,7 +648,9 @@ impl WinUI3RelayoutHost {
             // No dispatcher available on this thread (shouldn't normally happen — `schedule` only
             // ever runs on the UI thread once a `DispatcherQueue` already exists). Realize
             // immediately rather than silently dropping the relayout.
-            this.realize_synchronously(source, self.pending_kind.get());
+            let kind = self.pending_kind.get();
+            let realized = this.realize_synchronously(source, kind);
+            this.rebuild_accessibility_after_realization(realized, kind);
             return;
         };
         let ticket = self.queue_ticket.get();
@@ -638,7 +671,9 @@ impl WinUI3RelayoutHost {
             // Posting failed or was rejected — unregister the now-unused one-shot callback (it
             // will never fire) and realize immediately rather than leaving `pending` stuck.
             this.callback_owner.unregister_event(callback_id);
-            this.realize_synchronously(source, self.pending_kind.get());
+            let kind = self.pending_kind.get();
+            let realized = this.realize_synchronously(source, kind);
+            this.rebuild_accessibility_after_realization(realized, kind);
         }
     }
 }
@@ -679,7 +714,9 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
         if !self.pending.get() {
             return; // nothing queued or in flight — an interactive flush with no pending work is a no-op
         }
-        self.realize_synchronously(RelayoutSource::InteractiveFlush, self.pending_kind.get());
+        let kind = self.pending_kind.get();
+        let realized = self.realize_synchronously(RelayoutSource::InteractiveFlush, kind);
+        self.rebuild_accessibility_after_realization(realized, kind);
     }
 }
 
@@ -1495,6 +1532,7 @@ impl TreeHost {
                 self.viewport.get(),
                 &self.active,
                 &self.relayout_cycle,
+                0,
             );
         }
         self.accessibility.rebuild();
@@ -1576,6 +1614,7 @@ impl TreeHost {
             Vec::new(),
             &self.render_tree,
             &self.keyboard,
+            None,
         );
         *self.render_tree.borrow_mut() = None;
     }
@@ -1607,6 +1646,7 @@ impl TreeHost {
             weak_self: RefCell::new(Weak::<WinUI3RelayoutHost>::new()),
             animation_runtime: Rc::downgrade(&self.animation_runtime),
             rendering: Rc::downgrade(&self.rendering),
+            accessibility: Rc::downgrade(&self.accessibility),
         });
         *host.weak_self.borrow_mut() = Rc::downgrade(&host);
         *self.relayout_host.borrow_mut() = Rc::downgrade(&host);
@@ -1663,6 +1703,7 @@ impl TreeHost {
             Vec::new(),
             &self.render_tree,
             &self.keyboard,
+            None,
         );
         *self.tree.borrow_mut() = None;
         *self.render_tree.borrow_mut() = None;
@@ -1730,6 +1771,7 @@ impl TreeHost {
         viewport: Option<TreeHostViewport>,
         active: &Cell<bool>,
         relayout_cycle: &RelayoutCycleState,
+        diagnostic_id: u64,
     ) -> bool {
         if !active.get() {
             return false;
@@ -1744,6 +1786,7 @@ impl TreeHost {
                 native_children,
                 keyboard,
                 viewport,
+                diagnostic_id,
             );
         })
     }
@@ -1760,6 +1803,7 @@ impl TreeHost {
         native_children: &Rc<RefCell<NativeChildMap>>,
         keyboard: &Rc<KeyboardDispatcher>,
         viewport: Option<TreeHostViewport>,
+        diagnostic_id: u64,
     ) {
         #[cfg(test)]
         RELAYOUT_STATIC_PASS_COUNT.with(|count| count.set(count.get() + 1));
@@ -2331,12 +2375,17 @@ impl TreeHost {
                 HashMap::new()
             }
         };
+        // Loaded handlers can resolve synchronously from the append below. Drop the retained
+        // RenderTree borrow before entering reconciliation so the barrier's Core invalidation can
+        // mark that tree dirty without colliding with this replay's immutable borrow.
+        drop(retained_tree_ref);
         reconcile_native_children(
             canvas,
             native_children,
             native_wanted,
             retained_tree,
             keyboard,
+            Some(diagnostic_id),
         );
         {
             let native_children = native_children.borrow();

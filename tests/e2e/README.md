@@ -55,8 +55,9 @@ also designed for both AppKit and WinUI3 and is executed through the platform te
 Pointer cancellation and capture-loss verification is defined in
 [`pointer-cancellation-capture-loss.md`](pointer-cancellation-capture-loss.md) for Issue
 [#180](https://github.com/puchinya/elwindui/issues/180). It combines deterministic Core/custom-control
-evidence with WinUI3 native and real-pointer evidence; native rows remain explicitly
-`PASS`/`FAIL`/`NOT RUN`/`BLOCKED` according to the host and driver evidence actually obtained.
+evidence, hosted-XAML invariant checks, and WinUI3 real-pointer evidence where applicable; not all
+rows require real-pointer input. Native rows remain explicitly `PASS`/`FAIL`/`NOT RUN`/`BLOCKED`
+according to the host and driver evidence actually obtained.
 The former
 `tools/windows-ui-driver/tests/theme-demo-e2e.ps1` (a Windows-only, product-specific smoke script)
 was removed rather than kept as a placeholder. See

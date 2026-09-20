@@ -8,9 +8,10 @@ postcondition. It does not add an input-injection mechanism or call Core cancell
 replacement for a native event.
 
 The WinUI3 execution procedure is [`docs/agents/winui3-e2e.md`](../../docs/agents/winui3-e2e.md).
-The existing normal-pointer and renderer-proxy regression rows are in
+The existing normal-pointer regression rows are in
 [`self-drawn-pointer-input.md`](self-drawn-pointer-input.md) and must be rerun on the exact HEAD
-under test; an earlier Issue #236 result is not evidence for this scenario.
+under test; an earlier Issue #236 result is not evidence for this scenario. Renderer-proxy
+ownership is verified by the existing single-Application hosted-XAML backend test in PC-14.
 
 ## Setup and evidence rules
 
@@ -20,7 +21,8 @@ under test; an earlier Issue #236 result is not evidence for this scenario.
    `session_id`, and `input_desktop_probe`.
 3. Build the existing fixtures with the repository's Windows setup procedure. Use
    `custom-controls-demo.exe` for the custom-control rows and `controls-demo.exe` for the native
-   control boundary. Use the existing self-drawn-pointer-input fixture for PC-13 and PC-14.
+   control boundary. Use the existing self-drawn-pointer-input fixture for PC-13. PC-14 uses the
+   existing hosted-XAML test path and does not require a new real-mouse fixture.
 4. Before every real pointer action, reacquire the current PID/HWND, window rectangle, DPI, and
    target bounds. Derive screen coordinates from the current window rectangle; never reuse a
    coordinate after a resize, move, focus change, or layout mutation.
@@ -89,23 +91,24 @@ cancellation can be delivered, classify `NOT RUN` rather than substituting a syn
 
 ### PC-05 — No active gesture
 
-With no pressed pointer, attempt the available native cancellation/capture-loss stimulus and
-observe the application log/counter. PASS requires no callback, no target retention, and no state
-change. The Core deterministic cancellation no-op test is supporting evidence; it does not replace
-the native stimulus when a native stimulus is required.
+The Core deterministic result is PASS when cancellation with no active Core press is a no-op with
+no callback, target retention, or state change. The native cancellation/capture-loss stimulus
+portion is BLOCKED and owned by [#267](https://github.com/puchinya/elwindui/issues/267); do not
+convert it to PASS from the Core result.
 
 ### PC-06 — Recognition suppression
 
-On a self-drawn target, begin a gesture, observe a moved position, deliver a real cancellation when
-available, then deliver the matching release/click sequence. PASS requires no tapped,
-double-tapped, or right-tapped result from the canceled gesture. Map the deterministic Core
-assertion to the row and record any live native limitation separately.
+The deterministic Core result is PASS when a canceled gesture produces no tapped, double-tapped,
+or right-tapped result. The native integration portion is BLOCKED and owned by
+[#267](https://github.com/puchinya/elwindui/issues/267), because the bounded driver cannot deliver
+the required cancellation stimulus; record that limitation separately.
 
 ### PC-07 — Recovery and fresh hit test
 
-After cancellation, move to a different self-drawn target, refresh its geometry, and perform a new
-real pointer sequence. PASS requires the new target to receive the sequence and the old captured
-target not to receive it, proving that the next move starts with a fresh hit test.
+The deterministic Core result is PASS when the next move starts with a fresh hit test and can
+target a different element. The native post-cancel recovery portion is BLOCKED and owned by
+[#267](https://github.com/puchinya/elwindui/issues/267), pending a real native cancellation
+stimulus.
 
 ### PC-08 — `CustomGridSplitter` rollback
 
@@ -114,17 +117,18 @@ Launch `custom-controls-demo.exe`, locate the current splitter from a fresh scre
 native cancellation attempt as PC-02; do not call Core cancellation directly. Observe the visible
 pane geometry and the status text.
 
-PASS requires `Grid resize completed: ... canceled=true`, with provisional pane movement rolled
-back before the completion observation. The deterministic row
-`pointer_dispatcher_cancellation_restores_grid_before_notification` is required supporting
-evidence. A normal drag is the regression control and must report `canceled=false`.
+The deterministic cancellation row
+`pointer_dispatcher_cancellation_restores_grid_before_notification` must report
+`canceled=true` with provisional pane movement rolled back before completion. A normal real drag
+is the regression control and must report `canceled=false`. Only the canceled native path is
+BLOCKED and owned by [#267](https://github.com/puchinya/elwindui/issues/267).
 
 ### PC-09 — `CustomTabView` canceled drag
 
-In `custom-controls-demo.exe`, start a real drag on a visible tab header, attempt the same native
-cancellation stimulus, and observe the status text and selected tab. PASS requires
-`Tab drag completed: ... canceled=true` and no drag commit or selection mutation caused solely by
-the canceled drag. The deterministic tab cancellation row is required supporting evidence.
+The deterministic tab cancellation row must report
+`Tab drag completed: ... canceled=true` with no drag commit or selection mutation caused solely by
+the canceled drag. A normal real tab drag is the regression control. Only the canceled native path
+is BLOCKED and owned by [#267](https://github.com/puchinya/elwindui/issues/267).
 
 ### PC-10 — Captured subtree removal
 
@@ -135,11 +139,11 @@ just to replace this existing deterministic evidence.
 
 ### PC-11 — Host/window teardown
 
-Start a gesture in the existing hosted WinUI3 fixture, close/tear down the host through its normal
-window lifecycle, and observe callback count and capture release. PASS requires one cancellation,
-released native capture, and normal teardown without duplicate callback. If the window cannot be
-closed while an atomic driver drag is active, classify the native portion `BLOCKED` and retain the
-deterministic teardown evidence.
+The deterministic/hosted lifecycle result must show one cancellation, released capture, and normal
+teardown without duplicate callback. If the window cannot be closed while an atomic driver drag is
+active, classify only the active-gesture native cancellation portion `BLOCKED` and transfer it to
+[#267](https://github.com/puchinya/elwindui/issues/267); retain the deterministic teardown
+evidence in #180.
 
 ### PC-12 — NativeControl boundary
 
@@ -156,12 +160,17 @@ splitter drag, SDP-03/04 when the shared self-drawn surface is used by the teste
 the normal control portion of SDP-05. PASS requires the original pressed/moved/released capture
 behavior and each row's visible postcondition. Record each row separately in the evidence run.
 
-### PC-14 — Renderer proxy regression
+### PC-14 — Renderer proxy ownership
 
-On the exact #180 HEAD, rerun the renderer/text-proxy portion of the existing self-drawn pointer
-case with a fresh screenshot and current geometry. PASS requires a click/drag over the rendered
-text or proxy area to reach the underlying self-drawn target, with no stale or duplicate routing.
-If the target cannot be identified reliably from current visual evidence, classify `BLOCKED`.
+Run the existing single-Application hosted-XAML regression
+`hosted_button_text_and_window_lifecycle_regressions_work` on the exact HEAD. Its adjacent
+`live_input_surface_creation_persistence_viewport_and_source_classification()` coverage must
+create an actual renderer-created Core `TextBlock` projection and assert that it is a XAML
+`TextBlock` with `IsHitTestVisible=false`, while the permanent input surface remains attached and
+hit-testable. It must also accept only the exact root Canvas or exact input surface as Core
+self-drawn sources and reject the renderer projection/native children. This is deterministic
+hosted-XAML evidence; no unrelated manually-created XAML `TextBlock` and no new real-mouse fixture
+substitutes for the renderer projection.
 
 ## Deterministic supporting commands
 
@@ -180,9 +189,9 @@ WinUI3 native Canvas event was raised.
 
 ## Cleanup and reporting
 
-Report PC-01 through PC-14 one-to-one with the immutable evidence directory, including the exact
-action-delivery result and application postcondition. Attach only useful screenshots to Issue
-#180; keep raw logs under `.agent-state`. If a native event cannot be deterministically produced,
-record the mechanism attempted and create a focused follow-up Issue when an additional driver or
-native injection capability is genuinely required. Do not fix a product defect or weaken the PASS
-criteria in this verification branch.
+Report PC-01 through PC-14 one-to-one with the final committed HEAD, including the exact
+action-delivery result and application postcondition for live rows and the named test evidence for
+deterministic/hosted-XAML rows. Attach only useful screenshots to Issue #180; keep raw logs under
+`.agent-state`. If a native event cannot be deterministically produced, retain its BLOCKED result
+and #267 ownership. Do not fix a product defect or weaken the PASS criteria in this verification
+branch.

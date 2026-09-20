@@ -2831,6 +2831,54 @@ pub(crate) mod live_input_surface_tests {
         );
         assert_surface_is_first(&panel, &surface_ui);
 
+        // PC-14: this is the actual renderer-created TextBlock projection for a Core text node,
+        // not an unrelated manually-created native XAML child. The projection is paint-only, so
+        // native hit testing must pass through to the permanent host input surface.
+        use elwindui_core::ui::{TextBlock as CoreTextBlock, TextBlockExt};
+        let renderer_probe = CoreTextBlock::new();
+        renderer_probe.set_text("renderer-proxy probe");
+        renderer_probe.set_width(120.0);
+        renderer_probe.set_height(24.0);
+        panel.set_tree(renderer_probe);
+        assert_surface_is_first(&panel, &surface_ui);
+        let children = panel.canvas().Children().expect("Canvas.Children");
+        let projected = children.GetAt(1).expect("renderer TextBlock projection");
+        let projected_text: crate::bindings::Microsoft::UI::Xaml::Controls::TextBlock = projected
+            .cast()
+            .expect("renderer projection must be a XAML TextBlock");
+        assert_eq!(
+            projected_text
+                .Text()
+                .expect("renderer TextBlock.Text")
+                .to_string(),
+            "renderer-proxy probe"
+        );
+        let projected_ui: UIElement = projected_text
+            .clone()
+            .cast()
+            .expect("renderer TextBlock is a UIElement");
+        assert!(
+            !projected_ui
+                .IsHitTestVisible()
+                .expect("renderer TextBlock IsHitTestVisible"),
+            "renderer-created TextBlock projections must not own native pointer input"
+        );
+        assert!(TreeHost::is_self_drawn_pointer_source(
+            panel.canvas(),
+            &panel.input_surface,
+            panel.canvas()
+        ));
+        assert!(TreeHost::is_self_drawn_pointer_source(
+            panel.canvas(),
+            &panel.input_surface,
+            &panel.input_surface
+        ));
+        assert!(!TreeHost::is_self_drawn_pointer_source(
+            panel.canvas(),
+            &panel.input_surface,
+            &projected_ui
+        ));
+
         // H3: unconstrained dimensions come from the post-layout natural extent, not from a
         // requested viewport or the native Canvas output fed back into layout.
         let natural_panel = TreeHost::new();

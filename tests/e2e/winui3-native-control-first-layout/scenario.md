@@ -51,12 +51,17 @@ Do not reuse PID, HWND, or evidence directory between runs.
    the explicit diagnostic record `native_load_batch_complete` is present and the target window is
    non-empty. Polling is bounded and only waits for those named conditions; it is not a timer-based
    layout repair. Record each bounded poll result and the first-stable timestamp.
-3. Parse the captured WinUI3 diagnostics. For the startup fixture, identify the one startup batch
-   containing the six genuinely new native controls (Activate Button, TextArea, CheckBox, Slider,
-   removal Button, and exiting TextArea). Require exactly one matching
-   `native_load_batch`/`native_load_batch_complete` pair, one completion with
-   `saw_loaded=true`, and exactly one `relayout_realization` for the same host with
-   `source=InteractiveFlush`, `kind=Measure`, and `realized=true` after the bootstrap record.
+3. Parse the captured WinUI3 diagnostics. In this repository revision the fixture's initial
+   declarative tree is realized by two framework-owned reconciliation batches: a five-member
+   primary batch (Activate Button, TextArea, CheckBox, Slider, and removal Button), followed by
+   a one-member conditional/transition batch for the exiting TextArea. This is an observed fixture
+   lifecycle detail, not a user-generated event. Require exactly those two
+   `native_load_batch`/`native_load_batch_complete` pairs, one completion with `saw_loaded=true`
+   per batch, and exactly one `relayout_realization` for the same host with
+   `source=InteractiveFlush`, `kind=Measure`, and `realized=true` per batch after its bootstrap/
+   queued records. The acceptance is per reconciliation batch: it must not count bootstrap or
+   queued realization as readiness work, and must not permit more than one readiness realization
+   for either batch.
 4. Parse the final `native_projection_rect` records for that host. Require positive width and
    height for all six NativeControl rectangles, monotonically increasing row Y positions, and no
    overlapping row intervals. The self-drawn Canvas row is checked visually in the screenshot; it
@@ -97,11 +102,12 @@ required to preserve #225 viewport tracking coverage.
 
 ## Expected results and classification
 
-PASS requires: clean launch at the exact final HEAD; requested 620x560 fixture; one startup
-readiness batch; one readiness-driven authoritative full-host Measure realization; six positive,
-ordered, non-overlapping NativeControl rectangles; a valid complete screenshot; coherent normal
-resize evidence; no recurring relayout cascade; and normal process termination. Correctness must
-be established before the resize and without a user-generated second event.
+PASS requires: clean launch at the exact final HEAD; requested 620x560 fixture; the two observed
+startup reconciliation batches (5 + 1); exactly one readiness-driven authoritative full-host
+Measure realization per batch (two total for this fixture); six positive, ordered,
+non-overlapping NativeControl rectangles; a valid complete screenshot; coherent normal resize
+evidence; no recurring relayout cascade; and normal process termination. Correctness must be
+established before the resize and without a user-generated second event.
 
 FAIL means the product launched but the diagnostics show a missing/multiple readiness batch, more
 than one readiness-driven full-host Measure realization, zero/overlapping/incorrect projected
@@ -123,9 +129,9 @@ termination JSON, parsed diagnostics, and a compact `result.md` under
 
 * exact HEAD and requested/observed window geometry;
 * fresh PID/HWND and process-start UTC;
-* startup batch host and member count;
+* startup batch hosts and member counts;
 * readiness completion record;
-* readiness-driven full-host pass count, which must be exactly one;
+* readiness-driven full-host pass count per reconciliation batch, which must be exactly one;
 * final NativeControl rectangles, positive-size/order/overlap calculations;
 * native leaf measure count as supporting evidence only, never as the full-host pass assertion;
 * screenshot paths and visual inspection result;

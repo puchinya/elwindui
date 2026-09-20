@@ -6,7 +6,7 @@
 // becoming a second public automation tree.
 
 #include "accessibility_host.h"
-#include "Elwindui/WinUI3/Accessibility/SemanticPeer.g.h"
+#include "SemanticPeer.g.h"
 
 #include <algorithm>
 #include <cstdarg>

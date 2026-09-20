@@ -52,6 +52,11 @@ The shared durable cases include
 scenario for real self-drawn pointer input. WinUI3 execution is required for Issue #236; AppKit
 can consume the same semantics when that scenario is scheduled there. The accessibility case is
 also designed for both AppKit and WinUI3 and is executed through the platform tester procedures.
+Pointer cancellation and capture-loss verification is defined in
+[`pointer-cancellation-capture-loss.md`](pointer-cancellation-capture-loss.md) for Issue
+[#180](https://github.com/puchinya/elwindui/issues/180). It combines deterministic Core/custom-control
+evidence with WinUI3 native and real-pointer evidence; native rows remain explicitly
+`PASS`/`FAIL`/`NOT RUN`/`BLOCKED` according to the host and driver evidence actually obtained.
 The former
 `tools/windows-ui-driver/tests/theme-demo-e2e.ps1` (a Windows-only, product-specific smoke script)
 was removed rather than kept as a placeholder. See

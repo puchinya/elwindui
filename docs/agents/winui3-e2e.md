@@ -67,8 +67,13 @@ pwsh -NoProfile -File $D touch-cancel `
 
 The command brings the visible target HWND to the actual foreground, injects one Windows touch
 contact, keeps a bounded hold alive with UPDATE frames no more than 50 ms apart, and completes with
-`POINTER_FLAG_CANCELED | POINTER_FLAG_UP`. It owns no contact state after exit. Normal mouse,
-keyboard, touch gestures, and pen gestures remain external `winapp` operations.
+`POINTER_FLAG_CANCELED | POINTER_FLAG_UP`. The primary backend is the Windows 10 1809+
+`CreateSyntheticPointerDevice` / `InjectSyntheticPointerInput` / `DestroySyntheticPointerDevice`
+API. The legacy `InitializeTouchInjection` / `InjectTouchInput` path is fallback-only when the
+modern entry point is unavailable or explicitly unsupported; error 87 remains `tool_error` and
+must not be masked by RDP state or absent physical touch hardware. A physical touchscreen is not
+required. It owns no contact/device state after exit. Normal mouse, keyboard, touch gestures, and
+pen gestures remain external `winapp` operations.
 
 For the native cancellation cases, create the run directory before launching the demo and set the
 absolute trace path in the demo process environment:
@@ -80,10 +85,14 @@ $env:ELWINDUI_WINUI3_E2E_RELEASE_CAPTURE_ON_PRESS = '1'
 ```
 
 The trace is append-only JSONL and records native event/source/forwarding/order/position/capture
-records. The visible self-drawn demo exposes independent Probe A and Probe B counters for
+records, including the actual success/failure of native capture release after the release call.
+It does not claim a Core cancellation callback. The visible self-drawn demo exposes independent
+Probe A and Probe B counters for
 `pressed`, `moved`, `released`, `canceled`, `tapped`, `double_tapped`, `right_tapped`, plus the
-last root position, screen position, and button. A canceled record must visibly show
-`button=None`; driver `success: true` is never sufficient for product PASS.
+last root position, screen position, and button. Exactly-once Core cancellation is established by
+the native forwarded-event trace combined with the Probe canceled count. A canceled record must
+visibly show `button=None`; driver `success: true` is never sufficient for product PASS. RDP/VM
+injection API success alone is never native product evidence.
 
 For PC-11 only, start the complete bounded `touch-cancel --hold-ms <bounded>` invocation as a
 background PowerShell process, wait until the trace proves press acceptance and native capture,

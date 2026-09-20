@@ -63,7 +63,9 @@ The adapter embeds only the minimal P/Invoke needed for operations it owns: `Enu
 `GetWindowThreadProcessId`, `IsWindowVisible`, `IsWindowEnabled`, `GetWindowTextW`, `GetWindowRect`,
 `GetForegroundWindow`, `ShowWindowAsync`, `SetForegroundWindow`, `SetWindowPos`/`MoveWindow`,
 `GetDpiForWindow`, `MonitorFromWindow`, `GetMonitorInfoW`, `OpenInputDesktop`, and, only for
-`touch-cancel`, `InitializeTouchInjection`/`InjectTouchInput`.
+`touch-cancel`, the Windows 10 1809+ synthetic-pointer API
+`CreateSyntheticPointerDevice`/`InjectSyntheticPointerInput`/`DestroySyntheticPointerDevice` plus
+the legacy `InitializeTouchInjection`/`InjectTouchInput` fallback.
 
 The adapter never adds generic Win32 input injection (`SendInput`, `mouse_event`, `keybd_event`,
 `PostMessage` as a click/keystroke substitute). All normal real mouse/keyboard/touch/pen delivery
@@ -97,18 +99,23 @@ windows-ui-driver.ps1 touch-cancel
 
 The adapter validates the all-or-none destination pair and bounded hold, requires a visible target
 on an available interactive input desktop, makes that HWND the actual foreground window, and then
-uses `InitializeTouchInjection`/`InjectTouchInput` for exactly one contact. It emits DOWN at the
-origin, an UPDATE at a distinct destination, keep-alive UPDATE frames at no more than 50 ms while
-holding, and `POINTER_FLAG_CANCELED | POINTER_FLAG_UP` at the latest point. It always exits after
-that bounded sequence; there is no cross-command contact handle, state file, daemon, or generic
-pointer/pen injection API.
+uses `CreateSyntheticPointerDevice(PT_TOUCH, 1, POINTER_FEEDBACK_NONE)` plus
+`InjectSyntheticPointerInput` for exactly one contact. It emits DOWN at the origin, an UPDATE at a
+distinct destination, keep-alive UPDATE frames at no more than 50 ms while holding, and
+`POINTER_FLAG_CANCELED | POINTER_FLAG_UP` at the latest point. The synthetic device is destroyed
+in cleanup on success and failure. The legacy `InitializeTouchInjection`/`InjectTouchInput` path
+is fallback-only when the modern API entry point is unavailable or explicitly unsupported; it is
+not used to hide malformed modern frames or error 87. A physical touchscreen is not required.
+There is no cross-command contact handle, state file, daemon, or generic pointer/pen injection API.
 
 The successful result includes `hwnd`, `from`, `latest`, `hold_ms`, `sequence:
-"down-update-canceled"`, and `injection: "windows-touch"`. Invalid arguments are
-`usage_error`; invalid/gone HWNDs are `target_error`; unavailable desktop, foreground, access,
-or unsupported touch-injection conditions are `environment_blocker`; and internally invalid
-injection frames are `tool_error` with the Win32 error. `success: true` is injection evidence only,
-never a product PASS.
+"down-update-canceled"`, `injection: "windows-touch"`, and `injection_backend` identifying
+`synthetic-pointer` or a legitimately selected `legacy-touch` fallback. Invalid arguments are
+`usage_error`; invalid/gone HWNDs are `target_error`; unavailable desktop, foreground, access, or
+explicitly unsupported API conditions are `environment_blocker`; and malformed native frames
+including `ERROR_INVALID_PARAMETER` are `tool_error` with the Win32 error. RDP/VM state and absent
+physical touch metrics are not capability gates. `success: true` is injection evidence only, never
+a product PASS.
 
 ## 5. Error and result classification boundary
 
@@ -127,6 +134,12 @@ postcondition was wrong; **NOT RUN** means the step or its required evidence was
 exercising the product at all. `no_interactive_desktop` and an unrecoverable `foreground_not_target`
 are always BLOCKED, never FAIL — collapsing them into FAIL would misrepresent an environment gap as
 a product defect.
+
+For the direct touch exception, `ERROR_INVALID_PARAMETER` (87) is always `tool_error` by default.
+It is not reclassified from `SM_REMOTESESSION`, `SM_DIGITIZER`, or `SM_MAXIMUMTOUCHES`; a physical
+touchscreen is not required for synthetic-pointer injection. `ERROR_NOT_SUPPORTED` (50),
+`ERROR_CALL_NOT_IMPLEMENTED` (120), access denial, and unavailable interactive desktop/foreground
+conditions remain environment blockers where the failing operation documents that meaning.
 
 ## 6. Foreground and coordinate model
 

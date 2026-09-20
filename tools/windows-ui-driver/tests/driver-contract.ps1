@@ -308,6 +308,35 @@ $r = Invoke-Driver @('touch-cancel', '--hwnd', '4660', '--from-x', 'not-a-coordi
 Assert-OneJsonObject $r 'touch-cancel (malformed coordinate)'
 Assert ($r.Json.category -eq 'usage_error') 'touch-cancel (malformed coordinate) -- category:usage_error'
 
+# T11 -- deterministic private backend/classification seam. This does not inject input or add a
+# user-facing command; it exercises the pure selection/error taxonomy without requiring a GUI.
+$env:ELWINDUI_DRIVER_CONTRACT_PROBE = 'classification'
+$r = Invoke-Driver @('doctor')
+Assert-OneJsonObject $r 'touch backend classification probe'
+Assert ($r.Json.error_87 -eq 'tool_error') 'touch backend classification -- ERROR_INVALID_PARAMETER 87 is tool_error'
+Assert ($r.Json.error_50 -eq 'environment_blocker') 'touch backend classification -- ERROR_NOT_SUPPORTED 50 is environment_blocker'
+Assert ($r.Json.error_120 -eq 'environment_blocker') 'touch backend classification -- ERROR_CALL_NOT_IMPLEMENTED 120 is environment_blocker'
+Assert ($null -eq $r.Json.digitizer -and $null -eq $r.Json.maximum_touches) 'touch backend classification -- physical touch metrics are not capability output'
+Remove-Item Env:ELWINDUI_DRIVER_CONTRACT_PROBE -ErrorAction SilentlyContinue
+
+$env:ELWINDUI_DRIVER_CONTRACT_PROBE = 'backend-selection'
+$r = Invoke-Driver @('doctor')
+Assert-OneJsonObject $r 'touch backend selection probe'
+Assert ($r.Json.modern_available -eq 'synthetic-pointer') 'touch backend selection -- modern API selects synthetic-pointer'
+Assert ($r.Json.modern_entry_point_unavailable -eq 'legacy-touch') 'touch backend selection -- unavailable modern API selects legacy-touch fallback'
+Assert ($r.Json.modern_unsupported -eq 'legacy-touch') 'touch backend selection -- unsupported modern API selects legacy-touch fallback'
+Assert ($r.Json.modern_invalid_parameter -eq 'tool_error') 'touch backend selection -- ERROR_INVALID_PARAMETER does not fallback'
+Remove-Item Env:ELWINDUI_DRIVER_CONTRACT_PROBE -ErrorAction SilentlyContinue
+
+# The native lifecycle is intentionally source-inspected here: a real GUI is required to invoke
+# the API, but cleanup must remain structurally guaranteed in a finally block and after DOWN
+# failures. The live matrix is the evidence for actual delivery, not this deterministic check.
+$driverSource = Get-Content -LiteralPath $Driver -Raw
+Assert ($driverSource -match 'DestroySyntheticPointerDevice\(\$device\)') 'touch backend lifecycle -- synthetic device destruction is present'
+Assert ($driverSource -match '(?s)finally\s*\{.*DestroySyntheticPointerDevice') 'touch backend lifecycle -- destruction is in finally cleanup'
+Assert ($driverSource -match 'cleanup_attempted') 'touch backend lifecycle -- best-effort canceled cleanup is reported after post-DOWN failure'
+Assert (-not ($driverSource -match 'SM_DIGITIZER|SM_MAXIMUMTOUCHES')) 'touch backend classification -- no physical digitizer capability gate remains'
+
 if ($script:FailureCount -gt 0) {
     Write-Output "`n$script:FailureCount assertion(s) failed."
     exit 1

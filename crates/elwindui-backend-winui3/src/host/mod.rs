@@ -842,6 +842,7 @@ impl PointerTrace {
             root_position,
             screen_position,
             None,
+            None,
         );
     }
 
@@ -854,18 +855,20 @@ impl PointerTrace {
             None,
             None,
             Some(success),
+            None,
         );
     }
 
-    fn record_marker(&self, event: &str, pointer_id: u32, source_classification: &str) {
+    fn record_release(&self, pointer_id: u32, source_classification: &str, success: bool) {
         self.write_record(
-            event,
+            "NativeCaptureRelease",
             pointer_id,
             source_classification,
-            event == "CoreCancellation",
+            false,
             None,
             None,
             None,
+            Some(success),
         );
     }
 
@@ -878,6 +881,7 @@ impl PointerTrace {
         root_position: Option<Point>,
         screen_position: Option<Point>,
         native_capture_success: Option<bool>,
+        native_capture_release_success: Option<bool>,
     ) {
         let Some(path) = self.path.as_ref() else {
             return;
@@ -885,11 +889,14 @@ impl PointerTrace {
         let order = self.next_order.get();
         self.next_order.set(order.saturating_add(1));
         let line = format!(
-            "{{\"order\":{order},\"event\":\"{event}\",\"pointer_id\":{pointer_id},\"source_classification\":\"{source_classification}\",\"forwarded_to_core\":{forwarded},\"root_position\":{root},\"screen_position\":{screen},\"native_capture_success\":{capture}}}\n",
+            "{{\"order\":{order},\"event\":\"{event}\",\"pointer_id\":{pointer_id},\"source_classification\":\"{source_classification}\",\"forwarded_to_core\":{forwarded},\"root_position\":{root},\"screen_position\":{screen},\"native_capture_success\":{capture},\"native_capture_release_success\":{release}}}\n",
             forwarded = if forwarded_to_core { "true" } else { "false" },
             root = Self::format_point(root_position),
             screen = Self::format_point(screen_position),
             capture = native_capture_success
+                .map(|success| if success { "true" } else { "false" })
+                .unwrap_or("null"),
+            release = native_capture_release_success
                 .map(|success| if success { "true" } else { "false" })
                 .unwrap_or("null"),
         );
@@ -1177,12 +1184,14 @@ impl TreeHost {
                                 capture_success,
                             );
                             if capture_success && pointer_trace.release_capture_on_press {
-                                pointer_trace.record_marker(
-                                    "NativeCaptureRelease",
+                                let release_success = canvas_for_callback
+                                    .ReleasePointerCapture(&native_pointer)
+                                    .is_ok();
+                                pointer_trace.record_release(
                                     PointerTrace::pointer_id(args),
                                     source_classification,
+                                    release_success,
                                 );
-                                let _ = canvas_for_callback.ReleasePointerCapture(&native_pointer);
                             }
                         }
                         let _ = args.SetHandled(true);
@@ -1288,16 +1297,17 @@ impl TreeHost {
                         &pointer_trace,
                         "PointerCanceled",
                     ) {
-                        pointer_trace.record_marker(
-                            "NativeCaptureRelease",
-                            PointerTrace::pointer_id(args),
-                            Self::pointer_source_classification(
-                                &canvas_for_callback,
-                                &input_surface_for_callback,
-                                args,
-                            ),
+                        let source_classification = Self::pointer_source_classification(
+                            &canvas_for_callback,
+                            &input_surface_for_callback,
+                            args,
                         );
-                        let _ = canvas_for_callback.ReleasePointerCaptures();
+                        let release_success = canvas_for_callback.ReleasePointerCaptures().is_ok();
+                        pointer_trace.record_release(
+                            PointerTrace::pointer_id(args),
+                            source_classification,
+                            release_success,
+                        );
                         let _ = args.SetHandled(true);
                     }
                 }));
@@ -1646,9 +1656,6 @@ impl TreeHost {
                 timestamp_ms,
             },
         );
-        if matches!(kind, RawPointerEventKind::Canceled) {
-            trace.record_marker("CoreCancellation", pointer_id, source_classification);
-        }
         true
     }
 
@@ -3670,7 +3677,7 @@ mod tests {
             next_order: Rc::new(Cell::new(0)),
             release_capture_on_press: false,
         };
-        trace.record_marker("NativeCaptureRelease", 1, "root_canvas");
+        trace.record_release(1, "root_canvas", true);
         assert_eq!(trace.next_order.get(), 0);
     }
 
@@ -3681,7 +3688,36 @@ mod tests {
             next_order: Rc::new(Cell::new(0)),
             release_capture_on_press: false,
         };
-        trace.record_marker("NativeCaptureRelease", 1, "root_canvas");
+        trace.record_release(1, "root_canvas", false);
         assert_eq!(trace.next_order.get(), 1);
+    }
+
+    #[test]
+    fn pointer_trace_records_release_result_without_core_callback_claim() {
+        let path = std::env::temp_dir().join(format!(
+            "elwindui-pointer-trace-{}.jsonl",
+            std::process::id()
+        ));
+        let trace = PointerTrace {
+            path: Some(path.clone()),
+            next_order: Rc::new(Cell::new(0)),
+            release_capture_on_press: false,
+        };
+        trace.record_pointer(
+            "PointerCanceled",
+            1,
+            "root_canvas",
+            true,
+            Some(Point { x: 10.0, y: 20.0 }),
+            Some(Point { x: 110.0, y: 120.0 }),
+        );
+        trace.record_release(1, "root_canvas", true);
+        trace.record_release(1, "root_canvas", false);
+        let contents = std::fs::read_to_string(&path).expect("trace file should be readable");
+        assert!(contents.contains("\"event\":\"PointerCanceled\""));
+        assert!(contents.contains("\"native_capture_release_success\":true"));
+        assert!(contents.contains("\"native_capture_release_success\":false"));
+        assert!(!contents.contains("CoreCancellation"));
+        let _ = std::fs::remove_file(path);
     }
 }

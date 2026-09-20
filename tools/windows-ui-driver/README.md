@@ -89,16 +89,24 @@ pwsh -NoProfile -File $D touch-cancel `
 It requires an unlocked interactive desktop and a visible target HWND, brings that HWND to the
 actual foreground, and injects one bounded Windows touch contact: DOWN, an optional destination
 UPDATE, keep-alive UPDATE frames no more than 50 ms apart while holding, then
-`POINTER_FLAG_CANCELED | POINTER_FLAG_UP` at the latest point. The contact and all state end with
-the invocation; there is no cross-command handle or persistent input daemon. The destination flags
-are all-or-none.
+`POINTER_FLAG_CANCELED | POINTER_FLAG_UP` at the latest point. The primary backend is the Windows
+10 1809+ synthetic-pointer API (`CreateSyntheticPointerDevice` /
+`InjectSyntheticPointerInput` /
+`DestroySyntheticPointerDevice`). The legacy `InitializeTouchInjection` /
+`InjectTouchInput` path is fallback-only when the modern entry point is unavailable or explicitly
+unsupported; malformed modern frames and `ERROR_INVALID_PARAMETER` remain visible as
+`tool_error`. A physical touchscreen is not required. The contact and all state end with the
+invocation; there is no cross-command handle or persistent input daemon. The destination flags are
+all-or-none.
 
-Success JSON includes `hwnd`, `from`, `latest`, `hold_ms`, `sequence: "down-update-canceled"`, and
-`injection: "windows-touch"`. Invalid coordinates or hold bounds are `usage_error`, a gone/invalid
-HWND is `target_error`, unavailable desktop/foreground/access or unsupported touch injection is
-`environment_blocker`, and an internally invalid frame is `tool_error` with its Win32 error.
-Driver success is injection evidence only; the product's native trace and visible demo postcondition
-are still required for E2E PASS.
+Success JSON includes `hwnd`, `from`, `latest`, `hold_ms`, `sequence: "down-update-canceled"`,
+`injection: "windows-touch"`, and `injection_backend` (`"synthetic-pointer"` or the legitimately
+selected `"legacy-touch"` fallback). A diagnostic `remote_session` flag may be present, but RDP or
+VM/API success is never product evidence by itself. Invalid coordinates or hold bounds are
+`usage_error`, a gone/invalid HWND is `target_error`, unavailable desktop/foreground/access or
+unsupported API is `environment_blocker`, and malformed native frames including error 87 are
+`tool_error` with their Win32 error. Driver success is injection evidence only; the product's
+native trace and visible demo postcondition are still required for E2E PASS.
 
 ## UIA vs. real input
 

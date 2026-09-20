@@ -41,18 +41,26 @@ pwsh -NoProfile -File $D touch-cancel `
 ```
 
 The successful driver result must contain `success:true`, `hwnd`, `from`, `latest`, `hold_ms`,
-`sequence:"down-update-canceled"`, and `injection:"windows-touch"`. This proves injection only;
-product PASS requires the native trace and visible application state below. Use the complete bounded
-command with `--hold-ms 1500` as a background PowerShell process only for NC-11.
+`sequence:"down-update-canceled"`, `injection:"windows-touch"`, and
+`injection_backend:"synthetic-pointer"` unless the documented legacy fallback was selected.
+The primary backend is `CreateSyntheticPointerDevice` / `InjectSyntheticPointerInput` /
+`DestroySyntheticPointerDevice` on Windows 10 1809+. Legacy `InitializeTouchInjection` /
+`InjectTouchInput` is fallback-only for an unavailable or explicitly unsupported modern API; a
+malformed modern frame and error 87 are `tool_error`. A physical touchscreen is not required.
+This proves injection only; product PASS requires the native trace and visible application state
+below. Use the complete bounded command with `--hold-ms 1500` as a background PowerShell process
+only for NC-11.
 
 ## Evidence rules
 
 The trace is the native evidence layer. It must show the native event, `pointer_id`,
 `source_classification`, `forwarded_to_core`, root/screen positions, and monotonic `order`. Press
 records must be followed by a `NativeCapture` record with success. Cancellation records must make
-the sequence distinguishable as native event -> `CoreCancellation` -> `NativeCaptureRelease` ->
-optional later `PointerCaptureLost`. Do not fabricate `PointerCaptureLost` when Windows does not
-emit it.
+the sequence distinguishable as native event -> `NativeCaptureRelease` with
+`native_capture_release_success` recorded after the actual release call -> optional later
+`PointerCaptureLost`. The trace does not emit or claim `CoreCancellation`; exactly-once Core
+cancellation is proved by combining forwarded native events with the Probe canceled count. Do not
+fabricate `PointerCaptureLost` when Windows does not emit it.
 
 The visible demo is the Core/application evidence layer. Probe A and Probe B independently display
 `pressed`, `moved`, `released`, `canceled`, `tapped`, `double_tapped`, `right_tapped`, last root

@@ -12,7 +12,7 @@ Snapshot: 2026-09-21. Tool architecture is indexed in [`../design/README.md`](..
 | `elwindui-hotreload` | 🚧 | Patch/Remount decision helper exists; artifact loading and live replacement are absent. |
 | `elwindui-test` | 🚧 | Render-tree dump exists; canvas/image snapshots are absent. |
 | `macos-ui-driver` | 🚧 | Process/window control, focus, Accessibility queries/actions, screenshots, coordinate clicks, Core-backed identifiers, direct AX text/numeric value setting, real press/drag/release, and native resize gestures are implemented; full keyboard synthesis and every AX action are incomplete. |
-| `windows-ui-driver` | 🚧 | Process/window control, UIA inspect/search/invoke/get-value/set-value/get-property/set-focus/wait-for, real mouse click/drag, screenshot (window and screen-capture modes), move/resize, and the bounded cancellation-only `touch-cancel` Windows touch stimulus are implemented over the external `winapp` CLI/Windows API; deterministic contract tests pass, while native cancellation acceptance remains host-dependent. |
+| `windows-ui-driver` | 🚧 | Process/window control, UIA inspect/search/invoke/get-value/set-value/get-property/set-focus/wait-for, real mouse click/drag, screenshot (window and screen-capture modes), move/resize, and the bounded cancellation-only `touch-cancel` Windows synthetic-pointer stimulus are implemented over the external `winapp` CLI/Windows API; deterministic contract tests pass, while native cancellation acceptance remains host-dependent. The modern synthetic-pointer backend is primary, legacy touch injection is fallback-only, and a physical touchscreen is not required. |
 | Shared native E2E orchestration | ⬜ | Backend-neutral durable cases, deterministic compilation, reusable local plan cache, batch runner, bounded vision checkpoints, and animation capture sequence are planned but not implemented. |
 
 ## Native E2E orchestration state
@@ -58,12 +58,18 @@ acceptance recorded above.
 Issue #267 adds the durable native cancellation/capture-loss case at
 [`tests/e2e/pointer-cancellation-capture-loss.md`](../../tests/e2e/pointer-cancellation-capture-loss.md),
 the bounded `touch-cancel` command, and private WinUI3 trace/capture-loss instrumentation. The
-driver contract test suite, including touch-cancel usage and one-object JSON checks, passes. The
-NC-01..NC-09 and NC-11 native matrix is not claimed: the available Windows 10 Pro build 19045
-session reported `SM_REMOTESESSION=1`, and legacy `InjectTouchInput` returned Win32 error 87 as
-`environment_blocker`; the normal point-click path was also refused while the product's auxiliary
-console window held foreground. A normal local interactive Windows host must still produce both
-trace and visible-probe evidence.
+driver contract test suite, including backend selection, error taxonomy, lifecycle cleanup shape,
+touch-cancel usage, and one-object JSON checks, passes. The modern synthetic-pointer API is
+primary; legacy `InjectTouchInput` is fallback-only, and physical touch hardware is not a
+capability gate. The prior RDP error-87 classification as `environment_blocker` is superseded:
+error 87 is `tool_error` unless a separately documented API/session condition proves otherwise.
+The NC-01..NC-09 and NC-11 native matrix remains unresolved and is not claimed. The pre-remediation
+RDP legacy Error-87 classification is historical and superseded, not acceptance evidence. On the
+new remediation working-tree run, Windows 10 Pro build 19045 / `SM_REMOTESESSION=1` accepted the
+modern synthetic-pointer sequence (`injection_backend:"synthetic-pointer"`), but the application
+observed a normal release rather than cancellation; the capture-loss diagnostic was also blocked
+by foreground ownership. A normal local interactive Windows host must still produce both trace
+and visible-probe evidence.
 
 For PR #241 remediation, the comparable `rust-analyzer diagnostics .` run with the repository
 Visual Studio environment passed on both base `766c2a9ab24632e639e02e232fd2e861d834caad` and

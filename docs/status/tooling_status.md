@@ -1,6 +1,6 @@
 # Tooling status
 
-Snapshot: 2026-09-16. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-09-21. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
 
 ## Current capability matrix
 
@@ -12,7 +12,7 @@ Snapshot: 2026-09-16. Tool architecture is indexed in [`../design/README.md`](..
 | `elwindui-hotreload` | 🚧 | Patch/Remount decision helper exists; artifact loading and live replacement are absent. |
 | `elwindui-test` | 🚧 | Render-tree dump exists; canvas/image snapshots are absent. |
 | `macos-ui-driver` | 🚧 | Process/window control, focus, Accessibility queries/actions, screenshots, coordinate clicks, Core-backed identifiers, direct AX text/numeric value setting, real press/drag/release, and native resize gestures are implemented; full keyboard synthesis and every AX action are incomplete. |
-| `windows-ui-driver` | 🚧 | Process/window control, UIA inspect/search/invoke/get-value/set-value/get-property/set-focus/wait-for, real mouse click/drag, screenshot (window and screen-capture modes), and move/resize are implemented over the external `winapp` CLI; `send-keys` is implemented but not yet exercised end to end by a live case. |
+| `windows-ui-driver` | 🚧 | Process/window control, UIA inspect/search/invoke/get-value/set-value/get-property/set-focus/wait-for, real mouse click/drag, screenshot (window and screen-capture modes), move/resize, and the bounded cancellation-only `touch-cancel` Windows touch stimulus are implemented over the external `winapp` CLI/Windows API; deterministic contract tests pass, while native cancellation acceptance remains host-dependent. |
 | Shared native E2E orchestration | ⬜ | Backend-neutral durable cases, deterministic compilation, reusable local plan cache, batch runner, bounded vision checkpoints, and animation capture sequence are planned but not implemented. |
 
 ## Native E2E orchestration state
@@ -54,6 +54,16 @@ match, but Issue #260 UIA discoverability is not an Issue #236 acceptance depend
 is under `.agent-state/issues/236/e2e/98e5f9e204bfc0b5ae120c56b5a72f57e674fcde/20260916T142131Z/`.
 This does not claim the shared runner/compiler/cache, which is separate from the durable case
 acceptance recorded above.
+
+Issue #267 adds the durable native cancellation/capture-loss case at
+[`tests/e2e/pointer-cancellation-capture-loss.md`](../../tests/e2e/pointer-cancellation-capture-loss.md),
+the bounded `touch-cancel` command, and private WinUI3 trace/capture-loss instrumentation. The
+driver contract test suite, including touch-cancel usage and one-object JSON checks, passes. The
+NC-01..NC-09 and NC-11 native matrix is not claimed: the available Windows 10 Pro build 19045
+session reported `SM_REMOTESESSION=1`, and legacy `InjectTouchInput` returned Win32 error 87 as
+`environment_blocker`; the normal point-click path was also refused while the product's auxiliary
+console window held foreground. A normal local interactive Windows host must still produce both
+trace and visible-probe evidence.
 
 For PR #241 remediation, the comparable `rust-analyzer diagnostics .` run with the repository
 Visual Studio environment passed on both base `766c2a9ab24632e639e02e232fd2e861d834caad` and

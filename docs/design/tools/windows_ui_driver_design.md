@@ -14,7 +14,8 @@ the Windows adapter-specific responsibilities and does not duplicate that shared
 `tools/windows-ui-driver/windows-ui-driver.ps1` is a thin, repository-owned PowerShell adapter that
 gives the repository a stable, versioned command surface for Windows native E2E, while delegating
 every UI Automation (UIA) query/action, real mouse/keyboard input, and screenshot capture to the
-external Microsoft `winapp` CLI (`winapp ui ...`).
+external Microsoft `winapp` CLI (`winapp ui ...`). The only direct input exception is the bounded,
+cancellation-only `touch-cancel` command described in §4.1.
 
 The adapter owns:
 
@@ -26,6 +27,8 @@ The adapter owns:
 - native window move/resize (deterministic positioning, not a product interaction test);
 - normalization of `winapp --json` results and of `winapp` failure categories into one fixed error
   taxonomy;
+- the bounded `touch-cancel` native-touch stimulus required when `winapp` has no canceled-contact
+  verb;
 - resolution of the external backend executable, with a test-only override.
 
 The adapter delegates to `winapp ui` for: UIA tree inspection, search, invoke, focus, value/property
@@ -59,12 +62,16 @@ place.
 The adapter embeds only the minimal P/Invoke needed for operations it owns: `EnumWindows`,
 `GetWindowThreadProcessId`, `IsWindowVisible`, `IsWindowEnabled`, `GetWindowTextW`, `GetWindowRect`,
 `GetForegroundWindow`, `ShowWindowAsync`, `SetForegroundWindow`, `SetWindowPos`/`MoveWindow`,
-`GetDpiForWindow`, `MonitorFromWindow`, `GetMonitorInfoW`.
+`GetDpiForWindow`, `MonitorFromWindow`, `GetMonitorInfoW`, `OpenInputDesktop`, and, only for
+`touch-cancel`, `InitializeTouchInjection`/`InjectTouchInput`.
 
-The adapter never adds Win32 input injection (`SendInput`, `mouse_event`, `keybd_event`, `PostMessage`
-as a click/keystroke substitute). All real mouse/keyboard delivery is `winapp ui`'s responsibility;
-duplicating it here would recreate exactly the ad-hoc, unclassified `SendInput` path that Issue #224
-already showed reports success without observable effect on at least one host.
+The adapter never adds generic Win32 input injection (`SendInput`, `mouse_event`, `keybd_event`,
+`PostMessage` as a click/keystroke substitute). All normal real mouse/keyboard/touch/pen delivery
+is `winapp ui`'s responsibility; duplicating it here would recreate exactly the ad-hoc,
+unclassified `SendInput` path that Issue #224 already showed reports success without observable
+effect on at least one host. The one documented exception is `touch-cancel`, which uses the Windows
+touch-injection API solely to emit one complete canceled contact and never exposes retained contact
+state.
 
 ## 4. UIA vs. real-input selection
 
@@ -75,6 +82,33 @@ hover, drag/drop, splitters, pointer capture, right-click/context requests, keyb
 focus behavior that depends on real key/mouse delivery. WinUI 3 real-key E2E always uses `winapp ui
 send-keys ... --via send-input`; `PostMessage`-style keystroke injection is never an accepted
 substitute for windowless XAML controls.
+
+## 4.1 Bounded `touch-cancel` exception
+
+`touch-cancel` exists only for Issue #267's native cancellation evidence. Its command surface is:
+
+```text
+windows-ui-driver.ps1 touch-cancel
+  --hwnd <hwnd>
+  --from-x <screen-physical-x> --from-y <screen-physical-y>
+  [--to-x <screen-physical-x> --to-y <screen-physical-y>]
+  [--hold-ms <0..2000>]
+```
+
+The adapter validates the all-or-none destination pair and bounded hold, requires a visible target
+on an available interactive input desktop, makes that HWND the actual foreground window, and then
+uses `InitializeTouchInjection`/`InjectTouchInput` for exactly one contact. It emits DOWN at the
+origin, an UPDATE at a distinct destination, keep-alive UPDATE frames at no more than 50 ms while
+holding, and `POINTER_FLAG_CANCELED | POINTER_FLAG_UP` at the latest point. It always exits after
+that bounded sequence; there is no cross-command contact handle, state file, daemon, or generic
+pointer/pen injection API.
+
+The successful result includes `hwnd`, `from`, `latest`, `hold_ms`, `sequence:
+"down-update-canceled"`, and `injection: "windows-touch"`. Invalid arguments are
+`usage_error`; invalid/gone HWNDs are `target_error`; unavailable desktop, foreground, access,
+or unsupported touch-injection conditions are `environment_blocker`; and internally invalid
+injection frames are `tool_error` with the Win32 error. `success: true` is injection evidence only,
+never a product PASS.
 
 ## 5. Error and result classification boundary
 
@@ -174,10 +208,11 @@ automation framework.
 
 ## 11. Non-goals
 
-No ElwindUI public API or WinUI3 backend behavior change. No second UI Automation implementation.
-No vendored `winapp`. No Rust workspace crate for the driver (this is PowerShell, matching the
-already-PowerShell Windows host workflow). This design does not execute or close Issues #224, #226,
-or #157 — it is infrastructure those Issues' own verification work can build on.
+No ElwindUI public API or WinUI3 backend behavior change. No generic pointer-down/pointer-up,
+pen-injection, persistent contact, or second UI Automation implementation. No vendored `winapp`.
+No Rust workspace crate for the driver (this is PowerShell, matching the already-PowerShell Windows
+host workflow). This design does not execute or close Issues #224, #226, or #157 — it is
+infrastructure those Issues' own verification work can build on.
 
 ## 12. Product E2E ownership boundary
 

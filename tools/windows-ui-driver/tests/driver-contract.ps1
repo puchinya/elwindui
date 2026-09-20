@@ -281,6 +281,33 @@ finally {
     Remove-Item -LiteralPath $NestedArgvOut -ErrorAction SilentlyContinue
 }
 
+# T10 -- touch-cancel is the sole bounded direct-injection exception. Usage validation must fail
+# before any HWND/session/injection work, and every invocation must retain the driver's one-object
+# JSON protocol even when the native API is unavailable on the test host.
+$r = Invoke-Driver @('touch-cancel', '--from-x', '10', '--from-y', '20')
+Assert-OneJsonObject $r 'touch-cancel (missing hwnd)'
+Assert ($r.Json.category -eq 'usage_error') 'touch-cancel (missing hwnd) -- category:usage_error'
+
+$r = Invoke-Driver @('touch-cancel', '--hwnd', '4660', '--from-y', '20')
+Assert-OneJsonObject $r 'touch-cancel (missing from-x)'
+Assert ($r.Json.category -eq 'usage_error') 'touch-cancel (missing from-x) -- category:usage_error'
+
+$r = Invoke-Driver @('touch-cancel', '--hwnd', '4660', '--from-x', '10', '--from-y', '20', '--to-x', '30')
+Assert-OneJsonObject $r 'touch-cancel (incomplete destination pair)'
+Assert ($r.Json.category -eq 'usage_error') 'touch-cancel (incomplete destination pair) -- category:usage_error'
+
+$r = Invoke-Driver @('touch-cancel', '--hwnd', '4660', '--from-x', '10', '--from-y', '20', '--hold-ms', '-1')
+Assert-OneJsonObject $r 'touch-cancel (negative hold)'
+Assert ($r.Json.category -eq 'usage_error') 'touch-cancel (negative hold) -- category:usage_error'
+
+$r = Invoke-Driver @('touch-cancel', '--hwnd', '4660', '--from-x', '10', '--from-y', '20', '--hold-ms', '2001')
+Assert-OneJsonObject $r 'touch-cancel (hold above bound)'
+Assert ($r.Json.category -eq 'usage_error') 'touch-cancel (hold above bound) -- category:usage_error'
+
+$r = Invoke-Driver @('touch-cancel', '--hwnd', '4660', '--from-x', 'not-a-coordinate', '--from-y', '20')
+Assert-OneJsonObject $r 'touch-cancel (malformed coordinate)'
+Assert ($r.Json.category -eq 'usage_error') 'touch-cancel (malformed coordinate) -- category:usage_error'
+
 if ($script:FailureCount -gt 0) {
     Write-Output "`n$script:FailureCount assertion(s) failed."
     exit 1

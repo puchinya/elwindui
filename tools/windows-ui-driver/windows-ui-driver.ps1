@@ -9,12 +9,13 @@
     docs/agents/winui3-e2e.md for the operational tester procedure. tools/windows-ui-driver/README.md
     documents the command surface for humans.
 
-    This script never performs Win32 input injection (SendInput/mouse_event/keybd_event/PostMessage
-    as a click or keystroke substitute) and never vendors or auto-installs `winapp`. All UIA
-    inspection/actions, real mouse/keyboard input, and screenshot capture are delegated to `winapp
-    ui`. This script owns only: stable command names/JSON shape, process/window lifecycle, HWND
-    enumeration, foreground request+verification, bounds/DPI/monitor metadata, native move/resize,
-    and normalization of `winapp` results/failures into one fixed error taxonomy.
+    This script does not perform generic Win32 input injection (SendInput/mouse_event/keybd_event/
+    PostMessage as a click or keystroke substitute) and never vendors or auto-installs `winapp`.
+    All UIA inspection/actions, real mouse/keyboard input, and screenshot capture are delegated to
+    `winapp ui`, except for the narrowly scoped `touch-cancel` Windows touch-injection command.
+    This script owns stable command names/JSON shape, process/window lifecycle, HWND enumeration,
+    foreground request+verification, bounds/DPI/monitor metadata, native move/resize, the bounded
+    cancellation-only touch stimulus, and normalization of failures into one fixed error taxonomy.
 
 .NOTES
     Every command prints exactly one JSON object to stdout and sets the process exit code (0 success,
@@ -28,7 +29,7 @@ param(
     [ValidateSet(
         'doctor', 'launch', 'list-windows', 'focus-window',
         'inspect', 'search', 'invoke', 'get-value', 'set-value', 'get-property', 'set-focus', 'wait-for',
-        'capture-window', 'point-click', 'drag', 'send-keys',
+        'capture-window', 'point-click', 'drag', 'touch-cancel', 'send-keys',
         'move-window', 'resize-window', 'terminate'
     )]
     [string]$Command,
@@ -76,6 +77,13 @@ public static extern bool IsWindowVisible(IntPtr hWnd);
 
 [DllImport("user32.dll")]
 [return: MarshalAs(UnmanagedType.Bool)]
+public static extern bool IsWindow(IntPtr hWnd);
+
+[DllImport("user32.dll")]
+public static extern int GetSystemMetrics(int nIndex);
+
+[DllImport("user32.dll")]
+[return: MarshalAs(UnmanagedType.Bool)]
 public static extern bool IsWindowEnabled(IntPtr hWnd);
 
 [DllImport("user32.dll")]
@@ -114,7 +122,17 @@ public static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint dwFlags);
 [return: MarshalAs(UnmanagedType.Bool)]
 public static extern bool GetMonitorInfoW(IntPtr hMonitor, ref MONITORINFOEX lpmi);
 
-// doctor-only environment probe -- not used for any input injection.
+// The repository-owned touch-cancel command is the one documented direct-injection exception.
+// It owns one complete, bounded contact and never exposes a retained pointer handle.
+[DllImport("user32.dll", SetLastError = true)]
+[return: MarshalAs(UnmanagedType.Bool)]
+public static extern bool InitializeTouchInjection(uint maxCount, uint dwMode);
+
+[DllImport("user32.dll", SetLastError = true)]
+[return: MarshalAs(UnmanagedType.Bool)]
+public static extern bool InjectTouchInput(uint count, ref POINTER_TOUCH_INFO contacts);
+
+// Shared interactive-desktop probe used by doctor and the bounded touch-cancel command.
 [DllImport("user32.dll", CharSet = CharSet.Unicode)]
 public static extern IntPtr OpenInputDesktop(uint dwFlags, bool fInherit, uint dwDesiredAccess);
 
@@ -154,6 +172,40 @@ public static void MakeOwnStdHandlesNonInheritable() {
 
 [StructLayout(LayoutKind.Sequential)]
 public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+[StructLayout(LayoutKind.Sequential)]
+public struct POINT { public int X; public int Y; }
+
+[StructLayout(LayoutKind.Sequential)]
+public struct POINTER_INFO {
+    public uint pointerType;
+    public uint pointerId;
+    public uint frameId;
+    public uint pointerFlags;
+    public IntPtr sourceDevice;
+    public IntPtr hwndTarget;
+    public POINT ptPixelLocation;
+    public POINT ptHimetricLocation;
+    public POINT ptPixelLocationRaw;
+    public POINT ptHimetricLocationRaw;
+    public uint dwTime;
+    public uint historyCount;
+    public int inputData;
+    public uint dwKeyStates;
+    public ulong PerformanceCount;
+    public int ButtonChangeType;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct POINTER_TOUCH_INFO {
+    public POINTER_INFO pointerInfo;
+    public uint touchFlags;
+    public uint touchMask;
+    public RECT rcContact;
+    public RECT rcContactRaw;
+    public uint orientation;
+    public uint pressure;
+}
 
 [StructLayout(LayoutKind.Sequential)]
 public struct RECTM { public int Left; public int Top; public int Right; public int Bottom; }
@@ -438,6 +490,244 @@ function ConvertTo-Hwnd {
         return [IntPtr]([Convert]::ToInt64($s.Substring(2), 16))
     }
     return [IntPtr]([Convert]::ToInt64($s, 10))
+}
+
+function ConvertTo-Int32Argument {
+    param([string]$Name, $Value)
+    if ($Value -is [bool]) {
+        Emit-UsageError "--$Name requires an integer value"
+    }
+    $parsed = 0
+    $style = [Globalization.NumberStyles]::Integer
+    $culture = [Globalization.CultureInfo]::InvariantCulture
+    if (-not [int]::TryParse([string]$Value, $style, $culture, [ref]$parsed)) {
+        Emit-UsageError "--$Name must be a signed 32-bit integer"
+    }
+    return $parsed
+}
+
+function Get-Win32ErrorDescription {
+    param([int]$ErrorCode)
+    $message = ''
+    try { $message = [System.ComponentModel.Win32Exception]::new($ErrorCode).Message } catch { $message = 'unknown Win32 error' }
+    return "Win32 error $ErrorCode`: $message"
+}
+
+function Get-TouchInjectionFailureCategory {
+    param([int]$ErrorCode)
+    # API/session availability failures are host blockers; malformed frame data is a driver bug.
+    if ($ErrorCode -eq 87) {
+        try {
+            $remoteSession = [ElwindUI.Win32Driver]::GetSystemMetrics(0x1000) # SM_REMOTESESSION
+            $digitizer = [ElwindUI.Win32Driver]::GetSystemMetrics(94)
+            $maximumTouches = [ElwindUI.Win32Driver]::GetSystemMetrics(95)
+            if ($remoteSession -ne 0 -or $digitizer -eq 0 -or $maximumTouches -eq 0) {
+                return 'environment_blocker'
+            }
+        }
+        catch {
+            # Preserve tool_error when the capability probe itself is unavailable.
+        }
+    }
+    if ($ErrorCode -in @(1, 5, 21, 50, 120, 5023, 1223)) { return 'environment_blocker' }
+    return 'tool_error'
+}
+
+function Test-InteractiveInputDesktop {
+    $DESKTOP_READOBJECTS = 0x0001
+    try {
+        $desktop = [ElwindUI.Win32Driver]::OpenInputDesktop(0, $false, $DESKTOP_READOBJECTS)
+        if ($desktop -eq [IntPtr]::Zero) { return $false }
+        [void][ElwindUI.Win32Driver]::CloseDesktop($desktop)
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function New-TouchContact {
+    param(
+        [int]$X,
+        [int]$Y,
+        [uint32]$PointerFlags,
+        [uint32]$PointerId = 1
+    )
+    $point = New-Object ElwindUI.Win32Driver+POINT
+    $point.X = $X
+    $point.Y = $Y
+    $rect = New-Object ElwindUI.Win32Driver+RECT
+    $rect.Left = $X - 2
+    $rect.Top = $Y - 2
+    $rect.Right = $X + 2
+    $rect.Bottom = $Y + 2
+
+    $pointer = New-Object ElwindUI.Win32Driver+POINTER_INFO
+    $pointer.pointerType = 2 # PT_TOUCH
+    $pointer.pointerId = $PointerId
+    $pointer.pointerFlags = $PointerFlags
+    # InjectTouchInput routes by desktop coordinates. hwndTarget is populated by the system and
+    # must remain zero for a caller-supplied target; foreground verification above is the target
+    # ownership guard for this bounded command.
+    $pointer.ptPixelLocation = $point
+
+    $contact = New-Object ElwindUI.Win32Driver+POINTER_TOUCH_INFO
+    $contact.pointerInfo = $pointer
+    $contact.touchFlags = 0
+    $contact.touchMask = 0x00000007 # CONTACTAREA | ORIENTATION | PRESSURE
+    $contact.rcContact = $rect
+    $contact.rcContactRaw = $rect
+    $contact.orientation = 0
+    $contact.pressure = 512
+    return $contact
+}
+
+function Invoke-TouchFrame {
+    param(
+        [IntPtr]$Hwnd,
+        [int]$X,
+        [int]$Y,
+        [uint32]$PointerFlags
+    )
+    $contact = New-TouchContact -X $X -Y $Y -PointerFlags $PointerFlags
+    $accepted = [ElwindUI.Win32Driver]::InjectTouchInput(1, [ref]$contact)
+    if ($accepted) { return @{ success = $true } }
+    $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    return @{
+        success     = $false
+        error_code  = $errorCode
+        category    = Get-TouchInjectionFailureCategory $errorCode
+        error       = Get-Win32ErrorDescription $errorCode
+    }
+}
+
+function Cmd-TouchCancel {
+    $hwndArg = Require-Arg 'hwnd'
+    $fromX = ConvertTo-Int32Argument 'from-x' (Require-Arg 'from-x')
+    $fromY = ConvertTo-Int32Argument 'from-y' (Require-Arg 'from-y')
+
+    $hasToX = $Args2.ContainsKey('to-x')
+    $hasToY = $Args2.ContainsKey('to-y')
+    if ($hasToX -xor $hasToY) {
+        Emit-UsageError '--to-x and --to-y must be supplied together'
+    }
+    $toX = $fromX
+    $toY = $fromY
+    if ($hasToX) {
+        $toX = ConvertTo-Int32Argument 'to-x' (Get-Arg 'to-x')
+        $toY = ConvertTo-Int32Argument 'to-y' (Get-Arg 'to-y')
+    }
+
+    $holdMs = 0
+    if ($Args2.ContainsKey('hold-ms')) {
+        $holdMs = ConvertTo-Int32Argument 'hold-ms' (Get-Arg 'hold-ms')
+    }
+    if ($holdMs -lt 0 -or $holdMs -gt 2000) {
+        Emit-UsageError '--hold-ms must be between 0 and 2000 milliseconds'
+    }
+
+    $hwnd = [IntPtr]::Zero
+    try { $hwnd = ConvertTo-Hwnd $hwndArg } catch { Emit-Result @{ success = $false; category = 'target_error'; error = 'invalid HWND' } }
+    if ($hwnd -eq [IntPtr]::Zero -or -not [ElwindUI.Win32Driver]::IsWindow($hwnd)) {
+        Emit-Result @{ success = $false; category = 'target_error'; error = 'target HWND is invalid or no longer exists' }
+    }
+    $targetInfo = $null
+    try { $targetInfo = Get-WindowInfo -Hwnd $hwnd } catch {
+        Emit-Result @{ success = $false; category = 'target_error'; error = 'target HWND could not be inspected' }
+    }
+    if (-not $targetInfo.visible -or $targetInfo.width -le 0 -or $targetInfo.height -le 0) {
+        Emit-Result @{ success = $false; category = 'target_error'; error = 'target HWND is not a visible non-empty window' }
+    }
+
+    if (-not (Test-InteractiveInputDesktop)) {
+        Emit-Result @{ success = $false; category = 'environment_blocker'; error = 'interactive input desktop is unavailable' }
+    }
+
+    $before = [ElwindUI.Win32Driver]::GetForegroundWindow()
+    try {
+        if ([ElwindUI.Win32Driver]::IsIconic($hwnd)) {
+            [void][ElwindUI.Win32Driver]::ShowWindowAsync($hwnd, $SW_RESTORE)
+        }
+        [void][ElwindUI.Win32Driver]::SetForegroundWindow($hwnd)
+    }
+    catch {
+        Emit-Result @{ success = $false; category = 'environment_blocker'; error = "foreground request failed: $($_.Exception.Message)" }
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(3)
+    $after = [ElwindUI.Win32Driver]::GetForegroundWindow()
+    while (($after -ne $hwnd) -and ([DateTime]::UtcNow -lt $deadline)) {
+        Start-Sleep -Milliseconds 25
+        [void][ElwindUI.Win32Driver]::SetForegroundWindow($hwnd)
+        $after = [ElwindUI.Win32Driver]::GetForegroundWindow()
+    }
+    if ($after -ne $hwnd) {
+        Emit-Result @{
+            success            = $false
+            category           = 'environment_blocker'
+            error              = 'target window did not become the actual foreground window before injection'
+            foreground_before = ('0x{0:X}' -f [int64]$before)
+            foreground_after  = ('0x{0:X}' -f [int64]$after)
+        }
+    }
+
+    $initializeOk = [ElwindUI.Win32Driver]::InitializeTouchInjection(1, 1) # TOUCH_FEEDBACK_DEFAULT
+    if (-not $initializeOk) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        Emit-Result @{
+            success  = $false
+            category = Get-TouchInjectionFailureCategory $errorCode
+            error    = Get-Win32ErrorDescription $errorCode
+        }
+    }
+
+    $pointerFlagsDown = 0x00010000 -bor 0x00000002 -bor 0x00000004 # DOWN | INRANGE | INCONTACT
+    $pointerFlagsUpdate = 0x00020000 -bor 0x00000002 -bor 0x00000004 # UPDATE | INRANGE | INCONTACT
+    $pointerFlagsCanceledUp = 0x00008000 -bor 0x00040000 # CANCELED | UP
+
+    $down = Invoke-TouchFrame -Hwnd $hwnd -X $fromX -Y $fromY -PointerFlags $pointerFlagsDown
+    if (-not $down.success) {
+        Emit-Result @{ success = $false; category = $down.category; error = $down.error; error_code = $down.error_code }
+    }
+
+    $latestX = $fromX
+    $latestY = $fromY
+    if ($toX -ne $fromX -or $toY -ne $fromY) {
+        $latestX = $toX
+        $latestY = $toY
+        $update = Invoke-TouchFrame -Hwnd $hwnd -X $latestX -Y $latestY -PointerFlags $pointerFlagsUpdate
+        if (-not $update.success) {
+            # Best-effort bounded cleanup; the failure result remains the authoritative outcome.
+            [void](Invoke-TouchFrame -Hwnd $hwnd -X $latestX -Y $latestY -PointerFlags $pointerFlagsCanceledUp)
+            Emit-Result @{ success = $false; category = $update.category; error = $update.error; error_code = $update.error_code }
+        }
+    }
+
+    if ($holdMs -gt 0) {
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        while ($clock.ElapsedMilliseconds -lt $holdMs) {
+            $remaining = $holdMs - [int]$clock.ElapsedMilliseconds
+            Start-Sleep -Milliseconds ([Math]::Min(50, [Math]::Max(1, $remaining)))
+            $keepAlive = Invoke-TouchFrame -Hwnd $hwnd -X $latestX -Y $latestY -PointerFlags $pointerFlagsUpdate
+            if (-not $keepAlive.success) {
+                [void](Invoke-TouchFrame -Hwnd $hwnd -X $latestX -Y $latestY -PointerFlags $pointerFlagsCanceledUp)
+                Emit-Result @{ success = $false; category = $keepAlive.category; error = $keepAlive.error; error_code = $keepAlive.error_code }
+            }
+        }
+    }
+
+    $final = Invoke-TouchFrame -Hwnd $hwnd -X $latestX -Y $latestY -PointerFlags $pointerFlagsCanceledUp
+    if (-not $final.success) {
+        Emit-Result @{ success = $false; category = $final.category; error = $final.error; error_code = $final.error_code }
+    }
+    Emit-Result @{
+        success   = $true
+        hwnd      = $hwndArg
+        from      = @{ x = $fromX; y = $fromY }
+        latest    = @{ x = $latestX; y = $latestY }
+        hold_ms   = $holdMs
+        sequence  = 'down-update-canceled'
+        injection = 'windows-touch'
+    }
 }
 
 function Get-TargetArgs {
@@ -894,6 +1184,7 @@ switch ($Command) {
     'capture-window' { Cmd-CaptureWindow }
     'point-click' { Cmd-PointClick }
     'drag' { Cmd-Drag }
+    'touch-cancel' { Cmd-TouchCancel }
     'send-keys' { Cmd-SendKeys }
     'move-window' { Cmd-MoveWindow }
     'resize-window' { Cmd-ResizeWindow }

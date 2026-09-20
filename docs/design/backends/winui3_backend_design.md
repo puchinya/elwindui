@@ -55,6 +55,15 @@ they do not add a public API or a recurring layout trigger.
 
 The root Canvas forwards self-drawn pointer press/move/release/canceled events to the common `PointerDispatcher`. Every `TreeHost` permanently owns one transparent, hit-test-visible `Rectangle` at `Canvas.Children()[0]`; it spans the final relayout extent, including an unconstrained axis's natural arranged size, and is never part of dynamic reconciliation. Render-only XAML projections remain input-transparent, so blank/self-drawn hit testing resolves to this surface and bubbles to the root Canvas. The source boundary is exact identity: only the root Canvas or that host's exact input surface is forwarded to Core; native XAML children and unrelated descendants are rejected. A successful press captures the native pointer and release relinquishes it. `PointerCanceled` clears and notifies the Core capture before the Canvas releases its native captures; the resulting `PointerCaptureLost`, or an independently initiated capture loss, enters the same idempotent Core cancellation path. A weak `WinUI3PointerGestureHost` applies the Core-first ordering for subtree unmount, host deactivation, and tree replacement/clear.
 
+Private E2E observability is gated by `ELWINDUI_WINUI3_POINTER_TRACE_PATH`. When set, the native
+root-Canvas bridge appends and flushes JSONL records containing event, pointer id, source
+classification, Core forwarding, root/screen positions, monotonic order, and capture success.
+Trace failures are ignored by production behavior and never alter `Handled`. When the trace path
+and `ELWINDUI_WINUI3_E2E_RELEASE_CAPTURE_ON_PRESS=1` are both present, a Core-accepted press whose
+`CapturePointer` succeeds immediately releases that same native pointer. The hook performs no Core
+cancellation; the resulting native `PointerCaptureLost` travels through the existing callback.
+Both mechanisms are absent by default and are not exposed through public APIs or DSL properties.
+
 Real `NativeControl` children remain native input owners and therefore remain hit-testable. Host activation gates the root Canvas: deactivation performs the existing cancellation/native-capture release first, then disables root hit testing while retaining the permanent surface; reactivation restores root hit testing before the existing relayout. The surface's identity, fill, position, size path, and own hit-testability are independent of `Window.transparent`. `WinUI3CoordinateHost` weakly references the Canvas and promotes the existing `ContentCoordinateConverter`/rasterization-scale path for both root-to-screen and screen-to-root conversion, including transforms between Canvas and XamlRoot content.
 
 ## Rendering

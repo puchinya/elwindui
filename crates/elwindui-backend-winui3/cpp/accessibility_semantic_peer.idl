@@ -1,0 +1,18 @@
+// Metadata-only declaration for the Core-owned semantic AutomationPeer.
+// The class is non-activatable because it declares no constructor; cppwinrt -component generates
+// the implementation/projection scaffolding used by the native bridge.
+
+namespace Elwindui.WinUI3.Accessibility
+{
+    [default_interface]
+    runtimeclass SemanticPeer :
+        Microsoft.UI.Xaml.Automation.Peers.AutomationPeer,
+        Microsoft.UI.Xaml.Automation.Provider.IInvokeProvider,
+        Microsoft.UI.Xaml.Automation.Provider.IToggleProvider,
+        Microsoft.UI.Xaml.Automation.Provider.IRangeValueProvider,
+        Microsoft.UI.Xaml.Automation.Provider.IValueProvider,
+        Microsoft.UI.Xaml.Automation.Provider.ISelectionItemProvider,
+        Microsoft.UI.Xaml.Automation.Provider.IExpandCollapseProvider
+    {
+    }
+}

@@ -12,7 +12,9 @@
 
 param(
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
-    [string[]]$FakeArgs
+    [string[]]$FakeArgs,
+    [Alias('w')]
+    [string]$WindowHwnd
 )
 
 if ($FakeArgs -contains '--version') {
@@ -27,6 +29,22 @@ if ($FakeArgs -contains '--version') {
 # Scenario selection: driver-contract.ps1 encodes which fake scenario to run as the search/query
 # text or selector, since that's the one value windows-ui-driver.ps1 always forwards verbatim.
 $joined = $FakeArgs -join ' '
+
+if ($joined -match 'FAKE_SET_VALUE_BACKEND_ERROR') {
+    $body = '{"success":false,"error":{"code":"element_not_found","message":"set-value target missing"}}'
+    [Console]::Error.WriteLine($body)
+    exit 1
+}
+
+if ($WindowHwnd -eq '4660' -and $FakeArgs.Count -eq 5 -and
+    $FakeArgs[0] -eq 'ui' -and
+    $FakeArgs[1] -eq 'set-value' -and
+    $FakeArgs[2] -eq 'FAKE_SET_VALUE_SELECTOR' -and
+    $FakeArgs[3] -eq 'value with spaces' -and
+    $FakeArgs[4] -eq '--json') {
+    Write-Output '{"success":true,"forwarded":true}'
+    exit 0
+}
 
 if ($joined -match 'FAKE_SUCCESS') {
     Write-Output '{"success":true,"matchCount":1,"matches":[{"name":"FAKE_SUCCESS","selector":"fake-1"}]}'

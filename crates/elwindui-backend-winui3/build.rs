@@ -444,7 +444,7 @@ fn main() {
         .expect("write generated XAML interop bindings");
     copy_win2d_runtime(&out_dir);
     generate_resources_pri(&out_dir);
-    build_cpp_app_host(&out_dir, &winmd_inputs);
+    build_cpp_app_host(&out_dir, &winmd_inputs, &app_sdk);
     if !warnings.is_empty() || !interop_warnings.is_empty() {
         println!(
             "cargo:warning=WinUI binding generation omitted {} unsupported metadata member(s)",
@@ -656,14 +656,139 @@ fn generate_resources_pri(out_dir: &str) {
         .expect("copy resources.pri beside test binaries");
 }
 
+#[cfg(target_os = "windows")]
+fn deploy_accessibility_winmd(out_dir: &str, component_winmd: &std::path::Path) {
+    let profile_dir = std::path::Path::new(out_dir)
+        .ancestors()
+        .nth(3)
+        .expect("target profile directory");
+    let deps_dir = profile_dir.join("deps");
+    std::fs::create_dir_all(&deps_dir).expect("create target/<profile>/deps directory");
+    let filename = component_winmd
+        .file_name()
+        .expect("accessibility component WinMD filename");
+    std::fs::copy(component_winmd, profile_dir.join(filename))
+        .expect("copy accessibility component WinMD beside application binary");
+    std::fs::copy(component_winmd, deps_dir.join(filename))
+        .expect("copy accessibility component WinMD beside test binaries");
+}
+
 /// Generates a C++/WinRT projection (via `cppwinrt.exe`) for just enough of the WinUI 3 surface to
 /// host `Application`, and compiles `cpp/app_host.cpp` against it — see that file's own doc comment
 /// (and `src/composed_application.rs`'s) for why this exists at all (microsoft/windows-rs#3404).
 #[cfg(target_os = "windows")]
-fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String]) {
+fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String], app_sdk: &std::path::Path) {
     let cppwinrt = find_sdk_tool("cppwinrt.exe")
         .expect("cppwinrt.exe was not found; source tools/setup-vs-env.ps1 first");
+    let midl = find_sdk_tool("midl.exe")
+        .expect("midl.exe was not found; source tools/setup-vs-env.ps1 first");
     let projection_dir = std::path::Path::new(out_dir).join("cppwinrt_include");
+
+    let component_dir = std::path::Path::new(out_dir).join("accessibility_component");
+    std::fs::create_dir_all(&component_dir).expect("create accessibility component output");
+    let component_winmd = component_dir.join("Elwindui.WinUI3.Accessibility.winmd");
+    let idl =
+        std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("cpp/accessibility_semantic_peer.idl");
+    let metadata_dir = find_sdk_union_metadata_dir()
+        .expect("Windows SDK UnionMetadata was not found; source tools/setup-vs-env.ps1 first");
+
+    let midl_env = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86") => "win32",
+        Ok("aarch64") => "arm64",
+        _ => "x64",
+    };
+    let mut midl_args = vec![
+        "/nologo".to_owned(),
+        "/winrt".to_owned(),
+        "/env".to_owned(),
+        midl_env.to_owned(),
+        "/out".to_owned(),
+        component_dir.to_string_lossy().into_owned(),
+        "/winmd".to_owned(),
+        component_winmd.to_string_lossy().into_owned(),
+        "/metadata_dir".to_owned(),
+        metadata_dir.to_string_lossy().into_owned(),
+    ];
+    midl_args.push("/reference".to_owned());
+    midl_args.push(app_sdk.to_string_lossy().into_owned());
+    for metadata in [
+        "Windows.Foundation.FoundationContract.winmd",
+        "Windows.Foundation.UniversalApiContract.winmd",
+    ] {
+        let path = find_sdk_reference_winmd(metadata).unwrap_or_else(|| {
+            panic!(
+                "Windows SDK reference metadata was not found: {metadata}; source tools/setup-vs-env.ps1 first"
+            )
+        });
+        midl_args.push("/reference".to_owned());
+        midl_args.push(path.to_string_lossy().into_owned());
+    }
+    midl_args.extend(["/h".to_owned(), "nul".to_owned(), "/nomidl".to_owned()]);
+    midl_args.push(idl.to_string_lossy().into_owned());
+    let midl_status = std::process::Command::new(&midl)
+        .args(&midl_args)
+        .status()
+        .expect("run midl.exe for accessibility_semantic_peer.idl");
+    assert!(
+        midl_status.success(),
+        "midl.exe failed generating the accessibility semantic peer metadata"
+    );
+    assert!(
+        component_winmd.is_file(),
+        "midl.exe did not produce {}",
+        component_winmd.display()
+    );
+    deploy_accessibility_winmd(out_dir, &component_winmd);
+
+    let mut component_args = vec![
+        "-input".to_owned(),
+        component_winmd.to_string_lossy().into_owned(),
+    ];
+    component_args.push("-reference".to_owned());
+    component_args.push("sdk+".to_owned());
+    for winmd in winmd_inputs {
+        component_args.push("-reference".to_owned());
+        component_args.push(winmd.clone());
+    }
+    if let Some(webview2) = find_package_lib_winmd(
+        "microsoft.web.webview2",
+        "Microsoft.Web.WebView2.Core.winmd",
+    ) {
+        component_args.push("-reference".to_owned());
+        component_args.push(webview2.to_string_lossy().into_owned());
+    }
+    component_args.extend([
+        "-include".to_owned(),
+        "Elwindui.WinUI3.Accessibility".to_owned(),
+        "-output".to_owned(),
+        component_dir.to_string_lossy().into_owned(),
+        "-component".to_owned(),
+        "-pch".to_owned(),
+        ".".to_owned(),
+        "-overwrite".to_owned(),
+    ]);
+    for excluded in [
+        "Microsoft.UI.Xaml.Controls.WebView2",
+        "Microsoft.UI.Xaml.Controls.IWebView2",
+    ] {
+        component_args.push("-exclude".to_owned());
+        component_args.push(excluded.to_owned());
+    }
+    let component_status = std::process::Command::new(&cppwinrt)
+        .args(&component_args)
+        .status()
+        .expect("run cppwinrt.exe for accessibility semantic peer");
+    assert!(
+        component_status.success(),
+        "cppwinrt.exe failed generating the accessibility semantic peer component"
+    );
+    let component_source = component_dir.join("module.g.cpp");
+    assert!(
+        component_source.is_file(),
+        "cppwinrt.exe did not produce {}",
+        component_source.display()
+    );
 
     let mut args: Vec<String> = vec!["-input".to_owned(), "sdk+".to_owned()];
     for winmd in winmd_inputs {
@@ -719,6 +844,8 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String]) {
         .std("c++20")
         .file("cpp/app_host.cpp")
         .file("cpp/accessibility_host.cpp")
+        .file(&component_source)
+        .include(&component_dir)
         .include(&projection_dir)
         .flag_if_supported("/await:strict")
         .flag_if_supported("/EHsc")
@@ -729,6 +856,7 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String]) {
     println!("cargo:rerun-if-changed=cpp/app_host.cpp");
     println!("cargo:rerun-if-changed=cpp/accessibility_host.h");
     println!("cargo:rerun-if-changed=cpp/accessibility_host.cpp");
+    println!("cargo:rerun-if-changed=cpp/accessibility_semantic_peer.idl");
 }
 
 /// Looks for `<nuget_packages>/<package>/<version>/lib/<filename>` (the WebView2 package's own
@@ -780,6 +908,73 @@ fn find_sdk_tool(name: &str) -> Option<std::path::PathBuf> {
         .map(|entry| entry.path().join(arch).join(name))
         .filter(|path| path.is_file())
         .collect();
+    candidates.sort();
+    candidates.pop()
+}
+
+#[cfg(target_os = "windows")]
+fn find_sdk_union_metadata_dir() -> Option<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if let (Ok(sdk_dir), Ok(sdk_version)) = (
+        std::env::var("WindowsSdkDir"),
+        std::env::var("WindowsSDKVersion"),
+    ) {
+        candidates.push(
+            std::path::Path::new(&sdk_dir)
+                .join("UnionMetadata")
+                .join(sdk_version.trim_end_matches('\\')),
+        );
+    }
+    let union_root = std::path::Path::new(r"C:\Program Files (x86)\Windows Kits\10\UnionMetadata");
+    if let Ok(entries) = std::fs::read_dir(union_root) {
+        candidates.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir()),
+        );
+    }
+    candidates.sort();
+    candidates.into_iter().rev().find(|path| {
+        path.file_name().is_some_and(|name| name != "Facade")
+            && path.join("Windows.winmd").is_file()
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn find_sdk_reference_winmd(filename: &str) -> Option<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let (Ok(sdk_dir), Ok(sdk_version)) = (
+        std::env::var("WindowsSdkDir"),
+        std::env::var("WindowsSDKVersion"),
+    ) {
+        roots.push(
+            std::path::Path::new(&sdk_dir)
+                .join("References")
+                .join(sdk_version.trim_end_matches('\\')),
+        );
+    }
+    roots.push(std::path::PathBuf::from(
+        r"C:\Program Files (x86)\Windows Kits\10\References\10.0.26100.0",
+    ));
+
+    let mut candidates = Vec::new();
+    for root in roots {
+        let Ok(namespaces) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for namespace in namespaces.flatten() {
+            let Ok(versions) = std::fs::read_dir(namespace.path()) else {
+                continue;
+            };
+            for version in versions.flatten() {
+                let path = version.path().join(filename);
+                if path.is_file() {
+                    candidates.push(path);
+                }
+            }
+        }
+    }
     candidates.sort();
     candidates.pop()
 }

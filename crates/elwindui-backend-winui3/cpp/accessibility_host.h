@@ -10,6 +10,7 @@ struct ElwinduiAccessibilityNodeRecord {
     std::uint32_t role;
     std::uint32_t state_flags;
     std::uint32_t actions_mask;
+    std::uint32_t patterns_mask;
     double value;
     double minimum;
     double maximum;
@@ -23,6 +24,8 @@ struct ElwinduiAccessibilityNodeRecord {
     char16_t label[256];
     std::uint32_t value_length;
     char16_t value_text[256];
+    std::uint32_t identifier_length;
+    char16_t identifier[256];
 };
 
 struct ElwinduiAccessibilityCallbacks {

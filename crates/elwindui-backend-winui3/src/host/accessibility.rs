@@ -17,6 +17,8 @@ use std::rc::{Rc, Weak};
 #[cfg(windows)]
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 #[cfg(windows)]
+use elwindui_core::base::{Point, Rect};
+#[cfg(windows)]
 use windows::core::{IInspectable, Interface};
 
 #[cfg(windows)]
@@ -26,6 +28,7 @@ struct AccessibilityNodeRecord {
     role: u32,
     state_flags: u32,
     actions_mask: u32,
+    patterns_mask: u32,
     value: f64,
     minimum: f64,
     maximum: f64,
@@ -39,6 +42,8 @@ struct AccessibilityNodeRecord {
     label: [u16; 256],
     value_length: u32,
     value_text: [u16; 256],
+    identifier_length: u32,
+    identifier: [u16; 256],
 }
 
 #[cfg(windows)]
@@ -96,6 +101,8 @@ pub(crate) struct WinUI3AccessibilityState {
     pub(crate) runtime: Rc<AccessibilityRuntime>,
     tree: Weak<RefCell<Option<Rc<dyn UIElementExt>>>>,
     #[cfg(windows)]
+    canvas: RefCell<Option<windows::core::Weak<Canvas>>>,
+    #[cfg(windows)]
     cpp_bridge: CppAccessibilityBridge,
 }
 
@@ -111,12 +118,15 @@ impl WinUI3AccessibilityState {
             runtime: AccessibilityRuntime::new(),
             tree,
             #[cfg(windows)]
+            canvas: RefCell::new(None),
+            #[cfg(windows)]
             cpp_bridge: CppAccessibilityBridge::new(),
         })
     }
 
     #[cfg(windows)]
     pub(crate) fn bind_canvas(self: &Rc<Self>, canvas: &Canvas) -> bool {
+        *self.canvas.borrow_mut() = canvas.downgrade().ok();
         self.cpp_bridge.bridge_key.set(std::ptr::null_mut());
         let Some(bridge_key) = canonical_bridge_key(canvas) else {
             if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
@@ -322,6 +332,73 @@ fn copy_utf16(value: Option<&str>, destination: &mut [u16; 256]) -> u32 {
 }
 
 #[cfg(windows)]
+const PATTERN_INVOKE: u32 = 1 << 0;
+#[cfg(windows)]
+const PATTERN_TOGGLE: u32 = 1 << 1;
+#[cfg(windows)]
+const PATTERN_RANGE_VALUE: u32 = 1 << 2;
+#[cfg(windows)]
+const PATTERN_VALUE: u32 = 1 << 3;
+#[cfg(windows)]
+const PATTERN_SELECTION_ITEM: u32 = 1 << 4;
+#[cfg(windows)]
+const PATTERN_EXPAND_COLLAPSE: u32 = 1 << 5;
+
+#[cfg(windows)]
+fn action_is_present(actions_mask: u32, action: AccessibilityActionKind) -> bool {
+    actions_mask & (1u32 << action_kind_code(action)) != 0
+}
+
+#[cfg(windows)]
+fn patterns_mask(
+    role: AccessibilityRole,
+    checked: Option<AccessibilityCheckState>,
+    expanded: Option<bool>,
+    selected: Option<bool>,
+    value_range: bool,
+    actions_mask: u32,
+) -> u32 {
+    let mut mask = 0;
+    if role == AccessibilityRole::Button
+        && action_is_present(actions_mask, AccessibilityActionKind::Activate)
+    {
+        mask |= PATTERN_INVOKE;
+    }
+    if matches!(
+        role,
+        AccessibilityRole::CheckBox | AccessibilityRole::Switch
+    ) && checked.is_some()
+        && action_is_present(actions_mask, AccessibilityActionKind::Activate)
+    {
+        mask |= PATTERN_TOGGLE;
+    }
+    if role == AccessibilityRole::Slider
+        && value_range
+        && action_is_present(actions_mask, AccessibilityActionKind::SetValue)
+    {
+        mask |= PATTERN_RANGE_VALUE;
+    }
+    if role == AccessibilityRole::TextInput
+        && action_is_present(actions_mask, AccessibilityActionKind::SetText)
+    {
+        mask |= PATTERN_VALUE;
+    }
+    if role == AccessibilityRole::RadioButton
+        && selected.is_some()
+        && action_is_present(actions_mask, AccessibilityActionKind::Select)
+    {
+        mask |= PATTERN_SELECTION_ITEM;
+    }
+    if expanded.is_some()
+        && (action_is_present(actions_mask, AccessibilityActionKind::Expand)
+            || action_is_present(actions_mask, AccessibilityActionKind::Collapse))
+    {
+        mask |= PATTERN_EXPAND_COLLAPSE;
+    }
+    mask
+}
+
+#[cfg(windows)]
 fn fill_record(
     record: &mut AccessibilityNodeRecord,
     node: &elwindui_core::accessibility::AccessibilitySnapshotNode,
@@ -332,6 +409,7 @@ fn fill_record(
     const STATE_EXPANDED: u32 = 1 << 3;
     const STATE_SELECTED: u32 = 1 << 4;
     const STATE_READ_ONLY: u32 = 1 << 5;
+    const STATE_CHECKED_MIXED: u32 = 1 << 6;
 
     record.id = node.id.raw();
     record.role = role_code(node.semantics.role);
@@ -343,10 +421,10 @@ fn fill_record(
         STATE_FOCUSED
     } else {
         0
-    } | if node.semantics.state.checked == Some(AccessibilityCheckState::On) {
-        STATE_CHECKED_ON
-    } else {
-        0
+    } | match node.semantics.state.checked {
+        Some(AccessibilityCheckState::On) => STATE_CHECKED_ON,
+        Some(AccessibilityCheckState::Mixed) => STATE_CHECKED_MIXED,
+        Some(AccessibilityCheckState::Off) | None => 0,
     } | if node.semantics.state.expanded == Some(true) {
         STATE_EXPANDED
     } else {
@@ -363,11 +441,24 @@ fn fill_record(
     record.actions_mask = node.semantics.actions.iter().fold(0u32, |mask, action| {
         mask | (1u32 << action_kind_code(*action))
     });
+    record.patterns_mask = patterns_mask(
+        node.semantics.role,
+        node.semantics.state.checked,
+        node.semantics.state.expanded,
+        node.semantics.state.selected,
+        node.semantics.state.value_range.is_some(),
+        record.actions_mask,
+    );
+    record.value = 0.0;
+    record.minimum = 0.0;
+    record.maximum = 0.0;
+    record.step = f64::NAN;
+    record.has_range = 0;
     if let Some(range) = node.semantics.state.value_range {
         record.value = range.value;
         record.minimum = range.min;
         record.maximum = range.max;
-        record.step = range.step.unwrap_or(0.0);
+        record.step = range.step.unwrap_or(f64::NAN);
         record.has_range = 1;
     }
     record.x = node.bounds_in_root.x;
@@ -375,7 +466,71 @@ fn fill_record(
     record.width = node.bounds_in_root.width;
     record.height = node.bounds_in_root.height;
     record.label_length = copy_utf16(node.semantics.label.as_deref(), &mut record.label);
-    record.value_length = copy_utf16(node.semantics.value.as_deref(), &mut record.value_text);
+    // Password semantics never cross the Value/UIA projection boundary, even though the Core
+    // snapshot may carry an internal value for the native PasswordBox implementation.
+    record.value_length = if node.semantics.role == AccessibilityRole::SecureTextInput {
+        0
+    } else {
+        copy_utf16(node.semantics.value.as_deref(), &mut record.value_text)
+    };
+    record.identifier_length =
+        copy_utf16(node.semantics.identifier.as_deref(), &mut record.identifier);
+}
+
+#[cfg(windows)]
+fn physical_bounds_from_points(top_left: Point, bottom_right: Point) -> Rect {
+    Rect {
+        x: top_left.x.min(bottom_right.x),
+        y: top_left.y.min(bottom_right.y),
+        width: (bottom_right.x - top_left.x).abs(),
+        height: (bottom_right.y - top_left.y).abs(),
+    }
+}
+
+#[cfg(windows)]
+fn physical_bounds_for(
+    state: &WinUI3AccessibilityState,
+    node: &elwindui_core::accessibility::AccessibilitySnapshotNode,
+) -> Option<Rect> {
+    let canvas = {
+        let weak = state.canvas.borrow();
+        weak.as_ref()?.upgrade()?
+    };
+    let top_left = super::TreeHost::canvas_to_screen_physical_point(
+        &canvas,
+        Point {
+            x: node.bounds_in_root.x,
+            y: node.bounds_in_root.y,
+        },
+    )?;
+    let bottom_right = super::TreeHost::canvas_to_screen_physical_point(
+        &canvas,
+        Point {
+            x: node.bounds_in_root.x + node.bounds_in_root.width,
+            y: node.bounds_in_root.y + node.bounds_in_root.height,
+        },
+    )?;
+    Some(physical_bounds_from_points(top_left, bottom_right))
+}
+
+#[cfg(windows)]
+fn physical_canvas_bounds(state: &WinUI3AccessibilityState) -> Option<Rect> {
+    let canvas = {
+        let weak = state.canvas.borrow();
+        weak.as_ref()?.upgrade()?
+    };
+    let width = canvas.ActualWidth().ok()? as f32;
+    let height = canvas.ActualHeight().ok()? as f32;
+    let top_left =
+        super::TreeHost::canvas_to_screen_physical_point(&canvas, Point { x: 0.0, y: 0.0 })?;
+    let bottom_right = super::TreeHost::canvas_to_screen_physical_point(
+        &canvas,
+        Point {
+            x: width,
+            y: height,
+        },
+    )?;
+    Some(physical_bounds_from_points(top_left, bottom_right))
 }
 
 #[cfg(windows)]
@@ -422,11 +577,33 @@ extern "C" fn callback_get_node(
     let Some(record) = (unsafe { record.as_mut() }) else {
         return 0;
     };
+    if id == 0 {
+        let Some(bounds) = physical_canvas_bounds(state) else {
+            return 0;
+        };
+        *record = unsafe { std::mem::zeroed() };
+        record.x = bounds.x;
+        record.y = bounds.y;
+        record.width = bounds.width;
+        record.height = bounds.height;
+        return 1;
+    }
     let Some(node) = snapshot_node(state, id) else {
         return 0;
     };
     *record = unsafe { std::mem::zeroed() };
     fill_record(record, &node);
+    if let Some(bounds) = physical_bounds_for(state, &node) {
+        record.x = bounds.x;
+        record.y = bounds.y;
+        record.width = bounds.width;
+        record.height = bounds.height;
+    } else {
+        record.x = 0.0;
+        record.y = 0.0;
+        record.width = 0.0;
+        record.height = 0.0;
+    }
     1
 }
 
@@ -512,6 +689,43 @@ mod tests {
 
     fn snapshot(roots: Vec<AccessibilitySnapshotNode>) -> AccessibilitySnapshot {
         AccessibilitySnapshot { roots }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn action_kind_abi_codes_and_masks_are_distinct_and_stable() {
+        let cases = [
+            (AccessibilityActionKind::Activate, 0),
+            (AccessibilityActionKind::Increment, 1),
+            (AccessibilityActionKind::Decrement, 2),
+            (AccessibilityActionKind::SetValue, 3),
+            (AccessibilityActionKind::SetText, 4),
+            (AccessibilityActionKind::Focus, 5),
+            (AccessibilityActionKind::Expand, 6),
+            (AccessibilityActionKind::Collapse, 7),
+            (AccessibilityActionKind::Select, 8),
+        ];
+
+        for (action, expected_code) in cases {
+            assert_eq!(action_kind_code(action), expected_code);
+        }
+
+        let actions_mask = cases.iter().fold(0u32, |mask, (action, _)| {
+            mask | (1u32 << action_kind_code(*action))
+        });
+        assert_eq!(actions_mask, 0x1ff);
+        assert_eq!(action_kind_code(AccessibilityActionKind::Activate), 0);
+        assert_eq!(
+            1u32 << action_kind_code(AccessibilityActionKind::Activate),
+            1
+        );
+        assert_eq!(action_kind_code(AccessibilityActionKind::Focus), 5);
+        assert_eq!(1u32 << action_kind_code(AccessibilityActionKind::Focus), 32);
+        assert_eq!(action_kind_code(AccessibilityActionKind::Select), 8);
+        assert_eq!(
+            1u32 << action_kind_code(AccessibilityActionKind::Select),
+            256
+        );
     }
 
     #[test]
@@ -605,5 +819,131 @@ mod tests {
         assert_ne!(focused_record.state_flags & (1 << 1), 0);
         assert_ne!(focused_record.state_flags & (1 << 2), 0);
         assert_ne!(focused_record.actions_mask & (1 << 5), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn patterns_mask_matches_role_state_and_executable_action() {
+        let mut button = node(1, vec![]);
+        button.semantics.role = AccessibilityRole::Button;
+        button.semantics.actions = vec![AccessibilityActionKind::Activate];
+        assert_eq!(patterns_mask_for(&button), PATTERN_INVOKE);
+
+        let mut check_box = node(2, vec![]);
+        check_box.semantics.role = AccessibilityRole::CheckBox;
+        check_box.semantics.state.checked = Some(AccessibilityCheckState::On);
+        check_box.semantics.actions = vec![AccessibilityActionKind::Activate];
+        assert_eq!(patterns_mask_for(&check_box), PATTERN_TOGGLE);
+
+        let mut slider = node(3, vec![]);
+        slider.semantics.role = AccessibilityRole::Slider;
+        slider.semantics.state.value_range = Some(elwindui_core::accessibility::ValueRange {
+            value: 2.0,
+            min: 0.0,
+            max: 10.0,
+            step: Some(0.5),
+        });
+        slider.semantics.actions = vec![AccessibilityActionKind::SetValue];
+        assert_eq!(patterns_mask_for(&slider), PATTERN_RANGE_VALUE);
+
+        let mut text_input = node(4, vec![]);
+        text_input.semantics.role = AccessibilityRole::TextInput;
+        text_input.semantics.actions = vec![AccessibilityActionKind::SetText];
+        assert_eq!(patterns_mask_for(&text_input), PATTERN_VALUE);
+
+        let mut secure_text = text_input.clone();
+        secure_text.semantics.role = AccessibilityRole::SecureTextInput;
+        assert_eq!(patterns_mask_for(&secure_text), 0);
+        secure_text.semantics.value = Some("secret".into());
+        let mut secure_record: AccessibilityNodeRecord = unsafe { std::mem::zeroed() };
+        fill_record(&mut secure_record, &secure_text);
+        assert_eq!(secure_record.value_length, 0);
+
+        let mut radio = node(5, vec![]);
+        radio.semantics.role = AccessibilityRole::RadioButton;
+        radio.semantics.state.selected = Some(true);
+        radio.semantics.actions = vec![AccessibilityActionKind::Select];
+        assert_eq!(patterns_mask_for(&radio), PATTERN_SELECTION_ITEM);
+
+        let mut expandable = node(6, vec![]);
+        expandable.semantics.state.expanded = Some(false);
+        expandable.semantics.actions = vec![AccessibilityActionKind::Expand];
+        assert_eq!(patterns_mask_for(&expandable), PATTERN_EXPAND_COLLAPSE);
+
+        let mut dropdown = node(7, vec![]);
+        dropdown.semantics.role = AccessibilityRole::ComboBox;
+        dropdown.semantics.actions = vec![AccessibilityActionKind::Focus];
+        assert_eq!(patterns_mask_for(&dropdown), 0);
+
+        let mut missing_action = check_box.clone();
+        missing_action.semantics.actions.clear();
+        assert_eq!(patterns_mask_for(&missing_action), 0);
+        assert_eq!(patterns_mask_for(&radio), PATTERN_SELECTION_ITEM);
+    }
+
+    #[cfg(windows)]
+    fn patterns_mask_for(node: &AccessibilitySnapshotNode) -> u32 {
+        let actions_mask = node.semantics.actions.iter().fold(0u32, |mask, action| {
+            mask | (1u32 << action_kind_code(*action))
+        });
+        patterns_mask(
+            node.semantics.role,
+            node.semantics.state.checked,
+            node.semantics.state.expanded,
+            node.semantics.state.selected,
+            node.semantics.state.value_range.is_some(),
+            actions_mask,
+        )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fill_record_copies_identifier_mixed_state_and_range_without_aliasing_bits() {
+        let mut semantic = node(42, vec![]);
+        semantic.semantics.identifier = Some("a11y-slider".to_owned());
+        semantic.semantics.role = AccessibilityRole::CheckBox;
+        semantic.semantics.state.checked = Some(AccessibilityCheckState::Mixed);
+        semantic.semantics.state.focused = true;
+        semantic.semantics.state.value_range = Some(elwindui_core::accessibility::ValueRange {
+            value: 2.5,
+            min: -1.0,
+            max: 8.0,
+            step: None,
+        });
+        semantic.semantics.actions = vec![AccessibilityActionKind::Activate];
+
+        let mut record: AccessibilityNodeRecord = unsafe { std::mem::zeroed() };
+        fill_record(&mut record, &semantic);
+
+        assert_eq!(record.identifier_length, 11);
+        assert_eq!(
+            String::from_utf16_lossy(&record.identifier[..11]),
+            "a11y-slider"
+        );
+        assert_ne!(record.state_flags & (1 << 6), 0);
+        assert_eq!(record.state_flags & (1 << 2), 0);
+        assert_ne!(record.state_flags & (1 << 1), 0);
+        assert_eq!(record.patterns_mask, PATTERN_TOGGLE);
+        assert_eq!(record.value, 2.5);
+        assert_eq!(record.minimum, -1.0);
+        assert_eq!(record.maximum, 8.0);
+        assert!(record.step.is_nan());
+        assert_eq!(record.has_range, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn physical_bounds_normalize_converted_screen_points() {
+        let bounds =
+            physical_bounds_from_points(Point { x: 120.0, y: 80.0 }, Point { x: 240.0, y: 200.0 });
+        assert_eq!(
+            bounds,
+            Rect {
+                x: 120.0,
+                y: 80.0,
+                width: 120.0,
+                height: 120.0
+            }
+        );
     }
 }

@@ -27,7 +27,7 @@ param(
     [Parameter(Position = 0, Mandatory = $true)]
     [ValidateSet(
         'doctor', 'launch', 'list-windows', 'focus-window',
-        'inspect', 'search', 'invoke', 'get-value', 'get-property', 'set-focus', 'wait-for',
+        'inspect', 'search', 'invoke', 'get-value', 'set-value', 'get-property', 'set-focus', 'wait-for',
         'capture-window', 'point-click', 'drag', 'send-keys',
         'move-window', 'resize-window', 'terminate'
     )]
@@ -702,6 +702,13 @@ function Cmd-GetValue {
     Invoke-UiaCommand -BaseArgs (@('ui', 'get-value', $selector) + $target)
 }
 
+function Cmd-SetValue {
+    $target = Get-TargetArgs -TargetPid (Get-Arg 'pid') -Hwnd (Get-Arg 'hwnd')
+    $selector = Require-Arg 'selector'
+    $value = Require-Arg 'value'
+    Invoke-UiaCommand -BaseArgs (@('ui', 'set-value', $selector, $value) + $target)
+}
+
 function Cmd-GetProperty {
     $target = Get-TargetArgs -TargetPid (Get-Arg 'pid') -Hwnd (Get-Arg 'hwnd')
     $selector = Require-Arg 'selector'
@@ -880,6 +887,7 @@ switch ($Command) {
     'search' { Cmd-Search }
     'invoke' { Cmd-Invoke }
     'get-value' { Cmd-GetValue }
+    'set-value' { Cmd-SetValue }
     'get-property' { Cmd-GetProperty }
     'set-focus' { Cmd-SetFocus }
     'wait-for' { Cmd-WaitFor }

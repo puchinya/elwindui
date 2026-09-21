@@ -749,18 +749,40 @@ impl AnimationFrameHost for WinUI3RelayoutHost {
 /// own hosted tree — mirrors `elwindui_backend_appkit::inner::AppKitFocusHost`.
 pub(crate) struct WinUI3FocusHost {
     keyboard: Weak<KeyboardDispatcher>,
+    native_children: Weak<RefCell<NativeChildMap>>,
 }
 
 impl FocusHost for WinUI3FocusHost {
     fn request_focus(&self, target: &Rc<dyn elwindui_core::ui::UIElementExt>) -> bool {
         let keyboard: Option<Rc<KeyboardDispatcher>> = self.keyboard.upgrade();
-        match keyboard {
-            Some(keyboard) => keyboard
-                .as_ref()
-                .focus
-                .set_focus(target, FocusState::Programmatic),
-            None => false,
+        let Some(keyboard) = keyboard else {
+            return false;
+        };
+        if !keyboard
+            .as_ref()
+            .focus
+            .set_focus(target, FocusState::Programmatic)
+        {
+            return false;
         }
+
+        // Accessibility and programmatic Core focus both arrive through this host capability.
+        // Core focus state is authoritative, but a native leaf must also receive real XAML focus
+        // so WinUI3 emits GotFocus and the native control becomes the keyboard target. The
+        // semantic peer remains the only public UIA node; this lookup uses private projection
+        // bookkeeping solely for the native synchronization step.
+        let Some(native_children) = self.native_children.upgrade() else {
+            return true;
+        };
+        let Some(element) = native_focus_element(&native_children, target.render_group_id()) else {
+            return true;
+        };
+        let Ok(element) = element.cast::<UIElement>() else {
+            return false;
+        };
+        element
+            .Focus(Microsoft::UI::Xaml::FocusState::Programmatic)
+            .unwrap_or(false)
     }
 
     fn clear_focus_in_subtree(&self, subtree: &Rc<dyn elwindui_core::ui::UIElementExt>) -> bool {
@@ -1893,6 +1915,7 @@ impl TreeHost {
         tree.as_ui_element()
             .set_focus_host(Some(Rc::new(WinUI3FocusHost {
                 keyboard: Rc::downgrade(&self.keyboard),
+                native_children: Rc::downgrade(&self.native_children),
             })));
         tree.as_ui_element()
             .set_accessibility_host(Some(Rc::new(WinUI3AccessibilityHost::new(Rc::downgrade(

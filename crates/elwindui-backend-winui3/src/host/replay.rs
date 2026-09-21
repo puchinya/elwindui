@@ -180,6 +180,29 @@ impl NativeChildElement {
     }
 }
 
+/// Returns the projected native control for a Core owner, if this host currently has one.
+/// Semantic accessibility peers intentionally do not expose these XAML children, but the host's
+/// Core focus request still needs to synchronize a native control's real keyboard focus with the
+/// same owner. The map borrow ends before the caller invokes XAML `Focus`, since that notification
+/// can synchronously re-enter Core and request another relayout.
+pub(crate) fn native_focus_element(
+    native_children: &Rc<RefCell<NativeChildMap>>,
+    owner_id: u64,
+) -> Option<FrameworkElement> {
+    native_children
+        .borrow()
+        .iter()
+        .find_map(|((id, _), child)| {
+            if *id != owner_id {
+                return None;
+            }
+            match child {
+                NativeChildElement::Native(state) => Some(state.view.as_element()),
+                NativeChildElement::Text(_) => None,
+            }
+        })
+}
+
 /// Keyed by `(originating RenderGroup id, index of the command within that group's own
 /// `commands`)` — stable across relayout passes for the common case of a UIElement's `render()`
 /// always emitting the same shape of commands, so a `Text`/`NativeControl` producer that's merely

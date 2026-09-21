@@ -337,6 +337,31 @@ Assert ($driverSource -match '(?s)finally\s*\{.*DestroySyntheticPointerDevice') 
 Assert ($driverSource -match 'cleanup_attempted') 'touch backend lifecycle -- best-effort canceled cleanup is reported after post-DOWN failure'
 Assert (-not ($driverSource -match 'SM_DIGITIZER|SM_MAXIMUMTOUCHES')) 'touch backend classification -- no physical digitizer capability gate remains'
 
+# T12 -- deterministic synthetic-device destruction ABI/cleanup seam. DestroySyntheticPointerDevice
+# returns VOID, so normal managed completion is the only cleanup-success signal and no Win32
+# destroy result may be fabricated.
+Assert ($driverSource -match 'public static extern void DestroySyntheticPointerDevice\(IntPtr device\)') 'touch backend ABI -- DestroySyntheticPointerDevice is void-compatible'
+Assert (-not ($driverSource -match 'bool DestroySyntheticPointerDevice')) 'touch backend ABI -- no bool destroy return remains'
+Assert (-not ($driverSource -match 'DestroySyntheticPointerDevice.*GetLastWin32Error')) 'touch backend ABI -- destroy does not consume GetLastWin32Error'
+
+$env:ELWINDUI_DRIVER_CONTRACT_PROBE = 'cleanup'
+$r = Invoke-Driver @('doctor')
+Assert-OneJsonObject $r 'touch backend cleanup probe'
+Assert ($r.Json.normal_success -eq $true) 'touch backend cleanup -- normal destroy leaves sequence success'
+Assert ($r.Json.normal_cleanup_device_destroy_success -eq $true) 'touch backend cleanup -- normal destroy records cleanup success'
+Assert ($r.Json.success_exception_success -eq $false) 'touch backend cleanup -- destroy exception after success fails the result'
+Assert ($r.Json.success_exception_category -eq 'tool_error') 'touch backend cleanup -- destroy exception after success is tool_error'
+Assert ($r.Json.success_exception_cleanup_device_destroy_success -eq $false) 'touch backend cleanup -- destroy exception records cleanup failure'
+Assert ($r.Json.success_exception_has_error_code -eq $false) 'touch backend cleanup -- no fabricated native error code after destroy exception'
+Assert ($r.Json.success_exception_has_cleanup_error -eq $true) 'touch backend cleanup -- managed destroy exception is recorded'
+Assert ($r.Json.failure_exception_category -eq 'environment_blocker') 'touch backend cleanup -- original sequence category remains authoritative'
+Assert ($r.Json.failure_exception_error -eq 'injection failed') 'touch backend cleanup -- original sequence error remains authoritative'
+Assert ($r.Json.failure_exception_error_code -eq 50) 'touch backend cleanup -- original sequence error code remains authoritative'
+Assert ($r.Json.failure_exception_cleanup_device_destroy_success -eq $false) 'touch backend cleanup -- failed sequence records cleanup failure'
+Assert ($r.Json.failure_exception_has_cleanup_error -eq $true) 'touch backend cleanup -- failed sequence records managed destroy exception'
+Assert ($r.Json.failure_exception_has_cleanup_error_code -eq $false) 'touch backend cleanup -- failed sequence has no fabricated destroy error code'
+Remove-Item Env:ELWINDUI_DRIVER_CONTRACT_PROBE -ErrorAction SilentlyContinue
+
 if ($script:FailureCount -gt 0) {
     Write-Output "`n$script:FailureCount assertion(s) failed."
     exit 1

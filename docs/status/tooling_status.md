@@ -63,13 +63,14 @@ touch-cancel usage, and one-object JSON checks, passes. The modern synthetic-poi
 primary; legacy `InjectTouchInput` is fallback-only, and physical touch hardware is not a
 capability gate. The prior RDP error-87 classification as `environment_blocker` is superseded:
 error 87 is `tool_error` unless a separately documented API/session condition proves otherwise.
-The NC-01..NC-09 and NC-11 native matrix remains unresolved and is not claimed. The pre-remediation
-RDP legacy Error-87 classification is historical and superseded, not acceptance evidence. On the
-new remediation working-tree run, Windows 10 Pro build 19045 / `SM_REMOTESESSION=1` accepted the
-modern synthetic-pointer sequence (`injection_backend:"synthetic-pointer"`), but the application
-observed a normal release rather than cancellation; the capture-loss diagnostic was also blocked
-by foreground ownership. A normal local interactive Windows host must still produce both trace
-and visible-probe evidence.
+The implementation/tooling capability is complete in Issue #267 / PR #269. The NC-01..NC-09 and
+NC-11 local native matrix remains pending under [Issue #270](https://github.com/puchinya/elwindui/issues/270)
+and is not claimed by #267. The pre-remediation RDP legacy Error-87 classification is historical
+and superseded, not acceptance evidence. On the new remediation working-tree run, Windows 10 Pro
+build 19045 / `SM_REMOTESESSION=1` accepted the modern synthetic-pointer sequence
+(`injection_backend:"synthetic-pointer"`), but the application observed a normal release rather
+than cancellation; the capture-loss diagnostic was also blocked by foreground ownership. A normal
+local interactive Windows host must still produce both trace and visible-probe evidence.
 
 For PR #241 remediation, the comparable `rust-analyzer diagnostics .` run with the repository
 Visual Studio environment passed on both base `766c2a9ab24632e639e02e232fd2e861d834caad` and

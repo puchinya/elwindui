@@ -1,11 +1,13 @@
 # WinUI3 pointer cancellation and capture-loss evidence
 
-Owner: Issue [#267](https://github.com/puchinya/elwindui/issues/267)
+Implementation/tooling owner: Issue [#267](https://github.com/puchinya/elwindui/issues/267)
+Local runtime acceptance owner: Issue [#270](https://github.com/puchinya/elwindui/issues/270)
 
 This durable case covers only native-stimulus-dependent pointer cancellation evidence transferred
 from #180. Core/custom-control deterministic behavior and the normal WinUI3 pointer path remain
-owned by #180 / PR #268. The case must not synthesize Core cancellation or change the public
-pointer contract.
+owned by #180 / PR #268. Issue #267 owns the implementation/tooling capability; Issue #270 owns
+the deferred local non-RDP runtime execution. The case must not synthesize Core cancellation or
+change the public pointer contract.
 
 ## Fixed setup
 

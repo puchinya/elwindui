@@ -141,9 +141,8 @@ public static extern IntPtr CreateSyntheticPointerDevice(uint pointerType, uint 
 [return: MarshalAs(UnmanagedType.Bool)]
 public static extern bool InjectSyntheticPointerInput(IntPtr device, ref POINTER_TYPE_INFO pointerInfo, uint count);
 
-[DllImport("user32.dll", EntryPoint = "DestroySyntheticPointerDevice", SetLastError = true)]
-[return: MarshalAs(UnmanagedType.Bool)]
-public static extern bool DestroySyntheticPointerDevice(IntPtr device);
+[DllImport("user32.dll", EntryPoint = "DestroySyntheticPointerDevice")]
+public static extern void DestroySyntheticPointerDevice(IntPtr device);
 
 // Shared interactive-desktop probe used by doctor and the bounded touch-cancel command.
 [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -686,6 +685,27 @@ function Invoke-SyntheticPointerFrame {
     }
 }
 
+function Apply-SyntheticPointerDestroyOutcome {
+    param(
+        [hashtable]$Result,
+        [AllowNull()]
+        [object]$ManagedExceptionText
+    )
+    if ($null -eq $ManagedExceptionText) {
+        $Result.cleanup_device_destroy_success = $true
+        return $Result
+    }
+
+    $Result.cleanup_device_destroy_success = $false
+    $Result.cleanup_device_destroy_error = $ManagedExceptionText
+    if ($Result.success) {
+        $Result.success = $false
+        $Result.category = 'tool_error'
+        $Result.error = 'synthetic pointer device destruction failed'
+    }
+    return $Result
+}
+
 function Invoke-LegacyTouchCancel {
     param(
         [IntPtr]$Hwnd,
@@ -862,27 +882,16 @@ function Invoke-SyntheticPointerTouchCancel {
     }
     finally {
         if ($device -ne [IntPtr]::Zero) {
-            $destroyOk = $false
-            $destroyErrorCode = 0
-            try { $destroyOk = [ElwindUI.Win32Driver]::DestroySyntheticPointerDevice($device) }
-            catch { $destroyErrorCode = -1 }
-            if (-not $destroyOk -and $destroyErrorCode -eq 0) {
-                $destroyErrorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            $destroyExceptionText = $null
+            try {
+                [ElwindUI.Win32Driver]::DestroySyntheticPointerDevice($device)
             }
-            if (-not $destroyOk -and $null -ne $result) {
-                if ($result.success) {
-                    $result.success = $false
-                    $result.category = 'tool_error'
-                    $result.error = 'synthetic pointer device destruction failed'
-                    $result.error_code = $destroyErrorCode
-                }
-                else {
-                    $result.cleanup_device_destroy_success = $false
-                    $result.cleanup_device_destroy_error_code = $destroyErrorCode
-                }
+            catch {
+                $exception = $_.Exception
+                $destroyExceptionText = "{0}: {1}" -f $exception.GetType().FullName, $exception.Message
             }
-            elseif ($null -ne $result) {
-                $result.cleanup_device_destroy_success = $true
+            if ($null -ne $result) {
+                $result = Apply-SyntheticPointerDestroyOutcome -Result $result -ManagedExceptionText $destroyExceptionText
             }
         }
     }
@@ -907,6 +916,36 @@ function Cmd-ContractProbe {
                 modern_entry_point_unavailable = Get-BackendContractProbe 'entry-point-unavailable'
                 modern_unsupported = Get-BackendContractProbe 'unsupported'
                 modern_invalid_parameter = Get-BackendContractProbe 'invalid-parameter'
+            }
+        }
+        'cleanup' {
+            $normal = Apply-SyntheticPointerDestroyOutcome -Result @{
+                success = $true
+            } -ManagedExceptionText $null
+            $successException = Apply-SyntheticPointerDestroyOutcome -Result @{
+                success = $true
+            } -ManagedExceptionText 'System.InvalidOperationException: destroy invocation failed'
+            $failureException = Apply-SyntheticPointerDestroyOutcome -Result @{
+                success = $false
+                category = 'environment_blocker'
+                error = 'injection failed'
+                error_code = 50
+            } -ManagedExceptionText 'System.InvalidOperationException: destroy invocation failed'
+            Emit-Result @{
+                success = $true
+                normal_success = $normal.success
+                normal_cleanup_device_destroy_success = $normal.cleanup_device_destroy_success
+                success_exception_success = $successException.success
+                success_exception_category = $successException.category
+                success_exception_cleanup_device_destroy_success = $successException.cleanup_device_destroy_success
+                success_exception_has_error_code = $successException.ContainsKey('error_code')
+                success_exception_has_cleanup_error = $successException.ContainsKey('cleanup_device_destroy_error')
+                failure_exception_category = $failureException.category
+                failure_exception_error = $failureException.error
+                failure_exception_error_code = $failureException.error_code
+                failure_exception_cleanup_device_destroy_success = $failureException.cleanup_device_destroy_success
+                failure_exception_has_cleanup_error = $failureException.ContainsKey('cleanup_device_destroy_error')
+                failure_exception_has_cleanup_error_code = $failureException.ContainsKey('cleanup_device_destroy_error_code')
             }
         }
         default { Emit-Result @{ success = $false; category = 'usage_error'; error = 'unknown driver contract probe' } }

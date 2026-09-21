@@ -788,7 +788,7 @@ impl FocusHost for WinUI3FocusHost {
             .focused()
             .is_some_and(|focused| Rc::ptr_eq(&focused, target))
         {
-            return target.focus_state() == FocusState::Programmatic;
+            return true;
         }
         focus.set_focus(target, FocusState::Programmatic)
     }
@@ -968,6 +968,11 @@ impl PointerGestureHost for WinUI3PointerGestureHost {
 }
 
 impl TreeHost {
+    #[cfg(test)]
+    pub(crate) fn focus_tracker_for_test(&self) -> &elwindui_core::focus::FocusTracker {
+        &self.keyboard.focus
+    }
+
     pub(crate) fn new() -> Self {
         let canvas = accessibility::create_canvas();
         let composition = CompositionRenderer::new(&canvas).expect("CompositionRenderer::new");

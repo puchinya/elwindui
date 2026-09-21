@@ -238,6 +238,16 @@ mod hosted_xaml_regression_tests {
         non_tab_stop_returned: bool,
         non_tab_stop_core_unfocused: bool,
         non_tab_stop_native_unfocused: bool,
+        pointer_native_focus_returned: bool,
+        pointer_native_loaded: bool,
+        pointer_focus_core_pointer: bool,
+        pointer_focus_native_focused: bool,
+        pointer_focus_got_count: usize,
+        pointer_focus_lost_count: usize,
+        pointer_same_target_returned: bool,
+        pointer_same_target_core_pointer: bool,
+        pointer_same_target_got_count: usize,
+        pointer_same_target_lost_count: usize,
         first_focus_returned: bool,
         first_focus_core_programmatic: bool,
         getting_focus_observed: bool,
@@ -577,8 +587,12 @@ mod hosted_xaml_regression_tests {
                     let focus_window = XamlWindow::new().expect("focus regression Window::new");
                     let focus_text_box = crate::native_ui::TextBox::new();
                     let focus_view = focus_text_box.into_any_view();
+                    let pointer_text_box = crate::native_ui::TextBox::new();
+                    let pointer_view = pointer_text_box.into_any_view();
                     let window_for_focus = focus_window.clone();
                     let focus_event_count = Rc::new(Cell::new(0usize));
+                    let pointer_focus_got_count = Rc::new(Cell::new(0usize));
+                    let pointer_focus_lost_count = Rc::new(Cell::new(0usize));
                     {
                         let focus_event_count = focus_event_count.clone();
                         focus_text_box.register_routed_handler::<()>(
@@ -588,8 +602,27 @@ mod hosted_xaml_regression_tests {
                             }),
                         );
                     }
+                    {
+                        let pointer_focus_got_count = pointer_focus_got_count.clone();
+                        pointer_text_box.register_routed_handler::<()>(
+                            "on_got_focus",
+                            Box::new(move |_, _| {
+                                pointer_focus_got_count.set(pointer_focus_got_count.get() + 1);
+                            }),
+                        );
+                    }
+                    {
+                        let pointer_focus_lost_count = pointer_focus_lost_count.clone();
+                        pointer_text_box.register_routed_handler::<()>(
+                            "on_lost_focus",
+                            Box::new(move |_, _| {
+                                pointer_focus_lost_count.set(pointer_focus_lost_count.get() + 1);
+                            }),
+                        );
+                    }
                     let focus_root = VerticalLayout::new();
                     focus_root.children().add(focus_text_box.clone());
+                    focus_root.children().add(pointer_text_box.clone());
                     let focus_host_element = focus_host.as_element();
                     focus_window
                         .SetContent(&focus_host_element)
@@ -605,6 +638,10 @@ mod hosted_xaml_regression_tests {
                     let focus_text_box_for_loaded = focus_text_box.clone();
                     let focus_view_for_loaded = focus_view.clone();
                     let focus_event_count_for_loaded = focus_event_count.clone();
+                    let pointer_text_box_for_loaded = pointer_text_box.clone();
+                    let pointer_view_for_loaded = pointer_view.clone();
+                    let pointer_focus_got_count_for_loaded = pointer_focus_got_count.clone();
+                    let pointer_focus_lost_count_for_loaded = pointer_focus_lost_count.clone();
                     let focus_host_for_loaded = focus_host.clone();
                     let window_for_focus_for_loaded = window_for_focus.clone();
                     let loaded_callback_id =
@@ -612,6 +649,12 @@ mod hosted_xaml_regression_tests {
                             let focus_text_box_for_action = focus_text_box_for_loaded.clone();
                             let focus_view_for_action = focus_view_for_loaded.clone();
                             let focus_event_count_for_action = focus_event_count_for_loaded.clone();
+                            let pointer_text_box_for_action = pointer_text_box_for_loaded.clone();
+                            let pointer_view_for_action = pointer_view_for_loaded.clone();
+                            let pointer_focus_got_count_for_action =
+                                pointer_focus_got_count_for_loaded.clone();
+                            let pointer_focus_lost_count_for_action =
+                                pointer_focus_lost_count_for_loaded.clone();
                             let focus_host_for_action = focus_host_for_loaded.clone();
                             let window_for_focus_for_action = window_for_focus_for_loaded.clone();
                             enqueue_test_callback(Rc::new(move || {
@@ -631,45 +674,113 @@ mod hosted_xaml_regression_tests {
                             .map(|state| {
                                 state == crate::bindings::Microsoft::UI::Xaml::FocusState::Unfocused
                             })
-                            .unwrap_or(false);
+                                .unwrap_or(false);
 
                                 focus_text_box_for_action.set_tab_stop(true);
-                                GETTING_FOCUS_PROBE.with(|probe| probe.set(None));
-                                result.first_focus_returned = focus_text_box_for_action.focus();
-                                result.first_focus_event_count = focus_event_count_for_action.get();
-                                result.first_focus_core_programmatic = focus_text_box_for_action
-                                    .focus_state()
-                                    == elwindui_core::input::FocusState::Programmatic;
-                                GETTING_FOCUS_PROBE.with(|probe| {
-                                    result.getting_focus_observed = probe.get().is_some();
-                                    result.getting_focus_programmatic = probe.get()
-                                == Some(
-                                    crate::bindings::Microsoft::UI::Xaml::FocusState::Programmatic,
-                                );
-                                });
-                                let result_for_finish = Rc::new(RefCell::new(result));
-                                let result_for_finish_callback = result_for_finish.clone();
-                                let text_box_for_finish = focus_text_box_for_action.clone();
-                                let event_count_for_finish = focus_event_count_for_action.clone();
-                                let focus_host_for_finish = focus_host_for_action.clone();
-                                let focus_window_for_finish = window_for_focus_for_action.clone();
-                                enqueue_test_callback(Rc::new(move || {
-                                    let mut result = result_for_finish_callback.borrow_mut();
-                                    result.second_focus_returned = text_box_for_finish.focus();
-                                    result.second_focus_event_count = event_count_for_finish.get();
-                                    result.first_focus_core_programmatic = text_box_for_finish
-                                        .focus_state()
-                                        == elwindui_core::input::FocusState::Programmatic;
-                                    // Consume any focus-host relayout queued by the native focus
-                                    // notification before the later readiness-history probe resets its
-                                    // global diagnostic history.
-                                    text_box_for_finish.flush_interactive_relayout();
-                                    PROGRAMMATIC_FOCUS_RESULT
-                                        .with(|slot| *slot.borrow_mut() = Some(result.clone()));
-                                    let _ = &focus_host_for_finish;
-                                    focus_window_for_finish
-                                        .Close()
-                                        .expect("close focus regression Window");
+                                    let result_for_pointer = Rc::new(RefCell::new(result));
+                                    let result_for_pointer_callback = result_for_pointer.clone();
+                                    let pointer_text_box_for_after = pointer_text_box_for_action.clone();
+                                let pointer_view_for_after = pointer_view_for_action.clone();
+                                let pointer_focus_got_count_for_after =
+                                    pointer_focus_got_count_for_action.clone();
+                                let pointer_focus_lost_count_for_after =
+                                    pointer_focus_lost_count_for_action.clone();
+                                let focus_text_box_for_after = focus_text_box_for_action.clone();
+                                let focus_event_count_for_after = focus_event_count_for_action.clone();
+                                let focus_host_for_after = focus_host_for_action.clone();
+                                let window_for_focus_for_after = window_for_focus_for_action.clone();
+                                    enqueue_test_callback(Rc::new(move || {
+                                        let mut result = result_for_pointer_callback.borrow_mut();
+                                        let pointer_native = pointer_view_for_after.as_element();
+                                        result.pointer_native_loaded = pointer_native.IsLoaded().unwrap_or(false);
+                                    result.pointer_native_focus_returned = pointer_native
+                                        .Focus(
+                                            crate::bindings::Microsoft::UI::Xaml::FocusState::Pointer,
+                                        )
+                                        .unwrap_or(false);
+                                        let pointer_target: Rc<dyn UIElementExt> =
+                                            pointer_text_box_for_after.clone();
+                                        focus_host_for_after
+                                            .focus_tracker_for_test()
+                                            .set_focus(
+                                                &pointer_target,
+                                                elwindui_core::input::FocusState::Pointer,
+                                            );
+                                    result.pointer_focus_native_focused = pointer_native
+                                        .FocusState()
+                                        .map(|state| {
+                                            state
+                                                != crate::bindings::Microsoft::UI::Xaml::FocusState::Unfocused
+                                        })
+                                        .unwrap_or(false);
+                                    let result_for_pointer_settle = result_for_pointer.clone();
+                                    let pointer_text_box_for_settle = pointer_text_box_for_after.clone();
+                                    let pointer_focus_got_count_for_settle =
+                                        pointer_focus_got_count_for_after.clone();
+                                    let pointer_focus_lost_count_for_settle =
+                                        pointer_focus_lost_count_for_after.clone();
+                                    let focus_text_box_for_settle = focus_text_box_for_after.clone();
+                                    let focus_event_count_for_settle = focus_event_count_for_after.clone();
+                                    let focus_host_for_settle = focus_host_for_after.clone();
+                                    let focus_window_for_settle = window_for_focus_for_after.clone();
+                                    enqueue_test_callback(Rc::new(move || {
+                                        let mut result = result_for_pointer_settle.borrow_mut();
+                                        result.pointer_focus_core_pointer = pointer_text_box_for_settle
+                                            .focus_state()
+                                            == elwindui_core::input::FocusState::Pointer;
+                                        result.pointer_focus_got_count =
+                                            pointer_focus_got_count_for_settle.get();
+                                        result.pointer_focus_lost_count =
+                                            pointer_focus_lost_count_for_settle.get();
+                                        result.pointer_same_target_returned =
+                                            pointer_text_box_for_settle.focus();
+                                        result.pointer_same_target_core_pointer =
+                                            pointer_text_box_for_settle.focus_state()
+                                                == elwindui_core::input::FocusState::Pointer;
+                                        result.pointer_same_target_got_count =
+                                            pointer_focus_got_count_for_settle.get();
+                                        result.pointer_same_target_lost_count =
+                                            pointer_focus_lost_count_for_settle.get();
+
+                                        GETTING_FOCUS_PROBE.with(|probe| probe.set(None));
+                                        result.first_focus_returned = focus_text_box_for_settle.focus();
+                                        result.first_focus_event_count =
+                                            focus_event_count_for_settle.get();
+                                        result.first_focus_core_programmatic = focus_text_box_for_settle
+                                            .focus_state()
+                                            == elwindui_core::input::FocusState::Programmatic;
+                                        GETTING_FOCUS_PROBE.with(|probe| {
+                                            result.getting_focus_observed = probe.get().is_some();
+                                            result.getting_focus_programmatic = probe.get()
+                                                == Some(
+                                                    crate::bindings::Microsoft::UI::Xaml::FocusState::Programmatic,
+                                                );
+                                        });
+                                        let result_for_finish = result_for_pointer_settle.clone();
+                                        let result_for_finish_callback = result_for_finish.clone();
+                                        let text_box_for_finish = focus_text_box_for_settle.clone();
+                                        let event_count_for_finish = focus_event_count_for_settle.clone();
+                                        let focus_host_for_finish = focus_host_for_settle.clone();
+                                        let focus_window_for_finish = focus_window_for_settle.clone();
+                                        enqueue_test_callback(Rc::new(move || {
+                                            let mut result = result_for_finish_callback.borrow_mut();
+                                            result.second_focus_returned = text_box_for_finish.focus();
+                                            result.second_focus_event_count = event_count_for_finish.get();
+                                            result.first_focus_core_programmatic = text_box_for_finish
+                                                .focus_state()
+                                                == elwindui_core::input::FocusState::Programmatic;
+                                            // Consume any focus-host relayout queued by the native focus
+                                            // notification before the later readiness-history probe resets its
+                                            // global diagnostic history.
+                                            text_box_for_finish.flush_interactive_relayout();
+                                            PROGRAMMATIC_FOCUS_RESULT
+                                                .with(|slot| *slot.borrow_mut() = Some(result.clone()));
+                                            let _ = &focus_host_for_finish;
+                                            focus_window_for_finish
+                                                .Close()
+                                                .expect("close focus regression Window");
+                                        }));
+                                    }));
                                 }));
                             }));
                         }));
@@ -1176,6 +1287,22 @@ mod hosted_xaml_regression_tests {
             focus_result.non_tab_stop_native_unfocused,
             "a rejected non-tab-stop target must not become natively focused"
         );
+        assert!(focus_result.pointer_native_loaded);
+        assert!(focus_result.pointer_native_focus_returned);
+        assert!(focus_result.pointer_focus_core_pointer);
+        assert!(
+            focus_result.pointer_focus_native_focused,
+            "the pointer-acquired native target must remain focused"
+        );
+        assert_eq!(focus_result.pointer_focus_got_count, 1);
+        assert_eq!(focus_result.pointer_focus_lost_count, 0);
+        assert!(
+            focus_result.pointer_same_target_returned,
+            "same-target programmatic focus must succeed after Pointer focus"
+        );
+        assert!(focus_result.pointer_same_target_core_pointer);
+        assert_eq!(focus_result.pointer_same_target_got_count, 1);
+        assert_eq!(focus_result.pointer_same_target_lost_count, 0);
         assert!(focus_result.first_focus_returned);
         assert!(focus_result.first_focus_core_programmatic);
         assert!(

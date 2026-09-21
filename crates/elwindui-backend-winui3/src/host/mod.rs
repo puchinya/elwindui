@@ -758,31 +758,31 @@ impl FocusHost for WinUI3FocusHost {
         let Some(keyboard) = keyboard else {
             return false;
         };
-        if !keyboard
+
+        // Accessibility and programmatic Core focus both arrive through this host capability.
+        // A native leaf receives real XAML focus first so WinUI3 emits GotFocus through the
+        // existing native-to-Core bridge while the target is changing. The semantic peer remains
+        // the only public UIA node; this lookup uses private projection bookkeeping solely for
+        // the native synchronization step.
+        if let Some(native_children) = self.native_children.upgrade() {
+            if let Some(element) = native_focus_element(&native_children, target.render_group_id())
+            {
+                let Ok(element) = element.cast::<UIElement>() else {
+                    return false;
+                };
+                if !element
+                    .Focus(Microsoft::UI::Xaml::FocusState::Programmatic)
+                    .unwrap_or(false)
+                {
+                    return false;
+                }
+            }
+        }
+
+        keyboard
             .as_ref()
             .focus
             .set_focus(target, FocusState::Programmatic)
-        {
-            return false;
-        }
-
-        // Accessibility and programmatic Core focus both arrive through this host capability.
-        // Core focus state is authoritative, but a native leaf must also receive real XAML focus
-        // so WinUI3 emits GotFocus and the native control becomes the keyboard target. The
-        // semantic peer remains the only public UIA node; this lookup uses private projection
-        // bookkeeping solely for the native synchronization step.
-        let Some(native_children) = self.native_children.upgrade() else {
-            return true;
-        };
-        let Some(element) = native_focus_element(&native_children, target.render_group_id()) else {
-            return true;
-        };
-        let Ok(element) = element.cast::<UIElement>() else {
-            return false;
-        };
-        element
-            .Focus(Microsoft::UI::Xaml::FocusState::Programmatic)
-            .unwrap_or(false)
     }
 
     fn clear_focus_in_subtree(&self, subtree: &Rc<dyn elwindui_core::ui::UIElementExt>) -> bool {

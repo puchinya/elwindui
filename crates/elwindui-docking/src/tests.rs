@@ -2111,6 +2111,52 @@ fn floating_surface_renders_and_presents_its_own_auto_hide_entries() {
 }
 
 #[test]
+fn auto_hide_strip_remains_visible_after_docking_model_commit() {
+    let (main_item, _) = authored_item("main", "Main", true);
+    let (hidden_item, _) = authored_item("hidden", "Hidden", true);
+    let docking = mounted_docking_with_items(vec![main_item, hidden_item]);
+    let model = docking.layout();
+    let auto_hidden = model
+        .with_item_moved(
+            &item("hidden"),
+            DockPlacement::AutoHide {
+                side: DockSide::Right,
+            },
+        )
+        .expect("auto-hide placement should be valid");
+
+    docking.set_layout(auto_hidden);
+
+    let realization = docking
+        .realization_for_test()
+        .expect("mounted docking has a realization");
+    let (auto_hide_visual, _) = realization
+        .borrow()
+        .surface_chrome_for_test(&RootKind::Main)
+        .expect("main surface has retained chrome");
+    let auto_hide = auto_hide_visual
+        .as_any()
+        .downcast_ref::<Grid>()
+        .expect("auto-hide chrome uses a Grid root");
+    layout_root(
+        &auto_hide_visual,
+        Size {
+            width: 944.0,
+            height: 549.0,
+        },
+    );
+
+    let right_strip = auto_hide.children().to_vec()[2].clone();
+    assert_eq!(right_strip.visual_children().len(), 1);
+    assert_eq!(right_strip.arranged_width(), Some(28.0));
+    assert_eq!(right_strip.arranged_height(), Some(549.0));
+    assert_eq!(
+        right_strip.arranged_offset(),
+        Some(Point { x: 916.0, y: 0.0 })
+    );
+}
+
+#[test]
 fn auto_hide_popup_uses_side_aware_opaque_panel_geometry() {
     let wrapper = CustomTabViewItem::new_item();
     let page = TextBlock::new();
@@ -2220,6 +2266,7 @@ fn floating_bounds_move_callback_updates_the_current_root_once() {
     docking.set_on_layout_change(Box::new(move |_| {
         changes_for_callback.set(changes_for_callback.get() + 1);
     }));
+    host.log.events.borrow_mut().clear();
     host.log.invoke_bounds_changed(Rect {
         x: 940.0,
         y: 130.0,
@@ -2233,6 +2280,8 @@ fn floating_bounds_move_callback_updates_the_current_root_once() {
         (940.0, 130.0, 420.0, 260.0)
     );
     assert_eq!(changes.get(), 1);
+    assert!(!host.log.events.borrow().contains(&"set_bounds"));
+    assert!(!host.log.events.borrow().contains(&"set_content"));
 }
 
 #[test]

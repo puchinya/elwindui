@@ -152,15 +152,26 @@ def extract_canonical_checklist(text: str, source: str) -> Optional[list[str]]:
         fail(f"{source} canonical checklist markers are incomplete", "canonical-checklist-malformed")
 
     items: list[str] = []
+    checkbox_re = re.compile(r"^[-*][ \t]+\[[ xX]\][ \t]+(.+?)\s*$")
+    empty_checkbox_re = re.compile(r"^[-*][ \t]+\[[ xX]\][ \t]*$")
     for line in lines[begin_indices[0] + 1 : end_indices[0]]:
         stripped = line.strip()
         if not stripped:
             continue
-        if not stripped.startswith("REVIEW_ITEM:"):
-            fail(f"{source} canonical checklist contains an unexpected line", "canonical-checklist-malformed")
-        item = normalize_checklist_text(stripped[len("REVIEW_ITEM:") :])
+        if stripped.startswith("REVIEW_ITEM:"):
+            item_text = stripped[len("REVIEW_ITEM:") :]
+            empty_message = f"{source} canonical checklist contains an empty REVIEW_ITEM"
+        elif empty_checkbox_re.fullmatch(stripped):
+            fail(f"{source} canonical checklist contains an empty checkbox item", "canonical-checklist-empty")
+        else:
+            checkbox = checkbox_re.fullmatch(stripped)
+            if not checkbox:
+                fail(f"{source} canonical checklist contains an unexpected line", "canonical-checklist-malformed")
+            item_text = checkbox.group(1)
+            empty_message = f"{source} canonical checklist contains an empty checkbox item"
+        item = normalize_checklist_text(item_text)
         if not item:
-            fail(f"{source} canonical checklist contains an empty REVIEW_ITEM", "canonical-checklist-empty")
+            fail(empty_message, "canonical-checklist-empty")
         items.append(item)
     if not items:
         fail(f"{source} canonical checklist block is empty", "canonical-checklist-empty")

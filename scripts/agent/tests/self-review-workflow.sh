@@ -25,6 +25,20 @@ case "$1 $2" in
 esac
 EOF
 chmod +x "$STUB_BIN/gh" "$TMP/scripts/agent"/*.sh
+cat > "$STUB_BIN/gh.cmd" <<'EOF'
+@echo off
+if "%~1 %~2"=="auth status" exit /b 0
+if "%~1 %~2"=="repo view" (
+  echo test/repository
+  exit /b 0
+)
+if "%~1 %~2"=="issue view" (
+  type "%SELF_REVIEW_TEST_ROOT%\.agent-state\issue.json"
+  exit /b 0
+)
+echo unexpected gh invocation: %* 1>&2
+exit /b 1
+EOF
 export PATH="$STUB_BIN:$PATH"
 
 cd "$TMP"
@@ -276,6 +290,27 @@ grep -q -- '- C001 | contract | canonical obligation one' .agent-state/issues/12
 grep -q -- '- C002 | contract | canonical obligation two' .agent-state/issues/123/reviewer-checklist.md
 echo 'T22 raw canonical contract: PASS'
 
+canonical_checkbox_contract=$'transport heading\nELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\n- [ ] checkbox obligation one\n* [x] checkbox obligation two\nELWINDUI_REVIEWER_CHECKLIST_V1_END\n'
+write_contract "$canonical_checkbox_contract"
+out="$($TMP/scripts/agent/prepare-self-review.sh 123)"
+assert_contains "$out" 'items=2'
+checkbox_sha="$(sed -n 's/^review_checklist_sha256=//p' <<<"$out")"
+grep -q -- '- C001 | contract | checkbox obligation one' .agent-state/issues/123/reviewer-checklist.md
+grep -q -- '- C002 | contract | checkbox obligation two' .agent-state/issues/123/reviewer-checklist.md
+if command -v pwsh >/dev/null 2>&1; then
+  ps_out="$(pwsh -NoProfile -File "$TMP/scripts/agent/prepare-self-review.ps1" 123)"
+  [[ "$(sed -n 's/^review_checklist_sha256=//p' <<<"$ps_out")" == "$checkbox_sha" ]]
+  "$TMP/scripts/agent/validate-self-review.sh" 123 >/dev/null 2>&1 || true
+  fill_pass_review
+  validate_out="$($TMP/scripts/agent/validate-self-review.sh 123)"
+  assert_contains "$validate_out" 'self_review_status=pass'
+  pwsh_validate_out="$(pwsh -NoProfile -File "$TMP/scripts/agent/validate-self-review.ps1" 123)"
+  assert_contains "$pwsh_validate_out" 'self_review_status=pass'
+  echo 'T33 canonical Markdown checkbox POSIX/PowerShell prepare/validate parity: PASS'
+else
+  echo 'T33 canonical Markdown checkbox POSIX/PowerShell parity: NOT RUN (pwsh unavailable)'
+fi
+
 fenced_canonical=$'```\nELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\nREVIEW_ITEM: canonical obligation one\nREVIEW_ITEM: canonical obligation two\nELWINDUI_REVIEWER_CHECKLIST_V1_END\n```\n'
 write_contract "$fenced_canonical"
 out="$($TMP/scripts/agent/prepare-self-review.sh 123)"
@@ -325,6 +360,8 @@ expect_canonical_failure canonical-checklist-empty $'ELWINDUI_REVIEWER_CHECKLIST
 echo 'T28 empty canonical block: PASS'
 expect_canonical_failure canonical-checklist-empty $'ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\nREVIEW_ITEM:\nELWINDUI_REVIEWER_CHECKLIST_V1_END'
 echo 'T29 empty canonical item: PASS'
+expect_canonical_failure canonical-checklist-empty $'ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\n- [ ]\nELWINDUI_REVIEWER_CHECKLIST_V1_END'
+echo 'T29b empty canonical checkbox item: PASS'
 expect_canonical_failure canonical-checklist-malformed $'ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN\nunexpected line\nELWINDUI_REVIEWER_CHECKLIST_V1_END'
 echo 'T30 unexpected canonical line: PASS'
 

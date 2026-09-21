@@ -1017,6 +1017,14 @@ impl RuntimeRealization {
         self.floating_hosts.root_index_for_host(id)
     }
 
+    pub(crate) fn note_native_bounds_changed(
+        &mut self,
+        id: FloatingHostId,
+        bounds: crate::Rect,
+    ) -> bool {
+        self.floating_hosts.note_native_bounds_changed(id, bounds)
+    }
+
     pub(crate) fn begin_native_floating_close(&mut self, id: FloatingHostId) -> bool {
         self.floating_hosts.begin_native_close(id)
     }

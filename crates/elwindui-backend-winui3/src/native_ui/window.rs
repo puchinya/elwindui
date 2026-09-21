@@ -116,6 +116,15 @@ impl Window {
     }
 }
 
+impl Window {
+    /// Applies the complete native rectangle in one AppWindow operation. This is a backend
+    /// integration hook for retained floating hosts; ordinary Window callers keep the existing
+    /// individual bound properties.
+    pub fn set_bounds(&self, bounds: Rect) {
+        self.inner.set_bounds(bounds);
+    }
+}
+
 impl elwindui_core::ui::WindowLifecycleHost for Window {
     fn set_close_request_handler(&self, handler: Option<Rc<dyn Fn() -> bool>>) {
         self.inner.set_close_request_handler(handler);

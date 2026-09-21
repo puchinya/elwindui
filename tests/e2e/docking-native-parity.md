@@ -122,7 +122,12 @@ PASS requires the item to join the floating group and both main and floating HWN
 Real-drag a dockable item from a floating HWND into a main-window Center or valid root target.
 
 PASS requires the item in main, the floating source to update or disappear when emptied, and no
-stale source HWND.
+stale source HWND. After every move, resize, dock, undock, close, or other topology change,
+rediscover the live HWND set and target geometry; an invalidated cached HWND is not by itself a
+BLOCKED result. The chosen main target must also be visibly reachable and not covered by the
+source floating HWND; if a setup places the source over that target, restore the setup before
+classifying the action. If a delivered native move leaves the logical floating root without its
+required live native HWND, classify the row FAIL.
 
 ## DNP-10 — floating to floating
 
@@ -175,10 +180,15 @@ stale preview.
 ## DNP-15 — auto-hide, open, and pin back
 
 Use Solution Explorer. Request Auto Hide / Pin, activate its auto-hide strip item, observe the
-side-aware overlay, then use the visible pin affordance to return it.
+side-aware overlay, then use the visible pin affordance to return it. Auto-hide chrome may be
+self-drawn and need not be UIA-discoverable: when UIA does not expose the strip or overlay, use a
+fresh whole-screen capture and current window geometry to identify and real-click the visible
+target. UIA non-discoverability alone is not BLOCKED.
 
 PASS requires one overlay, an interactive item, and return to the remembered/default live placement
-without duplication.
+without duplication. If the normal action is delivered but the required strip/overlay is absent,
+classify FAIL; classify BLOCKED only when host/tool/capture conditions prevent identifying or
+clicking a visually present target after the required fallback.
 
 ## DNP-16A/B/C/D — context close actions
 
@@ -271,7 +281,9 @@ and retain the Docking deterministic tests for stable host identity, veto, one-h
 redock.
 
 PASS requires both layers. Do not invent a second runtime trace solely to expose the private app
-registry unless an observed defect requires such instrumentation and design approves it.
+registry unless an observed defect requires such instrumentation and design approves it. Report
+exactly one four-state DNP-25 result, derived from the required native rows and deterministic
+evidence; do not replace it with descriptive partial prose.
 
 ## Cleanup and reporting
 

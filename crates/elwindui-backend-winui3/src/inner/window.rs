@@ -85,6 +85,12 @@ pub(crate) fn should_veto_native_close(handler_result: bool) -> bool {
     handler_result
 }
 
+fn clone_bounds_changed_handler(
+    handlers: &RefCell<Option<Rc<dyn Fn(Rect)>>>,
+) -> Option<Rc<dyn Fn(Rect)>> {
+    handlers.borrow().clone()
+}
+
 pub(crate) struct InnerWindow {
     /// Issue #254: `Weak` only — the application-layer registry (`crate::app::WINDOWS`) is the
     /// strong lifetime authority for the final owner once `show()` has retained it; this must
@@ -298,7 +304,12 @@ impl InnerWindow {
                 {
                     return;
                 }
-                if let Some(callback) = bounds_changed_handler.borrow().clone() {
+                // Drop the RefCell borrow before invoking the callback. Docking reconciliation
+                // refreshes this handler as part of the same retained-host transaction; keeping
+                // the temporary borrow alive through the `if let` body would panic when that
+                // refresh calls set_bounds_changed_handler.
+                let callback = clone_bounds_changed_handler(&bounds_changed_handler);
+                if let Some(callback) = callback {
                     callback(bounds);
                 }
             },
@@ -523,6 +534,20 @@ impl InnerWindow {
         }
     }
 
+    /// Applies a complete native window rectangle as one AppWindow operation. Docking uses
+    /// this for retained floating-host reconciliation so WinUI3 does not publish a sequence of
+    /// intermediate position/size notifications while the model is being synchronized.
+    pub(crate) fn set_bounds(&self, bounds: Rect) {
+        if let Some(app_window) = self.app_window() {
+            let _ = app_window.MoveAndResize(windows::Graphics::RectInt32 {
+                X: bounds.x as i32,
+                Y: bounds.y as i32,
+                Width: bounds.width as i32,
+                Height: bounds.height as i32,
+            });
+        }
+    }
+
     pub(crate) fn top(&self) -> f32 {
         self.app_window()
             .and_then(|w| w.Position().ok())
@@ -629,5 +654,24 @@ mod native_close_decision_tests {
     #[test]
     fn handler_declining_the_close_allows_native_default() {
         assert!(!should_veto_native_close(false));
+    }
+
+    #[test]
+    fn bounds_callback_can_replace_handler_during_delivery() {
+        let handlers: Rc<RefCell<Option<Rc<dyn Fn(Rect)>>>> = Rc::new(RefCell::new(None));
+        let handlers_for_callback = Rc::clone(&handlers);
+        *handlers.borrow_mut() = Some(Rc::new(move |_| {
+            *handlers_for_callback.borrow_mut() = None;
+        }));
+
+        let callback = clone_bounds_changed_handler(&handlers).expect("handler should be cloned");
+        callback(Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 300.0,
+            height: 200.0,
+        });
+
+        assert!(handlers.borrow().is_none());
     }
 }

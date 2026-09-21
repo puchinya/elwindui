@@ -1003,6 +1003,10 @@ impl TreeHost {
         #[cfg(windows)]
         let _ = this.accessibility.bind_canvas(&this.canvas);
         let pointer_trace = PointerTrace::from_environment();
+        // A captured pointer can continue bubbling through a native XAML child after it leaves
+        // the self-drawn surface. Keep the active pointer ID here so only that captured stream
+        // is routed back into Core; ordinary native-child input remains owned by the child.
+        let captured_pointer_id = Rc::new(Cell::new(None::<u32>));
         // WinUI3's `Control.IsTabStop` gate. Once the WinRT event projection is restored this
         // allows the host to receive OS keyboard focus, mirroring AppKit's TreeHost.
         let _ = this.canvas.SetIsTabStop(true);
@@ -1187,6 +1191,7 @@ impl TreeHost {
             let canvas_for_callback = canvas.clone();
             let input_surface_for_callback = this.input_surface.clone();
             let pointer_trace = pointer_trace.clone();
+            let captured_pointer_id = captured_pointer_id.clone();
             let callback_id = this
                 .callback_owner
                 .register_pointer_event(Rc::new(move |args| {
@@ -1200,6 +1205,7 @@ impl TreeHost {
                         &keyboard,
                         &canvas_for_callback,
                         &input_surface_for_callback,
+                        &captured_pointer_id,
                         args,
                         kind,
                         &pointer_trace,
@@ -1208,25 +1214,32 @@ impl TreeHost {
                         if let Ok(native_pointer) = args.Pointer() {
                             let capture_success =
                                 canvas_for_callback.CapturePointer(&native_pointer).is_ok();
+                            let pointer_id = PointerTrace::pointer_id(args);
                             let source_classification = Self::pointer_source_classification(
                                 &canvas_for_callback,
                                 &input_surface_for_callback,
                                 args,
                             );
                             pointer_trace.record_capture(
-                                PointerTrace::pointer_id(args),
+                                pointer_id,
                                 source_classification,
                                 capture_success,
                             );
+                            if capture_success {
+                                captured_pointer_id.set(Some(pointer_id));
+                            }
                             if capture_success && pointer_trace.release_capture_on_press {
                                 let release_success = canvas_for_callback
                                     .ReleasePointerCapture(&native_pointer)
                                     .is_ok();
                                 pointer_trace.record_release(
-                                    PointerTrace::pointer_id(args),
+                                    pointer_id,
                                     source_classification,
                                     release_success,
                                 );
+                                if release_success {
+                                    captured_pointer_id.set(None);
+                                }
                             }
                         }
                         let _ = args.SetHandled(true);
@@ -1247,6 +1260,7 @@ impl TreeHost {
             let canvas_for_callback = canvas.clone();
             let input_surface_for_callback = this.input_surface.clone();
             let pointer_trace = pointer_trace.clone();
+            let captured_pointer_id = captured_pointer_id.clone();
             let callback_id = this
                 .callback_owner
                 .register_pointer_event(Rc::new(move |args| {
@@ -1256,6 +1270,7 @@ impl TreeHost {
                         &keyboard,
                         &canvas_for_callback,
                         &input_surface_for_callback,
+                        &captured_pointer_id,
                         args,
                         RawPointerEventKind::Moved,
                         &pointer_trace,
@@ -1279,6 +1294,7 @@ impl TreeHost {
             let canvas_for_callback = canvas.clone();
             let input_surface_for_callback = this.input_surface.clone();
             let pointer_trace = pointer_trace.clone();
+            let captured_pointer_id = captured_pointer_id.clone();
             let callback_id = this
                 .callback_owner
                 .register_pointer_event(Rc::new(move |args| {
@@ -1292,6 +1308,7 @@ impl TreeHost {
                         &keyboard,
                         &canvas_for_callback,
                         &input_surface_for_callback,
+                        &captured_pointer_id,
                         args,
                         kind,
                         &pointer_trace,
@@ -1300,6 +1317,7 @@ impl TreeHost {
                         if let Ok(native_pointer) = args.Pointer() {
                             let _ = canvas_for_callback.ReleasePointerCapture(&native_pointer);
                         }
+                        captured_pointer_id.set(None);
                         let _ = args.SetHandled(true);
                     }
                 }));
@@ -1318,6 +1336,7 @@ impl TreeHost {
             let canvas_for_callback = canvas.clone();
             let input_surface_for_callback = this.input_surface.clone();
             let pointer_trace = pointer_trace.clone();
+            let captured_pointer_id = captured_pointer_id.clone();
             let callback_id = this
                 .callback_owner
                 .register_pointer_event(Rc::new(move |args| {
@@ -1327,6 +1346,7 @@ impl TreeHost {
                         &keyboard,
                         &canvas_for_callback,
                         &input_surface_for_callback,
+                        &captured_pointer_id,
                         args,
                         RawPointerEventKind::Canceled,
                         &pointer_trace,
@@ -1343,6 +1363,7 @@ impl TreeHost {
                             source_classification,
                             release_success,
                         );
+                        captured_pointer_id.set(None);
                         let _ = args.SetHandled(true);
                     }
                 }));
@@ -1361,6 +1382,7 @@ impl TreeHost {
             let canvas_for_callback = canvas.clone();
             let input_surface_for_callback = this.input_surface.clone();
             let pointer_trace = pointer_trace.clone();
+            let captured_pointer_id = captured_pointer_id.clone();
             let callback_id = this
                 .callback_owner
                 .register_pointer_event(Rc::new(move |args| {
@@ -1370,11 +1392,13 @@ impl TreeHost {
                         &keyboard,
                         &canvas_for_callback,
                         &input_surface_for_callback,
+                        &captured_pointer_id,
                         args,
                         RawPointerEventKind::Canceled,
                         &pointer_trace,
                         "PointerCaptureLost",
                     ) {
+                        captured_pointer_id.set(None);
                         let _ = args.SetHandled(true);
                     }
                 }));
@@ -1545,16 +1569,31 @@ impl TreeHost {
 
     /// `Canvas` receives bubbled events from native XAML children too. Only the exact root Canvas
     /// or this host's exact input surface belongs to the self-drawn Core tree; native children and
-    /// unrelated XAML descendants remain their own input owners.
+    /// unrelated XAML descendants remain their own input owners. Once this host has accepted
+    /// native capture, however, the captured pointer stream remains Core-owned even when WinUI
+    /// reports a native child as the routed event source after the pointer leaves the surface.
     fn pointer_originates_from_canvas(
         canvas: &Canvas,
         input_surface: &Rectangle,
+        captured_pointer_id: &Cell<Option<u32>>,
         args: &PointerRoutedEventArgs,
     ) -> bool {
         let Ok(source) = args.OriginalSource() else {
-            return false;
+            return captured_pointer_id.get() == Some(PointerTrace::pointer_id(args));
         };
-        Self::is_self_drawn_pointer_source(canvas, input_surface, &source)
+        Self::pointer_belongs_to_host(
+            Self::is_self_drawn_pointer_source(canvas, input_surface, &source),
+            PointerTrace::pointer_id(args),
+            captured_pointer_id.get(),
+        )
+    }
+
+    fn pointer_belongs_to_host(
+        source_is_self_drawn: bool,
+        pointer_id: u32,
+        captured_pointer_id: Option<u32>,
+    ) -> bool {
+        source_is_self_drawn || captured_pointer_id == Some(pointer_id)
     }
 
     fn pointer_source_classification(
@@ -1628,6 +1667,7 @@ impl TreeHost {
         keyboard: &Weak<KeyboardDispatcher>,
         canvas: &Canvas,
         input_surface: &Rectangle,
+        captured_pointer_id: &Cell<Option<u32>>,
         args: &PointerRoutedEventArgs,
         kind: RawPointerEventKind,
         trace: &PointerTrace,
@@ -1648,7 +1688,7 @@ impl TreeHost {
         let screen_position =
             root_position.and_then(|position| Self::canvas_to_screen_point(canvas, position));
         let source_is_self_drawn =
-            Self::pointer_originates_from_canvas(canvas, input_surface, args);
+            Self::pointer_originates_from_canvas(canvas, input_surface, captured_pointer_id, args);
         let tree_storage: Option<Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>> =
             tree.upgrade();
         let tree = tree_storage.and_then(|tree| tree.borrow().clone());
@@ -3704,6 +3744,13 @@ mod tests {
             Some("0".to_string())
         ));
         assert!(!PointerTrace::capture_loss_hook_enabled(true, None));
+    }
+
+    #[test]
+    fn captured_pointer_stream_remains_core_owned_after_native_child_reroute() {
+        assert!(TreeHost::pointer_belongs_to_host(false, 7, Some(7)));
+        assert!(TreeHost::pointer_belongs_to_host(true, 7, None));
+        assert!(!TreeHost::pointer_belongs_to_host(false, 8, Some(7)));
     }
 
     #[test]

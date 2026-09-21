@@ -8,7 +8,7 @@ use crate::core::layout::{GridLength, HorizontalAlignment, VerticalAlignment, Vi
 use crate::core::theme::BrushStyle;
 use crate::core::ui::{
     ContentControlExt, ControlExt, Grid, GridExt, IconSourceElement, IconSourceElementExt,
-    LayoutExt, TextBlock, TextBlockExt, UIElementExt,
+    LayoutExt, TextBlock, TextBlockExt, TextStyleOwner, UIElementExt,
 };
 use crate::model::RootKind;
 use crate::placement::DockSide;
@@ -47,23 +47,26 @@ impl AutoHideOverlay {
         ]);
         let strips = std::array::from_fn(|index| {
             let strip = Grid::new();
-            strip.set_width(AUTO_HIDE_STRIP_SIZE);
-            strip.set_height(AUTO_HIDE_STRIP_SIZE);
+            strip.set_background(themed_brush(BrushStyle::Secondary));
             strip.set_attached("DockSurface", "side", index as i32);
             match index {
                 0 => {
+                    strip.set_width(AUTO_HIDE_STRIP_SIZE);
                     strip.set_attached("Grid", "row", 1i32);
                     strip.set_attached("Grid", "column", 0i32);
                 }
                 1 => {
+                    strip.set_height(AUTO_HIDE_STRIP_SIZE);
                     strip.set_attached("Grid", "row", 0i32);
                     strip.set_attached("Grid", "column", 1i32);
                 }
                 2 => {
+                    strip.set_width(AUTO_HIDE_STRIP_SIZE);
                     strip.set_attached("Grid", "row", 1i32);
                     strip.set_attached("Grid", "column", 2i32);
                 }
                 _ => {
+                    strip.set_height(AUTO_HIDE_STRIP_SIZE);
                     strip.set_attached("Grid", "row", 2i32);
                     strip.set_attached("Grid", "column", 1i32);
                 }
@@ -178,11 +181,13 @@ impl AutoHideOverlay {
     ) {
         for strip in &self.strips {
             strip.children().clear();
+            strip.set_visibility(Visibility::Collapsed);
         }
         for (side, item, title, icon_source) in titles {
             let Some(strip) = self.strips.get(side) else {
                 continue;
             };
+            strip.set_visibility(Visibility::Visible);
             let entry = Grid::new();
             entry.set_width(AUTO_HIDE_ENTRY_WIDTH);
             entry.set_height(AUTO_HIDE_ENTRY_HEIGHT);
@@ -197,6 +202,7 @@ impl AutoHideOverlay {
             }
             let text = TextBlock::new();
             text.set_text(&title);
+            text.set_foreground(themed_brush(BrushStyle::Foreground));
             text.set_attached("Grid", "column", 1i32);
             entry.children().add(text);
             let weak_owner: Weak<DockingControl> = owner.clone();

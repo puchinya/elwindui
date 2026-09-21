@@ -1,6 +1,6 @@
 # Docking status
 
-Snapshot: 2026-09-21. Docking behavior is defined by the docking specification and its durable design documents under [`../design/`](../design/).
+Snapshot: 2026-09-22. Docking behavior is defined by the docking specification and its durable design documents under [`../design/`](../design/).
 
 ## Current implementation
 
@@ -13,10 +13,10 @@ Snapshot: 2026-09-21. Docking behavior is defined by the docking specification a
 
 ## Current verification state
 
-- Focused model, reconciliation, retained-presentation, pointer-path, splitter, floating-host, snapshot, auto-hide, weak-lifetime, and workspace tests pass. Final-head AppKit runtime interaction for CustomGridSplitter-owned Docking splitter resizing is verified on the current implementation.
-- The backend-neutral native parity case is [`../../tests/e2e/docking-native-parity.md`](../../tests/e2e/docking-native-parity.md). The bounded WinUI3 run for Issue #226 verified rapid selection, reorder, Center and directional group/root docking, main-to-floating docking, context actions, short splitter drags, theme preservation, allowed native close, programmatic removal, and repeated host cleanup. The acceptance is not closed: the fresh outside-bounds item tear-out row remains a native FAIL, auto-hide strip/overlay exposure and continuous three-second splitter tracking are blocked, and several multi-floating, snapshot, capability, veto, and whole-group rows remain unverified.
+- Focused model, reconciliation, retained-presentation, pointer-path, splitter, floating-host, snapshot, auto-hide, weak-lifetime, and workspace tests pass. The current WinUI3 native run also passes DNP-01 through DNP-17, DNP-18 short, DNP-19 short, and DNP-20 through DNP-25. DNP-06 was repaired at the WinUI3 capture-delivery boundary; native floating move/resize and auto-hide were repaired at their existing retained-host/runtime boundaries.
+- The backend-neutral native parity case is [`../../tests/e2e/docking-native-parity.md`](../../tests/e2e/docking-native-parity.md). Issue #226 remains open because DNP-18 long and DNP-19 long require a genuine continuous >=3 second left-mouse movement interval that the approved winapp 0.6.1 `ui drag` command cannot express. Short splitter drags are passing regression controls. AppKit evidence for affected shared-runtime Docking paths is not revalidated on this Windows host.
 
 ## Platform boundaries and blockers
 
-- WinUI 3 native Docking acceptance remains open under [#226](https://github.com/puchinya/elwindui/issues/226); the remaining native failures/blockers and unverified rows must be resolved before phase review. GTK4 native floating is unavailable without a usable GTK Window implementation.
+- WinUI 3 native Docking acceptance remains open under [#226](https://github.com/puchinya/elwindui/issues/226); all currently exercised rows pass, but the two continuous splitter rows remain blocked by the external driver capability and must be resolved before phase review. GTK4 native floating is unavailable without a usable GTK Window implementation.
 - The broader disabled-capability interaction matrix is not a required closure gate and is not represented as a PASS.

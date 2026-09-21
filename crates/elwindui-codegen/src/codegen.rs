@@ -10154,11 +10154,43 @@ fn emit_lazy_leaf_value(
         &mut construct,
         std::slice::from_ref(leaf),
     );
+    // A lazy branch leaf is intentionally absent from the shared `plan`, so the ordinary
+    // post-construction wiring pass cannot see it.  Wire it at the same moment it is first
+    // materialized, while `#binding` is still the freshly-created concrete widget.  The cache
+    // guard below makes this one-time, matching the leaf's construct-once lifetime.
+    let mut wiring = TokenStream::new();
+    emit_wiring_with_widget(
+        leaf,
+        ctx,
+        from,
+        table,
+        &mut wiring,
+        false,
+        Some(quote! { #binding.clone() }),
+    );
+    let wiring = if wiring.is_empty() {
+        TokenStream::new()
+    } else if ctx.is_template_storage() {
+        wiring
+    } else {
+        let target = &ctx.target;
+        quote! {
+            if let Some(this) = self
+                .__self_weak
+                .borrow()
+                .upgrade()
+                .and_then(|__rc| __rc.downcast::<#target>().ok())
+            {
+                #wiring
+            }
+        }
+    };
     quote! {
         {
             let mut __elwindui_lazy_cache = #cache.borrow_mut();
             if __elwindui_lazy_cache.is_none() {
                 #construct
+                #wiring
                 *__elwindui_lazy_cache = Some(#binding);
             }
             __elwindui_lazy_cache
@@ -15639,6 +15671,21 @@ fn emit_wiring(
     out: &mut TokenStream,
     self_is_node: bool,
 ) {
+    emit_wiring_with_widget(node, ctx, from, table, out, self_is_node, None);
+}
+
+/// Shared wiring emitter with an optional live-widget override.  Ordinary nodes use the stored
+/// `self.#binding`/template-local binding selected by `emit_wiring`; a lazy dynamic leaf supplies
+/// its freshly materialized local handle instead, because it has no persistent plan field.
+fn emit_wiring_with_widget(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    out: &mut TokenStream,
+    self_is_node: bool,
+    widget_binding_override: Option<TokenStream>,
+) {
     if !node.stored {
         return;
     }
@@ -15650,7 +15697,9 @@ fn emit_wiring(
     // it's moved into `self.base` at construction, and `self`/`this` itself *is* the tree node (see
     // that code's own doc comment). Every `let widget = this.#binding.clone();` below needs `this`
     // itself in that case instead.
-    let widget_binding = if self_is_node {
+    let widget_binding = if let Some(override_binding) = widget_binding_override {
+        override_binding
+    } else if self_is_node {
         quote! { this.clone() }
     } else if ctx.is_template_storage() {
         quote! { #binding.clone() }
@@ -19774,6 +19823,54 @@ struct NotepadWindow {
             "both branches are childless literals, so both should be lazily cached: {rendered}"
         );
         assert!(rendered.contains("RefCell < Option < std :: rc :: Rc"));
+    }
+
+    #[test]
+    fn generates_event_wiring_when_a_lazy_dynamic_branch_leaf_is_materialized() {
+        let module = viewmodel_and_component_module(
+            r#"
+            mod dynamic_view_model_mod {
+                struct DynamicViewModel {
+                    #[observable(default = true)]
+                    show: bool,
+                }
+
+                impl DynamicViewModel {
+                    fn focused(&self) {}
+                }
+            }
+            "#,
+            None,
+            r#"
+            struct DynamicHost {
+                #[param]
+                #[inject]
+                vm: DynamicViewModel,
+
+                body: view! {
+                    VerticalLayout {
+                        if vm.show {
+                            TextBox {
+                                on_got_focus: vm.focused
+                            }
+                        } else {
+                            TextBlock { text: "hidden" }
+                        }
+                    }
+                },
+            }
+            "#,
+        );
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("lazy_dynamic_event_wiring", &generated);
+
+        let rendered = generated.to_string();
+        assert!(rendered.contains("__lazy_branch_"), "{rendered}");
+        assert!(
+            rendered.contains("register_routed_handler"),
+            "the lazy TextBox must receive its routed focus handler when materialized: {rendered}"
+        );
     }
 
     /// Task #14 (Issue #52): `initial_dynamic_content_value`'s construction-time value for a

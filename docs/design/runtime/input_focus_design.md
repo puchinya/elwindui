@@ -20,9 +20,22 @@ Routed events use one precomputed route so tree mutation during a handler does n
 
 ## Focus
 
-One focus tracker per host owns the focused element. Focus changes validate that the target is active, focusable, and attached; they dispatch loss before gain and synchronize the native widget where one exists.
+One focus tracker per host owns the focused element and its acquisition-mode `FocusState`. Focus
+changes validate that the target is active, focusable, and attached; they dispatch loss before gain
+and synchronize the native widget where one exists. Backends do not create a second focus owner.
 
-Native focus callbacks resolve back to the same owner mapping. Re-entrant callbacks caused by programmatic native focus must converge on the already selected owner rather than producing a second transition.
+WinUI3 native acquisition mode comes from the synchronous `GettingFocusEventArgs.FocusState`
+notification. `GettingFocus` records only transient event metadata; it does not commit Core focus
+because the movement can still be canceled or redirected. `GotFocus` confirms the movement,
+consumes that metadata, resolves the same Core owner, and dispatches the native focus transition.
+If the correlation is missing, the backend may use the later native property only as a diagnostic
+compatibility fallback; the post-hoc `UIElement.FocusState` value is not required to equal a Core
+programmatic request.
+
+Native focus callbacks resolve back to the same owner mapping. Re-entrant callbacks caused by
+programmatic native focus must converge on the already selected owner rather than producing a
+second transition. Same-target requests remain idempotent and do not rewrite the acquisition mode
+or dispatch another loss/gain pair.
 
 ## Keyboard navigation
 

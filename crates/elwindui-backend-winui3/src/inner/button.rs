@@ -181,10 +181,12 @@ mod hosted_xaml_regression_tests {
     use std::cell::{Cell, RefCell};
     use std::rc::{Rc, Weak};
     use windows::Foundation::IPropertyValue;
+    use windows::Foundation::TypedEventHandler;
     use windows::core::{HSTRING, Interface};
 
     thread_local! {
         static TEST_CALLBACK_OWNERS: RefCell<Vec<crate::ffi::UiCallbackRegistryOwner>> = const { RefCell::new(Vec::new()) };
+        static GETTING_FOCUS_PROBE: Cell<Option<crate::bindings::Microsoft::UI::Xaml::FocusState>> = const { Cell::new(None) };
     }
 
     #[elwindui_macros::class(inherits = elwindui_core::ui::UIElement)]
@@ -231,6 +233,20 @@ mod hosted_xaml_regression_tests {
         let _ = queue.TryEnqueue(&handler);
     }
 
+    #[derive(Clone, Debug, Default)]
+    struct ProgrammaticFocusRegressionResult {
+        non_tab_stop_returned: bool,
+        non_tab_stop_core_unfocused: bool,
+        non_tab_stop_native_unfocused: bool,
+        first_focus_returned: bool,
+        first_focus_core_programmatic: bool,
+        getting_focus_observed: bool,
+        getting_focus_programmatic: bool,
+        first_focus_event_count: usize,
+        second_focus_returned: bool,
+        second_focus_event_count: usize,
+    }
+
     fn native_batch_root(count: usize) -> (Rc<dyn UIElementExt>, Vec<AnyView>) {
         let root = VerticalLayout::new();
         root.set_spacing(4.0);
@@ -245,10 +261,23 @@ mod hosted_xaml_regression_tests {
     }
 
     fn readiness_measure_pass_count(history: &[crate::host::RelayoutRealizationRecord]) -> usize {
+        // This hosted session now contains the focus-correlation TreeHost as well as the
+        // readiness probe. Select the probe's most recently-created host id before counting its
+        // own InteractiveFlush records; the global diagnostic history is intentionally shared by
+        // all TreeHosts in the one-Application test process.
+        let probe_id = history
+            .iter()
+            .filter(|record| {
+                record.source == crate::host::RelayoutSource::SetTreeInitial
+                    && record.kind == elwindui_core::ui::InvalidationKind::Measure
+            })
+            .map(|record| record.diagnostic_id)
+            .max();
         history
             .iter()
             .filter(|record| {
-                record.source == crate::host::RelayoutSource::InteractiveFlush
+                Some(record.diagnostic_id) == probe_id
+                    && record.source == crate::host::RelayoutSource::InteractiveFlush
                     && record.kind == elwindui_core::ui::InvalidationKind::Measure
             })
             .count()
@@ -444,6 +473,7 @@ mod hosted_xaml_regression_tests {
             static READINESS_MANY_HISTORY: RefCell<Option<Vec<crate::host::RelayoutRealizationRecord>>> = const { RefCell::new(None) };
             static READINESS_ONE_NATIVE_MEASURE_COUNT: RefCell<Option<u32>> = const { RefCell::new(None) };
             static READINESS_MANY_NATIVE_MEASURE_COUNT: RefCell<Option<u32>> = const { RefCell::new(None) };
+            static PROGRAMMATIC_FOCUS_RESULT: RefCell<Option<ProgrammaticFocusRegressionResult>> = const { RefCell::new(None) };
         }
 
         crate::init().expect("elwindui_backend_winui3::init");
@@ -537,6 +567,143 @@ mod hosted_xaml_regression_tests {
             // from inside `Loaded` so this test reflects genuine already-connected-window
             // conditions instead of an arbitrary earlier point.
             let loaded = RoutedEventHandler::new(move |_, _| {
+                // Programmatic native-focus synchronization regression. This deliberately uses
+                // a queued callback so its private host cannot contaminate the readiness probes
+                // that are queued by the remainder of this Loaded handler.
+                enqueue_test_callback(Rc::new(move || {
+                    // the existing hosted XAML application/window rather than starting another
+                    // Application instance in this test process.
+                    let focus_host = Rc::new(crate::host::TreeHost::new());
+                    let focus_window = XamlWindow::new().expect("focus regression Window::new");
+                    let focus_text_box = crate::native_ui::TextBox::new();
+                    let focus_view = focus_text_box.into_any_view();
+                    let window_for_focus = focus_window.clone();
+                    let focus_event_count = Rc::new(Cell::new(0usize));
+                    {
+                        let focus_event_count = focus_event_count.clone();
+                        focus_text_box.register_routed_handler::<()>(
+                            "on_got_focus",
+                            Box::new(move |_, _| {
+                                focus_event_count.set(focus_event_count.get() + 1);
+                            }),
+                        );
+                    }
+                    let focus_root = VerticalLayout::new();
+                    focus_root.children().add(focus_text_box.clone());
+                    let focus_host_element = focus_host.as_element();
+                    focus_window
+                        .SetContent(&focus_host_element)
+                        .expect("set focus regression Window content");
+                    focus_host
+                        .set_viewport(crate::host::TreeHostViewport {
+                            width: Some(620.0),
+                            height: Some(120.0),
+                        })
+                        .expect("focus regression TreeHost.set_viewport");
+
+                    let loaded_owner = crate::ffi::UiCallbackRegistryOwner::default();
+                    let focus_text_box_for_loaded = focus_text_box.clone();
+                    let focus_view_for_loaded = focus_view.clone();
+                    let focus_event_count_for_loaded = focus_event_count.clone();
+                    let focus_host_for_loaded = focus_host.clone();
+                    let window_for_focus_for_loaded = window_for_focus.clone();
+                    let loaded_callback_id =
+                        loaded_owner.register_one_shot_event(Rc::new(move || {
+                            let focus_text_box_for_action = focus_text_box_for_loaded.clone();
+                            let focus_view_for_action = focus_view_for_loaded.clone();
+                            let focus_event_count_for_action = focus_event_count_for_loaded.clone();
+                            let focus_host_for_action = focus_host_for_loaded.clone();
+                            let window_for_focus_for_action = window_for_focus_for_loaded.clone();
+                            enqueue_test_callback(Rc::new(move || {
+                                window_for_focus_for_action
+                                    .Activate()
+                                    .expect("activate focus regression window");
+                                let native = focus_view_for_action.as_element();
+                                let mut result = ProgrammaticFocusRegressionResult::default();
+
+                                focus_text_box_for_action.set_tab_stop(false);
+                                result.non_tab_stop_returned = focus_text_box_for_action.focus();
+                                result.non_tab_stop_core_unfocused = focus_text_box_for_action
+                                    .focus_state()
+                                    == elwindui_core::input::FocusState::Unfocused;
+                                result.non_tab_stop_native_unfocused = native
+                            .FocusState()
+                            .map(|state| {
+                                state == crate::bindings::Microsoft::UI::Xaml::FocusState::Unfocused
+                            })
+                            .unwrap_or(false);
+
+                                focus_text_box_for_action.set_tab_stop(true);
+                                GETTING_FOCUS_PROBE.with(|probe| probe.set(None));
+                                result.first_focus_returned = focus_text_box_for_action.focus();
+                                result.first_focus_event_count = focus_event_count_for_action.get();
+                                result.first_focus_core_programmatic = focus_text_box_for_action
+                                    .focus_state()
+                                    == elwindui_core::input::FocusState::Programmatic;
+                                GETTING_FOCUS_PROBE.with(|probe| {
+                                    result.getting_focus_observed = probe.get().is_some();
+                                    result.getting_focus_programmatic = probe.get()
+                                == Some(
+                                    crate::bindings::Microsoft::UI::Xaml::FocusState::Programmatic,
+                                );
+                                });
+                                let result_for_finish = Rc::new(RefCell::new(result));
+                                let result_for_finish_callback = result_for_finish.clone();
+                                let text_box_for_finish = focus_text_box_for_action.clone();
+                                let event_count_for_finish = focus_event_count_for_action.clone();
+                                let focus_host_for_finish = focus_host_for_action.clone();
+                                let focus_window_for_finish = window_for_focus_for_action.clone();
+                                enqueue_test_callback(Rc::new(move || {
+                                    let mut result = result_for_finish_callback.borrow_mut();
+                                    result.second_focus_returned = text_box_for_finish.focus();
+                                    result.second_focus_event_count = event_count_for_finish.get();
+                                    result.first_focus_core_programmatic = text_box_for_finish
+                                        .focus_state()
+                                        == elwindui_core::input::FocusState::Programmatic;
+                                    // Consume any focus-host relayout queued by the native focus
+                                    // notification before the later readiness-history probe resets its
+                                    // global diagnostic history.
+                                    text_box_for_finish.flush_interactive_relayout();
+                                    PROGRAMMATIC_FOCUS_RESULT
+                                        .with(|slot| *slot.borrow_mut() = Some(result.clone()));
+                                    let _ = &focus_host_for_finish;
+                                    focus_window_for_finish
+                                        .Close()
+                                        .expect("close focus regression Window");
+                                }));
+                            }));
+                        }));
+                    let focus_loaded_handler = RoutedEventHandler::new(move |_, _| {
+                        invoke_ui_event_callback(loaded_callback_id);
+                        Ok(())
+                    });
+                    focus_view
+                        .as_element()
+                        .Loaded(&focus_loaded_handler)
+                        .expect("focus regression TextBox.Loaded");
+                    TEST_CALLBACK_OWNERS.with(|owners| owners.borrow_mut().push(loaded_owner));
+                    focus_host.set_tree(focus_root);
+                    focus_window
+                        .Activate()
+                        .expect("activate focus regression Window");
+
+                    let getting_focus_probe = TypedEventHandler::<
+                        crate::bindings::Microsoft::UI::Xaml::UIElement,
+                        crate::bindings::Microsoft::UI::Xaml::Input::GettingFocusEventArgs,
+                    >::new(move |_, args| {
+                        if let Some(args) = args.as_ref() {
+                            if let Ok(state) = args.FocusState() {
+                                GETTING_FOCUS_PROBE.with(|probe| probe.set(Some(state)));
+                            }
+                        }
+                        Ok(())
+                    });
+                    let _getting_focus_probe_token = focus_view
+                        .as_element()
+                        .GettingFocus(&getting_focus_probe)
+                        .expect("focus regression GettingFocus registration");
+                }));
+
                 VIEW.with(|slot| {
                     if let Some(mut view) = slot.borrow_mut().take() {
                         // Reproduces the exact poisoning condition this regression guards
@@ -993,6 +1160,35 @@ mod hosted_xaml_regression_tests {
             let _ = window.Activate();
         });
         TEST_CALLBACK_OWNERS.with(|owners| owners.borrow_mut().clear());
+
+        let focus_result = PROGRAMMATIC_FOCUS_RESULT
+            .with(|slot| slot.borrow().clone())
+            .expect("programmatic focus regression should have completed");
+        assert!(
+            !focus_result.non_tab_stop_returned,
+            "a non-tab-stop target must reject focus before native XAML Focus"
+        );
+        assert!(
+            focus_result.non_tab_stop_core_unfocused,
+            "a rejected non-tab-stop target must not become Core-focused"
+        );
+        assert!(
+            focus_result.non_tab_stop_native_unfocused,
+            "a rejected non-tab-stop target must not become natively focused"
+        );
+        assert!(focus_result.first_focus_returned);
+        assert!(focus_result.first_focus_core_programmatic);
+        assert!(
+            focus_result.getting_focus_observed,
+            "programmatic native focus must raise GettingFocus: {focus_result:?}"
+        );
+        assert!(
+            focus_result.getting_focus_programmatic,
+            "GettingFocus must report Programmatic acquisition: {focus_result:?}"
+        );
+        assert_eq!(focus_result.first_focus_event_count, 1);
+        assert!(focus_result.second_focus_returned);
+        assert_eq!(focus_result.second_focus_event_count, 1);
 
         let width = WIDTH
             .with(|slot| *slot.borrow())

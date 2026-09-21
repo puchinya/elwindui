@@ -759,30 +759,38 @@ impl FocusHost for WinUI3FocusHost {
             return false;
         };
 
+        let focus: &elwindui_core::focus::FocusTracker = &keyboard.focus;
+        if !target.is_tab_stop() {
+            return false;
+        }
+
         // Accessibility and programmatic Core focus both arrive through this host capability.
         // A native leaf receives real XAML focus first so WinUI3 emits GotFocus through the
         // existing native-to-Core bridge while the target is changing. The semantic peer remains
         // the only public UIA node; this lookup uses private projection bookkeeping solely for
         // the native synchronization step.
-        if let Some(native_children) = self.native_children.upgrade() {
-            if let Some(element) = native_focus_element(&native_children, target.render_group_id())
-            {
-                let Ok(element) = element.cast::<UIElement>() else {
-                    return false;
-                };
-                if !element
-                    .Focus(Microsoft::UI::Xaml::FocusState::Programmatic)
-                    .unwrap_or(false)
-                {
-                    return false;
-                }
-            }
+        let Some(native_children) = self.native_children.upgrade() else {
+            return focus.set_focus(target, FocusState::Programmatic);
+        };
+        let Some(element) = native_focus_element(&native_children, target.render_group_id()) else {
+            return focus.set_focus(target, FocusState::Programmatic);
+        };
+        let Ok(element) = element.cast::<UIElement>() else {
+            return false;
+        };
+        if !element
+            .Focus(Microsoft::UI::Xaml::FocusState::Programmatic)
+            .unwrap_or(false)
+        {
+            return false;
         }
-
-        keyboard
-            .as_ref()
-            .focus
-            .set_focus(target, FocusState::Programmatic)
+        if focus
+            .focused()
+            .is_some_and(|focused| Rc::ptr_eq(&focused, target))
+        {
+            return target.focus_state() == FocusState::Programmatic;
+        }
+        focus.set_focus(target, FocusState::Programmatic)
     }
 
     fn clear_focus_in_subtree(&self, subtree: &Rc<dyn elwindui_core::ui::UIElementExt>) -> bool {

@@ -28,6 +28,7 @@ thread_local! {
     /// intentionally single-threaded (`Rc<RefCell<_>>`). WinUI invokes these delegates on this UI
     /// thread, so the delegate captures only a numeric key and resolves the actual callback here.
     static UI_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn()>>> = RefCell::new(HashMap::new());
+    static UI_GETTING_FOCUS_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::GettingFocusEventArgs)>>> = RefCell::new(HashMap::new());
     static UI_BOOL_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn() -> bool>>> = RefCell::new(HashMap::new());
     static UI_CONTEXT_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::ContextRequestedEventArgs)>>> = RefCell::new(HashMap::new());
     static UI_POINTER_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs)>>> = RefCell::new(HashMap::new());
@@ -55,6 +56,7 @@ pub(crate) fn reset_native_measure_call_count_for_test() {
 #[derive(Clone, Copy)]
 enum UiCallbackKind {
     Event,
+    GettingFocus,
     BoolEvent,
     ContextEvent,
     PointerEvent,
@@ -74,6 +76,9 @@ struct UiCallbackRegistryOwnerInner {
 fn remove_ui_callback(kind: UiCallbackKind, id: usize) {
     let _ = match kind {
         UiCallbackKind::Event => UI_EVENT_CALLBACKS.try_with(|callbacks| {
+            callbacks.borrow_mut().remove(&id);
+        }),
+        UiCallbackKind::GettingFocus => UI_GETTING_FOCUS_CALLBACKS.try_with(|callbacks| {
             callbacks.borrow_mut().remove(&id);
         }),
         UiCallbackKind::BoolEvent => UI_BOOL_EVENT_CALLBACKS.try_with(|callbacks| {
@@ -145,6 +150,19 @@ impl UiCallbackRegistryOwner {
             .registrations
             .borrow_mut()
             .push((UiCallbackKind::Event, id));
+        id
+    }
+
+    /// Registers a native WinUI `GettingFocus` callback owned by this lifetime group.
+    pub(crate) fn register_getting_focus(
+        &self,
+        callback: Rc<dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::GettingFocusEventArgs)>,
+    ) -> usize {
+        let id = register_ui_getting_focus_callback(callback);
+        self.0
+            .registrations
+            .borrow_mut()
+            .push((UiCallbackKind::GettingFocus, id));
         id
     }
 
@@ -323,6 +341,27 @@ pub(crate) fn invoke_ui_event_callback(id: usize) {
     let callback = UI_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
     if let Some(callback) = callback {
         callback();
+    }
+}
+
+pub(crate) fn register_ui_getting_focus_callback(
+    callback: Rc<dyn Fn(&crate::bindings::Microsoft::UI::Xaml::Input::GettingFocusEventArgs)>,
+) -> usize {
+    let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
+    UI_GETTING_FOCUS_CALLBACKS.with(|callbacks| {
+        callbacks.borrow_mut().insert(id, callback);
+    });
+    id
+}
+
+pub(crate) fn invoke_ui_getting_focus_callback(
+    id: usize,
+    args: &crate::bindings::Microsoft::UI::Xaml::Input::GettingFocusEventArgs,
+) {
+    let callback =
+        UI_GETTING_FOCUS_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
+    if let Some(callback) = callback {
+        callback(args);
     }
 }
 

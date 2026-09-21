@@ -647,8 +647,11 @@ pub struct RawTextInputEvent {
     pub text: String,
 }
 
-/// WinUI3's `Control.FocusState` — not just "focused or not", but *how* focus was acquired, so a
-/// component can (e.g.) only show a focus ring for keyboard navigation and not for a mouse click.
+/// Core's focus-acquisition mode — not just "focused or not", but *how* the current Core focus
+/// transition was acquired, so a component can (e.g.) only show a focus ring for keyboard
+/// navigation and not for a mouse click. WinUI3 native focus bridges obtain this mode from the
+/// synchronous `GettingFocusEventArgs.FocusState` notification; its later `UIElement.FocusState`
+/// property is not required to remain identical to the original request.
 /// See `crate::focus::FocusTracker::set_focus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusState {

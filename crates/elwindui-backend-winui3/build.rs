@@ -207,6 +207,7 @@ fn main() {
         "Microsoft.UI.Xaml.ElementTheme".to_owned(),
         "Microsoft.UI.Xaml.FocusState".to_owned(),
         "Microsoft.UI.Xaml.FrameworkElement".to_owned(),
+        "Microsoft.UI.Xaml.Input.GettingFocusEventArgs".to_owned(),
         "Microsoft.UI.Xaml.RoutedEventHandler".to_owned(),
         "Microsoft.UI.Xaml.SizeChangedEventHandler".to_owned(),
         "Microsoft.UI.Xaml.TextAlignment".to_owned(),

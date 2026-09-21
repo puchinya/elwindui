@@ -20,6 +20,27 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use windows::core::{HSTRING, Interface};
 
+fn core_focus_state_from_xaml(
+    state: crate::bindings::Microsoft::UI::Xaml::FocusState,
+) -> Option<FocusState> {
+    match state {
+        crate::bindings::Microsoft::UI::Xaml::FocusState::Pointer => Some(FocusState::Pointer),
+        crate::bindings::Microsoft::UI::Xaml::FocusState::Keyboard => Some(FocusState::Keyboard),
+        crate::bindings::Microsoft::UI::Xaml::FocusState::Programmatic => {
+            Some(FocusState::Programmatic)
+        }
+        crate::bindings::Microsoft::UI::Xaml::FocusState::Unfocused => None,
+        _ => None,
+    }
+}
+
+fn core_focus_state_for_got_focus(
+    pending: &Cell<Option<FocusState>>,
+    fallback: impl FnOnce() -> Option<FocusState>,
+) -> Option<FocusState> {
+    pending.take().or_else(fallback)
+}
+
 /// A `RenderCommand::Text`/`NativeControl` command's reflection as a real XAML child, kept across
 /// relayout passes so it can be updated in place instead of torn down and recreated — see
 /// `reconcile_native_children`'s own doc comment for why.
@@ -143,8 +164,10 @@ pub(crate) struct NativeChildState {
     view: AnyView,
     loaded_token: Option<i64>,
     loaded_ticket: Option<NativeLoadTicket>,
+    getting_focus_token: Option<i64>,
     got_focus_token: Option<i64>,
     lost_focus_token: Option<i64>,
+    pending_focus_state: Rc<Cell<Option<FocusState>>>,
     callback_owner: UiCallbackRegistryOwner,
 }
 
@@ -157,12 +180,16 @@ impl Drop for NativeChildState {
         if let Some(ticket) = self.loaded_ticket.take() {
             ticket.resolve_cancelled();
         }
+        if let Some(token) = self.getting_focus_token.take() {
+            let _ = element.RemoveGettingFocus(token);
+        }
         if let Some(token) = self.got_focus_token.take() {
             let _ = element.RemoveGotFocus(token);
         }
         if let Some(token) = self.lost_focus_token.take() {
             let _ = element.RemoveLostFocus(token);
         }
+        self.pending_focus_state.set(None);
         // `callback_owner` drops immediately after this method returns, once the native delegates
         // that could still contain their numeric ids have been detached above.
         let _ = &self.callback_owner;
@@ -178,6 +205,29 @@ impl NativeChildElement {
             NativeChildElement::Native(state) => state.view.as_element(),
         }
     }
+}
+
+/// Returns the projected native control for a Core owner, if this host currently has one.
+/// Semantic accessibility peers intentionally do not expose these XAML children, but the host's
+/// Core focus request still needs to synchronize a native control's real keyboard focus with the
+/// same owner. The map borrow ends before the caller invokes XAML `Focus`, since that notification
+/// can synchronously re-enter Core and request another relayout.
+pub(crate) fn native_focus_element(
+    native_children: &Rc<RefCell<NativeChildMap>>,
+    owner_id: u64,
+) -> Option<FrameworkElement> {
+    native_children
+        .borrow()
+        .iter()
+        .find_map(|((id, _), child)| {
+            if *id != owner_id {
+                return None;
+            }
+            match child {
+                NativeChildElement::Native(state) => Some(state.view.as_element()),
+                NativeChildElement::Text(_) => None,
+            }
+        })
 }
 
 /// Keyed by `(originating RenderGroup id, index of the command within that group's own
@@ -483,6 +533,40 @@ pub(crate) fn reconcile_native_children(
                         // can run user code that synchronously re-enters this same `render_tree` via
                         // `RelayoutHost::request_relayout`).
                         let callback_owner = UiCallbackRegistryOwner::default();
+                        let pending_focus_state = Rc::new(Cell::new(None));
+                        let pending_focus_state_for_getting = pending_focus_state.clone();
+                        let getting_focus_id = callback_owner.register_getting_focus(Rc::new(
+                            move |args| {
+                                let state = args
+                                    .FocusState()
+                                    .ok()
+                                    .and_then(core_focus_state_from_xaml);
+                                pending_focus_state_for_getting.set(state);
+                                if state.is_none()
+                                    && std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some()
+                                {
+                                    eprintln!(
+                                        "[elwindui-winui3] native GettingFocus FocusState was not mapped"
+                                    );
+                                }
+                            },
+                        ));
+                        let getting_focus_token = element
+                            .GettingFocus(&windows::Foundation::TypedEventHandler::<
+                                UIElement,
+                                crate::bindings::Microsoft::UI::Xaml::Input::GettingFocusEventArgs,
+                            >::new(move |_, args| {
+                                if let Some(args) = args.as_ref() {
+                                    crate::ffi::invoke_ui_getting_focus_callback(
+                                        getting_focus_id,
+                                        args,
+                                    );
+                                }
+                                Ok(())
+                            }))
+                            .ok();
+                        let element_for_gained = element.clone();
+                        let pending_focus_state_for_gained = pending_focus_state.clone();
                         let got_focus_id = callback_owner.register_event(Rc::new(move || {
                             let render_tree: Option<
                                 Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
@@ -490,6 +574,25 @@ pub(crate) fn reconcile_native_children(
                             let keyboard: Option<Rc<KeyboardDispatcher>> =
                                 keyboard_for_gained.upgrade();
                             if let (Some(render_tree), Some(keyboard)) = (render_tree, keyboard) {
+                                let core_state = core_focus_state_for_got_focus(
+                                    &pending_focus_state_for_gained,
+                                    || {
+                                        if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS")
+                                            .is_some()
+                                        {
+                                            eprintln!(
+                                                "[elwindui-winui3] native GotFocus had no GettingFocus correlation; using FocusState fallback"
+                                            );
+                                        }
+                                        element_for_gained
+                                            .FocusState()
+                                            .ok()
+                                            .and_then(core_focus_state_from_xaml)
+                                    },
+                                );
+                                let Some(core_state) = core_state else {
+                                    return;
+                                };
                                 let target = render_tree.borrow().as_ref().and_then(|rt| {
                                     elwindui_core::focus::resolve_native_focus_target(rt, owner_id)
                                 });
@@ -497,7 +600,7 @@ pub(crate) fn reconcile_native_children(
                                     elwindui_core::focus::native_focus_gained(
                                         &target,
                                         &keyboard.as_ref().focus,
-                                        FocusState::Pointer,
+                                        core_state,
                                     );
                                 }
                             }
@@ -509,7 +612,9 @@ pub(crate) fn reconcile_native_children(
                             }))
                             .ok();
                         let keyboard_for_lost = Rc::downgrade(keyboard);
+                        let pending_focus_state_for_lost = pending_focus_state.clone();
                         let lost_focus_id = callback_owner.register_event(Rc::new(move || {
+                            pending_focus_state_for_lost.set(None);
                             let keyboard: Option<Rc<KeyboardDispatcher>> =
                                 keyboard_for_lost.upgrade();
                             if let Some(keyboard) = keyboard {
@@ -563,8 +668,10 @@ pub(crate) fn reconcile_native_children(
                             view,
                             loaded_token,
                             loaded_ticket,
+                            getting_focus_token,
                             got_focus_token,
                             lost_focus_token,
+                            pending_focus_state,
                             callback_owner,
                         })
                     }
@@ -638,6 +745,52 @@ pub(crate) enum RenderedNativeChild {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_focus_state_from_xaml_maps_each_native_state() {
+        assert_eq!(
+            core_focus_state_from_xaml(crate::bindings::Microsoft::UI::Xaml::FocusState::Pointer),
+            Some(FocusState::Pointer)
+        );
+        assert_eq!(
+            core_focus_state_from_xaml(crate::bindings::Microsoft::UI::Xaml::FocusState::Keyboard),
+            Some(FocusState::Keyboard)
+        );
+        assert_eq!(
+            core_focus_state_from_xaml(
+                crate::bindings::Microsoft::UI::Xaml::FocusState::Programmatic
+            ),
+            Some(FocusState::Programmatic)
+        );
+        assert_eq!(
+            core_focus_state_from_xaml(crate::bindings::Microsoft::UI::Xaml::FocusState::Unfocused),
+            None
+        );
+        assert_eq!(
+            core_focus_state_from_xaml(crate::bindings::Microsoft::UI::Xaml::FocusState(99)),
+            None
+        );
+    }
+
+    #[test]
+    fn got_focus_consumes_pending_mode_before_using_fallback() {
+        let pending = Cell::new(Some(FocusState::Programmatic));
+        let fallback_called = Cell::new(false);
+        assert_eq!(
+            core_focus_state_for_got_focus(&pending, || {
+                fallback_called.set(true);
+                Some(FocusState::Pointer)
+            }),
+            Some(FocusState::Programmatic)
+        );
+        assert!(!fallback_called.get());
+        assert_eq!(pending.get(), None);
+
+        assert_eq!(
+            core_focus_state_for_got_focus(&pending, || Some(FocusState::Keyboard)),
+            Some(FocusState::Keyboard)
+        );
+    }
 
     fn batch(remaining: usize) -> Rc<NativeLoadBatch> {
         Rc::new(NativeLoadBatch::new(remaining, None, None))

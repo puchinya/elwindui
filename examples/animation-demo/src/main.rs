@@ -158,12 +158,16 @@ struct AnimationDemoWindow {
                 ))]
                 TextBox {
                     placeholder: "Focus me, then remove this control"
+                    accessibility_identifier: "animation-native-textbox"
                     on_got_focus: vm.native_got_focus
                     on_lost_focus: vm.native_lost_focus
                 }
             }
             TextBlock { text: "Native focus:" }
-            TextBlock { text: vm.native_focus }
+            TextBlock {
+                text: vm.native_focus
+                accessibility_identifier: "animation-native-focus-state"
+            }
             TextBlock { text: "Reduce motion:" }
             TextBlock { text: vm.reduce_motion_label }
             TextBlock { text: vm.status }

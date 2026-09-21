@@ -749,18 +749,48 @@ impl AnimationFrameHost for WinUI3RelayoutHost {
 /// own hosted tree — mirrors `elwindui_backend_appkit::inner::AppKitFocusHost`.
 pub(crate) struct WinUI3FocusHost {
     keyboard: Weak<KeyboardDispatcher>,
+    native_children: Weak<RefCell<NativeChildMap>>,
 }
 
 impl FocusHost for WinUI3FocusHost {
     fn request_focus(&self, target: &Rc<dyn elwindui_core::ui::UIElementExt>) -> bool {
         let keyboard: Option<Rc<KeyboardDispatcher>> = self.keyboard.upgrade();
-        match keyboard {
-            Some(keyboard) => keyboard
-                .as_ref()
-                .focus
-                .set_focus(target, FocusState::Programmatic),
-            None => false,
+        let Some(keyboard) = keyboard else {
+            return false;
+        };
+
+        let focus: &elwindui_core::focus::FocusTracker = &keyboard.focus;
+        if !target.is_tab_stop() {
+            return false;
         }
+
+        // Accessibility and programmatic Core focus both arrive through this host capability.
+        // A native leaf receives real XAML focus first so WinUI3 emits GotFocus through the
+        // existing native-to-Core bridge while the target is changing. The semantic peer remains
+        // the only public UIA node; this lookup uses private projection bookkeeping solely for
+        // the native synchronization step.
+        let Some(native_children) = self.native_children.upgrade() else {
+            return focus.set_focus(target, FocusState::Programmatic);
+        };
+        let Some(element) = native_focus_element(&native_children, target.render_group_id()) else {
+            return focus.set_focus(target, FocusState::Programmatic);
+        };
+        let Ok(element) = element.cast::<UIElement>() else {
+            return false;
+        };
+        if !element
+            .Focus(Microsoft::UI::Xaml::FocusState::Programmatic)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        if focus
+            .focused()
+            .is_some_and(|focused| Rc::ptr_eq(&focused, target))
+        {
+            return true;
+        }
+        focus.set_focus(target, FocusState::Programmatic)
     }
 
     fn clear_focus_in_subtree(&self, subtree: &Rc<dyn elwindui_core::ui::UIElementExt>) -> bool {
@@ -938,6 +968,11 @@ impl PointerGestureHost for WinUI3PointerGestureHost {
 }
 
 impl TreeHost {
+    #[cfg(test)]
+    pub(crate) fn focus_tracker_for_test(&self) -> &elwindui_core::focus::FocusTracker {
+        &self.keyboard.focus
+    }
+
     pub(crate) fn new() -> Self {
         let canvas = accessibility::create_canvas();
         let composition = CompositionRenderer::new(&canvas).expect("CompositionRenderer::new");
@@ -1893,6 +1928,7 @@ impl TreeHost {
         tree.as_ui_element()
             .set_focus_host(Some(Rc::new(WinUI3FocusHost {
                 keyboard: Rc::downgrade(&self.keyboard),
+                native_children: Rc::downgrade(&self.native_children),
             })));
         tree.as_ui_element()
             .set_accessibility_host(Some(Rc::new(WinUI3AccessibilityHost::new(Rc::downgrade(

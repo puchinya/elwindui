@@ -6,9 +6,126 @@
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
 use elwindui::core::graphics::FontWeight;
+use elwindui::core::input::{MouseButton, PointerEventArgs, TappedEventArgs};
 use elwindui::core::layout::GridLength;
-use elwindui::core::ui::WindowExt;
+use elwindui::core::ui::{TextBlock, TextBlockExt, UIElementExt, WindowExt};
 use elwindui_custom_controls::{CloseButtonPresentation, GridResizeBehavior, GridResizeDirection};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+#[derive(Default)]
+struct PointerProbeState {
+    pressed: u32,
+    moved: u32,
+    released: u32,
+    canceled: u32,
+    tapped: u32,
+    double_tapped: u32,
+    right_tapped: u32,
+    last_root_position: Option<elwindui::core::base::Point>,
+    last_screen_position: Option<elwindui::core::base::Point>,
+    last_button: Option<MouseButton>,
+    last_canceled_button: Option<Option<MouseButton>>,
+}
+
+#[derive(Clone, Copy)]
+enum ProbePointerEvent {
+    Pressed,
+    Moved,
+    Released,
+    Canceled,
+}
+
+impl PointerProbeState {
+    fn record_pointer(&mut self, event: ProbePointerEvent, args: &PointerEventArgs) {
+        match event {
+            ProbePointerEvent::Pressed => self.pressed += 1,
+            ProbePointerEvent::Moved => self.moved += 1,
+            ProbePointerEvent::Released => self.released += 1,
+            ProbePointerEvent::Canceled => {
+                self.canceled += 1;
+                self.last_canceled_button = Some(args.button);
+            }
+        }
+        self.last_root_position = Some(args.position);
+        self.last_screen_position = args.screen_position;
+        self.last_button = args.button;
+    }
+
+    fn record_tapped(&mut self, event: &'static str) {
+        match event {
+            "on_tapped" => self.tapped += 1,
+            "on_double_tapped" => self.double_tapped += 1,
+            "on_right_tapped" => self.right_tapped += 1,
+            _ => {}
+        }
+    }
+}
+
+fn format_point(point: Option<elwindui::core::base::Point>) -> String {
+    point
+        .map(|point| format!("({:.1}, {:.1})", point.x, point.y))
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn format_probe_status(label: &str, state: &PointerProbeState) -> String {
+    let canceled_button = state
+        .last_canceled_button
+        .map(|button| format!("{:?}", button))
+        .unwrap_or_else(|| "n/a".to_string());
+    format!(
+        "{label}\npressed={} moved={} released={}\ncanceled={} (last canceled button={canceled_button})\ntapped={} double_tapped={} right_tapped={}\nlast root={} screen={} button={:?}",
+        state.pressed,
+        state.moved,
+        state.released,
+        state.canceled,
+        state.tapped,
+        state.double_tapped,
+        state.right_tapped,
+        format_point(state.last_root_position),
+        format_point(state.last_screen_position),
+        state.last_button,
+    )
+}
+
+fn refresh_probe_status(label: &str, state: &PointerProbeState, status: &TextBlock) {
+    status.set_text(&format_probe_status(label, state));
+}
+
+fn register_probe_pointer_handler<T: UIElementExt>(
+    probe: &Rc<T>,
+    state: Rc<RefCell<PointerProbeState>>,
+    status: Rc<TextBlock>,
+    label: &'static str,
+    event_name: &'static str,
+    event: ProbePointerEvent,
+) {
+    probe.register_routed_handler(
+        event_name,
+        Box::new(move |args: &PointerEventArgs, _| {
+            let mut state = state.borrow_mut();
+            state.record_pointer(event, args);
+            refresh_probe_status(label, &state, &status);
+        }),
+    );
+}
+
+fn register_probe_tapped_handler<T: UIElementExt>(
+    probe: &Rc<T>,
+    state: Rc<RefCell<PointerProbeState>>,
+    status: Rc<TextBlock>,
+    label: &'static str,
+    event_name: &'static str,
+) {
+    probe.register_routed_handler(
+        event_name,
+        Box::new(move |_: &TappedEventArgs, _| {
+            let mut state = state.borrow_mut();
+            state.record_tapped(event_name);
+            refresh_probe_status(label, &state, &status);
+        }),
+    );
+}
 
 #[elwindui::component(inherits VerticalLayout)]
 struct OverviewPage {
@@ -177,6 +294,120 @@ struct CustomControlsDemoSurface {
                     event.cumulative_delta, event.canceled
                 ));
             }));
+
+            let probe_a = this.probe_a();
+            let probe_a_state = Rc::new(RefCell::new(PointerProbeState::default()));
+            let probe_a_status = this.probe_a_status();
+            register_probe_pointer_handler(
+                &probe_a,
+                probe_a_state.clone(),
+                probe_a_status.clone(),
+                "Probe A",
+                "on_pointer_pressed",
+                ProbePointerEvent::Pressed,
+            );
+            register_probe_pointer_handler(
+                &probe_a,
+                probe_a_state.clone(),
+                probe_a_status.clone(),
+                "Probe A",
+                "on_pointer_moved",
+                ProbePointerEvent::Moved,
+            );
+            register_probe_pointer_handler(
+                &probe_a,
+                probe_a_state.clone(),
+                probe_a_status.clone(),
+                "Probe A",
+                "on_pointer_released",
+                ProbePointerEvent::Released,
+            );
+            register_probe_pointer_handler(
+                &probe_a,
+                probe_a_state.clone(),
+                probe_a_status.clone(),
+                "Probe A",
+                "on_pointer_canceled",
+                ProbePointerEvent::Canceled,
+            );
+            register_probe_tapped_handler(
+                &probe_a,
+                probe_a_state.clone(),
+                probe_a_status.clone(),
+                "Probe A",
+                "on_tapped",
+            );
+            register_probe_tapped_handler(
+                &probe_a,
+                probe_a_state.clone(),
+                probe_a_status.clone(),
+                "Probe A",
+                "on_double_tapped",
+            );
+            register_probe_tapped_handler(
+                &probe_a,
+                probe_a_state,
+                probe_a_status,
+                "Probe A",
+                "on_right_tapped",
+            );
+
+            let probe_b = this.probe_b();
+            let probe_b_state = Rc::new(RefCell::new(PointerProbeState::default()));
+            let probe_b_status = this.probe_b_status();
+            register_probe_pointer_handler(
+                &probe_b,
+                probe_b_state.clone(),
+                probe_b_status.clone(),
+                "Probe B",
+                "on_pointer_pressed",
+                ProbePointerEvent::Pressed,
+            );
+            register_probe_pointer_handler(
+                &probe_b,
+                probe_b_state.clone(),
+                probe_b_status.clone(),
+                "Probe B",
+                "on_pointer_moved",
+                ProbePointerEvent::Moved,
+            );
+            register_probe_pointer_handler(
+                &probe_b,
+                probe_b_state.clone(),
+                probe_b_status.clone(),
+                "Probe B",
+                "on_pointer_released",
+                ProbePointerEvent::Released,
+            );
+            register_probe_pointer_handler(
+                &probe_b,
+                probe_b_state.clone(),
+                probe_b_status.clone(),
+                "Probe B",
+                "on_pointer_canceled",
+                ProbePointerEvent::Canceled,
+            );
+            register_probe_tapped_handler(
+                &probe_b,
+                probe_b_state.clone(),
+                probe_b_status.clone(),
+                "Probe B",
+                "on_tapped",
+            );
+            register_probe_tapped_handler(
+                &probe_b,
+                probe_b_state.clone(),
+                probe_b_status.clone(),
+                "Probe B",
+                "on_double_tapped",
+            );
+            register_probe_tapped_handler(
+                &probe_b,
+                probe_b_state,
+                probe_b_status,
+                "Probe B",
+                "on_right_tapped",
+            );
         }
 
         #[id("status")]
@@ -208,7 +439,7 @@ struct CustomControlsDemoSurface {
 
         #[id("content_grid")]
         let content_grid = Grid {
-            height: 450.0
+            height: 350.0
             rows: [GridLength::Star(1.0)]
             columns: [
                 GridLength::Fixed(460.0),
@@ -250,6 +481,57 @@ struct CustomControlsDemoSurface {
                 }
             }
         };
+
+        #[id("probe_a")]
+        let probe_a = Rectangle {
+            width: 460.0
+            height: 64.0
+            fill: "#356b9d"
+        };
+        #[id("probe_a_status")]
+        let probe_a_status = TextBlock {
+            text: "Probe A\npressed=0 moved=0 released=0\ncanceled=0 (last canceled button=n/a)\ntapped=0 double_tapped=0 right_tapped=0\nlast root=None screen=None button=None"
+            font_size: 11.0
+            foreground: "#abb7c4"
+        };
+        #[id("probe_b")]
+        let probe_b = Rectangle {
+            width: 460.0
+            height: 64.0
+            fill: "#587a46"
+        };
+        #[id("probe_b_status")]
+        let probe_b_status = TextBlock {
+            text: "Probe B\npressed=0 moved=0 released=0\ncanceled=0 (last canceled button=n/a)\ntapped=0 double_tapped=0 right_tapped=0\nlast root=None screen=None button=None"
+            font_size: 11.0
+            foreground: "#abb7c4"
+        };
+
+        HorizontalLayout {
+            spacing: 12.0
+            VerticalLayout {
+                width: 470.0
+                spacing: 4.0
+                TextBlock {
+                    text: "Probe A · native cancellation target"
+                    font_size: 13.0
+                    foreground: "#eef2f7"
+                }
+                probe_a
+                probe_a_status
+            }
+            VerticalLayout {
+                width: 470.0
+                spacing: 4.0
+                TextBlock {
+                    text: "Probe B · fresh-routing target"
+                    font_size: 13.0
+                    foreground: "#eef2f7"
+                }
+                probe_b
+                probe_b_status
+            }
+        }
 
         margin: 18.0
         spacing: 12.0

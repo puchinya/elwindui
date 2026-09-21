@@ -281,6 +281,87 @@ finally {
     Remove-Item -LiteralPath $NestedArgvOut -ErrorAction SilentlyContinue
 }
 
+# T10 -- touch-cancel is the sole bounded direct-injection exception. Usage validation must fail
+# before any HWND/session/injection work, and every invocation must retain the driver's one-object
+# JSON protocol even when the native API is unavailable on the test host.
+$r = Invoke-Driver @('touch-cancel', '--from-x', '10', '--from-y', '20')
+Assert-OneJsonObject $r 'touch-cancel (missing hwnd)'
+Assert ($r.Json.category -eq 'usage_error') 'touch-cancel (missing hwnd) -- category:usage_error'
+
+$r = Invoke-Driver @('touch-cancel', '--hwnd', '4660', '--from-y', '20')
+Assert-OneJsonObject $r 'touch-cancel (missing from-x)'
+Assert ($r.Json.category -eq 'usage_error') 'touch-cancel (missing from-x) -- category:usage_error'
+
+$r = Invoke-Driver @('touch-cancel', '--hwnd', '4660', '--from-x', '10', '--from-y', '20', '--to-x', '30')
+Assert-OneJsonObject $r 'touch-cancel (incomplete destination pair)'
+Assert ($r.Json.category -eq 'usage_error') 'touch-cancel (incomplete destination pair) -- category:usage_error'
+
+$r = Invoke-Driver @('touch-cancel', '--hwnd', '4660', '--from-x', '10', '--from-y', '20', '--hold-ms', '-1')
+Assert-OneJsonObject $r 'touch-cancel (negative hold)'
+Assert ($r.Json.category -eq 'usage_error') 'touch-cancel (negative hold) -- category:usage_error'
+
+$r = Invoke-Driver @('touch-cancel', '--hwnd', '4660', '--from-x', '10', '--from-y', '20', '--hold-ms', '2001')
+Assert-OneJsonObject $r 'touch-cancel (hold above bound)'
+Assert ($r.Json.category -eq 'usage_error') 'touch-cancel (hold above bound) -- category:usage_error'
+
+$r = Invoke-Driver @('touch-cancel', '--hwnd', '4660', '--from-x', 'not-a-coordinate', '--from-y', '20')
+Assert-OneJsonObject $r 'touch-cancel (malformed coordinate)'
+Assert ($r.Json.category -eq 'usage_error') 'touch-cancel (malformed coordinate) -- category:usage_error'
+
+# T11 -- deterministic private backend/classification seam. This does not inject input or add a
+# user-facing command; it exercises the pure selection/error taxonomy without requiring a GUI.
+$env:ELWINDUI_DRIVER_CONTRACT_PROBE = 'classification'
+$r = Invoke-Driver @('doctor')
+Assert-OneJsonObject $r 'touch backend classification probe'
+Assert ($r.Json.error_87 -eq 'tool_error') 'touch backend classification -- ERROR_INVALID_PARAMETER 87 is tool_error'
+Assert ($r.Json.error_50 -eq 'environment_blocker') 'touch backend classification -- ERROR_NOT_SUPPORTED 50 is environment_blocker'
+Assert ($r.Json.error_120 -eq 'environment_blocker') 'touch backend classification -- ERROR_CALL_NOT_IMPLEMENTED 120 is environment_blocker'
+Assert ($null -eq $r.Json.digitizer -and $null -eq $r.Json.maximum_touches) 'touch backend classification -- physical touch metrics are not capability output'
+Remove-Item Env:ELWINDUI_DRIVER_CONTRACT_PROBE -ErrorAction SilentlyContinue
+
+$env:ELWINDUI_DRIVER_CONTRACT_PROBE = 'backend-selection'
+$r = Invoke-Driver @('doctor')
+Assert-OneJsonObject $r 'touch backend selection probe'
+Assert ($r.Json.modern_available -eq 'synthetic-pointer') 'touch backend selection -- modern API selects synthetic-pointer'
+Assert ($r.Json.modern_entry_point_unavailable -eq 'legacy-touch') 'touch backend selection -- unavailable modern API selects legacy-touch fallback'
+Assert ($r.Json.modern_unsupported -eq 'legacy-touch') 'touch backend selection -- unsupported modern API selects legacy-touch fallback'
+Assert ($r.Json.modern_invalid_parameter -eq 'tool_error') 'touch backend selection -- ERROR_INVALID_PARAMETER does not fallback'
+Remove-Item Env:ELWINDUI_DRIVER_CONTRACT_PROBE -ErrorAction SilentlyContinue
+
+# The native lifecycle is intentionally source-inspected here: a real GUI is required to invoke
+# the API, but cleanup must remain structurally guaranteed in a finally block and after DOWN
+# failures. The live matrix is the evidence for actual delivery, not this deterministic check.
+$driverSource = Get-Content -LiteralPath $Driver -Raw
+Assert ($driverSource -match 'DestroySyntheticPointerDevice\(\$device\)') 'touch backend lifecycle -- synthetic device destruction is present'
+Assert ($driverSource -match '(?s)finally\s*\{.*DestroySyntheticPointerDevice') 'touch backend lifecycle -- destruction is in finally cleanup'
+Assert ($driverSource -match 'cleanup_attempted') 'touch backend lifecycle -- best-effort canceled cleanup is reported after post-DOWN failure'
+Assert (-not ($driverSource -match 'SM_DIGITIZER|SM_MAXIMUMTOUCHES')) 'touch backend classification -- no physical digitizer capability gate remains'
+
+# T12 -- deterministic synthetic-device destruction ABI/cleanup seam. DestroySyntheticPointerDevice
+# returns VOID, so normal managed completion is the only cleanup-success signal and no Win32
+# destroy result may be fabricated.
+Assert ($driverSource -match 'public static extern void DestroySyntheticPointerDevice\(IntPtr device\)') 'touch backend ABI -- DestroySyntheticPointerDevice is void-compatible'
+Assert (-not ($driverSource -match 'bool DestroySyntheticPointerDevice')) 'touch backend ABI -- no bool destroy return remains'
+Assert (-not ($driverSource -match 'DestroySyntheticPointerDevice.*GetLastWin32Error')) 'touch backend ABI -- destroy does not consume GetLastWin32Error'
+
+$env:ELWINDUI_DRIVER_CONTRACT_PROBE = 'cleanup'
+$r = Invoke-Driver @('doctor')
+Assert-OneJsonObject $r 'touch backend cleanup probe'
+Assert ($r.Json.normal_success -eq $true) 'touch backend cleanup -- normal destroy leaves sequence success'
+Assert ($r.Json.normal_cleanup_device_destroy_success -eq $true) 'touch backend cleanup -- normal destroy records cleanup success'
+Assert ($r.Json.success_exception_success -eq $false) 'touch backend cleanup -- destroy exception after success fails the result'
+Assert ($r.Json.success_exception_category -eq 'tool_error') 'touch backend cleanup -- destroy exception after success is tool_error'
+Assert ($r.Json.success_exception_cleanup_device_destroy_success -eq $false) 'touch backend cleanup -- destroy exception records cleanup failure'
+Assert ($r.Json.success_exception_has_error_code -eq $false) 'touch backend cleanup -- no fabricated native error code after destroy exception'
+Assert ($r.Json.success_exception_has_cleanup_error -eq $true) 'touch backend cleanup -- managed destroy exception is recorded'
+Assert ($r.Json.failure_exception_category -eq 'environment_blocker') 'touch backend cleanup -- original sequence category remains authoritative'
+Assert ($r.Json.failure_exception_error -eq 'injection failed') 'touch backend cleanup -- original sequence error remains authoritative'
+Assert ($r.Json.failure_exception_error_code -eq 50) 'touch backend cleanup -- original sequence error code remains authoritative'
+Assert ($r.Json.failure_exception_cleanup_device_destroy_success -eq $false) 'touch backend cleanup -- failed sequence records cleanup failure'
+Assert ($r.Json.failure_exception_has_cleanup_error -eq $true) 'touch backend cleanup -- failed sequence records managed destroy exception'
+Assert ($r.Json.failure_exception_has_cleanup_error_code -eq $false) 'touch backend cleanup -- failed sequence has no fabricated destroy error code'
+Remove-Item Env:ELWINDUI_DRIVER_CONTRACT_PROBE -ErrorAction SilentlyContinue
+
 if ($script:FailureCount -gt 0) {
     Write-Output "`n$script:FailureCount assertion(s) failed."
     exit 1

@@ -57,6 +57,7 @@ pwsh -NoProfile -File $D invoke --hwnd <hwnd> --selector <selector-from-search>
 pwsh -NoProfile -File $D set-value --hwnd <hwnd> --selector <selector-from-search> --value "text with spaces"
 pwsh -NoProfile -File $D point-click --hwnd <hwnd> --x <screen-x> --y <screen-y>
 pwsh -NoProfile -File $D drag --hwnd <hwnd> --from-x <x1> --from-y <y1> --to-x <x2> --to-y <y2>
+pwsh -NoProfile -File $D touch-cancel --hwnd <hwnd> --from-x <screen-x> --from-y <screen-y> --to-x <screen-x> --to-y <screen-y> --hold-ms 250
 pwsh -NoProfile -File $D capture-window --hwnd <hwnd> --output shot.png
 pwsh -NoProfile -File $D capture-window --hwnd <hwnd> --output shot.png --capture-screen
 pwsh -NoProfile -File $D move-window --hwnd <hwnd> --left 100 --top 100
@@ -70,6 +71,42 @@ accordingly (0/1). `category` is one of `tool_error`, `environment_blocker`, `ta
 `usage_error` -- see the design doc's Section 5 for the full boundary. A command's own
 `success: true` proves only that the driver operation executed; it is never proof that the target
 application's state actually changed -- verify that separately (`search`/`get-value`/`wait-for`).
+
+## `touch-cancel`
+
+`touch-cancel` is the sole repository-owned direct input-injection exception. It exists for the
+native cancellation evidence in Issue #267 because `winapp` has no canceled-contact verb and its
+input commands are desktop-exclusive. The complete command surface is:
+
+```powershell
+pwsh -NoProfile -File $D touch-cancel `
+  --hwnd <hwnd> `
+  --from-x <screen-physical-x> --from-y <screen-physical-y> `
+  [--to-x <screen-physical-x> --to-y <screen-physical-y>] `
+  [--hold-ms <0..2000>]
+```
+
+It requires an unlocked interactive desktop and a visible target HWND, brings that HWND to the
+actual foreground, and injects one bounded Windows touch contact: DOWN, an optional destination
+UPDATE, keep-alive UPDATE frames no more than 50 ms apart while holding, then
+`POINTER_FLAG_CANCELED | POINTER_FLAG_UP` at the latest point. The primary backend is the Windows
+10 1809+ synthetic-pointer API (`CreateSyntheticPointerDevice` /
+`InjectSyntheticPointerInput` /
+`DestroySyntheticPointerDevice`). The legacy `InitializeTouchInjection` /
+`InjectTouchInput` path is fallback-only when the modern entry point is unavailable or explicitly
+unsupported; malformed modern frames and `ERROR_INVALID_PARAMETER` remain visible as
+`tool_error`. A physical touchscreen is not required. The contact and all state end with the
+invocation; there is no cross-command handle or persistent input daemon. The destination flags are
+all-or-none.
+
+Success JSON includes `hwnd`, `from`, `latest`, `hold_ms`, `sequence: "down-update-canceled"`,
+`injection: "windows-touch"`, and `injection_backend` (`"synthetic-pointer"` or the legitimately
+selected `"legacy-touch"` fallback). A diagnostic `remote_session` flag may be present, but RDP or
+VM/API success is never product evidence by itself. Invalid coordinates or hold bounds are
+`usage_error`, a gone/invalid HWND is `target_error`, unavailable desktop/foreground/access or
+unsupported API is `environment_blocker`, and malformed native frames including error 87 are
+`tool_error` with their Win32 error. Driver success is injection evidence only; the product's
+native trace and visible demo postcondition are still required for E2E PASS.
 
 ## UIA vs. real input
 

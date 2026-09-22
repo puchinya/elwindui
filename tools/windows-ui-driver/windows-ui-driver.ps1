@@ -1384,6 +1384,13 @@ function Cmd-Drag {
     $baseArgs = @('ui', 'drag', $from, $to) + $target
     if ($button -eq 'right') { $baseArgs += '--right' }
     if (Get-Arg 'hold-ms') { $baseArgs += @('--hold-ms', (Get-Arg 'hold-ms')) }
+    if ($Args2.ContainsKey('duration-ms')) {
+        $durationMs = ConvertTo-Int32Argument 'duration-ms' (Get-Arg 'duration-ms')
+        if ($durationMs -lt 1 -or $durationMs -gt 60000) {
+            Emit-UsageError '--duration-ms must be between 1 and 60000 milliseconds'
+        }
+        $baseArgs += @('--duration-ms', $durationMs)
+    }
     if (Get-Arg 'dwell-ms') { $baseArgs += @('--dwell-ms', (Get-Arg 'dwell-ms')) }
     Invoke-UiaCommand -BaseArgs $baseArgs
 }

@@ -61,6 +61,30 @@ Assert ($r.Json.success -eq $true) 'search (success) -- success:true'
 Assert ($r.Json.backend.matchCount -eq 1) 'search (success) -- backend JSON body preserved (matchCount)'
 Assert ($r.ExitCode -eq 0) 'search (success) -- exit code 0'
 
+# 2a) duration-controlled mouse drags are passed through to the external backend verbatim.
+$r = Invoke-Driver @('drag', '--hwnd', '4660', '--from-x', '100', '--from-y', '100', '--to-x', '300', '--to-y', '300', '--duration-ms', '4000')
+Assert-OneJsonObject $r 'drag (duration pass-through)'
+Assert ($r.Json.success -eq $true) 'drag (duration pass-through) -- success:true'
+Assert (($r.Json.backend.receivedArgs -contains '--duration-ms') -and ($r.Json.backend.receivedArgs -contains '4000')) 'drag (duration pass-through) -- exact duration flag/value forwarded'
+Assert (($r.Json.backend.receivedArgs -join ' ') -match '--duration-ms 4000') 'drag (duration pass-through) -- duration flag/value are adjacent'
+
+# 2b) omitted duration remains backward compatible and does not add a backend duration flag.
+$r = Invoke-Driver @('drag', '--hwnd', '4660', '--from-x', '100', '--from-y', '100', '--to-x', '300', '--to-y', '300')
+Assert-OneJsonObject $r 'drag (duration omitted)'
+Assert (-not ($r.Json.backend.receivedArgs -contains '--duration-ms')) 'drag (duration omitted) -- no duration flag forwarded'
+
+# 2c) invalid durations fail before the external backend is invoked.
+foreach ($invalidDuration in @('0', '-1', '60001', 'not-an-integer')) {
+    $callLog = Join-Path $env:TEMP ("elwindui-driver-duration-{0}.log" -f [guid]::NewGuid())
+    $env:ELWINDUI_FAKE_WINAPP_CALL_LOG = $callLog
+    $r = Invoke-Driver @('drag', '--hwnd', '4660', '--from-x', '100', '--from-y', '100', '--to-x', '300', '--to-y', '300', '--duration-ms', $invalidDuration)
+    Assert-OneJsonObject $r "drag (invalid duration $invalidDuration)"
+    Assert ($r.ExitCode -eq 1) "drag (invalid duration $invalidDuration) -- exit code 1"
+    Assert ($r.Json.category -eq 'usage_error') "drag (invalid duration $invalidDuration) -- category:usage_error"
+    Assert (-not (Test-Path -LiteralPath $callLog)) "drag (invalid duration $invalidDuration) -- backend not invoked"
+    Remove-Item Env:ELWINDUI_FAKE_WINAPP_CALL_LOG -ErrorAction SilentlyContinue
+}
+
 # 3) no_interactive_desktop becomes environment_blocker.
 $r = Invoke-Driver @('search', '--pid', '999', '--query', 'FAKE_NO_INTERACTIVE_DESKTOP')
 Assert-OneJsonObject $r 'search (no_interactive_desktop)'

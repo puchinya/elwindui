@@ -57,6 +57,7 @@ pwsh -NoProfile -File $D invoke --hwnd <hwnd> --selector <selector-from-search>
 pwsh -NoProfile -File $D set-value --hwnd <hwnd> --selector <selector-from-search> --value "text with spaces"
 pwsh -NoProfile -File $D point-click --hwnd <hwnd> --x <screen-x> --y <screen-y>
 pwsh -NoProfile -File $D drag --hwnd <hwnd> --from-x <x1> --from-y <y1> --to-x <x2> --to-y <y2>
+pwsh -NoProfile -File $D drag --hwnd <hwnd> --from-x <x1> --from-y <y1> --to-x <x2> --to-y <y2> --duration-ms 4000
 pwsh -NoProfile -File $D touch-cancel --hwnd <hwnd> --from-x <screen-x> --from-y <screen-y> --to-x <screen-x> --to-y <screen-y> --hold-ms 250
 pwsh -NoProfile -File $D capture-window --hwnd <hwnd> --output shot.png
 pwsh -NoProfile -File $D capture-window --hwnd <hwnd> --output shot.png --capture-screen
@@ -70,7 +71,15 @@ Every command prints exactly one JSON object to stdout (`{"success": true, ...}`
 accordingly (0/1). `category` is one of `tool_error`, `environment_blocker`, `target_error`,
 `usage_error` -- see the design doc's Section 5 for the full boundary. A command's own
 `success: true` proves only that the driver operation executed; it is never proof that the target
-application's state actually changed -- verify that separately (`search`/`get-value`/`wait-for`).
+application’s state actually changed -- verify that separately (`search`/`get-value`/`wait-for`).
+
+`drag --duration-ms <1..60000>` is a thin pass-through to external `winapp ui drag`. It controls
+the real mouse movement interval only; `--hold-ms` is stationary before movement and
+`--dwell-ms` is stationary at the destination before release. The external backend's
+`requestedDurationMs`, `actualMovementDurationMs`, and `moveStepCount` fields are authoritative.
+The driver does not contain a generic mouse injector. During the pinned upstream capability gap,
+native acceptance may use the approved `puchinya/winappCli` fork based on v0.6.1; record the fork
+commit, `winapp.exe` SHA-256, and `winapp --version` with the native evidence.
 
 ## `touch-cancel`
 

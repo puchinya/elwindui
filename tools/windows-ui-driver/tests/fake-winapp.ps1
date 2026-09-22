@@ -30,6 +30,18 @@ if ($FakeArgs -contains '--version') {
 # text or selector, since that's the one value windows-ui-driver.ps1 always forwards verbatim.
 $joined = $FakeArgs -join ' '
 
+if ($env:ELWINDUI_FAKE_WINAPP_CALL_LOG) {
+    Add-Content -LiteralPath $env:ELWINDUI_FAKE_WINAPP_CALL_LOG -Value $joined
+}
+
+if ($FakeArgs.Count -ge 3 -and $FakeArgs[0] -eq 'ui' -and $FakeArgs[1] -eq 'drag' -and $FakeArgs[-1] -eq '--json') {
+    [ordered]@{
+        success = $true
+        receivedArgs = @($FakeArgs)
+    } | ConvertTo-Json -Compress
+    exit 0
+}
+
 if ($joined -match 'FAKE_SET_VALUE_BACKEND_ERROR') {
     $body = '{"success":false,"error":{"code":"element_not_found","message":"set-value target missing"}}'
     [Console]::Error.WriteLine($body)

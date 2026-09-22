@@ -220,15 +220,17 @@ Perform a normal real-mouse short drag as a regression control.
 PASS for the short control requires the boundary to move by a non-zero expected x displacement and
 the persisted model not to jump again on release.
 
-Then perform a genuinely continuous left-mouse tracking run of at least three seconds if the
-approved driver/tool version can express it. --hold-ms and --dwell-ms are not substitutes for
+Then perform a genuinely continuous left-mouse tracking run using `--duration-ms 4000` if the
+approved driver/tool version can express it. PASS requires backend evidence with
+`requestedDurationMs = 4000`, `actualMovementDurationMs >= 3000`, and `moveStepCount > 20`,
+plus the live product postcondition. `--hold-ms` and `--dwell-ms` are not substitutes for
 movement duration. If the approved tool cannot express the run, classify only the long-run subrow
 BLOCKED with the exact version limitation and leave #226 open.
 
 ## DNP-19 — row-resize Splitter native drag
 
-Same as DNP-18 for the orthogonal y-axis path, with the same continuous-tracking and BLOCKED
-rule.
+Same as DNP-18 for the orthogonal y-axis path, with the same `--duration-ms 4000`, backend timing,
+continuous-tracking, and BLOCKED rule.
 
 ## DNP-20 — light/dark theme preservation
 

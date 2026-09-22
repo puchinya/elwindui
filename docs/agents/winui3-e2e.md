@@ -121,6 +121,13 @@ in host context.
 - Keep stdout and stderr separate. A summary without the required numeric/window evidence or
   screenshot is NOT RUN, never PASS.
 
+For a continuous mouse drag whose movement duration is part of acceptance, use the external
+`winapp ui drag --duration-ms 4000` capability through the repository driver. `--hold-ms` and
+`--dwell-ms` are stationary phases and do not prove movement duration. Record the backend's
+`actualMovementDurationMs` (which excludes hold and dwell), `requestedDurationMs`, and
+`moveStepCount`; a requested value alone is not evidence. If using the approved pinned
+`puchinya/winappCli` v0.6.1 fork, also record its commit SHA, executable SHA-256, and version.
+
 ## Fixed tester instruction-sheet format
 
 The main agent must give the tester a concrete, case-scoped instruction sheet, not a request to

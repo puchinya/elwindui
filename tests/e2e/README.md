@@ -70,3 +70,8 @@ The Docking native interaction parity case is
 [`docking-native-parity.md`](docking-native-parity.md). It is required for Issue [#226](https://github.com/puchinya/elwindui/issues/226)
 on WinUI3 and is reusable for AppKit invalidation/reruns. Its product semantics are backend-neutral;
 GTK4 is not a native-floating acceptance backend while native Window support remains unavailable.
+
+The Window-lifetime case is [`window-lifetime.md`](window-lifetime.md). It uses
+`examples/custom-controls-demo` for the generated caller-drop shape and reuses the real-input
+mechanics from [`self-drawn-pointer-input.md`](self-drawn-pointer-input.md) rather than defining a
+second click/drag protocol. AppKit execution is required for Issue [#259](https://github.com/puchinya/elwindui/issues/259).

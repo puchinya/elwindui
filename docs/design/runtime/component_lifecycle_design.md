@@ -176,7 +176,15 @@ Concretely, `show()`'s body: if `self.__mount_environment.get().is_none()` (this
 **Verification & Test Coverage**:
 - **Component recursive lifecycle** (`crates/elwindui/tests/recursive_unmount.rs`): verified on macOS AppKit test harness (`cargo test --test recursive_unmount --features elwindui/backend-appkit`), covering child-first ordering, subscription cancellation, Environment listener release, Weak reference drops, self and ancestor (up to 3 tiers) reentrancy safety, dynamic region replacement (`if`/`for`/`match`), unmount-before-mount zero `on_unmount` invocation, and teardown before visual/logical detach.
 - **Window lifecycle** (`crates/elwindui/tests/window_mount_hide_close.rs`): covers Window `show()` (mount-on-show), `hide()` (invariant: no unmount), `close()` (cascading child-first unmount to child subtree, double-close idempotency, and close-before-show zero `on_unmount`), and show-after-close no-op invariant.
-  - *AppKit*: type-checked (runtime test execution omitted on macOS harness because native NSWindow construction requires the main thread while Rust's test harness runs on worker threads).
+  - *AppKit*: the ordinary Rust libtest harness still runs tests on worker threads, so direct
+    `NSWindow` construction remains unsuitable there. Issue #259 instead executes the dedicated
+    main-thread, `harness = false` `window_lifetime_appkit` target and verifies LT-A1 through
+    LT-A6, including caller-drop survival, single retention across hide/re-show, isolation, and
+    normal last-window termination.
+  - *AppKit native close*: Issue #259 WLT-02 verifies the generated Window's real native title-bar
+    close and normal process termination on an authenticated macOS host. Its AppKit Docking
+    DNP-21/DNP-22 evidence verifies allowed native close and veto behavior while the main/floating
+    UI remains usable.
   - *WinUI 3*: runtime test structured for WinUI 3 test execution (Unverified on WinUI 3 runtime in macOS CI/environment).
 
 **PopupSurface consumer** (Issue #161): AppKit's and WinUI3's `InnerPopupSurface` (`crates/elwindui-backend-appkit`/`-winui3`'s `inner/popup.rs`) call `unmount_subtree` on the popup content root before the backend host's own native detach (`TreeHost::clear_tree()`), the same teardown-before-detach ordering as every other consumer here. The portable invariant this generic lifecycle machinery provides is unmount-before-ElwindUI-host-tree-detach — it does not, by itself, promise unmount-before-every-native-visibility-change on every path. Both backends' *framework-initiated* close (`close()`) additionally sequences unmount before the native visibility/detach call it itself issues (`removeChildWindow`/`orderOut` on AppKit, `SetIsOpen(false)` on WinUI3). WinUI3 has one backend-specific exception: a toolkit-originated post-dismiss notification (`Popup.Closed`, native light-dismiss) can arrive *after* WinUI has already changed `Popup.IsOpen` — ElwindUI is not notified in advance — so that one path (`on_native_closed`, distinct from `close()`) cannot offer the stronger native-visibility ordering, only the portable host-tree-detach one. See `docs/design/runtime/popup_context_menu_design.md` §6/§7 for the full sequence (including this branch) and `docs/design/runtime/view_factory_design.md` for the deferred-view type (`ViewFactory`) popup content is built from. This does not change the generic Component lifecycle state machine (`ComponentLifecycleState`, `unmount_subtree`) documented above — only how a *specific* `PopupSurfaceHandle` consumer schedules its own native calls around it.
@@ -221,7 +229,12 @@ The installed closure captures `self.__self_weak.borrow().clone()` — type-eras
 
 **Backend-specific reentrancy shape** (`docs/status/backend_status.md`'s AppKit/WinUI3 gap entries have the concrete implementation detail): AppKit's `NSWindow::close` does not consult `windowShouldClose:` at all (Apple's documented contract), so the framework's own `close()` calling back into `self.ns.close()` never re-enters the override — no guard needed. WinUI3's `AppWindow.Closing` fires for *any* close, including the framework's own, so `InnerWindow` needs an explicit `framework_initiated_close` guard (set for the duration of its own native close call) to stop the registered handler from re-triggering against its own close.
 
-Not yet implemented as of this design revision: nothing — WinUI3 `AppWindow.Closing` compiles as written but is unverified in every environment this design pass had access to (cross-compilation to `aarch64-pc-windows-msvc` fails: target triple metadata present, full `std`/`core` artifacts not installed); AppKit's `windowShouldClose:` is compile-verified but its interactive native-close-button click itself still needs manual verification (`NSWindow` construction requires the main thread, unavailable in this repository's test harness — same limitation §4g's own Verification & Test Coverage subsection already documents for `window_mount_hide_close.rs`).
+Historical pre-Issue-#259 status: WinUI3 `AppWindow.Closing` was unverified in the environments
+available to that design revision because cross-compilation to `aarch64-pc-windows-msvc` lacked
+the full `std`/`core` artifacts. The former AppKit compile-only status is superseded by Issue #259:
+the main-thread `harness = false` `window_lifetime_appkit` target verifies LT-A1 through LT-A6,
+WLT-02 verifies generated Window native title-bar close and normal termination, and DNP-21/DNP-22
+verify AppKit native-close allow/veto behavior on a real macOS host.
 
 ### 4j. Issue #254: the application-layer Window retention invariant
 

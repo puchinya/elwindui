@@ -66,3 +66,9 @@ name = "control_template_window_rt4"
 path = "tests/control_template_window_rt4.rs"
 harness = false
 required-features = ["backend-appkit"]
+
+[[test]]
+name = "window_lifetime_appkit"
+path = "tests/window_lifetime_appkit.rs"
+harness = false
+required-features = ["backend-appkit"]

@@ -8,8 +8,9 @@ native-floating acceptance backend while native Window support is unavailable.
 This case accepts product behavior, not driver return values. Native execution follows
 [the platform tester guide](../../docs/agents/winui3-e2e.md) or
 [AppKit tester guide](../../docs/agents/appkit-e2e.md), and uses the checked-in platform driver.
-UIA is Windows discovery; AX is AppKit discovery. Real mouse input is required for self-drawn
-clicks, drags, splitter gestures, capture continuity, and right-click context requests.
+Accessibility discovery is platform-mapped: Windows uses UIA and AppKit uses AX. Real mouse input
+is required for self-drawn clicks, drags, splitter gestures, capture continuity, and right-click
+context requests.
 
 ## Platform mapping
 
@@ -52,8 +53,9 @@ capability fixture:
 - Solution Explorer and Terminal: positive controls for permitted operations.
 
 Each independent reset restores the authored layout through the normal demo action. Use fresh
-screenshots when self-drawn chrome is not exposed through UIA. Capture popup/context overlays with
-the screen-capture mode. Do not infer a product result from a button/menu action alone.
+screenshots when self-drawn chrome is not exposed through platform accessibility (UIA on Windows
+or AX on AppKit). Capture popup/context overlays with the screen-capture mode. Do not infer a
+product result from a button/menu action alone.
 
 Store immutable evidence in
 .agent-state/issues/<owning-issue>/e2e/<head-short>/<run-id>/. Each run records repository HEAD,
@@ -155,25 +157,33 @@ Maintain at least two non-empty floating windows concurrently.
 PASS requires the main HWND and both floating HWNDs to be enumerated and each to accept an
 interaction affecting only its expected state.
 
-## DNP-12 — native floating move/resize callback
+## DNP-12 — native floating-window move/resize callback
 
-Move and resize one floating HWND with repository driver window-control commands.
+Move and resize one native floating window using the platform's real window controls. On Windows,
+use the repository Windows UI driver/window controls against the current HWND. On AppKit, move the
+current floating window with a real mouse drag of its title bar using `macos-ui-driver drag`, then
+resize it with `macos-ui-driver resize` against its current CGWindowID. Reacquire the current
+native window ID and geometry before each action and after every topology change; do not imply a
+generic AppKit `move-window` command.
 
-PASS requires OS-reported bounds to change, subsequent Docking save/snapshot behavior to reflect
-the new logical bounds, and no duplicate floating root/window. On AppKit, the native callback/model
-comparison must show one logical model update and no same-bounds reentrant native write-back.
+PASS requires native OS-reported bounds to change, subsequent Docking save/snapshot behavior to
+reflect the new logical bounds, and no duplicate floating root/window. On AppKit, the native
+callback/model comparison must show one logical model update and no same-bounds reentrant native
+write-back.
 
 ## DNP-13 — snapshot A/B/C native bounds persistence
 
-1. Place a floating HWND at geometry A and record current OS bounds.
-2. Save a snapshot through the normal demo action.
-3. Move/resize to materially different geometry B.
+1. Place a native floating window at geometry A and record its current native window ID and OS bounds.
+2. Save a snapshot through the normal demo action without persisting HWND, CGWindowID, or native-object identity.
+3. Move/resize the native floating window to materially different geometry B using the platform mechanics in DNP-12.
 4. Restore the snapshot.
-5. Record geometry C.
+5. Reacquire the current native window ID and record geometry C.
 
 PASS requires B materially different from A; C matching A for left/top/width/height within the
-platform tolerance defined above; and restored content/selection remaining interactive. Snapshot
-evidence must not persist HWND, CGWindowID, or native-object identity.
+platform tolerance defined above; and restored content/selection remaining interactive. Windows
+maps native identity to HWND and retains the existing DPI-aware pixel tolerance. AppKit maps native
+identity to CGWindowID and compares logical coordinates after backend conversion with an independent
+2-logical-point tolerance for left, top, width, and height. Neither identity is snapshot state.
 
 ## DNP-14 — capability gates
 
@@ -193,10 +203,11 @@ stale preview.
 ## DNP-15 — auto-hide, open, and pin back
 
 Use Solution Explorer. Request Auto Hide / Pin, activate its auto-hide strip item, observe the
-side-aware overlay, then use the visible pin affordance to return it. Auto-hide chrome may be
-self-drawn and need not be UIA-discoverable: when UIA does not expose the strip or overlay, use a
-fresh whole-screen capture and current window geometry to identify and real-click the visible
-target. UIA non-discoverability alone is not BLOCKED.
+side-aware overlay, then use the visible pin affordance to return it. Accessibility discovery is
+platform-specific: Windows uses UIA and AppKit uses AX. Auto-hide chrome may be self-drawn and
+need not be exposed through either mechanism; when the platform accessibility tree does not expose
+the strip or overlay, use a fresh whole-screen capture plus current native-window geometry to
+identify and real-click the visible target. Non-discoverability alone is not BLOCKED.
 
 PASS requires one overlay, an interactive item, and return to the remembered/default live placement
 without duplication. If the normal action is delivered but the required strip/overlay is absent,
@@ -255,36 +266,40 @@ group ownership, floating HWND count, and layout topology, with no duplicate cal
 
 ## DNP-21 — native title-bar close, allowed
 
-Float a closeable item or group. Freshly identify the native title-bar Close button for that
-floating HWND and activate it.
+Float a closeable item or group. Freshly identify the native title-bar Close affordance for the
+current native floating window and activate the real native close action. Windows maps the native
+window identity to HWND; AppKit maps it to the CGWindowID returned by `macos-ui-driver list-windows`.
 
-PASS requires the request to be accepted; the floating HWND to disappear; all contained closeable
-items to be removed once; no stale second floating HWND; a live process; and a subsequent
-successful main-window selection/action.
+PASS requires the request to be accepted; the native floating window to disappear; all contained
+closeable items to be removed once; no stale second native floating window; a live process; and a
+subsequent successful main-window selection/action.
 
 ## DNP-22 — native title-bar close veto
 
-Float a root containing Error List and activate that floating HWND's native title-bar Close.
+Float a root containing Error List and activate that native floating window's real title-bar Close
+affordance. Use the platform identity mapping from DNP-21 (HWND on Windows, CGWindowID on AppKit).
 
-PASS requires close veto, the HWND to remain, all model contents to remain, no partial item close,
-and main/floating UI to continue responding.
+PASS requires close veto, the native floating window to remain, all model contents to remain, no
+partial item close, and main/floating UI to continue responding.
 
 ## DNP-23 — programmatic floating removal/redock
 
 Float a permitted item, then use normal demo reset/restore behavior that removes the floating root
 without clicking its title-bar Close.
 
-PASS requires the stale floating HWND to disappear, the item to return to its expected
-authored/restored placement, no crash or use-after-free, and a subsequent main interaction.
+PASS requires the stale native floating window and its native window ID to disappear, the item to
+return to its expected authored/restored placement, no crash or use-after-free, and a subsequent
+main interaction. The row is model-driven/programmatic removal, not native title-bar close.
 
-## DNP-24 — repeated lifecycle and stale HWND check
+## DNP-24 — repeated lifecycle and stale native-window check
 
 Repeat create -> interact -> remove/close for a floating host at least three times, alternating
 native close and programmatic removal.
 
-PASS requires each list-windows --pid <pid> result to contain only the expected live HWND set,
-no accumulating HWND count, no closed HWND addressable as live, a successful final main
-interaction, and normal final process termination without force.
+PASS requires each `list-windows --pid <pid>` result to contain only the expected live native-window
+identity set, with HWND on Windows or CGWindowID on AppKit; no accumulating native-window count; no
+closed native window addressable as live; a successful final main interaction; and normal final
+process termination without force.
 
 ## DNP-25 — composed exactly-once Window-release evidence
 

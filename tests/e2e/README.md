@@ -65,3 +65,8 @@ was removed rather than kept as a placeholder. See
 [`docs/agents/appkit-e2e.md`](../../docs/agents/appkit-e2e.md) for the platform tester procedures a
 the case is executed through. The executable fixture for this case is
 `examples/accessibility-semantics-demo`.
+
+The Docking native interaction parity case is
+[`docking-native-parity.md`](docking-native-parity.md). It is required for Issue [#226](https://github.com/puchinya/elwindui/issues/226)
+on WinUI3 and is reusable for AppKit invalidation/reruns. Its product semantics are backend-neutral;
+GTK4 is not a native-floating acceptance backend while native Window support remains unavailable.

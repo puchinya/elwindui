@@ -72,15 +72,29 @@ function Extract-CanonicalChecklist([string] $Text, [string] $Source) {
     }
 
     $items = [System.Collections.Generic.List[string]]::new()
+    $checkboxPattern = '^[-*][ \t]+\[[ xX]\][ \t]+(.+?)\s*$'
+    $emptyCheckboxPattern = '^[-*][ \t]+\[[ xX]\][ \t]*$'
     for ($index = $beginIndices[0] + 1; $index -lt $endIndices[0]; $index++) {
         $trimmed = $lines[$index].Trim()
         if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
-        if (-not $trimmed.StartsWith('REVIEW_ITEM:', [System.StringComparison]::Ordinal)) {
-            Stop-Workflow 'canonical-checklist-malformed' "$Source canonical checklist contains an unexpected line"
+        if ($trimmed.StartsWith('REVIEW_ITEM:', [System.StringComparison]::Ordinal)) {
+            $itemText = $trimmed.Substring('REVIEW_ITEM:'.Length)
+            $emptyMessage = "$Source canonical checklist contains an empty REVIEW_ITEM"
         }
-        $item = Normalize-ChecklistText $trimmed.Substring('REVIEW_ITEM:'.Length)
+        elseif ($trimmed -match $emptyCheckboxPattern) {
+            Stop-Workflow 'canonical-checklist-empty' "$Source canonical checklist contains an empty checkbox item"
+        }
+        else {
+            $checkbox = [regex]::Match($trimmed, $checkboxPattern)
+            if (-not $checkbox.Success) {
+                Stop-Workflow 'canonical-checklist-malformed' "$Source canonical checklist contains an unexpected line"
+            }
+            $itemText = $checkbox.Groups[1].Value
+            $emptyMessage = "$Source canonical checklist contains an empty checkbox item"
+        }
+        $item = Normalize-ChecklistText $itemText
         if ([string]::IsNullOrWhiteSpace($item)) {
-            Stop-Workflow 'canonical-checklist-empty' "$Source canonical checklist contains an empty REVIEW_ITEM"
+            Stop-Workflow 'canonical-checklist-empty' $emptyMessage
         }
         [void] $items.Add($item)
     }

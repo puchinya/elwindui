@@ -85,6 +85,15 @@ focus behavior that depends on real key/mouse delivery. WinUI 3 real-key E2E alw
 send-keys ... --via send-input`; `PostMessage`-style keystroke injection is never an accepted
 substitute for windowless XAML controls.
 
+Mouse drag duration is delegated to the external `winapp ui drag --duration-ms <1..60000>`
+capability. The repository adapter validates and forwards the option; it does not implement a
+second mouse transport or a local generic Win32 injector. `--hold-ms` is stationary before the
+movement, `--duration-ms` is the monotonic movement interval, and `--dwell-ms` is stationary at
+the destination before release. The external JSON fields `requestedDurationMs`,
+`actualMovementDurationMs`, and `moveStepCount` are the timing evidence. While the approved
+upstream release lacks this option, a pinned fork based on Microsoft winappCli v0.6.1 may be used;
+native evidence records its fork commit, executable SHA-256, and version.
+
 ## 4.1 Bounded `touch-cancel` exception
 
 `touch-cancel` exists only for Issue #267's native cancellation evidence. Its command surface is:

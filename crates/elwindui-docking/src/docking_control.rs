@@ -1015,7 +1015,15 @@ impl DockingControl {
             }
             realization.floating_root_index(host_id)
         };
-        let Some(index) = index else { return };
+        let Some(index) = index else {
+            return;
+        };
+        if !realization
+            .borrow_mut()
+            .note_native_bounds_changed(host_id, bounds)
+        {
+            return;
+        }
         let model = self.layout();
         let Ok(next) = model.with_floating_bounds(index, bounds) else {
             return;

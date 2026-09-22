@@ -31,16 +31,29 @@ struct PlatformFloatingHost {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
+impl PlatformFloatingHost {
+    #[cfg(target_os = "macos")]
+    fn set_native_bounds(&self, bounds: Rect) {
+        self.window.set_left(bounds.x);
+        self.window.set_top(bounds.y);
+        self.window.set_width(bounds.width);
+        self.window.set_height(bounds.height);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn set_native_bounds(&self, bounds: Rect) {
+        self.window.set_bounds(bounds);
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl FloatingWindowHost for PlatformFloatingHost {
     fn set_content(&self, content: Rc<dyn UIElementExt>) {
         self.window.set_content(content);
     }
 
     fn set_bounds(&self, bounds: Rect) {
-        self.window.set_left(bounds.x);
-        self.window.set_top(bounds.y);
-        self.window.set_width(bounds.width);
-        self.window.set_height(bounds.height);
+        self.set_native_bounds(bounds);
     }
 
     fn set_title(&self, title: &str) {
@@ -378,12 +391,22 @@ impl FloatingHostRegistry {
 
         for update in prepared.updates {
             if let Some(host) = self.hosts.iter_mut().find(|host| host.id == update.id) {
+                let bounds_changed = host.bounds != update.bounds;
+                let content_changed = !Rc::ptr_eq(&host.surface, &update.surface);
                 host.root_index = update.root_index;
                 host.bounds = update.bounds;
                 host.surface = update.surface.clone();
-                host.host.set_bounds(update.bounds);
-                let content: Rc<dyn UIElementExt> = update.surface.clone();
-                host.host.set_content(content);
+                // A native AppWindow.Changed callback records the effective native bounds before
+                // publishing the model transaction. Avoid writing the same rectangle back from
+                // inside that callback: WinUI3 can re-enter AppWindow.Changed while the native
+                // notification is still being dispatched.
+                if bounds_changed {
+                    host.host.set_bounds(update.bounds);
+                }
+                if content_changed {
+                    let content: Rc<dyn UIElementExt> = update.surface.clone();
+                    host.host.set_content(content);
+                }
                 host.host
                     .set_close_request_handler(Some(update.close_handler));
                 host.host
@@ -431,6 +454,14 @@ impl FloatingHostRegistry {
             .iter()
             .find(|host| host.id == id)
             .map(|host| host.root_index)
+    }
+
+    pub(crate) fn note_native_bounds_changed(&mut self, id: FloatingHostId, bounds: Rect) -> bool {
+        let Some(host) = self.hosts.iter_mut().find(|host| host.id == id) else {
+            return false;
+        };
+        host.bounds = bounds;
+        true
     }
 
     pub(crate) fn begin_native_close(&mut self, id: FloatingHostId) -> bool {

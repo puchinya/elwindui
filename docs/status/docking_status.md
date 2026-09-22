@@ -14,9 +14,9 @@ Snapshot: 2026-09-22. Docking behavior is defined by the docking specification a
 ## Current verification state
 
 - Focused model, reconciliation, retained-presentation, pointer-path, splitter, floating-host, snapshot, auto-hide, weak-lifetime, and workspace tests pass. The current WinUI3 native run passes DNP-01 through DNP-17, DNP-18 short/long, DNP-19 short/long, and DNP-20 through DNP-25. DNP-18/19 long use the pinned `puchinya/winappCli` fork based on v0.6.1 and report 4000 ms movement, 250 steps, and the expected live splitter displacement without a release-time jump.
-- The backend-neutral native parity case is [`../../tests/e2e/docking-native-parity.md`](../../tests/e2e/docking-native-parity.md). The WinUI3 DNP matrix is complete for the current implementation; the shared-runtime Docking evidence still requires the corresponding AppKit invalidation rerun before cross-backend parity can be claimed on this Windows host.
+- The backend-neutral native parity case is [`../../tests/e2e/docking-native-parity.md`](../../tests/e2e/docking-native-parity.md). The WinUI3 DNP matrix is complete for the current implementation. AppKit invalidation/revalidation is tracked separately in [#259](https://github.com/puchinya/elwindui/issues/259); this Windows run does not claim AppKit verification.
 
 ## Platform boundaries and blockers
 
-- WinUI 3 native Docking acceptance rows pass under [#226](https://github.com/puchinya/elwindui/issues/226), including both continuous splitter rows through the approved external fork. Final cross-backend delivery remains gated by the required AppKit invalidation rerun and repository review workflow. GTK4 native floating is unavailable without a usable GTK Window implementation.
+- WinUI 3 native Docking acceptance rows pass under [#226](https://github.com/puchinya/elwindui/issues/226), including both continuous splitter rows through the approved external fork. AppKit invalidation/revalidation is a separate follow-up under [#259](https://github.com/puchinya/elwindui/issues/259), while #226 is delivered as the WinUI3 acceptance. GTK4 native floating is unavailable without a usable GTK Window implementation.
 - The broader disabled-capability interaction matrix is not a required closure gate and is not represented as a PASS.

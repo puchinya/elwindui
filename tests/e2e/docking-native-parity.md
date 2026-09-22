@@ -1,18 +1,30 @@
-# WinUI3 Docking native interaction parity
+# Docking native interaction parity
 
 Issue [#226](https://github.com/puchinya/elwindui/issues/226) durable, backend-neutral product E2E
-case. WinUI3 execution is required for #226. AppKit may reuse this case when shared-runtime
-changes invalidate or extend its native Docking evidence. GTK4 is not a native-floating acceptance
-backend while native Window support is unavailable.
+case. WinUI3 execution is required for #226. AppKit reuses this case for the explicit #259 subset
+when shared-runtime changes invalidate or extend its native Docking evidence. GTK4 is not a
+native-floating acceptance backend while native Window support is unavailable.
 
 This case accepts product behavior, not driver return values. Native execution follows
-[the WinUI3 tester guide](../../docs/agents/winui3-e2e.md) and uses
-[the repository Windows UI driver](../../tools/windows-ui-driver/README.md). UIA may locate or
-observe targets and activate native menu/button controls when pointer delivery is not the subject.
-Real mouse input is required for self-drawn clicks, drags, splitter gestures, capture continuity,
-and right-click context requests. Coordinates come from fresh HWND/window geometry and visible
-target geometry immediately before each action. Reacquire HWNDs and geometry after every topology,
-move, resize, dock, undock, create, or close operation.
+[the platform tester guide](../../docs/agents/winui3-e2e.md) or
+[AppKit tester guide](../../docs/agents/appkit-e2e.md), and uses the checked-in platform driver.
+UIA is Windows discovery; AX is AppKit discovery. Real mouse input is required for self-drawn
+clicks, drags, splitter gestures, capture continuity, and right-click context requests.
+
+## Platform mapping
+
+- Windows native window identity is an HWND from the Windows UI driver. AppKit native window
+  identity is the CGWindowID returned by `macos-ui-driver list-windows`.
+- Windows-specific timed-drag requirements in DNP-18/19 remain Windows-only and are not #259
+  acceptance. AppKit rows use the AppKit tester procedure and current native geometry.
+- DNP-13 retains the existing Windows tolerance `max(2 px, ceil(2 * dpi / 96))`. On AppKit,
+  compare model/native logical coordinates after the backend's coordinate conversion with a tolerance
+  of 2 logical points independently for left, top, width, and height.
+- DNP-25 selects the deterministic backend regression for the platform being accepted.
+
+Coordinates come from fresh native window geometry and visible target geometry immediately before
+each action. Reacquire native IDs and geometry after every topology, move, resize, dock, undock,
+create, or close operation.
 
 ## Result vocabulary
 
@@ -44,11 +56,11 @@ screenshots when self-drawn chrome is not exposed through UIA. Capture popup/con
 the screen-capture mode. Do not infer a product result from a button/menu action alone.
 
 Store immutable evidence in
-.agent-state/issues/226/e2e/<head-short>/<run-id>/. Each run records repository HEAD,
-origin/master, Windows version/build/session, winapp version and one doctor result, PID,
-all live HWNDs with geometry, action JSON, required screenshots, numeric snapshot bounds,
-splitter displacement/duration/tool capability, native-close/removal HWND sets, row result, and
-cleanup forced=true|false.
+.agent-state/issues/<owning-issue>/e2e/<head-short>/<run-id>/. Each run records repository HEAD,
+origin/master, platform version/build/session, application and driver versions, one doctor result,
+PID, all live native window IDs with geometry (HWND on Windows or CGWindowID on AppKit), action JSON,
+required screenshots, numeric snapshot bounds, splitter displacement/duration/tool capability,
+native-close/removal window-ID sets, row result, and cleanup forced=true|false.
 
 Cleanup terminates every launched process through the repository driver with the documented
 timeout, including blocked and failed runs. Do not overwrite an earlier run directory.
@@ -148,7 +160,8 @@ interaction affecting only its expected state.
 Move and resize one floating HWND with repository driver window-control commands.
 
 PASS requires OS-reported bounds to change, subsequent Docking save/snapshot behavior to reflect
-the new logical bounds, and no duplicate floating root/window.
+the new logical bounds, and no duplicate floating root/window. On AppKit, the native callback/model
+comparison must show one logical model update and no same-bounds reentrant native write-back.
 
 ## DNP-13 — snapshot A/B/C native bounds persistence
 
@@ -158,9 +171,9 @@ the new logical bounds, and no duplicate floating root/window.
 4. Restore the snapshot.
 5. Record geometry C.
 
-PASS requires B materially different from A; C matching A for left/top/width/height within
-max(2 px, ceil(2 * dpi / 96)); and restored content/selection remaining interactive. Snapshot
-evidence must not persist HWND or native-object identity.
+PASS requires B materially different from A; C matching A for left/top/width/height within the
+platform tolerance defined above; and restored content/selection remaining interactive. Snapshot
+evidence must not persist HWND, CGWindowID, or native-object identity.
 
 ## DNP-14 — capability gates
 
@@ -277,10 +290,12 @@ interaction, and normal final process termination without force.
 
 Native part: DNP-21, DNP-23, and DNP-24 must PASS.
 
-Deterministic backend part: run
+Deterministic Windows part: run
 cargo test -p elwindui-backend-winui3 hosted_button_text_and_window_lifecycle_regressions_work
 and retain the Docking deterministic tests for stable host identity, veto, one-host close, and
-redock.
+redock. Deterministic AppKit acceptance instead runs
+`cargo test -p elwindui --features backend-appkit --test window_lifetime_appkit` and the relevant
+`elwindui-docking` floating-host/veto/redock tests.
 
 PASS requires both layers. Do not invent a second runtime trace solely to expose the private app
 registry unless an observed defect requires such instrumentation and design approves it. Report
@@ -294,5 +309,7 @@ Failure diagnosis and any architecture-preserving repair belong to the main agen
 rows are not considered complete until the action-delivery record and product postcondition
 evidence are both present.
 
-The final matrix must report DNP-01 through DNP-25 as PASS, FAIL, NOT RUN, or BLOCKED. Any FAIL,
-NOT RUN, or BLOCKED required row prevents claiming Issue #226 completion.
+The #226 final matrix must report DNP-01 through DNP-25 as PASS, FAIL, NOT RUN, or BLOCKED. Any
+FAIL, NOT RUN, or BLOCKED required row prevents claiming Issue #226 completion. For Issue #259,
+report exactly DNP-12, DNP-13, DNP-15, DNP-21, DNP-22, DNP-23, DNP-24, and DNP-25 with the same
+four-state vocabulary; do not imply that AppKit DNP-01..25 was executed.

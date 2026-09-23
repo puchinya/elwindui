@@ -8,8 +8,8 @@ diagnostic: it uses the process, top-level HWND geometry, screenshots, redirecte
 output, and bounded WinUI3 diagnostics. Semantic-accessibility acceptance remains owned by #256 /
 PR #264 after this fix is integrated.
 
-The main agent assigns each complete GUI run to one bounded tester using GPT-5.6 Luna with medium
-reasoning. The tester does not edit product code, this scenario, Git history, or GitHub state; it
+The main agent assigns each complete GUI run to one bounded tester using `gpt-6-luna` with `medium`
+reasoning effort. The tester does not edit product code, this scenario, Git history, or GitHub state; it
 does not delegate further. The tester runs as a normal non-elevated user on an unlocked interactive
 desktop, uses the repository `windows-ui-driver.ps1`, allows at most one controlled retry, and
 always terminates the launched process.

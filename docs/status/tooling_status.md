@@ -23,7 +23,7 @@ not implemented. No durable shared product E2E case exists yet; durable cases re
 [`tests/e2e/`](../../tests/e2e/README.md). The animation `capture-sequence` capability is planned,
 not implemented, and no AI image-recognition pipeline is claimed.
 
-The required Codex tester routing policy is GPT-5.6 Luna with child reasoning effort explicitly
+The required Codex tester routing policy is `gpt-6-luna` with child reasoning effort explicitly
 `medium`. The repository does not currently prove explicit child-effort enforcement or attestation;
 the policy must not be described as enforced, and no speculative `.codex/config.toml` key is used.
 

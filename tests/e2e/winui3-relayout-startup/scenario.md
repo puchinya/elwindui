@@ -4,7 +4,7 @@
 
 This is the durable Windows/WinUI3 startup acceptance case for Issue #261 and PR #262. It verifies that \`docking-demo\` launches, paints its docking content, reaches a usable UIA/input checkpoint, settles its relayout and invalidation traces, remains responsive for the required idle window, and terminates normally.
 
-The main agent assigns the complete GUI run to one bounded tester using GPT-5.6 Luna with medium reasoning. The tester does not edit product code, this scenario, Git history, or GitHub state; it does not delegate further. The tester runs as a normal non-elevated user on an unlocked interactive desktop, uses the repository \`windows-ui-driver.ps1\`, allows at most one controlled retry, and always terminates the launched process.
+The main agent assigns the complete GUI run to one bounded tester using `gpt-6-luna` with `medium` reasoning effort. The tester does not edit product code, this scenario, Git history, or GitHub state; it does not delegate further. The tester runs as a normal non-elevated user on an unlocked interactive desktop, uses the repository \`windows-ui-driver.ps1\`, allows at most one controlled retry, and always terminates the launched process.
 
 ## Fixed setup
 

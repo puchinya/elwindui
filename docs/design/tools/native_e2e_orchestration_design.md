@@ -253,7 +253,7 @@ screenshot just in case” is not an unbounded evidence strategy.
 The required routing policy is:
 
 ```text
-Codex tester:       gpt-5.6-luna, reasoning effort explicitly medium
+Codex tester:       gpt-6-luna, reasoning effort explicitly medium
 Claude Code tester: Claude Haiku 4.5, normal/default reasoning configuration
 ```
 

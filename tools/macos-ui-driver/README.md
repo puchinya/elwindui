@@ -45,7 +45,7 @@ the elevated execution path. A `doctor` result with either value false is a bloc
 not a native PASS.
 
 Codex must delegate the real AppKit E2E matrix to a bounded sub-agent before any driver action;
-the standard sub-agent is `gpt-5.6-luna` with standard reasoning effort (`medium`). The checked-in
+the standard sub-agent is `gpt-6-luna` with standard reasoning effort (`medium`). The checked-in
 binary is the permission-stable E2E artifact; do not delegate a refresh or replacement sidecar for
 ordinary E2E. The main agent must review the file diff and evidence before
 recording results. This Codex-only routing gate and the fixed tester instruction example are

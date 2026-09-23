@@ -21,7 +21,7 @@ retry rules, and PASS/FAIL/NOT RUN/BLOCKED semantics. Only the selected tester m
 provider-specific sub-agent mechanism differ:
 
 ```text
-Codex target:  GPT-5.6 Luna, reasoning effort explicitly medium
+Codex target:  gpt-6-luna, reasoning effort explicitly medium
 Claude Code:  Claude Haiku 4.5, normal/default reasoning configuration
               (do not enable extended thinking for routine E2E execution)
 ```

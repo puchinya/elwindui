@@ -18,7 +18,7 @@ instruction-sheet structure, evidence obligations, retry rules, and PASS/FAIL/NO
 semantics. Only the selected tester model and each provider's own sub-agent mechanism differ.
 
 ```text
-Codex target:  GPT-5.6 Luna, reasoning effort explicitly medium
+Codex target:  gpt-6-luna, reasoning effort explicitly medium
 Claude Code:  Claude Haiku 4.5, normal/default reasoning configuration
               (do not enable extended thinking for routine E2E execution)
 ```

@@ -664,21 +664,21 @@ fn(引数型, ...)?                 // 省略可能。既定値は `= None` で�
 アトリビュートは存在しない:
 
 - **`#[param]`付き** = 実体化時に固定される値計算コールバック。静的評価式(その場で束縛された
-  クロージャ)のみ許可される。例: `key: fn(&Item) -> usize`, `render_item: fn(&Item) -> View`。
+  クロージャ)のみ許可される。例: `item_id: fn(&Item) -> usize`, `render_item: fn(&Item) -> View`。
 - **`#[param]`無し(既定の`prop`)** = 実行時に差し替え可能な通知コールバック、いわゆる
   イベントハンドラ。例: `on_select: fn(usize)`, `on_close: fn(usize)`。
 
 ```rust
 #[elwindui::component]
-struct VirtualList {
+struct ItemPicker {
     #[param]
-    key: fn(&Item) -> usize,      // 値計算コールバック(paramなので実体化時固定)
+    item_id: fn(&Item) -> usize,  // 値計算コールバック(paramなので実体化時固定)
 
     on_select: fn(usize),         // 通知コールバック(propなので実行時に発火・差し替え可)
 }
 
 #[elwindui::component]
-impl VirtualList {}
+impl ItemPicker {}
 ```
 
 ### コールバック型フィールドへのクロージャ値構文
@@ -854,7 +854,6 @@ impl ItemList {}
 
 - **`collection`が`Vec<Rc<T>>`型の場合**(またはbodyがitemを子componentの`#[bindable]`へ束縛している場合)、`Rc` identityをitem identityとして使う。同じ`Rc`実体は対応するUI要素・購読を再利用し、削除されたitemの要素は破棄する
 - **それ以外の(`Rc`でラップされていない)コレクションの場合**、識別可能な安定したidが無いため、`for`が再評価されるたびにその範囲のUI要素を丸ごと作り直す(既存の要素は再利用されない)
-- 13章ルール23も参照(`VirtualList`の`key`未指定時の挙動を含む、より詳しい規則)
 
 ### `if`/`match`:条件分岐
 
@@ -1356,7 +1355,7 @@ impl SaveButton {}
 11. `on_mount`/`on_update`/`on_unmount`を含むあらゆる実行contextで`#[param]`フィールドの再代入相当の操作が行われている → エラー([`ui_tree_design.md`](../design/runtime/ui_tree_design.md)参照。paramの不変性は生涯を通じて保証される)
 12. リアクティブ属性式または`<=>`の参照先が`store`宣言(`docs/design/runtime/state_management_design.md`)の型・フィールドとして存在しない → エラー
 13. `store`/`viewmodel`フィールドへの`#[param]`側からの直接参照 → エラー(`docs/design/runtime/state_management_design.md`、`docs/agents/codegen.md`参照。store/viewmodelはViewのリアクティブ属性式または明示的な`<=>`から参照する)
-14. `NavigationHost`内の`match route { ... }` がRoute enumの全メンバーを網羅していない(`_ =>`なし) → エラー(7章の網羅性検査と同じ仕組み、`docs/specs/ui_spec.md`参照)
+14. (欠番 — 0.1.0には`NavigationHost`固有の構文がないため不要)
 15. (欠番 — `native!` / `target::backend()` 構文の廃止に伴い不要)
 16. `#[animation(animation = ..., value = ...)]` は `animation_spec.md` が定義する AST メタデータとして検証し、`value` は許可された bare trigger field のみ受理する。`#[transition(...)]` は dynamic UIElement child の supported visual collection に限り受理し、static/non-UIElement collection entry はエラー。未実装の `KeyframeAnimation` 構文は受理しない → エラー
 
@@ -1378,7 +1377,7 @@ codegen はこの metadata を保持し、fake ordinary property に変換しな
 20. `#[async_computed]` が `viewmodel`/`store` 以外(通常の`component`のprop等)に付与されている → エラー(`docs/design/runtime/state_management_design.md`参照。非同期状態はVM/Model層に閉じ込める)
 21. (欠番 — ElwindUIは宣言的なundo/redo(`#[undoable]`)を提供しないため。SwiftUIの`UndoManager`同様、必要であればアプリ側がhostレベルの仕組みに自分で配線する)
 22. (欠番 — Themeがtoken/variantモデルからEnvironment上のPresetモデルへ再定義されたことに伴い(#96)、`tokens{}`/`variant`ブロック自体が存在しなくなったため不要)
-23. `VirtualList`に`key`が指定されていない状態で`items`の順序が変わる更新が行われる → 警告(`docs/specs/ui_spec.md`参照。挿入位置ベースの再利用にフォールバックし、リコンサイル効率が低下する可能性がある)。一般の `for` は `Vec<Rc<T>>` のとき各要素の `Rc<T>` ポインタ同一性で子を再利用し、その他の collection は当該範囲を再構築する(`docs/specs/ui_spec.md`参照)。`TabView` は `TabViewItem` を子として指定する。
+23. (欠番 — 0.1.0には`VirtualList`固有のkey/reorder契約がないため不要)
 24. `on_foreground`/`on_background`/`on_terminate`(`docs/design/runtime/ui_tree_design.md`)が、アプリのエントリポイント(ルート)コンポーネント以外で宣言されている → 警告(OSレベルのライフサイクルは単一箇所への集約を推奨)
 25. コールバック型のフィールドで `Rc<dyn Fn(...)>` / `Box<dyn Fn(...)>` のような型消去表現を直接使用している(`fn(...)` 糖衣構文を使っていない) → エラー(4章「コールバック型フィールド」参照)
 26. `template_view!(|alias: Target| { ... })`の`Target`が`ControlExt`を実装しない(`NativeControl`を含む) → エラー

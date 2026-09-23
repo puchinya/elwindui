@@ -326,6 +326,8 @@ pub struct RuntimeRealization {
     fail_after_reconcile_plan: bool,
     #[cfg(test)]
     full_reconcile_count: usize,
+    #[cfg(test)]
+    theme_refresh_count: Cell<usize>,
 }
 
 /// Source updates use a latest-only queue while a realization is being applied.
@@ -409,6 +411,8 @@ impl RuntimeRealization {
             fail_after_reconcile_plan: false,
             #[cfg(test)]
             full_reconcile_count: 0,
+            #[cfg(test)]
+            theme_refresh_count: Cell::new(0),
         })
     }
 
@@ -479,6 +483,10 @@ impl RuntimeRealization {
     }
 
     pub(crate) fn refresh_theme(&self) {
+        #[cfg(test)]
+        self.theme_refresh_count
+            .set(self.theme_refresh_count.get() + 1);
+
         self.main_surface.refresh_theme();
         for floating in &self.floating {
             floating.surface.refresh_theme();
@@ -1049,6 +1057,11 @@ impl RuntimeRealization {
     }
 
     #[cfg(test)]
+    pub(crate) fn theme_refresh_count_for_test(&self) -> usize {
+        self.theme_refresh_count.get()
+    }
+
+    #[cfg(test)]
     pub(crate) fn active_drag_for_test(&self) -> bool {
         self.drag.is_some() || self.group_drag.is_some()
     }
@@ -1346,7 +1359,6 @@ impl RuntimeRealization {
     pub(crate) fn apply_selection_fast_path(
         &mut self,
         model: &DockLayoutModel,
-        next: &DockLayoutModel,
         group: &SnapshotGroupKey,
         index: usize,
         item: &DockItemId,
@@ -1356,9 +1368,7 @@ impl RuntimeRealization {
                 .groups
                 .get(group)
                 .is_some_and(|view| view.selected_index() == index)
-            || model.is_item_closed(item)
-            || model.is_item_auto_hidden(item)
-            || !same_selection_structure(&model.snapshot(), &next.snapshot())
+            || !model.activation_is_selection_only(item)
         {
             return false;
         }
@@ -2738,71 +2748,6 @@ fn desired_owners(
         owners.insert(entry.item.clone(), RuntimePresentationOwner::None);
     }
     owners
-}
-
-fn same_selection_structure(
-    left: &crate::snapshot::DockLayoutSnapshot,
-    right: &crate::snapshot::DockLayoutSnapshot,
-) -> bool {
-    fn same_node(left: &SnapshotNode, right: &SnapshotNode) -> bool {
-        match (left, right) {
-            (
-                SnapshotNode::Split {
-                    orientation: left_orientation,
-                    children: left_children,
-                },
-                SnapshotNode::Split {
-                    orientation: right_orientation,
-                    children: right_children,
-                },
-            ) => {
-                left_orientation == right_orientation
-                    && left_children.len() == right_children.len()
-                    && left_children
-                        .iter()
-                        .zip(right_children)
-                        .all(|(left, right)| {
-                            left.weight == right.weight && same_node(&left.node, &right.node)
-                        })
-            }
-            (
-                SnapshotNode::Group {
-                    group: left_group,
-                    items: left_items,
-                    ..
-                },
-                SnapshotNode::Group {
-                    group: right_group,
-                    items: right_items,
-                    ..
-                },
-            ) => left_group == right_group && left_items == right_items,
-            _ => false,
-        }
-    }
-
-    let roots_match = match (&left.main_root, &right.main_root) {
-        (Some(left), Some(right)) => same_node(left, right),
-        (None, None) => true,
-        _ => false,
-    } && left.floating_roots.len() == right.floating_roots.len()
-        && left
-            .floating_roots
-            .iter()
-            .zip(&right.floating_roots)
-            .all(|(left, right)| left.bounds == right.bounds && same_node(&left.root, &right.root));
-    if !roots_match || left.closed != right.closed {
-        return false;
-    }
-    left.auto_hide
-        .iter()
-        .zip(&right.auto_hide)
-        .all(|(left, right)| {
-            left.len() == right.len()
-                && left.iter().zip(right).all(|(left, right)| {
-                    left.item == right.item && left.return_state == right.return_state
-                })
-        })
 }
 
 struct ReconcilingGuard(Rc<Cell<bool>>);

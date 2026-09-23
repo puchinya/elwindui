@@ -8,7 +8,6 @@
 pub mod accessibility;
 pub mod base;
 pub mod environment;
-pub mod error;
 pub mod focus;
 pub mod graphics;
 pub mod input;

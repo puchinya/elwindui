@@ -602,7 +602,7 @@ pub(crate) fn invoke_ui_text_event_callback(id: usize, text: String) {
 
 /// The capability a type needs to be usable as an `AnyView` — implemented once per raw XAML element
 /// type (`XamlTextBox`/`XamlButton`/`XamlTabView`) instead of matched on centrally, so a future native
-/// leaf (`Dialog`, `VirtualList`, ...) only needs its own `impl WinUiHandle`, never a change to
+/// leaf (`Dialog`, ...) only needs its own `impl WinUiHandle`, never a change to
 /// `AnyView` itself or to any `match` over it — mirrors `elwindui-backend-appkit`'s `AppKitHandle`
 /// (see that trait's own doc comment for the rationale).
 ///

@@ -24,7 +24,7 @@ Snapshot: 2026-09-06. Public behavior is defined by [`../specs/ui_spec.md`](../s
 - Runtime re-template, per-instance template properties, `TemplatePart`, and `VisualState` are not implemented.
 - `tooltip` is implemented for NativeControl descendants, not backend-neutral self-rendered elements.
 - Native control support has no GTK4 implementation.
-- Accessibility scaffolds and the NavigationHost/VirtualList/ErrorBoundary surface require an explicit public-contract decision ([#85](https://github.com/puchinya/elwindui/issues/85)).
+- `NavigationHost`, `VirtualList`, and `ErrorBoundary` are not part of the 0.1.0 public control surface ([#85](https://github.com/puchinya/elwindui/issues/85)).
 - Additional controls remain backlog items until their public contract and design are approved.
 
 ## Verification state

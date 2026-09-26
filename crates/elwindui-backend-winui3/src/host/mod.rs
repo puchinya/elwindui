@@ -31,7 +31,7 @@ use crate::render::composition::{
     DesiredCompositionNode, IslandId,
 };
 use accessibility::{WinUI3AccessibilityHost, WinUI3AccessibilityState};
-use elwindui_core::base::{Point, Rect};
+use elwindui_core::base::{AffineTransform, Point, Rect};
 use elwindui_core::input::{
     FocusState, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent, RawKeyEventKind,
     RawPointerEvent, RawPointerEventKind, RawTextInputEvent,
@@ -109,6 +109,62 @@ impl RelayoutCycleState {
             }
         }
         true
+    }
+}
+
+/// Scoped drawing state for the flattened render-command stream. A group's commands are
+/// contiguous in that stream, so transform and opacity scopes persist across commands within the
+/// group and reset to the group's inherited state when traversal moves to another group.
+#[derive(Default)]
+struct CommandReplayState {
+    group_id: Option<u64>,
+    transforms: Vec<AffineTransform>,
+    opacities: Vec<f32>,
+}
+
+impl CommandReplayState {
+    fn begin_group_command(
+        &mut self,
+        group_id: u64,
+        group_transform: AffineTransform,
+        group_opacity: f32,
+    ) {
+        if self.group_id == Some(group_id) {
+            return;
+        }
+        self.group_id = Some(group_id);
+        self.transforms.clear();
+        self.transforms.push(group_transform);
+        self.opacities.clear();
+        self.opacities.push(group_opacity);
+    }
+
+    fn transform(&self) -> AffineTransform {
+        *self.transforms.last().expect("transform stack")
+    }
+
+    fn opacity(&self) -> f32 {
+        *self.opacities.last().expect("opacity stack")
+    }
+
+    fn push_transform(&mut self, transform: AffineTransform) {
+        self.transforms.push(self.transform().concat(&transform));
+    }
+
+    fn pop_transform(&mut self) {
+        if self.transforms.len() > 1 {
+            self.transforms.pop();
+        }
+    }
+
+    fn push_opacity(&mut self, opacity: f32) {
+        self.opacities.push(self.opacity() * opacity);
+    }
+
+    fn pop_opacity(&mut self) {
+        if self.opacities.len() > 1 {
+            self.opacities.pop();
+        }
     }
 }
 
@@ -2189,8 +2245,7 @@ impl TreeHost {
             return;
         };
 
-        let mut transforms = vec![elwindui_core::base::AffineTransform::identity()];
-        let mut opacities = vec![1.0_f32];
+        let mut replay_state = CommandReplayState::default();
 
         // Keyed by `(group.id, index within that group's own commands)` — see `NativeChildKey`'s
         // doc comment — so `reconcile_native_children` can tell a `Text`/`NativeControl` command
@@ -2275,28 +2330,18 @@ impl TreeHost {
             group_input_enabled,
         ) in commands
         {
-            transforms.clear();
-            transforms.push(group_transform);
-            opacities.clear();
-            opacities.push(group_opacity);
+            replay_state.begin_group_command(group_id, group_transform, group_opacity);
             match command {
                 elwindui_core::graphics::RenderCommand::PushTransform { transform } => {
-                    let next = transforms
-                        .last()
-                        .expect("transform stack")
-                        .concat(transform);
-                    transforms.push(next);
+                    replay_state.push_transform(*transform);
                     continue;
                 }
                 elwindui_core::graphics::RenderCommand::PopTransform => {
-                    if transforms.len() > 1 {
-                        transforms.pop();
-                    }
+                    replay_state.pop_transform();
                     continue;
                 }
                 elwindui_core::graphics::RenderCommand::PushOpacity { opacity } => {
-                    let next = opacities.last().expect("opacity stack") * opacity;
-                    opacities.push(next);
+                    replay_state.push_opacity(*opacity);
                     continue;
                 }
                 elwindui_core::graphics::RenderCommand::PushClip { clip } => {
@@ -2306,7 +2351,7 @@ impl TreeHost {
                         &mut layer_order,
                         &clip_stack,
                     );
-                    let transform = *transforms.last().expect("transform stack");
+                    let transform = replay_state.transform();
                     let spec = match clip {
                         elwindui_core::graphics::Clip::Rect(rect) => CompositionClipSpec::Rect {
                             rect: elwindui_core::base::Rect {
@@ -2352,17 +2397,15 @@ impl TreeHost {
                     continue;
                 }
                 elwindui_core::graphics::RenderCommand::PopOpacity => {
-                    if opacities.len() > 1 {
-                        opacities.pop();
-                    }
+                    replay_state.pop_opacity();
                     continue;
                 }
                 _ => {}
             }
 
             let node_id = (group_id, command_index);
-            let transform = *transforms.last().expect("transform stack");
-            let opacity = *opacities.last().expect("opacity stack");
+            let transform = replay_state.transform();
+            let opacity = replay_state.opacity();
             let absolute_rect = |rect: &elwindui_core::base::Rect| elwindui_core::base::Rect {
                 x: origin.x + rect.x,
                 y: origin.y + rect.y,
@@ -3363,6 +3406,60 @@ pub(crate) mod accessibility_tests {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn replay_scopes_persist_between_commands_and_restore_on_pop() {
+        let base_transform = AffineTransform::translation(8.0, 11.0);
+        let mut state = CommandReplayState::default();
+        state.begin_group_command(7, base_transform, 0.8);
+
+        let rotation = AffineTransform::rotation(std::f32::consts::FRAC_PI_2);
+        state.push_transform(rotation);
+        state.push_opacity(0.5);
+        state.begin_group_command(7, base_transform, 0.8);
+        assert_eq!(state.transform(), base_transform.concat(&rotation));
+        assert!((state.opacity() - 0.4).abs() < 1e-6);
+
+        let scale = AffineTransform::scale(2.0, 3.0);
+        state.push_transform(scale);
+        state.push_opacity(0.25);
+        state.begin_group_command(7, base_transform, 0.8);
+        assert_eq!(
+            state.transform(),
+            base_transform.concat(&rotation).concat(&scale)
+        );
+        assert!((state.opacity() - 0.1).abs() < 1e-6);
+
+        state.pop_transform();
+        state.pop_opacity();
+        state.begin_group_command(7, base_transform, 0.8);
+        assert_eq!(state.transform(), base_transform.concat(&rotation));
+        assert!((state.opacity() - 0.4).abs() < 1e-6);
+
+        state.pop_transform();
+        state.pop_opacity();
+        state.begin_group_command(7, base_transform, 0.8);
+        assert_eq!(state.transform(), base_transform);
+        assert!((state.opacity() - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn replay_scopes_reset_to_inherited_state_when_group_changes() {
+        let mut state = CommandReplayState::default();
+        let parent_transform = AffineTransform::translation(8.0, 11.0);
+        state.begin_group_command(7, parent_transform, 0.8);
+        state.push_transform(AffineTransform::rotation(0.5));
+        state.push_opacity(0.5);
+
+        let child_transform = AffineTransform::translation(30.0, 40.0);
+        state.begin_group_command(8, child_transform, 0.25);
+        assert_eq!(state.transform(), child_transform);
+        assert_eq!(state.opacity(), 0.25);
+
+        state.begin_group_command(9, AffineTransform::IDENTITY, 1.0);
+        assert_eq!(state.transform(), AffineTransform::IDENTITY);
+        assert_eq!(state.opacity(), 1.0);
+    }
 
     #[test]
     fn reentrant_invalidation_does_not_contaminate_the_next_pending_kind() {

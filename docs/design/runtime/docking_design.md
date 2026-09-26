@@ -27,6 +27,12 @@ content; dynamic page replacement is outside this design scope. A normal tab sel
 group's selected bookkeeping and the bound value when its fast-path preconditions hold. It does
 not rebuild groups, splitters, surfaces, wrappers, or native hosts.
 
+Successful normal selection publishes `last_applied_model`, the bound layout, and the layout
+callback in that order, without invalidating DockingControl's containing visual subtree. The
+retained `CustomTabView` content presenter remains responsible for the local layout work needed to
+show the selected page. Structural/source layout updates keep their containing-subtree invalidation
+because they can replace native descendants and must repaint surrounding native siblings.
+
 The runtime owns presentation only. It does not serialize wrappers, visual parents, native Window
 handles, callbacks, or surface registrations in `DockLayoutSnapshot`.
 
@@ -81,6 +87,20 @@ There is no reconcile-the-old-model rollback path and no production runtime reco
 Selection-only changes and completed adjacent split-weight changes use retained value/layout fast
 paths because neither changes ownership or topology. The subsequent generated property update is
 suppressed by equality with `last_applied_model`.
+
+Selection fast-path qualification does not create snapshots: `DockLayoutModel` checks that the
+activated item is neither closed nor auto-hidden and is present in a live group by recursively
+reading the main and floating roots. `RuntimeRealization` then checks the requested group item,
+retained tab selected index, and presentation owner before updating selection bookkeeping. Closed
+and auto-hidden activation continue through the general model/reconcile path.
+
+The shared layout/theme update hook applies model/layout handling first, then compares the current
+theme environment signature with the last signature used by the retained runtime. The signature
+contains the `BrushStyle` values for primary, secondary, tertiary, foreground, background,
+window-background, tint, selection, separator, placeholder, and link. A layout-only update leaves
+the signature unchanged and skips `RuntimeRealization::refresh_theme`; a changed signature is
+stored before refreshing the retained runtime so a synchronous update cannot repeat the refresh.
+The signature is captured after initial realization and cleared when that runtime is disposed.
 
 Authored registration callbacks are bound on every current declaration node after each traversal.
 They guard reentrancy, cancel stale gestures, refresh item/group metadata, repair removed authored

@@ -295,6 +295,31 @@ impl DockLayoutModel {
             .any(|entry| &entry.item == item)
     }
 
+    pub(crate) fn activation_is_selection_only(&self, item: &DockItemId) -> bool {
+        if self.is_item_closed(item) || self.is_item_auto_hidden(item) {
+            return false;
+        }
+
+        fn contains_live_item(node: &Node, item: &DockItemId) -> bool {
+            match node {
+                Node::Group { items, .. } => items.iter().any(|candidate| candidate == item),
+                Node::Split { children, .. } => children
+                    .iter()
+                    .any(|child| contains_live_item(&child.node, item)),
+            }
+        }
+
+        self.workspace
+            .main_root
+            .as_ref()
+            .is_some_and(|root| contains_live_item(root, item))
+            || self
+                .workspace
+                .floating_roots
+                .iter()
+                .any(|root| contains_live_item(&root.root, item))
+    }
+
     /// Returns a model with the item selected, reopening it when it is closed.
     pub fn with_item_activated(&self, item: &DockItemId) -> Result<Self, DockLayoutError> {
         let mut next = self.clone();

@@ -1,6 +1,6 @@
 # Docking status
 
-Snapshot: 2026-09-22. Docking behavior is defined by the docking specification and its durable design documents under [`../design/`](../design/).
+Snapshot: 2026-09-26. Docking behavior is defined by the docking specification and its durable design documents under [`../design/`](../design/).
 
 ## Current implementation
 
@@ -10,12 +10,15 @@ Snapshot: 2026-09-22. Docking behavior is defined by the docking specification a
 - CustomTabView and CustomGridSplitter callbacks use weak docking owners. Selection, close, tab drag, Grid track movement, whole-group dragging, indexed context actions, capability flags, and empty-group presentation are wired through retained hosts.
 - AppKit and WinUI 3 floating hosts use staged prepare/commit creation, stable host IDs, logical bounds, close interception, rejected-close preservation, and empty-host cleanup. GTK model floating remains valid but has no usable native Window implementation.
 - Docking chrome uses cached vector geometry and transparent hit-test surfaces; the docking demo composes documents, nested tools, floating windows, auto-hide, and retained DockingControl state.
+- Issue #279 keeps normal retained tab selection on a selection-only publication path: one layout publication and callback, with no DockingControl containing-tree invalidation or full runtime reconciliation. Fast-path qualification reads live model roots without snapshots. Runtime theme refresh is gated by the 11-value BrushStyle signature.
 
 ## Current verification state
 
-- Focused model, reconciliation, retained-presentation, pointer-path, splitter, floating-host, snapshot, auto-hide, weak-lifetime, and workspace tests pass. The current WinUI3 native run passes DNP-01 through DNP-17, DNP-18 short/long, DNP-19 short/long, and DNP-20 through DNP-25. DNP-18/19 long use the pinned `puchinya/winappCli` fork based on v0.6.1 and report 4000 ms movement, 250 steps, and the expected live splitter displacement without a release-time jump.
+- Focused model, reconciliation, retained-presentation, pointer-path, splitter, floating-host, snapshot, auto-hide, weak-lifetime, and workspace tests pass.
 - Issue #259 AppKit revalidation passes exactly DNP-12, DNP-13, DNP-15, DNP-21, DNP-22, DNP-23, and DNP-24 on tested HEAD `6060a7725ddcae821da58e98576ecb420f5725e2`; DNP-25 passes through those native rows plus `window_lifetime_appkit` and the relevant deterministic `elwindui-docking` tests. The authoritative final manifest is immutable under `.agent-state/issues/259/e2e/6060a77/20260922T103912Z/final-result.md`; earlier incomplete retries remain retained as historical evidence and are superseded by this final run.
-- The backend-neutral native parity case is [`../../tests/e2e/docking-native-parity.md`](../../tests/e2e/docking-native-parity.md). The WinUI3 DNP matrix remains complete for the current implementation; the separate AppKit #259 subset is recorded above and does not imply an AppKit DNP-01..25 run.
+- The historical WinUI3 DNP-01..25 matrix for Issue #226 passed on tested HEAD `c589a142208bc46d2c48c29d948ec92719839756` ([final matrix result](https://github.com/puchinya/elwindui/issues/226#issuecomment-5771368668)). This evidence does not verify Issue #279 or PR #281 at its current HEAD. The backend-neutral native parity case is [`../../tests/e2e/docking-native-parity.md`](../../tests/e2e/docking-native-parity.md); the separate AppKit #259 subset is recorded above and does not imply an AppKit DNP-01..25 run.
+- Issue #279 regression tests pass for zero reconcile/theme-refresh deltas, one layout callback, stable wrapper parents, and zero unrelated-sibling measure delta. The authoritative Windows DNP-01 result is PASS on final committed HEAD `0366fc8271289801dd109c6431a00296a13154ab`: 20/20 real pointer clicks, final page Document A. An earlier run on HEAD `7b33b4d6625d36d293d3f7efba56cc3e01f667d1` failed at click 18 when clicking Document A left Document B selected; a complete intermediate run on `e35f8c199af970b3e08b0bf18d7a7860f976f968` also passed. No product-code changes occurred between the mismatch and later passing runs. The intermittent Windows mismatch is tracked separately in [#282](https://github.com/puchinya/elwindui/issues/282). macOS/AppKit host verification remains deferred to #280.
+- After `cargo clean` freed 2.4 GiB, the standard debug-profile `cargo build --workspace` and `cargo test --workspace` both passed without profile overrides; `cargo check --workspace` and rust-analyzer diagnostics also passed. macOS/AppKit host verification remains deferred to #280.
 
 ## Platform boundaries and blockers
 

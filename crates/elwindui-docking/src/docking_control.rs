@@ -42,6 +42,23 @@ async fn wait_for_next_ui_turn() {
     .await;
 }
 
+#[doc(hidden)]
+/// Cached semantic theme values used to skip redundant retained-runtime refreshes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeThemeSignature {
+    primary: crate::core::theme::BrushStyle,
+    secondary: crate::core::theme::BrushStyle,
+    tertiary: crate::core::theme::BrushStyle,
+    foreground: crate::core::theme::BrushStyle,
+    background: crate::core::theme::BrushStyle,
+    window_background: crate::core::theme::BrushStyle,
+    tint: crate::core::theme::BrushStyle,
+    selection: crate::core::theme::BrushStyle,
+    separator: crate::core::theme::BrushStyle,
+    placeholder: crate::core::theme::BrushStyle,
+    link: crate::core::theme::BrushStyle,
+}
+
 /// Private marker used to distinguish the visible retained runtime host from the collapsed
 /// authored declaration presenter. It is exported only as a hidden macro support type.
 #[elwindui::component(inherits ContentControl)]
@@ -85,6 +102,8 @@ pub struct DockingControl {
     layout_change_callback: Option<Rc<dyn Fn(DockLayoutModel)>>,
     #[state(default = None)]
     runtime_realization: Option<Rc<RefCell<crate::runtime::RuntimeRealization>>>,
+    #[state(default = None)]
+    runtime_theme_signature: Option<RuntimeThemeSignature>,
     #[state(default = crate::runtime::DockSurfaceView::empty_surface())]
     runtime_surface: Rc<crate::runtime::DockSurfaceView>,
     #[state(default = crate::dock_layout_model::empty())]
@@ -119,7 +138,7 @@ pub struct DockingControl {
             link_brush
         ) {
             this.handle_layout_update(layout);
-            this.refresh_runtime_theme();
+            this.refresh_runtime_theme_if_changed();
         }
         Grid {
             rows: [crate::core::layout::GridLength::Star(1.0)]
@@ -249,6 +268,7 @@ impl DockingControl {
                 panic!("failed to realize authored docking declaration: {error}");
             }
         };
+        self.set_runtime_theme_signature(Some(self.current_runtime_theme_signature()));
         self.bind_registration_callbacks(content.as_ref());
         self.set_last_applied_model(model.clone());
         self.set_layout(model.clone());
@@ -265,10 +285,53 @@ impl DockingControl {
         self.__content_opt()
     }
 
-    fn refresh_runtime_theme(&self) {
-        if let Some(realization) = self.runtime_realization() {
-            realization.borrow().refresh_theme();
+    fn current_runtime_theme_signature(&self) -> RuntimeThemeSignature {
+        RuntimeThemeSignature {
+            primary: self.primary_brush(),
+            secondary: self.secondary_brush(),
+            tertiary: self.tertiary_brush(),
+            foreground: self.foreground_brush(),
+            background: self.background_brush(),
+            window_background: self.window_background_brush(),
+            tint: self.tint_brush(),
+            selection: self.selection_brush(),
+            separator: self.separator_brush(),
+            placeholder: self.placeholder_brush(),
+            link: self.link_brush(),
         }
+    }
+
+    fn refresh_runtime_theme_if_changed(&self) {
+        self.refresh_runtime_theme_for_signature(self.current_runtime_theme_signature());
+    }
+
+    fn refresh_runtime_theme_for_signature(&self, signature: RuntimeThemeSignature) {
+        let Some(realization) = self.runtime_realization() else {
+            return;
+        };
+        if self.runtime_theme_signature().as_ref() == Some(&signature) {
+            return;
+        }
+        self.set_runtime_theme_signature(Some(signature));
+        realization.borrow().refresh_theme();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn refresh_runtime_theme_for_test(&self, change_primary: bool) {
+        let mut signature = self.current_runtime_theme_signature();
+        if change_primary {
+            signature.primary = if signature.primary == crate::core::theme::BrushStyle::Primary {
+                crate::core::theme::BrushStyle::Secondary
+            } else {
+                crate::core::theme::BrushStyle::Primary
+            };
+        }
+        self.refresh_runtime_theme_for_signature(signature);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_runtime_theme_signature_for_test(&self) -> bool {
+        self.runtime_theme_signature().is_some()
     }
 
     fn apply_model(
@@ -334,6 +397,14 @@ impl DockingControl {
         self.invalidate_containing_visual_subtree();
     }
 
+    fn commit_user_selection(&self, model: DockLayoutModel) {
+        self.set_last_applied_model(model.clone());
+        self.set_layout(model.clone());
+        if let Some(callback) = self.layout_change_callback() {
+            callback(model);
+        }
+    }
+
     fn commit_source_model(&self, model: DockLayoutModel) -> Result<(), DockLayoutError> {
         let (runtime_before, host_sync) = self.apply_model(model.clone())?;
         self.finalize_staged_host_sync(runtime_before, &model, host_sync);
@@ -341,6 +412,7 @@ impl DockingControl {
     }
 
     fn dispose_runtime(&self) {
+        self.set_runtime_theme_signature(None);
         if let Some(realization) = self.runtime_realization() {
             realization.borrow_mut().dispose();
         }
@@ -505,10 +577,10 @@ impl DockingControl {
             let fast_path = self.runtime_realization().is_some_and(|realization| {
                 realization
                     .borrow_mut()
-                    .apply_selection_fast_path(&current, &next, &group, index, &item)
+                    .apply_selection_fast_path(&current, &group, index, &item)
             });
             if fast_path {
-                self.commit_user_value_only(next);
+                self.commit_user_selection(next);
             } else {
                 let _ = self.commit_user_model(next);
             }

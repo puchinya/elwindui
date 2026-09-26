@@ -72,6 +72,30 @@ impl DockingMeasureProbe {
     }
 }
 
+struct SiblingMeasureRelayoutHost {
+    sibling: Rc<DockingMeasureProbe>,
+    dirty_groups: RefCell<Vec<u64>>,
+}
+
+impl RelayoutHost for SiblingMeasureRelayoutHost {
+    fn request_relayout(&self, dirty_group_id: u64, _kind: InvalidationKind) {
+        self.dirty_groups.borrow_mut().push(dirty_group_id);
+    }
+}
+
+impl SiblingMeasureRelayoutHost {
+    fn layout_dirty_sibling(&self) {
+        let sibling_group = self.sibling.as_ui_element().render_group_id;
+        let dirty_groups = self.dirty_groups.borrow_mut().drain(..).collect::<Vec<_>>();
+        if dirty_groups.contains(&sibling_group) {
+            self.sibling.measure(Size {
+                width: 80.0,
+                height: 40.0,
+            });
+        }
+    }
+}
+
 struct FakeHostLog {
     events: RefCell<Vec<&'static str>>,
     close_count: Cell<usize>,
@@ -648,6 +672,40 @@ fn activation_is_global_and_close_repairs_to_the_same_group() {
     assert_eq!(closed.active_item(), Some(item("first")));
     assert!(!closed.is_item_active(&item("second")));
     assert!(closed.is_item_active(&item("first")));
+}
+
+#[test]
+fn activation_selection_only_classifies_live_main_and_floating_items() {
+    let model = default_model();
+    assert!(model.activation_is_selection_only(&item("first")));
+
+    let floating = model
+        .with_item_moved(
+            &item("first"),
+            DockPlacement::Floating {
+                bounds: Rect {
+                    x: 40.0,
+                    y: 50.0,
+                    width: 320.0,
+                    height: 240.0,
+                },
+            },
+        )
+        .unwrap();
+    assert!(floating.activation_is_selection_only(&item("first")));
+
+    let closed = model.with_item_closed(&item("first")).unwrap();
+    assert!(!closed.activation_is_selection_only(&item("first")));
+
+    let auto_hidden = model
+        .with_item_moved(
+            &item("first"),
+            DockPlacement::AutoHide {
+                side: DockSide::Left,
+            },
+        )
+        .unwrap();
+    assert!(!auto_hidden.activation_is_selection_only(&item("first")));
 }
 
 #[test]
@@ -3233,6 +3291,11 @@ fn retained_group_callbacks_commit_selection_and_close_once() {
         .expect("mounted docking has a realization")
         .borrow()
         .full_reconcile_count_for_test();
+    let theme_refreshes_before_selection = docking
+        .realization_for_test()
+        .expect("mounted docking has a realization")
+        .borrow()
+        .theme_refresh_count_for_test();
     let second_bounds =
         SurfaceRegistry::bounds_in_host_root(&(wrappers[1].clone() as Rc<dyn UIElementExt>))
             .expect("second tab should be arranged");
@@ -3265,6 +3328,15 @@ fn retained_group_callbacks_commit_selection_and_close_once() {
             .realization_for_test()
             .unwrap()
             .borrow()
+            .theme_refresh_count_for_test(),
+        theme_refreshes_before_selection,
+        "selection-only changes must not refresh retained Docking theme state"
+    );
+    assert_eq!(
+        docking
+            .realization_for_test()
+            .unwrap()
+            .borrow()
             .full_reconcile_count_for_test(),
         full_reconciles_before_selection,
         "selection-only changes must not reconcile the retained Dock runtime"
@@ -3283,6 +3355,128 @@ fn retained_group_callbacks_commit_selection_and_close_once() {
     assert!(tab.request_close(1));
     assert!(docking.layout().is_item_closed(&item("second")));
     assert_eq!(changes.get(), 2);
+}
+
+#[test]
+fn selection_does_not_remeasure_an_unrelated_sibling() {
+    let (first_page, second_page) = (TextBlock::new(), TextBlock::new());
+    let first = DockItem::new_item();
+    first.set_id(item("first"));
+    first.set_title("First".to_string());
+    first.set_content(first_page);
+    let second = DockItem::new_item();
+    second.set_id(item("second"));
+    second.set_title("Second".to_string());
+    second.set_content(second_page);
+
+    let dock_group = DockGroup::new_group();
+    dock_group.set_id(group("main"));
+    dock_group.set_children(vec![first, second]);
+    let docking = DockingControl::__new_unmounted();
+    docking.set_content(dock_group);
+    docking.mount(application_environment());
+    assert!(docking.apply_template());
+
+    let probe = DockingMeasureProbe::new(Size {
+        width: 80.0,
+        height: 40.0,
+    });
+    let host = Grid::new();
+    host.set_rows(vec![GridLength::Star(1.0), GridLength::Fixed(60.0)]);
+    docking.set_attached("Grid", "row", 0i32);
+    probe.set_attached("Grid", "row", 1i32);
+    host.children().add(docking.clone());
+    host.children().add(probe.clone());
+    let root: Rc<dyn UIElementExt> = host.clone();
+    let size = Size {
+        width: 720.0,
+        height: 420.0,
+    };
+    layout_root(&root, size);
+    probe.reset_measure_count();
+    let relayout_host = Rc::new(SiblingMeasureRelayoutHost {
+        sibling: probe.clone(),
+        dirty_groups: RefCell::new(Vec::new()),
+    });
+    host.set_invalidate_host(Some(relayout_host.clone()));
+
+    let wrappers = find_all::<CustomTabViewItem>(docking.as_ref());
+    let second_bounds =
+        SurfaceRegistry::bounds_in_host_root(&(wrappers[1].clone() as Rc<dyn UIElementExt>))
+            .expect("second tab should be arranged");
+    let second_center = Point {
+        x: second_bounds.x + second_bounds.width * 0.5,
+        y: second_bounds.y + second_bounds.height * 0.5,
+    };
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(
+            RawPointerEventKind::Pressed(MouseButton::Left),
+            second_center,
+        ),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(
+            RawPointerEventKind::Released(MouseButton::Left),
+            second_center,
+        ),
+    );
+    relayout_host.layout_dirty_sibling();
+
+    assert!(docking.layout().is_item_active(&item("second")));
+    assert_eq!(
+        probe.measure_count(),
+        0,
+        "selection must not recursively invalidate an unrelated sibling"
+    );
+}
+
+#[test]
+fn runtime_theme_refresh_gate_is_idempotent() {
+    let docking = mounted_default_docking();
+    let realization = docking
+        .realization_for_test()
+        .expect("mounted docking has a realization");
+    let initial_refreshes = realization.borrow().theme_refresh_count_for_test();
+
+    docking.refresh_runtime_theme_for_test(false);
+    assert_eq!(
+        realization.borrow().theme_refresh_count_for_test(),
+        initial_refreshes,
+        "an unchanged theme signature must not refresh retained runtime chrome"
+    );
+
+    docking.refresh_runtime_theme_for_test(true);
+    assert_eq!(
+        realization.borrow().theme_refresh_count_for_test(),
+        initial_refreshes + 1,
+        "a changed BrushStyle signature must refresh exactly once"
+    );
+
+    docking.refresh_runtime_theme_for_test(true);
+    assert_eq!(
+        realization.borrow().theme_refresh_count_for_test(),
+        initial_refreshes + 1,
+        "repeating the changed signature must not refresh again"
+    );
+}
+
+#[test]
+fn runtime_theme_signature_resets_and_reinitializes_with_runtime_lifecycle() {
+    let docking = mounted_default_docking();
+    assert!(docking.has_runtime_theme_signature_for_test());
+
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    unmount_subtree(&root);
+    assert!(!docking.has_runtime_theme_signature_for_test());
+
+    let remounted = mounted_default_docking();
+    assert!(remounted.has_runtime_theme_signature_for_test());
 }
 
 #[test]

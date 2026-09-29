@@ -36,16 +36,21 @@ because they can replace native descendants and must repaint surrounding native 
 The runtime owns presentation only. It does not serialize wrappers, visual parents, native Window
 handles, callbacks, or surface registrations in `DockLayoutSnapshot`.
 
-Group title bars are retained whole-group drag handles. Tab context menus dispatch capability-
-checked close, indexed-close, float, and pin operations through the same model transaction
-boundary as pointer gestures. Empty authored groups marked `show_when_empty` retain their group
-host and display a non-hit-testable drop hint; other empty groups are normalized away. Per-group
+Docking has no group-level drag session or group-level tear-out/cross-dock gesture. The private
+group host contains no separate group title bar. Individual `CustomTabViewItem` drag remains the
+only Docking drag source and moves one Document through reorder, Center, Split, root Dock, or Float
+transactions. A Bottom content header presents operations for the selected Document only; its
+non-action area may begin that Document's item drag, never a group drag. Native floating windows
+continue to move through their platform title bars. Tab context menus dispatch capability-checked
+close, indexed-close, float, and pin operations through the same model transaction boundary as
+their pointer equivalents. Empty authored groups marked `show_when_empty` retain their group host
+and display a non-hit-testable drop hint; other empty groups are normalized away. Per-group
 `compact_tabs` is applied to the retained tab view without replacing wrappers or page content.
 
 ## Main surface and split realization
 
 `DockSurfaceView` is the private retained root containing the main root and the surface chrome. A
-snapshot split with N children is realized as one Grid with N Star pane tracks and N-1 Fixed(6)
+snapshot split with N children is realized as one Grid with N Star pane tracks and N-1 Fixed(12)
 splitter tracks. Horizontal splits use columns and one Star row; vertical splits use rows and one
 Star column. Every splitter records a private `SplitAddress` (main/floating root plus child path)
 and adjacent boundary index.
@@ -118,32 +123,80 @@ bands use the centralized 40-pixel root-target size. Group split bands are 25% w
 24..64-pixel clamp. Edge ties use Left, Top, Right, Bottom.
 
 Target discovery returns one private `ResolvedDockTarget` containing the destination `RootKind`,
-`DockTarget`, optional group key, computed surface-local preview rectangle, and an optional Center
-tab insertion index. Outer Dock targets use the selected surface's root; group targets are filtered
-to groups belonging to that root. The preview is the group bounds, a half-group split, or a
-quarter-surface outer band as appropriate. The five group compass buttons and four root-edge buttons
-are distinct retained visuals, all non-hit-testable, and only the source drag coordinator resolves
-their target.
+`DockTarget`, optional group key and arranged group rectangle, computed surface-local preview
+rectangle, and an optional Center tab insertion index. Outer Dock targets use the selected surface's
+root; group targets are filtered to groups belonging to that root. The preview is the group bounds,
+a half-group split, or a quarter-surface outer band as appropriate.
+
+`DockTargetOverlay` has two retained visual layers per surface. The root-target layer stays in
+surface coordinates and owns the four edge targets. The group-compass layer uses the target group's
+arranged rectangle, converted into that surface's coordinates, to place a 124-pixel connected cross
+with five 36-pixel glyph cells at the group's center. The two layers have independent visual state;
+no root Dock target aliases a similarly oriented group Split. All target cells are non-hit-testable,
+and only the source drag coordinator consumes the resolved target. The retained preview uses the
+resolved surface-local rectangle and active fill, default separator stroke, 4-pixel border/corner,
+and 0.4 opacity. It never recomputes target semantics.
+
+Each target cell keeps a 4-pixel inset, default fill/separator stroke, and an active/accent document
+outline. Center renders a whole-document glyph; Split adds a dashed midline along the split
+direction; Dock renders a half-document glyph with a direction indicator. The compass backing is a
+single rounded, stroked connected cross with a 2-pixel outer inset. Preview geometry communicates
+the selected target; the target cell does not become a large accent block. Compose these visuals
+from existing Core shapes rather than copying the reference's path data.
 
 Center insertion queries the retained `CustomTabStripPresenter` header arrangement, including
 unequal and compact headers, rather than estimating equal widths or reconciling the tab view. It
 has precedence over compass split-band resolution while the pointer is inside that arranged header,
 then returns the actual midpoint-derived index and the matching retained header boundary. One retained
 two-logical-pixel insertion marker is arranged at that boundary using the semantic accent brush.
-Target, preview, marker, and commit consume the same resolved index; group drags never synthesize
-per-item insertion operations.
+Target, preview, marker, and commit consume the same resolved index for the dragged Document. The
+coordinator has no group-placement drag path.
 
 `DragSession` retains the committed model, source `RootKind`, source group bounds in host-root
-coordinates, pointer offset, and a runtime-only candidate placement. Moving a tab updates only
+coordinates used to size an individual Document's floating window, pointer offset, and a runtime-only
+candidate item placement. Moving a tab updates only
 `DropPreview`, the target highlight, and the retained insertion marker; it never applies candidate
 ownership, reparents content, measures pages, or reconciles the model. Cancel, capture loss, source
 removal, source application, and unmount clear every surface preview, marker, and session.
 
+## Group chrome and tab sizing
+
+`CustomTabView` owns tab-strip measurement and retained selection/content presentation. Non-compact
+headers share available width up to 200 pixels each; compact headers measure from their text/content
+under the same cap. Both modes use the same 32-pixel strip and 32-pixel item height. The active and
+pointer-over header frames are template states; changing a state updates retained visuals and never
+replaces a tab wrapper or page.
+
+Docking-specific chrome stays in the retained group realization keyed by `DockGroupId`; there is no
+independent group title or group drag surface. In a Bottom group, the active item's title and
+pin/close actions live in a private content-header row above the same selected page. The header
+refers to the active stable item wrapper and routes requests through existing item callbacks. Its
+non-action area may initiate a drag for that item only. The bottom tab strip remains interactive
+when multiple items are present and is collapsed/non-hit-testable when exactly one item is present.
+Neither path creates a second page presenter or changes item ownership.
+
 ## Auto-hide and native floating hosts
 
-`AutoHideOverlay` owns four custom strip Grids, custom icon/title entries, one overlay pane, and a
-pin affordance. It attaches the stable wrapper to the pane, so auto-hide never creates a second page.
-The bound model controls which entry is open and which remembered return state is used.
+`AutoHideOverlay` owns four custom strip Grids, title-first side entries, one overlay pane, resize
+grip, and pin/close affordances. It attaches the stable wrapper to the pane, so auto-hide never
+creates a second page. The bound model controls which entry is open and which remembered return
+state is used.
+
+The strip entries measure from their title, rotate for Left/Right, remain horizontal for Top/Bottom,
+space entries by 16 pixels, and retain a 4-pixel theme marker for active/hover state. The pane fills
+the usable center region on its perpendicular axis and begins at one third of that axis unless a
+runtime extent exists. Resizing is local to the pane edge (inverted for Right/Bottom), remains
+bounded to leave usable center content, and updates the transient extent for the item and axis.
+
+`RuntimeRealization` owns the auto-hide extent cache, keyed by `DockItemId` with separate width and
+height values so a side change does not reinterpret an extent across axes. Each surface overlay
+reads/writes the same owner cache through callbacks that do not retain the owner. Ordinary model
+updates, close/reopen, and pin/unpin keep these extents; owner runtime reset/disposal clears them.
+They never enter `DockLayoutSnapshot` or V2 persistence. Outside dismissal is observed by the common
+surface root so an overlay does not consume clicks in remaining content; Escape is handled only via
+the existing routed input path. The 40-pixel pane header owns its Document title and pin/close
+actions; its non-action region may start a drag for that open Document only. The page wrapper stays
+stable below it.
 
 `SurfaceRuntime` retains one surface, auto-hide controller, preview controller, target sets, and one
 insertion marker for the main root and for every floating root. `FloatingHostRegistry` maps model

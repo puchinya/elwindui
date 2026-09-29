@@ -4,7 +4,8 @@ use super::core::base::{Point, Size};
 use super::core::environment::application_environment;
 use super::core::focus::FocusTracker;
 use super::core::input::{
-    KeyModifiers, MouseButton, PointerDispatcher, RawPointerEvent, RawPointerEventKind,
+    KeyModifiers, MouseButton, PointerDispatcher, PointerEventArgs, RawPointerEvent,
+    RawPointerEventKind, RoutedEventArgs,
 };
 use super::core::layout::{GridLength, Visibility};
 use super::core::ui::{
@@ -15,8 +16,8 @@ use super::core::visual_tree::find_all;
 use super::docking_control::DockTabContextAction;
 use super::id::{DockGroupId, DockItemId};
 use super::model::{
-    DefaultDockDefinition, DockLayoutModel, InternalDockGroupKey, InternalDockGroupPlacement,
-    InternalDockPlacement, Node, RootKind, SplitAddress, WeightedNode,
+    DefaultDockDefinition, DockLayoutModel, InternalDockGroupKey, InternalDockPlacement, Node,
+    RootKind, SplitAddress, WeightedNode,
 };
 use super::placement::{DockLayoutError, DockPlacement, DockSide};
 use super::runtime::{
@@ -34,7 +35,8 @@ use super::{
 };
 use elwindui_core::base::Rect;
 use elwindui_custom_controls::{
-    CustomGridSplitter, CustomTabView, CustomTabViewItem, TabDragCompletedEventArgs,
+    CustomGridSplitter, CustomTabView, CustomTabViewExt, CustomTabViewItem,
+    TabDragCompletedEventArgs, TabStripPosition,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -291,6 +293,12 @@ fn resolved_target(target: DockTarget, group: Option<SnapshotGroupKey>) -> Resol
     ResolvedDockTarget {
         root: RootKind::Main,
         target,
+        group_bounds: group.as_ref().map(|_| Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 80.0,
+        }),
         group,
         preview_rect: Rect {
             x: 0.0,
@@ -386,6 +394,29 @@ fn mounted_default_docking() -> Rc<DockingControl> {
     docking
 }
 
+fn mounted_bottom_documents_docking() -> Rc<DockingControl> {
+    let (first, _) = authored_item("first", "First", true);
+    let (second, _) = authored_item("second", "Second", true);
+    let (third, _) = authored_item("third", "Third", true);
+    let documents = DockGroup::new_group();
+    documents.set_id(group("documents"));
+    documents.set_tab_strip_position(TabStripPosition::Bottom);
+    documents.set_children(vec![first, second]);
+    let tools = DockGroup::new_group();
+    tools.set_id(group("tools"));
+    tools.set_children(vec![third]);
+    let split = DockSplitPanel::new_panel();
+    split.set_children(vec![
+        documents as Rc<dyn UIElementExt>,
+        tools as Rc<dyn UIElementExt>,
+    ]);
+    let docking = DockingControl::__new_unmounted();
+    docking.set_content(split);
+    docking.mount(application_environment());
+    assert!(docking.apply_template());
+    docking
+}
+
 fn mounted_capability_docking(
     first_can_float: bool,
     second_can_float: bool,
@@ -427,6 +458,7 @@ fn mounted_unequal_docking() -> Rc<DockingControl> {
     documents.set_children(vec![source]);
     let tools = DockGroup::new_group();
     tools.set_id(group("tools"));
+    tools.set_compact_tabs(true);
     tools.set_children(vec![short, long, tail]);
     let split = DockSplitPanel::new_panel();
     split.set_children(vec![
@@ -452,23 +484,6 @@ fn arranged_group_point(docking: &Rc<DockingControl>, group_id: &str) -> (Rc<Cus
     let node: Rc<dyn UIElementExt> = view.clone();
     let bounds = SurfaceRegistry::bounds_in_host_root(&node).expect("group should be arranged");
     (view, bounds)
-}
-
-fn group_title_start(docking: &Rc<DockingControl>, group_id: &str) -> Point {
-    let title_bar = docking
-        .realization_for_test()
-        .and_then(|realization| {
-            realization
-                .borrow()
-                .group_title_bar_for_test(&SnapshotGroupKey::Authored(group(group_id)))
-        })
-        .expect("group title bar should be retained");
-    let node: Rc<dyn UIElementExt> = title_bar.clone();
-    let bounds = SurfaceRegistry::bounds_in_host_root(&node).expect("title bar should be arranged");
-    Point {
-        x: bounds.x + bounds.width * 0.25,
-        y: bounds.y + bounds.height * 0.5,
-    }
 }
 
 fn first_tab_in_group(docking: &Rc<DockingControl>, group_id: &str) -> Rc<dyn UIElementExt> {
@@ -743,46 +758,6 @@ fn same_group_indexed_moves_insert_before_or_after_without_reversing_order() {
             &SnapshotGroupKey::Authored(group("documents")),
         ),
         Some(vec![item("second"), item("first")])
-    );
-}
-
-#[test]
-fn group_moves_keep_the_group_node_and_all_pages_together() {
-    let model = default_model();
-    let split = model
-        .with_group_moved_internal(
-            &InternalDockGroupKey::Authored(group("documents")),
-            InternalDockGroupPlacement::SplitGroup {
-                group: InternalDockGroupKey::Authored(group("tools")),
-                side: DockSide::Right,
-                weight: 1.0,
-            },
-        )
-        .unwrap();
-    assert!(matches!(
-        split.snapshot().main_root,
-        Some(SnapshotNode::Split { ref children, .. })
-            if children.iter().any(|child| matches!(
-                child.node,
-                SnapshotNode::Group { group: SnapshotGroupKey::Authored(ref id), ref items, .. }
-                    if id == &group("documents") && items == &vec![item("first"), item("second")]
-            ))
-    ));
-
-    let merged = model
-        .with_group_moved_internal(
-            &InternalDockGroupKey::Authored(group("documents")),
-            InternalDockGroupPlacement::Center {
-                group: InternalDockGroupKey::Authored(group("tools")),
-            },
-        )
-        .unwrap();
-    assert_eq!(
-        snapshot_group_items(
-            &merged.snapshot(),
-            &SnapshotGroupKey::Authored(group("tools")),
-        ),
-        Some(vec![item("third"), item("first"), item("second")])
     );
 }
 
@@ -1523,7 +1498,7 @@ fn preview_geometry_matches_all_nine_resolved_targets() {
 fn root_and_group_target_visuals_are_retained_and_never_alias_highlights() {
     let overlay = DockTargetOverlay::new();
     assert_eq!(overlay.button_counts(), (5, 4));
-    overlay.show(DockTarget::DockLeft);
+    overlay.show(DockTarget::DockLeft, None);
     assert_eq!(overlay.selected_target(), Some(DockTarget::DockLeft));
     let visual = overlay.visual();
     super::core::ui::layout_root(
@@ -1543,13 +1518,40 @@ fn root_and_group_target_visuals_are_retained_and_never_alias_highlights() {
         left,
         Rect {
             x: 16.0,
-            y: 100.0,
-            width: 40.0,
-            height: 40.0
+            y: 102.0,
+            width: 36.0,
+            height: 36.0
         }
     );
-    overlay.show(DockTarget::SplitLeft);
+    overlay.show(
+        DockTarget::SplitLeft,
+        Some(Rect {
+            x: 80.0,
+            y: 30.0,
+            width: 220.0,
+            height: 160.0,
+        }),
+    );
+    super::core::ui::layout_root(
+        &visual,
+        Size {
+            width: 400.0,
+            height: 240.0,
+        },
+    );
     assert_eq!(overlay.selected_target(), Some(DockTarget::SplitLeft));
+    let compass_center = overlay
+        .button_rects()
+        .into_iter()
+        .find(|(target, _)| *target == DockTarget::Center)
+        .and_then(|(_, rect)| rect)
+        .map(|rect| Point {
+            x: rect.x + rect.width * 0.5,
+            y: rect.y + rect.height * 0.5,
+        })
+        .expect("group center target should be arranged");
+    assert_eq!(compass_center, Point { x: 190.0, y: 110.0 });
+    assert_eq!(overlay.target_glyph_kinds().len(), 9);
     overlay.clear();
     assert_eq!(overlay.selected_target(), None);
 }
@@ -1560,6 +1562,12 @@ fn drop_preview_layer_arranges_the_rectangle_at_the_resolved_surface_rect() {
         root: RootKind::Floating(0),
         target: DockTarget::SplitRight,
         group: Some(SnapshotGroupKey::Generated(1)),
+        group_bounds: Some(Rect {
+            x: 100.0,
+            y: 20.0,
+            width: 200.0,
+            height: 120.0,
+        }),
         preview_rect: Rect {
             x: 137.0,
             y: 21.0,
@@ -2087,6 +2095,7 @@ fn floating_surface_runtime_keeps_its_chrome_across_reconciliation() {
         root: RootKind::Floating(0),
         target: DockTarget::DockLeft,
         group: None,
+        group_bounds: None,
         preview_rect: Rect {
             x: 0.0,
             y: 0.0,
@@ -2221,8 +2230,15 @@ fn auto_hide_popup_uses_side_aware_opaque_panel_geometry() {
     page.set_text("Popup body");
     wrapper.set_content(page.clone());
     let mut overlay = AutoHideOverlay::new();
-    overlay.open(item("right"), DockSide::Right);
-    overlay.present_open_item(Some(wrapper.clone()));
+    overlay.open(
+        item("right"),
+        DockSide::Right,
+        Size {
+            width: 900.0,
+            height: 600.0,
+        },
+    );
+    overlay.present_open_item(Some(wrapper.clone()), "Right document", true, true);
 
     let page_host: Rc<dyn UIElementExt> = overlay.page_host_for_test();
     let page_parent = page
@@ -2240,14 +2256,191 @@ fn auto_hide_popup_uses_side_aware_opaque_panel_geometry() {
         },
     );
     let pane = overlay.pane_for_test();
-    assert_eq!(pane.arranged_width(), Some(320.0));
-    assert_eq!(pane.arranged_height(), Some(240.0));
-    assert_eq!(pane.arranged_offset(), Some(Point { x: 552.0, y: 180.0 }));
+    assert_eq!(pane.arranged_width(), Some(300.0));
+    assert_eq!(pane.arranged_height(), Some(600.0));
+    assert_eq!(pane.arranged_offset(), Some(Point { x: 600.0, y: 0.0 }));
     let pin_button = overlay.pin_button_for_test();
     assert_eq!(
         pin_button.arranged_offset(),
-        Some(Point { x: 302.0, y: 0.0 })
+        Some(Point { x: 236.0, y: 4.0 })
     );
+}
+
+#[test]
+fn auto_hide_strip_markers_follow_the_four_side_orientations() {
+    let overlay = AutoHideOverlay::new();
+    let owner = std::rc::Weak::<DockingControl>::new();
+    overlay.render_strips(
+        [
+            (0, item("left"), "Left document".to_owned(), None),
+            (1, item("top"), "Top document".to_owned(), None),
+            (2, item("right"), "Right document".to_owned(), None),
+            (3, item("bottom"), "Bottom document".to_owned(), None),
+        ]
+        .into_iter(),
+        &owner,
+        RootKind::Main,
+    );
+    let visual = overlay.visual();
+    layout_root(
+        &visual,
+        Size {
+            width: 944.0,
+            height: 549.0,
+        },
+    );
+    assert_eq!(overlay.marker_count_for_test(), 4);
+    let left = overlay.marker_size_for_test(&item("left")).unwrap();
+    assert_eq!(left.width, 4.0);
+    assert!(left.height > 24.0);
+    let right = overlay.marker_size_for_test(&item("right")).unwrap();
+    assert_eq!(right.width, 4.0);
+    assert!(right.height > 24.0);
+    let top = overlay.marker_size_for_test(&item("top")).unwrap();
+    assert!(top.width > 24.0);
+    assert_eq!(top.height, 4.0);
+    let bottom = overlay.marker_size_for_test(&item("bottom")).unwrap();
+    assert!(bottom.width > 24.0);
+    assert_eq!(bottom.height, 4.0);
+}
+
+#[test]
+fn auto_hide_resizing_remembers_document_axis_extent_and_inverts_trailing_edges() {
+    let mut overlay = AutoHideOverlay::new();
+    let size = Size {
+        width: 900.0,
+        height: 600.0,
+    };
+    overlay.open(item("right"), DockSide::Right, size);
+    let visual = overlay.visual();
+    layout_root(&visual, size);
+    let grip = overlay.resize_grip_for_test();
+    let grip_node: Rc<dyn UIElementExt> = grip.clone();
+    let bounds = SurfaceRegistry::bounds_in_host_root(&grip_node).unwrap();
+    let start = Point {
+        x: bounds.x + bounds.width * 0.5,
+        y: bounds.y + bounds.height * 0.5,
+    };
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &visual,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
+    );
+    dispatcher.handle(
+        &visual,
+        &focus,
+        pointer_event(
+            RawPointerEventKind::Moved,
+            Point {
+                x: start.x - 40.0,
+                y: start.y,
+            },
+        ),
+    );
+    layout_root(&visual, size);
+    assert_eq!(overlay.pane_for_test().arranged_width(), Some(340.0));
+    dispatcher.handle(
+        &visual,
+        &focus,
+        pointer_event(
+            RawPointerEventKind::Released(MouseButton::Left),
+            Point {
+                x: start.x - 40.0,
+                y: start.y,
+            },
+        ),
+    );
+    assert_eq!(
+        overlay.remembered_extent_for_test(&item("right"), DockSide::Right),
+        Some(340.0)
+    );
+    overlay.close();
+    overlay.open(item("right"), DockSide::Right, size);
+    layout_root(&visual, size);
+    assert_eq!(overlay.pane_for_test().arranged_width(), Some(340.0));
+
+    overlay.close();
+    overlay.open(item("bottom"), DockSide::Bottom, size);
+    layout_root(&visual, size);
+    let grip = overlay.resize_grip_for_test();
+    let grip_node: Rc<dyn UIElementExt> = grip;
+    let bounds = SurfaceRegistry::bounds_in_host_root(&grip_node).unwrap();
+    let start = Point {
+        x: bounds.x + bounds.width * 0.5,
+        y: bounds.y + bounds.height * 0.5,
+    };
+    dispatcher.handle(
+        &visual,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
+    );
+    dispatcher.handle(
+        &visual,
+        &focus,
+        pointer_event(
+            RawPointerEventKind::Moved,
+            Point {
+                x: start.x,
+                y: start.y - 30.0,
+            },
+        ),
+    );
+    layout_root(&visual, size);
+    assert_eq!(overlay.pane_for_test().arranged_height(), Some(230.0));
+    dispatcher.handle(
+        &visual,
+        &focus,
+        pointer_event(
+            RawPointerEventKind::Released(MouseButton::Left),
+            Point {
+                x: start.x,
+                y: start.y - 30.0,
+            },
+        ),
+    );
+    assert_eq!(
+        overlay.remembered_extent_for_test(&item("bottom"), DockSide::Bottom),
+        Some(230.0)
+    );
+}
+
+#[test]
+fn auto_hide_light_dismiss_suppresses_model_reopen_until_explicit_activation() {
+    let mut overlay = AutoHideOverlay::new();
+    let surface_root = Grid::new();
+    surface_root.set_background(Some(super::core::graphics::Color::TRANSPARENT.into()));
+    surface_root.children().add(overlay.visual());
+    overlay.bind_light_dismiss(&surface_root);
+    let root: Rc<dyn UIElementExt> = surface_root.clone();
+    let size = Size {
+        width: 900.0,
+        height: 600.0,
+    };
+    layout_root(&root, size);
+    overlay.open(item("right"), DockSide::Right, size);
+    layout_root(&root, size);
+    let event = PointerEventArgs {
+        position: Point { x: 450.0, y: 16.0 },
+        screen_position: None,
+        button: Some(MouseButton::Left),
+        modifiers: KeyModifiers::default(),
+    };
+    super::core::ui::dispatch_routed(
+        &root,
+        "on_pointer_pressed",
+        &event,
+        &RoutedEventArgs::default(),
+    );
+    assert_eq!(overlay.current(), None);
+    assert_eq!(
+        overlay.open_from_model(item("right"), DockSide::Right, size),
+        None
+    );
+    assert_eq!(overlay.current(), None);
+    overlay.open(item("right"), DockSide::Right, size);
+    assert_eq!(overlay.current(), Some(item("right")));
 }
 
 #[test]
@@ -2939,9 +3132,16 @@ fn drag_preview_can_target_a_generated_runtime_group() {
 #[test]
 fn auto_hide_overlay_keeps_one_open_item_and_preview_clears() {
     let mut overlay = AutoHideOverlay::default();
-    assert_eq!(overlay.open(item("a"), DockSide::Left), None);
-    assert_eq!(overlay.current(), Some(&item("a")));
-    assert_eq!(overlay.open(item("b"), DockSide::Right), Some(item("a")));
+    let surface_size = Size {
+        width: 900.0,
+        height: 600.0,
+    };
+    assert_eq!(overlay.open(item("a"), DockSide::Left, surface_size), None);
+    assert_eq!(overlay.current(), Some(item("a")));
+    assert_eq!(
+        overlay.open(item("b"), DockSide::Right, surface_size),
+        Some(item("a"))
+    );
     assert_eq!(overlay.close(), Some(item("b")));
     assert_eq!(overlay.current(), None);
 
@@ -3534,6 +3734,140 @@ fn actual_tab_pointer_path_starts_and_cancels_docking_drag_after_four_pixels() {
 }
 
 #[test]
+fn top_tab_strip_blank_space_does_not_start_a_group_drag() {
+    let docking = mounted_default_docking();
+    let original = docking.layout();
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 900.0,
+            height: 600.0,
+        },
+    );
+    let (documents, group_bounds) = arranged_group_point(&docking, "documents");
+    assert_eq!(documents.tab_strip_position(), TabStripPosition::Top);
+    let last_tab_boundary = documents
+        .tab_insertion_boundary(2)
+        .expect("two document tabs have an ending boundary");
+    let tab_strip_right = last_tab_boundary.x + last_tab_boundary.width;
+    assert!(
+        tab_strip_right < group_bounds.width,
+        "fixture needs blank strip area"
+    );
+    let header = docking
+        .realization_for_test()
+        .and_then(|realization| {
+            realization
+                .borrow()
+                .group_content_header_for_test(&SnapshotGroupKey::Authored(group("documents")))
+        })
+        .expect("the group host retains its optional content header");
+    assert_eq!(header.visibility(), Visibility::Collapsed);
+
+    let start = Point {
+        x: group_bounds.x + (tab_strip_right + group_bounds.width) * 0.5,
+        y: group_bounds.y + last_tab_boundary.y + last_tab_boundary.height * 0.5,
+    };
+    let (_, target_bounds) = arranged_group_point(&docking, "tools");
+    let target = Point {
+        x: target_bounds.x + target_bounds.width * 0.5,
+        y: target_bounds.y + target_bounds.height * 0.5,
+    };
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Moved, target),
+    );
+    let realization = docking.realization_for_test().unwrap();
+    assert!(!realization.borrow().active_drag_for_test());
+    assert_eq!(docking.layout(), original);
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Released(MouseButton::Left), target),
+    );
+    assert_eq!(docking.layout(), original);
+}
+
+#[test]
+fn bottom_content_header_drags_only_the_selected_document() {
+    let docking = mounted_bottom_documents_docking();
+    let original = docking.layout();
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 900.0,
+            height: 600.0,
+        },
+    );
+    let header = docking
+        .realization_for_test()
+        .and_then(|realization| {
+            realization
+                .borrow()
+                .group_content_header_for_test(&SnapshotGroupKey::Authored(group("documents")))
+        })
+        .expect("bottom group should have a selected-document content header");
+    assert_eq!(header.visibility(), Visibility::Visible);
+    let header_node: Rc<dyn UIElementExt> = header;
+    let header_bounds = SurfaceRegistry::bounds_in_host_root(&header_node)
+        .expect("bottom content header should be arranged");
+    let start = Point {
+        x: header_bounds.x + header_bounds.width * 0.5,
+        y: header_bounds.y + header_bounds.height * 0.5,
+    };
+    let (_, target_bounds) = arranged_group_point(&docking, "tools");
+    let target = Point {
+        x: target_bounds.x + target_bounds.width * 0.5,
+        y: target_bounds.y + target_bounds.height * 0.5,
+    };
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Moved, target),
+    );
+    let realization = docking.realization_for_test().unwrap();
+    assert!(realization.borrow().active_drag_for_test());
+    assert_eq!(
+        docking.layout(),
+        original,
+        "drag preview must not commit early"
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Released(MouseButton::Left), target),
+    );
+    assert_ne!(docking.layout(), original);
+    let snapshot = docking.layout().snapshot();
+    assert_eq!(
+        snapshot_group_items(&snapshot, &SnapshotGroupKey::Authored(group("documents"))),
+        Some(vec![item("second")]),
+        "only the selected Document should leave the source group"
+    );
+    let tools = snapshot_group_items(&snapshot, &SnapshotGroupKey::Authored(group("tools")))
+        .expect("target group should remain authored");
+    assert!(tools.contains(&item("first")));
+    assert!(tools.contains(&item("third")));
+}
+
+#[test]
 fn actual_tab_pointer_path_commits_a_root_edge_drop_once() {
     let docking = mounted_default_docking();
     let original = docking.layout();
@@ -3623,393 +3957,6 @@ fn actual_tab_pointer_path_commits_a_root_edge_drop_once() {
 }
 
 #[test]
-fn actual_group_pointer_path_commits_center_merge_once() {
-    let docking = mounted_default_docking();
-    let original = docking.layout();
-    let root: Rc<dyn UIElementExt> = docking.clone();
-    layout_root(
-        &root,
-        Size {
-            width: 720.0,
-            height: 420.0,
-        },
-    );
-    let start = group_title_start(&docking, "documents");
-    let (_, target_bounds) = arranged_group_point(&docking, "tools");
-    let target = Point {
-        x: target_bounds.x + target_bounds.width * 0.5,
-        y: target_bounds.y + target_bounds.height * 0.5,
-    };
-    let changes = Rc::new(Cell::new(0));
-    let changes_for_callback = changes.clone();
-    docking.set_on_layout_change(Box::new(move |_| {
-        changes_for_callback.set(changes_for_callback.get() + 1);
-    }));
-    let full_reconciles = docking
-        .realization_for_test()
-        .unwrap()
-        .borrow()
-        .full_reconcile_count_for_test();
-    let dispatcher = PointerDispatcher::new();
-    let focus = FocusTracker::new();
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
-    );
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Moved, target),
-    );
-    assert_eq!(docking.layout(), original);
-    assert_eq!(
-        docking
-            .realization_for_test()
-            .unwrap()
-            .borrow()
-            .preview_for_test(&RootKind::Main)
-            .map(|(kind, _)| kind),
-        Some(DockTarget::Center)
-    );
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Released(MouseButton::Left), target),
-    );
-
-    assert_eq!(changes.get(), 1);
-    assert_eq!(
-        docking
-            .realization_for_test()
-            .unwrap()
-            .borrow()
-            .full_reconcile_count_for_test(),
-        full_reconciles + 1
-    );
-    assert_eq!(
-        snapshot_group_items(
-            &docking.layout().snapshot(),
-            &SnapshotGroupKey::Authored(group("tools"))
-        ),
-        Some(vec![item("third"), item("first"), item("second")])
-    );
-    assert_eq!(
-        snapshot_group_items(
-            &docking.layout().snapshot(),
-            &SnapshotGroupKey::Authored(group("documents"))
-        ),
-        None
-    );
-}
-
-#[test]
-fn actual_group_pointer_path_commits_split_once() {
-    let docking = mounted_default_docking();
-    let original = docking.layout();
-    let root: Rc<dyn UIElementExt> = docking.clone();
-    layout_root(
-        &root,
-        Size {
-            width: 720.0,
-            height: 420.0,
-        },
-    );
-    let start = group_title_start(&docking, "documents");
-    let (_, target_bounds) = arranged_group_point(&docking, "tools");
-    let target = Point {
-        x: target_bounds.x + target_bounds.width * 0.83,
-        y: target_bounds.y + target_bounds.height * 0.5,
-    };
-    let changes = Rc::new(Cell::new(0));
-    let changes_for_callback = changes.clone();
-    docking.set_on_layout_change(Box::new(move |_| {
-        changes_for_callback.set(changes_for_callback.get() + 1);
-    }));
-    let dispatcher = PointerDispatcher::new();
-    let focus = FocusTracker::new();
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
-    );
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Moved, target),
-    );
-    let preview = docking
-        .realization_for_test()
-        .unwrap()
-        .borrow()
-        .preview_for_test(&RootKind::Main)
-        .map(|(kind, _)| kind);
-    assert_eq!(preview, Some(DockTarget::SplitRight));
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Released(MouseButton::Left), target),
-    );
-
-    assert_ne!(docking.layout(), original);
-    assert_eq!(changes.get(), 1);
-    assert!(matches!(
-        docking.layout().snapshot().main_root,
-        Some(SnapshotNode::Split { .. })
-    ));
-    assert_eq!(
-        snapshot_group_items(
-            &docking.layout().snapshot(),
-            &SnapshotGroupKey::Authored(group("documents"))
-        ),
-        Some(vec![item("first"), item("second")])
-    );
-}
-
-#[test]
-fn actual_group_pointer_path_commits_root_dock_once() {
-    let docking = mounted_default_docking();
-    let original = docking.layout();
-    let root: Rc<dyn UIElementExt> = docking.clone();
-    layout_root(
-        &root,
-        Size {
-            width: 720.0,
-            height: 420.0,
-        },
-    );
-    let start = group_title_start(&docking, "tools");
-    let surface = docking
-        .realization_for_test()
-        .unwrap()
-        .borrow()
-        .surface_for_test(&RootKind::Main)
-        .unwrap();
-    let surface_node: Rc<dyn UIElementExt> = surface;
-    let surface_bounds = SurfaceRegistry::bounds_in_host_root(&surface_node).unwrap();
-    let target = Point {
-        x: surface_bounds.x + 2.0,
-        y: surface_bounds.y + surface_bounds.height * 0.5,
-    };
-    let changes = Rc::new(Cell::new(0));
-    let changes_for_callback = changes.clone();
-    docking.set_on_layout_change(Box::new(move |_| {
-        changes_for_callback.set(changes_for_callback.get() + 1);
-    }));
-    let dispatcher = PointerDispatcher::new();
-    let focus = FocusTracker::new();
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
-    );
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Moved, target),
-    );
-    assert_eq!(
-        docking
-            .realization_for_test()
-            .unwrap()
-            .borrow()
-            .preview_for_test(&RootKind::Main)
-            .map(|(kind, _)| kind),
-        Some(DockTarget::DockLeft)
-    );
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Released(MouseButton::Left), target),
-    );
-
-    assert_ne!(docking.layout(), original);
-    assert_eq!(changes.get(), 1);
-    assert!(matches!(
-        docking.layout().snapshot().main_root,
-        Some(SnapshotNode::Split { .. })
-    ));
-}
-
-#[test]
-fn actual_group_pointer_path_floats_once() {
-    let docking = mounted_default_docking();
-    let hosts = Rc::new(RefCell::new(Vec::new()));
-    docking.install_floating_host_factory_for_test(individual_fake_factory(hosts.clone()));
-    let original = docking.layout();
-    let root: Rc<dyn UIElementExt> = docking.clone();
-    root.set_coordinate_host(Some(Rc::new(OffsetCoordinateHost {
-        screen_origin: Point { x: 0.0, y: 0.0 },
-    })));
-    layout_root(
-        &root,
-        Size {
-            width: 720.0,
-            height: 420.0,
-        },
-    );
-    let start = group_title_start(&docking, "documents");
-    let release = Point {
-        x: 1000.0,
-        y: 700.0,
-    };
-    let changes = Rc::new(Cell::new(0));
-    let changes_for_callback = changes.clone();
-    docking.set_on_layout_change(Box::new(move |_| {
-        changes_for_callback.set(changes_for_callback.get() + 1);
-    }));
-    let dispatcher = PointerDispatcher::new();
-    let focus = FocusTracker::new();
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
-    );
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Moved, release),
-    );
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event_with_screen(
-            RawPointerEventKind::Released(MouseButton::Left),
-            release,
-            release,
-        ),
-    );
-
-    assert_ne!(docking.layout(), original);
-    assert_eq!(docking.layout().snapshot().floating_roots.len(), 1);
-    assert_eq!(changes.get(), 1);
-    assert_eq!(hosts.borrow().len(), 1);
-    let snapshot = docking.layout().snapshot();
-    let floating = snapshot
-        .floating_roots
-        .first()
-        .expect("the group should become one floating root");
-    assert!(matches!(
-        &floating.root,
-        SnapshotNode::Group {
-            group: group_key,
-            items,
-            ..
-        } if group_key == &SnapshotGroupKey::Authored(group("documents"))
-                && items == &vec![item("first"), item("second")]
-    ));
-}
-
-#[test]
-fn actual_group_pointer_path_respects_float_capability_and_rule() {
-    let docking = mounted_capability_docking(false, true, true, true);
-    let original = docking.layout();
-    let root: Rc<dyn UIElementExt> = docking.clone();
-    layout_root(
-        &root,
-        Size {
-            width: 720.0,
-            height: 420.0,
-        },
-    );
-    let start = group_title_start(&docking, "documents");
-    let release = Point {
-        x: 1000.0,
-        y: 700.0,
-    };
-    let changes = Rc::new(Cell::new(0));
-    let changes_for_callback = changes.clone();
-    docking.set_on_layout_change(Box::new(move |_| {
-        changes_for_callback.set(changes_for_callback.get() + 1);
-    }));
-    let dispatcher = PointerDispatcher::new();
-    let focus = FocusTracker::new();
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
-    );
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Moved, release),
-    );
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event_with_screen(
-            RawPointerEventKind::Released(MouseButton::Left),
-            release,
-            release,
-        ),
-    );
-
-    assert_eq!(docking.layout(), original);
-    assert_eq!(changes.get(), 0);
-    assert_eq!(
-        docking
-            .realization_for_test()
-            .unwrap()
-            .borrow()
-            .floating_host_count_for_test(),
-        0
-    );
-}
-
-#[test]
-fn actual_group_pointer_path_respects_dock_capability_and_rule() {
-    let docking = mounted_capability_docking(true, true, false, true);
-    let original = docking.layout();
-    let root: Rc<dyn UIElementExt> = docking.clone();
-    layout_root(
-        &root,
-        Size {
-            width: 720.0,
-            height: 420.0,
-        },
-    );
-    let start = group_title_start(&docking, "documents");
-    let (_, target_bounds) = arranged_group_point(&docking, "tools");
-    let target = Point {
-        x: target_bounds.x + target_bounds.width * 0.5,
-        y: target_bounds.y + target_bounds.height * 0.5,
-    };
-    let changes = Rc::new(Cell::new(0));
-    let changes_for_callback = changes.clone();
-    docking.set_on_layout_change(Box::new(move |_| {
-        changes_for_callback.set(changes_for_callback.get() + 1);
-    }));
-    let dispatcher = PointerDispatcher::new();
-    let focus = FocusTracker::new();
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), start),
-    );
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Moved, target),
-    );
-    assert_eq!(
-        docking
-            .realization_for_test()
-            .unwrap()
-            .borrow()
-            .preview_for_test(&RootKind::Main),
-        None
-    );
-    dispatcher.handle(
-        &root,
-        &focus,
-        pointer_event(RawPointerEventKind::Released(MouseButton::Left), target),
-    );
-
-    assert_eq!(docking.layout(), original);
-    assert_eq!(changes.get(), 0);
-}
-
-#[test]
 fn actual_marker_boundary_matches_resolved_index_and_committed_order() {
     let docking = mounted_unequal_docking();
     let root: Rc<dyn UIElementExt> = docking.clone();
@@ -4030,15 +3977,18 @@ fn actual_marker_boundary_matches_resolved_index_and_committed_order() {
     let second_boundary = target_view
         .tab_insertion_boundary(2)
         .expect("second insertion boundary should be retained");
-    assert_ne!(
-        midpoint_boundary.x - first_boundary.x,
-        second_boundary.x - midpoint_boundary.x,
-        "the marker proof must use unequal arranged header widths"
-    );
+    assert!(second_boundary.x > first_boundary.x);
     let target = Point {
         x: target_bounds.x + midpoint_boundary.x + 1.0,
         y: target_bounds.y + midpoint_boundary.y + midpoint_boundary.height * 0.5,
     };
+    assert_eq!(
+        target_view.tab_insertion_index_at(Point {
+            x: midpoint_boundary.x + 1.0,
+            y: midpoint_boundary.y + midpoint_boundary.height * 0.5,
+        }),
+        Some(1)
+    );
     let source = first_tab_in_group(&docking, "documents");
     let source_node: Rc<dyn UIElementExt> = source;
     let source_bounds = SurfaceRegistry::bounds_in_host_root(&source_node).unwrap();

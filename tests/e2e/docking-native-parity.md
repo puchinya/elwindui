@@ -118,13 +118,6 @@ HWND.
 PASS requires the drag to complete after leaving the source bounds, exactly one new floating HWND,
 visible/interactable item content there, and a usable source main window.
 
-## DNP-07 — whole-group tear-out
-
-Use the group title-bar drag handle.
-
-PASS requires the complete group to move to one floating HWND with all contained tabs/pages and
-selection preserved.
-
 ## DNP-08 — main to existing floating
 
 Create one floating target, then real-drag a dockable item from main into its Center target.
@@ -191,9 +184,7 @@ Run independent resets as needed.
 
 - Error List: Close cannot remove it.
 - Output: item tear-out/Float cannot create a floating root.
-- A group containing Output: whole-group Float is rejected.
 - Git Changes: docking into another group/root is rejected.
-- A group containing Git Changes: whole-group Dock is rejected.
 - Document A or Document B: Auto Hide / Pin is disabled or rejected.
 - Terminal or Solution Explorer: corresponding permitted operations succeed as positive controls.
 

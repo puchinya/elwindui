@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 const TAB_STRIP_HEIGHT: f32 = 32.0;
-const COMPACT_TAB_STRIP_HEIGHT: f32 = 28.0;
 const TAB_DRAG_THRESHOLD: f32 = 4.0;
 
 #[cfg(test)]
@@ -308,6 +307,22 @@ impl CustomTabView {
         self.set_tab_drag_completed_callback(Some(Rc::from(callback)));
     }
 
+    /// Forwards a pointer event from another part of this document's presentation through the
+    /// same selection, threshold, and drag callbacks used by its tab header.
+    #[doc(hidden)]
+    pub fn forward_item_pointer_event(&self, index: usize, event: TabItemPointerEvent) {
+        let Some(item) = self.children_values().get(index).cloned() else {
+            return;
+        };
+        self.handle_item_pointer(&item, event);
+    }
+
+    /// Forwards a pointer event from a selected-document surface through its tab header gesture.
+    #[doc(hidden)]
+    pub fn forward_selected_item_pointer_event(&self, event: TabItemPointerEvent) {
+        self.forward_item_pointer_event(self.selected_index(), event);
+    }
+
     /// Reapplies runtime-owned tab chrome that is resolved from the application theme.
     pub fn refresh_theme(&self) {
         let children = self.children_values();
@@ -497,13 +512,7 @@ impl CustomTabView {
             presenter.reconcile_contents();
         }
         for (index, item) in children.iter().enumerate() {
-            item.set_presentation(
-                index == selected,
-                item.pointer_over(),
-                position,
-                close,
-                compact,
-            );
+            item.set_presentation(index == selected, item.pointer_over(), position, close);
         }
         self.set_last_presented_selected_index(Some(selected));
         self.set_last_presented_tab_strip_position(Some(position));
@@ -566,19 +575,12 @@ impl CustomTabView {
                             item.pointer_over(),
                             position,
                             close,
-                            compact,
                         );
                     }
                 }
             } else {
                 for (index, item) in children.iter().enumerate() {
-                    item.set_presentation(
-                        index == selected,
-                        item.pointer_over(),
-                        position,
-                        close,
-                        compact,
-                    );
+                    item.set_presentation(index == selected, item.pointer_over(), position, close);
                 }
             }
         }
@@ -609,15 +611,16 @@ impl CustomTabView {
         let Some(grid) = root.as_any().downcast_ref::<Grid>() else {
             return;
         };
-        let strip_height = if self.compact() {
-            COMPACT_TAB_STRIP_HEIGHT
-        } else {
-            TAB_STRIP_HEIGHT
-        };
+        let strip_height = TAB_STRIP_HEIGHT;
         let rows = if self.tab_strip_position() == TabStripPosition::Top {
             vec![
                 elwindui::core::layout::GridLength::Fixed(strip_height),
                 elwindui::core::layout::GridLength::Star(1.0),
+            ]
+        } else if self.children_values().len() == 1 {
+            vec![
+                elwindui::core::layout::GridLength::Star(1.0),
+                elwindui::core::layout::GridLength::Fixed(0.0),
             ]
         } else {
             vec![
@@ -626,6 +629,19 @@ impl CustomTabView {
             ]
         };
         grid.set_rows(rows);
+        let strip_visibility = if self.tab_strip_position() == TabStripPosition::Bottom
+            && self.children_values().len() == 1
+        {
+            elwindui::core::layout::Visibility::Collapsed
+        } else {
+            elwindui::core::layout::Visibility::Visible
+        };
+        let strip: Option<Rc<CustomTabStripPresenter>> = self
+            .strip_presenter()
+            .and_then(|presenter| presenter.upgrade());
+        if let Some(strip) = strip {
+            strip.set_visibility(strip_visibility);
+        }
     }
 
     fn validate_children(&self, children: &[Rc<CustomTabViewItem>]) {

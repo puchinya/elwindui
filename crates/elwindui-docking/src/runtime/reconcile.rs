@@ -1,6 +1,6 @@
 //! Reconciliation boundary between the value model and stable runtime item wrappers.
 
-use crate::core::base::{Point, Rect};
+use crate::core::base::{Point, Rect, Size};
 use crate::core::graphics::Color;
 use crate::core::input::PointerEventArgs;
 use crate::core::layout::{
@@ -19,23 +19,24 @@ use crate::{
     DockSplitPanel,
 };
 use elwindui_custom_controls::{
-    CustomGridSplitter, CustomGridSplitterExt, CustomTabView, CustomTabViewExt, CustomTabViewItem,
-    CustomTabViewItemExt, GridResizeBehavior, GridResizeDirection,
-    GridSplitterResizeCompletedEventArgs, GridSplitterResizeStartedEventArgs, TabStripPosition,
+    CloseButtonPresentation, CustomGridSplitter, CustomGridSplitterExt, CustomTabView,
+    CustomTabViewExt, CustomTabViewItem, CustomTabViewItemExt, GridResizeBehavior,
+    GridResizeDirection, GridSplitterResizeCompletedEventArgs, GridSplitterResizeStartedEventArgs,
+    TabItemPointerEvent, TabStripPosition,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::rc::Weak;
 
-use super::drag::{DragSession, DragSourceGeometry, GroupDragSession, ResolvedDockTarget};
+use super::drag::{DragSession, DragSourceGeometry, ResolvedDockTarget};
 #[cfg(test)]
 use super::floating_window::FloatingHostFactory;
 use super::floating_window::{FloatingHostId, FloatingHostRegistry, PreparedFloatingHostSync};
 use super::group_view::replace_group_items;
 use super::metrics::{
-    GROUP_DOCK_BAND_FRACTION, GROUP_DOCK_BAND_MAX, GROUP_DOCK_BAND_MIN, ROOT_TARGET_SIZE,
-    SPLITTER_HIT_SIZE, TAB_INSERTION_MARKER_WIDTH, TITLE_BAR_HEIGHT, TITLE_BUTTON_COLUMN_WIDTH,
+    CONTENT_HEADER_HEIGHT, GROUP_DOCK_BAND_FRACTION, GROUP_DOCK_BAND_MAX, GROUP_DOCK_BAND_MIN,
+    ROOT_TARGET_SIZE, SPLITTER_HIT_SIZE, TAB_INSERTION_MARKER_WIDTH, TITLE_BUTTON_COLUMN_WIDTH,
     TITLE_BUTTON_SIZE, TITLE_TEXT_MARGIN,
 };
 use super::split_view::SplitterSession;
@@ -218,17 +219,17 @@ impl RuntimeNode {
 #[derive(Clone)]
 struct GroupRuntimeHost {
     container: Rc<Grid>,
-    title_bar: Rc<Grid>,
+    content_header: Rc<Grid>,
     title: Rc<TextBlock>,
     empty_hint: Rc<TextBlock>,
     pin_button: Rc<Grid>,
-    float_button: Rc<Grid>,
     close_button: Rc<Grid>,
+    header_drag_handlers_bound: Rc<Cell<bool>>,
 }
 
 impl GroupRuntimeHost {
     fn refresh_theme(&self) {
-        self.title_bar
+        self.content_header
             .set_background(themed_brush(BrushStyle::Secondary));
         self.title
             .set_foreground(themed_brush(BrushStyle::Foreground));
@@ -239,10 +240,6 @@ impl GroupRuntimeHost {
         self.pin_button
             .children()
             .add(RuntimeRealization::private_icon(true));
-        self.float_button.children().clear();
-        self.float_button
-            .children()
-            .add(RuntimeRealization::float_icon());
         self.close_button.children().clear();
         self.close_button
             .children()
@@ -262,7 +259,6 @@ struct PlannedGroup {
     visibility: Visibility,
     title_visibility: Visibility,
     pin_visibility: Visibility,
-    float_visibility: Visibility,
     close_visibility: Visibility,
 }
 
@@ -312,7 +308,6 @@ pub struct RuntimeRealization {
     floating: Vec<FloatingRuntime>,
     split_views: BTreeMap<SplitAddress, (Rc<Grid>, Vec<Rc<CustomGridSplitter>>)>,
     drag: Option<DragSession>,
-    group_drag: Option<GroupDragSession>,
     splitter: Option<SplitterSession>,
     floating_hosts: FloatingHostRegistry,
     surfaces: SurfaceRegistry,
@@ -397,7 +392,6 @@ impl RuntimeRealization {
             floating: Vec::new(),
             split_views: BTreeMap::new(),
             drag: None,
-            group_drag: None,
             splitter: None,
             floating_hosts: FloatingHostRegistry::default(),
             surfaces,
@@ -425,7 +419,6 @@ impl RuntimeRealization {
         // native gesture. Cancel both transient sessions before the next model reconciliation;
         // this is safer than allowing a stale wrapper to commit into the new registry.
         self.drag = None;
-        self.group_drag = None;
         if let Some(mut splitter) = self.splitter.take() {
             splitter.cancel();
         }
@@ -435,7 +428,6 @@ impl RuntimeRealization {
 
     pub(crate) fn cancel_transient(&mut self) {
         self.drag = None;
-        self.group_drag = None;
         if let Some(mut splitter) = self.splitter.take() {
             splitter.cancel();
         }
@@ -750,16 +742,30 @@ impl RuntimeRealization {
             );
         }
         for (root, side, item) in open_auto_hide {
+            let Some(authored) = self.registry.items.get(&item) else {
+                continue;
+            };
+            let wrapper = self.registry.wrapper(&item);
+            let title = authored.title_value();
+            let can_pin = authored.can_pin_value();
+            let can_close = authored.can_close_value();
             if let Some(surface) = match &root {
                 RootKind::Main => Some(&mut self.main_surface),
                 RootKind::Floating(index) => {
                     floating.get_mut(*index).map(|runtime| &mut runtime.surface)
                 }
             } {
-                surface.auto_hide.open(item.clone(), side);
-                surface
-                    .auto_hide
-                    .present_open_item(self.registry.wrapper(&item));
+                let root = surface.surface.content_root();
+                let size = Size {
+                    width: root.arranged_width().unwrap_or(1.0),
+                    height: root.arranged_height().unwrap_or(1.0),
+                };
+                surface.auto_hide.open_from_model(item.clone(), side, size);
+                if surface.auto_hide.current().as_ref() == Some(&item) {
+                    surface
+                        .auto_hide
+                        .present_open_item(wrapper, &title, can_pin, can_close);
+                }
             }
         }
 
@@ -810,26 +816,34 @@ impl RuntimeRealization {
                 .ok_or_else(|| DockLayoutError::InvalidSnapshot {
                     reason: "dock item has no current runtime surface".to_owned(),
                 })?;
-        let group = self
-            .group_items
-            .iter()
-            .find(|(_, items)| items.iter().any(|candidate| candidate == &item))
-            .map(|(group, _)| group)
-            .ok_or_else(|| DockLayoutError::InvalidSnapshot {
-                reason: "dock item has no current runtime group geometry".to_owned(),
-            })?;
-        let group_view =
-            self.groups
-                .get(group)
-                .cloned()
+        let source_node: Rc<dyn UIElementExt> = match self.owners.get(&item) {
+            Some(RuntimePresentationOwner::AutoHide { root }) => self
+                .surface_runtime(root)
+                .map(|surface| surface.auto_hide.drag_source_element())
                 .ok_or_else(|| DockLayoutError::InvalidSnapshot {
-                    reason: "dock item runtime group is unavailable".to_owned(),
+                    reason: "auto-hide Document has no runtime popup geometry".to_owned(),
+                })?,
+            _ => {
+                let group = self
+                    .group_items
+                    .iter()
+                    .find(|(_, items)| items.iter().any(|candidate| candidate == &item))
+                    .map(|(group, _)| group)
+                    .ok_or_else(|| DockLayoutError::InvalidSnapshot {
+                        reason: "dock item has no current runtime group geometry".to_owned(),
+                    })?;
+                let group_view = self.groups.get(group).cloned().ok_or_else(|| {
+                    DockLayoutError::InvalidSnapshot {
+                        reason: "dock item runtime group is unavailable".to_owned(),
+                    }
                 })?;
-        let group_node: Rc<dyn UIElementExt> = group_view;
+                group_view
+            }
+        };
         let source_bounds_host =
-            SurfaceRegistry::bounds_in_host_root(&group_node).ok_or_else(|| {
+            SurfaceRegistry::bounds_in_host_root(&source_node).ok_or_else(|| {
                 DockLayoutError::InvalidSnapshot {
-                    reason: "dock item runtime group has no arranged geometry".to_owned(),
+                    reason: "dock item drag source has no arranged geometry".to_owned(),
                 }
             })?;
         let pointer_offset = Point {
@@ -852,56 +866,6 @@ impl RuntimeRealization {
             source_root,
             source_geometry,
         )?);
-        self.group_drag = None;
-        self.clear_previews();
-        Ok(())
-    }
-
-    pub(crate) fn begin_group_drag(
-        &mut self,
-        model: &DockLayoutModel,
-        group: SnapshotGroupKey,
-        host_root_position: Point,
-    ) -> Result<(), DockLayoutError> {
-        let source_root = self.group_roots.get(&group).cloned().ok_or_else(|| {
-            DockLayoutError::InvalidSnapshot {
-                reason: "group has no current runtime surface".to_owned(),
-            }
-        })?;
-        let group_view =
-            self.groups
-                .get(&group)
-                .cloned()
-                .ok_or_else(|| DockLayoutError::InvalidSnapshot {
-                    reason: "group runtime view is unavailable".to_owned(),
-                })?;
-        let group_node: Rc<dyn UIElementExt> = group_view;
-        let source_bounds_host =
-            SurfaceRegistry::bounds_in_host_root(&group_node).ok_or_else(|| {
-                DockLayoutError::InvalidSnapshot {
-                    reason: "group has no arranged geometry".to_owned(),
-                }
-            })?;
-        let pointer_offset = Point {
-            x: host_root_position.x - source_bounds_host.x,
-            y: host_root_position.y - source_bounds_host.y,
-        };
-        if !pointer_offset.x.is_finite() || !pointer_offset.y.is_finite() {
-            return Err(DockLayoutError::InvalidSnapshot {
-                reason: "group drag pointer offset is not finite".to_owned(),
-            });
-        }
-        self.group_drag = Some(GroupDragSession::begin(
-            model,
-            group,
-            source_root.clone(),
-            DragSourceGeometry {
-                source_root,
-                source_bounds_host,
-                pointer_offset,
-            },
-        )?);
-        self.drag = None;
         self.clear_previews();
         Ok(())
     }
@@ -951,8 +915,6 @@ impl RuntimeRealization {
         let insertion_marker = self.insertion_marker_rect(target);
         if let Some(drag) = self.drag.as_mut() {
             drag.preview(target, weight)?;
-        } else if let Some(drag) = self.group_drag.as_mut() {
-            drag.preview(target, weight)?;
         } else {
             return Err(DockLayoutError::InvalidSnapshot {
                 reason: "dock preview requested without an active drag".to_owned(),
@@ -968,7 +930,7 @@ impl RuntimeRealization {
             });
         };
         surface.preview.show(target);
-        surface.targets.show(target.target);
+        surface.targets.show(target.target, target.group_bounds);
         surface.insertion_marker.show(insertion_marker);
         Ok(())
     }
@@ -981,11 +943,6 @@ impl RuntimeRealization {
         self.drag
             .as_ref()
             .map(|drag| drag.source_geometry().clone())
-            .or_else(|| {
-                self.group_drag
-                    .as_ref()
-                    .map(|drag| drag.source_geometry().clone())
-            })
     }
 
     pub(crate) fn floating_candidate(
@@ -995,18 +952,6 @@ impl RuntimeRealization {
         let Some(drag) = self.drag.as_mut() else {
             return Err(DockLayoutError::InvalidSnapshot {
                 reason: "floating candidate requested without an active drag".to_owned(),
-            });
-        };
-        drag.set_floating_candidate(bounds)
-    }
-
-    pub(crate) fn group_floating_candidate(
-        &mut self,
-        bounds: crate::Rect,
-    ) -> Result<DockLayoutModel, DockLayoutError> {
-        let Some(drag) = self.group_drag.as_mut() else {
-            return Err(DockLayoutError::InvalidSnapshot {
-                reason: "floating candidate requested without an active group drag".to_owned(),
             });
         };
         drag.set_floating_candidate(bounds)
@@ -1063,7 +1008,7 @@ impl RuntimeRealization {
 
     #[cfg(test)]
     pub(crate) fn active_drag_for_test(&self) -> bool {
-        self.drag.is_some() || self.group_drag.is_some()
+        self.drag.is_some()
     }
 
     #[cfg(test)]
@@ -1083,10 +1028,13 @@ impl RuntimeRealization {
     }
 
     #[cfg(test)]
-    pub(crate) fn group_title_bar_for_test(&self, group: &SnapshotGroupKey) -> Option<Rc<Grid>> {
+    pub(crate) fn group_content_header_for_test(
+        &self,
+        group: &SnapshotGroupKey,
+    ) -> Option<Rc<Grid>> {
         self.group_hosts
             .get(group)
-            .map(|host| host.title_bar.clone())
+            .map(|host| host.content_header.clone())
     }
 
     #[cfg(test)]
@@ -1136,7 +1084,7 @@ impl RuntimeRealization {
         self.clear_previews();
         if let Some(surface) = self.surface_runtime_mut(&target.root) {
             surface.preview.show(&target);
-            surface.targets.show(target.target);
+            surface.targets.show(target.target, target.group_bounds);
             surface.insertion_marker.show(insertion_marker);
         }
     }
@@ -1156,11 +1104,7 @@ impl RuntimeRealization {
         screen_position: Option<Point>,
         host_root_position: Point,
     ) -> Option<ResolvedDockTarget> {
-        let source_root = self
-            .drag
-            .as_ref()
-            .map(DragSession::source_root)
-            .or_else(|| self.group_drag.as_ref().map(GroupDragSession::source_root))?;
+        let source_root = self.drag.as_ref().map(DragSession::source_root)?;
         let (root, surface, surface_local_point) = if let Some(screen) = screen_position {
             self.surfaces
                 .entries()
@@ -1202,6 +1146,43 @@ impl RuntimeRealization {
                     .map(|bounds| (key.clone(), bounds))
             })
             .collect();
+        // A root outer band would otherwise cover the first 40 px of the top strip (and the last
+        // 40 px of the bottom strip), leaving individual Documents unable to reorder from the
+        // strip that actually contains their pointer. While a Document drag is active, a point
+        // in an arranged target tab strip resolves to that group before surface edge targets.
+        if self.drag.is_some()
+            && let Some((group, bounds, index)) = groups
+                .iter()
+                .filter_map(|(group, bounds)| {
+                    let group_view = self.groups.get(group)?;
+                    let local = Point {
+                        x: surface_local_point.x - bounds.x,
+                        y: surface_local_point.y - bounds.y,
+                    };
+                    let header = group_view.tab_insertion_boundary(0)?;
+                    (local.y >= header.y
+                        && local.y <= header.y + header.height
+                        && local.x >= 0.0
+                        && local.x <= bounds.width)
+                        .then(|| {
+                            group_view
+                                .tab_insertion_index_at(local)
+                                .map(|index| (group.clone(), *bounds, index))
+                        })?
+                })
+                .min_by(|(_, left, _), (_, right, _)| {
+                    (left.width * left.height).total_cmp(&(right.width * right.height))
+                })
+        {
+            return Some(ResolvedDockTarget {
+                root,
+                target: crate::DockTarget::Center,
+                group: Some(group),
+                group_bounds: Some(bounds),
+                preview_rect: group_preview(bounds, crate::DockTarget::Center)?,
+                tab_insert_index: Some(index),
+            });
+        }
         let target = resolve_local_target(
             root,
             surface_bounds,
@@ -1233,7 +1214,7 @@ impl RuntimeRealization {
                 return Some(resolved);
             }
         }
-        if target.target != crate::DockTarget::Center || self.group_drag.is_some() {
+        if target.target != crate::DockTarget::Center {
             return Some(target);
         }
         let index = group_view.tab_insertion_index_at(local);
@@ -1270,13 +1251,7 @@ impl RuntimeRealization {
                 Some(drag.cancel())
             }
         } else {
-            self.group_drag.take().and_then(|mut drag| {
-                if commit {
-                    drag.commit()
-                } else {
-                    Some(drag.cancel())
-                }
-            })
+            None
         };
         self.clear_previews();
         result
@@ -1320,10 +1295,29 @@ impl RuntimeRealization {
             return;
         };
         if let Some(surface) = self.surface_runtime(root) {
-            surface
-                .auto_hide
-                .present_open_item(self.registry.wrapper(item));
+            self.present_auto_hide_item(surface, item);
         }
+    }
+
+    pub(crate) fn dismiss_auto_hide_for_drag(&self, item: &DockItemId) {
+        let Some(RuntimePresentationOwner::AutoHide { root }) = self.owners.get(item) else {
+            return;
+        };
+        if let Some(surface) = self.surface_runtime(root) {
+            surface.auto_hide.dismiss_for_drag(item);
+        }
+    }
+
+    fn present_auto_hide_item(&self, surface: &SurfaceRuntime, item: &DockItemId) {
+        let Some(authored) = self.registry.items.get(item) else {
+            return;
+        };
+        surface.auto_hide.present_open_item(
+            self.registry.wrapper(item),
+            &authored.title_value(),
+            authored.can_pin_value(),
+            authored.can_close_value(),
+        );
     }
 
     pub(crate) fn open_auto_hide_on(
@@ -1334,11 +1328,25 @@ impl RuntimeRealization {
         self.clear_auto_hide_presentations();
         let wrapper = self.registry.wrapper(&item);
         let side = self.auto_hide_roots.get(&item)?.1;
-        self.surface_runtime_mut(&root).map(|surface| {
-            let previous = surface.auto_hide.open(item.clone(), side);
-            surface.auto_hide.present_open_item(wrapper);
-            previous
-        })?
+        let root_element = self.surface_runtime(&root)?.surface.content_root();
+        let size = Size {
+            width: root_element.arranged_width().unwrap_or(1.0),
+            height: root_element.arranged_height().unwrap_or(1.0),
+        };
+        let authored = self.registry.items.get(&item)?;
+        let title = authored.title_value();
+        let can_pin = authored.can_pin_value();
+        let can_close = authored.can_close_value();
+        let previous = self
+            .surface_runtime_mut(&root)?
+            .auto_hide
+            .open(item, side, size);
+        if let Some(surface) = self.surface_runtime(&root) {
+            surface
+                .auto_hide
+                .present_open_item(wrapper, &title, can_pin, can_close);
+        }
+        previous
     }
 
     pub(crate) fn selected_group_item(&self, group: &SnapshotGroupKey) -> Option<DockItemId> {
@@ -1396,7 +1404,7 @@ impl RuntimeRealization {
 
     pub(crate) fn open_auto_hide_item_on(&self, root: &RootKind) -> Option<DockItemId> {
         self.surface_runtime(root)
-            .and_then(|surface| surface.auto_hide.current().cloned())
+            .and_then(|surface| surface.auto_hide.current())
     }
 
     pub(crate) fn can_pin(&self, item: &DockItemId) -> bool {
@@ -1413,30 +1421,10 @@ impl RuntimeRealization {
             .is_some_and(|item| item.can_float_value())
     }
 
-    pub(crate) fn can_dock(&self, item: &DockItemId) -> bool {
-        self.registry
-            .items
-            .get(item)
-            .is_some_and(|item| item.can_dock_value())
-    }
-
-    pub(crate) fn can_float_group(&self, group: &SnapshotGroupKey) -> bool {
-        self.group_items
-            .get(group)
-            .is_some_and(|items| !items.is_empty() && items.iter().all(|item| self.can_float(item)))
-    }
-
-    pub(crate) fn can_dock_group(&self, group: &SnapshotGroupKey) -> bool {
-        self.group_items
-            .get(group)
-            .is_some_and(|items| !items.is_empty() && items.iter().all(|item| self.can_dock(item)))
-    }
-
     pub(crate) fn dispose(&mut self) {
         self.detach_existing_tree();
         self.surface_root.children().clear();
         self.drag = None;
-        self.group_drag = None;
         self.splitter = None;
         self.clear_previews();
         self.main_surface.auto_hide.close();
@@ -1457,10 +1445,6 @@ impl RuntimeRealization {
 
     pub(crate) fn drag_item(&self) -> Option<DockItemId> {
         self.drag.as_ref().map(|drag| drag.item().clone())
-    }
-
-    pub(crate) fn drag_group(&self) -> Option<SnapshotGroupKey> {
-        self.group_drag.as_ref().map(|drag| drag.group().clone())
     }
 
     fn plan_node(
@@ -1525,27 +1509,14 @@ impl RuntimeRealization {
                     .as_ref()
                     .and_then(|selected| self.registry.items.get(selected));
                 let has_pin = selected_item.is_some_and(|item| item.can_pin_value());
-                // Every group keeps a small title band so the complete group has an explicit
-                // drag source even when its tab strip is at the top. Pin/close remain conditional
-                // affordances inside that shared band.
-                let show_title_bar = true;
-                let title_visibility = if show_title_bar {
+                let has_bottom_header =
+                    tab_position == TabStripPosition::Bottom && selected_item.is_some();
+                let title_visibility = if has_bottom_header {
                     Visibility::Visible
                 } else {
                     Visibility::Collapsed
                 };
                 let pin_visibility = if has_pin {
-                    Visibility::Visible
-                } else {
-                    Visibility::Collapsed
-                };
-                let float_visibility = if !items.is_empty()
-                    && items.iter().all(|item| {
-                        self.registry
-                            .items
-                            .get(item)
-                            .is_some_and(|item| item.can_float_value())
-                    }) {
                     Visibility::Visible
                 } else {
                     Visibility::Collapsed
@@ -1575,7 +1546,6 @@ impl RuntimeRealization {
                         visibility,
                         title_visibility,
                         pin_visibility,
-                        float_visibility,
                         close_visibility,
                     },
                 );
@@ -1649,23 +1619,23 @@ impl RuntimeRealization {
         container.set_rows(vec![GridLength::Auto, GridLength::Star(1.0)]);
         container.set_columns(vec![GridLength::Star(1.0)]);
 
-        let title_bar = Grid::new();
-        title_bar.set_rows(vec![GridLength::Star(1.0)]);
-        title_bar.set_columns(vec![
+        let content_header = Grid::new();
+        content_header.set_rows(vec![GridLength::Star(1.0)]);
+        content_header.set_columns(vec![
             GridLength::Star(1.0),
             GridLength::Fixed(TITLE_BUTTON_COLUMN_WIDTH),
             GridLength::Fixed(TITLE_BUTTON_COLUMN_WIDTH),
-            GridLength::Fixed(TITLE_BUTTON_COLUMN_WIDTH),
         ]);
-        title_bar.set_height(TITLE_BAR_HEIGHT);
-        title_bar.set_background(themed_brush(BrushStyle::Secondary));
+        content_header.set_height(CONTENT_HEADER_HEIGHT);
+        content_header.set_background(themed_brush(BrushStyle::Secondary));
+        content_header.set_visibility(Visibility::Collapsed);
 
         let title = TextBlock::new();
         title.set_foreground(themed_brush(BrushStyle::Foreground));
         title.set_margin(TITLE_TEXT_MARGIN);
         title.set_attached("Grid", "row", 0i32);
         title.set_attached("Grid", "column", 0i32);
-        title_bar.children().add(title.clone());
+        content_header.children().add(title.clone());
 
         let empty_hint = TextBlock::new();
         empty_hint.set_text("Drop here");
@@ -1693,7 +1663,7 @@ impl RuntimeRealization {
                 args.handled.set(true);
                 let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
                 if let Some(owner) = owner {
-                    owner.handle_group_pin(pin_group.clone());
+                    owner.handle_selected_item_pin(pin_group.clone());
                 }
             }),
         );
@@ -1705,45 +1675,15 @@ impl RuntimeRealization {
                 }
             }),
         );
-        title_bar.children().add(pin_button.clone());
-
-        let float_button = Grid::new();
-        // Keep the full button hit-testable without painting a surface over the title bar.
-        float_button.set_background(Some(Color::TRANSPARENT.into()));
-        float_button.set_width(TITLE_BUTTON_SIZE);
-        float_button.set_height(TITLE_BUTTON_SIZE);
-        float_button.set_attached("Grid", "row", 0i32);
-        float_button.set_attached("Grid", "column", 2i32);
-        float_button.children().add(Self::float_icon());
-        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
-        let float_group = group.clone();
-        float_button.register_routed_handler::<PointerEventArgs>(
-            "on_pointer_released",
-            Box::new(move |_, args| {
-                args.handled.set(true);
-                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
-                if let Some(owner) = owner {
-                    owner.handle_group_float(float_group.clone());
-                }
-            }),
-        );
-        float_button.register_routed_handler::<PointerEventArgs>(
-            "on_pointer_pressed",
-            Box::new(|event, args| {
-                if event.button == Some(crate::core::input::MouseButton::Left) {
-                    args.handled.set(true);
-                }
-            }),
-        );
-        title_bar.children().add(float_button.clone());
+        content_header.children().add(pin_button.clone());
 
         let close_button = Grid::new();
-        // Keep the full button hit-testable without painting a surface over the title bar.
+        // Keep the full button hit-testable without painting a surface over the content header.
         close_button.set_background(Some(Color::TRANSPARENT.into()));
         close_button.set_width(TITLE_BUTTON_SIZE);
         close_button.set_height(TITLE_BUTTON_SIZE);
         close_button.set_attached("Grid", "row", 0i32);
-        close_button.set_attached("Grid", "column", 3i32);
+        close_button.set_attached("Grid", "column", 2i32);
         close_button.children().add(Self::private_icon(false));
         let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let close_group = group.clone();
@@ -1753,7 +1693,7 @@ impl RuntimeRealization {
                 args.handled.set(true);
                 let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
                 if let Some(owner) = owner {
-                    owner.handle_group_title_close(close_group.clone());
+                    owner.handle_selected_item_close(close_group.clone());
                 }
             }),
         );
@@ -1765,82 +1705,19 @@ impl RuntimeRealization {
                 }
             }),
         );
-        title_bar.children().add(close_button.clone());
-        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
-        let drag_group = group.clone();
-        title_bar.register_routed_handler::<PointerEventArgs>(
-            "on_pointer_pressed",
-            Box::new(move |event, args| {
-                if !args.handled.get()
-                    && event.button == Some(crate::core::input::MouseButton::Left)
-                {
-                    args.handled.set(true);
-                    let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
-                    if let Some(owner) = owner {
-                        owner.handle_group_drag_started(drag_group.clone(), *event);
-                    }
-                }
-            }),
-        );
-        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
-        let drag_group = group.clone();
-        title_bar.register_routed_handler::<PointerEventArgs>(
-            "on_pointer_moved",
-            Box::new(move |event, args| {
-                if args.handled.get() {
-                    return;
-                }
-                args.handled.set(true);
-                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
-                if let Some(owner) = owner {
-                    owner.handle_group_drag_moved(drag_group.clone(), *event);
-                }
-            }),
-        );
-        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
-        let drag_group = group.clone();
-        title_bar.register_routed_handler::<PointerEventArgs>(
-            "on_pointer_released",
-            Box::new(move |event, args| {
-                if args.handled.get() {
-                    return;
-                }
-                args.handled.set(true);
-                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
-                if let Some(owner) = owner {
-                    owner.handle_group_drag_completed(drag_group.clone(), *event, false);
-                }
-            }),
-        );
-        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
-        let drag_group = group.clone();
-        title_bar.register_routed_handler::<PointerEventArgs>(
-            "on_pointer_canceled",
-            Box::new(move |event, args| {
-                if args.handled.get() {
-                    return;
-                }
-                args.handled.set(true);
-                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
-                if let Some(owner) = owner {
-                    owner.handle_group_drag_completed(drag_group.clone(), *event, true);
-                }
-            }),
-        );
-        title_bar.set_visibility(Visibility::Visible);
-        title_bar.set_attached("Grid", "row", 0i32);
-        title_bar.set_attached("Grid", "column", 0i32);
-        container.children().add(title_bar.clone());
+        content_header.children().add(close_button.clone());
+        content_header.set_attached("Grid", "row", 0i32);
+        content_header.set_attached("Grid", "column", 0i32);
         container.children().add(empty_hint.clone());
 
         GroupRuntimeHost {
             container,
-            title_bar,
+            content_header,
             title,
             empty_hint,
             pin_button,
-            float_button,
             close_button,
+            header_drag_handlers_bound: Rc::new(Cell::new(false)),
         }
     }
 
@@ -1855,14 +1732,17 @@ impl RuntimeRealization {
         )
     }
 
-    fn float_icon() -> Rc<dyn UIElementExt> {
-        chrome_icon(ChromeIcon::Float, themed_brush(BrushStyle::Foreground))
-    }
-
     fn apply_planned_group(&self, planned: &PlannedGroup) {
         replace_group_items(&planned.view, planned.tabs.clone());
         planned.view.set_tab_strip_position(planned.tab_position);
         planned.view.set_compact(planned.compact_tabs);
+        planned.view.set_close_button_presentation(
+            if planned.tab_position == TabStripPosition::Top {
+                CloseButtonPresentation::OnPointerOver
+            } else {
+                CloseButtonPresentation::Never
+            },
+        );
         if let Some(selected) = planned.selected.as_ref() {
             if let Some(index) = planned.items.iter().position(|item| item == selected) {
                 planned.view.select_index(index);
@@ -1870,24 +1750,15 @@ impl RuntimeRealization {
         }
         planned.host.container.children().clear();
         planned.host.container.set_visibility(planned.visibility);
-        planned
-            .host
-            .container
-            .children()
-            .add(planned.host.title_bar.clone());
         planned.host.title.set_text(&planned.title);
         planned
             .host
-            .title_bar
+            .content_header
             .set_visibility(planned.title_visibility);
         planned
             .host
             .pin_button
             .set_visibility(planned.pin_visibility);
-        planned
-            .host
-            .float_button
-            .set_visibility(planned.float_visibility);
         planned
             .host
             .close_button
@@ -1902,6 +1773,12 @@ impl RuntimeRealization {
             });
         planned.view.set_attached_if_changed("Grid", "row", 1i32);
         planned.view.set_attached_if_changed("Grid", "column", 0i32);
+        planned
+            .host
+            .container
+            .children()
+            .add(planned.host.content_header.clone());
+        self.bind_content_header_drag(&planned.host, &planned.view);
         planned.host.container.children().add(planned.view.clone());
         planned
             .host
@@ -1910,6 +1787,93 @@ impl RuntimeRealization {
             .add(planned.host.empty_hint.clone());
         #[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
         self.install_tab_context_menus(&planned.items);
+    }
+
+    fn bind_content_header_drag(&self, host: &GroupRuntimeHost, view: &Rc<CustomTabView>) {
+        if host.header_drag_handlers_bound.replace(true) {
+            return;
+        }
+        let weak_view: Weak<CustomTabView> = Rc::downgrade(view);
+        host.content_header
+            .register_routed_handler::<PointerEventArgs>(
+                "on_pointer_pressed",
+                Box::new(
+                    move |event: &PointerEventArgs, args: &crate::core::input::RoutedEventArgs| {
+                        if args.handled.get()
+                            || event.button != Some(crate::core::input::MouseButton::Left)
+                        {
+                            return;
+                        }
+                        let view: Option<Rc<CustomTabView>> = weak_view.upgrade();
+                        if let Some(view) = view {
+                            view.forward_selected_item_pointer_event(TabItemPointerEvent::Pressed(
+                                *event,
+                            ));
+                            args.handled.set(true);
+                        }
+                    },
+                ),
+            );
+
+        let weak_view: Weak<CustomTabView> = Rc::downgrade(view);
+        host.content_header
+            .register_routed_handler::<PointerEventArgs>(
+                "on_pointer_moved",
+                Box::new(
+                    move |event: &PointerEventArgs, args: &crate::core::input::RoutedEventArgs| {
+                        if args.handled.get() {
+                            return;
+                        }
+                        let view: Option<Rc<CustomTabView>> = weak_view.upgrade();
+                        if let Some(view) = view {
+                            view.forward_selected_item_pointer_event(TabItemPointerEvent::Moved(
+                                *event,
+                            ));
+                            args.handled.set(true);
+                        }
+                    },
+                ),
+            );
+
+        let weak_view: Weak<CustomTabView> = Rc::downgrade(view);
+        host.content_header
+            .register_routed_handler::<PointerEventArgs>(
+                "on_pointer_released",
+                Box::new(
+                    move |event: &PointerEventArgs, args: &crate::core::input::RoutedEventArgs| {
+                        if args.handled.get() {
+                            return;
+                        }
+                        let view: Option<Rc<CustomTabView>> = weak_view.upgrade();
+                        if let Some(view) = view {
+                            view.forward_selected_item_pointer_event(
+                                TabItemPointerEvent::Released(*event),
+                            );
+                            args.handled.set(true);
+                        }
+                    },
+                ),
+            );
+
+        let weak_view: Weak<CustomTabView> = Rc::downgrade(view);
+        host.content_header
+            .register_routed_handler::<PointerEventArgs>(
+                "on_pointer_canceled",
+                Box::new(
+                    move |event: &PointerEventArgs, args: &crate::core::input::RoutedEventArgs| {
+                        if args.handled.get() {
+                            return;
+                        }
+                        let view: Option<Rc<CustomTabView>> = weak_view.upgrade();
+                        if let Some(view) = view {
+                            view.forward_selected_item_pointer_event(
+                                TabItemPointerEvent::Canceled(*event),
+                            );
+                            args.handled.set(true);
+                        }
+                    },
+                ),
+            );
     }
 
     #[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
@@ -2538,6 +2502,7 @@ fn resolve_local_target(
             root,
             target,
             group: None,
+            group_bounds: None,
             preview_rect: outer_preview(surface_bounds, target)?,
             tab_insert_index: None,
         });
@@ -2582,6 +2547,7 @@ fn resolve_local_target(
         root,
         target,
         group: Some(group),
+        group_bounds: Some(bounds),
         preview_rect: group_preview(bounds, target)?,
         tab_insert_index: None,
     })

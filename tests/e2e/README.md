@@ -71,6 +71,11 @@ The Docking native interaction parity case is
 on WinUI3 and is reusable for AppKit invalidation/reruns. Its product semantics are backend-neutral;
 GTK4 is not a native-floating acceptance backend while native Window support remains unavailable.
 
+The WinUI.Dock visual and interaction fidelity case is
+[`docking-winuidock-fidelity.md`](docking-winuidock-fidelity.md). Its WinUI3 matrix is required for
+Issue [#285](https://github.com/puchinya/elwindui/issues/285); drag cases operate on one individual
+Document and do not define a group-level drag operation.
+
 The Window-lifetime case is [`window-lifetime.md`](window-lifetime.md). It uses
 `examples/custom-controls-demo` for the generated caller-drop shape and reuses the real-input
 mechanics from [`self-drawn-pointer-input.md`](self-drawn-pointer-input.md) rather than defining a

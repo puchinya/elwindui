@@ -39,6 +39,7 @@ are not exposed as writable construction properties.
 
 - `selected_index: usize`, default `0`, TwoWay;
 - `tab_strip_position: TabStripPosition`, default `Top`;
+- `compact: bool`, default `false`;
 - `close_button_presentation: CloseButtonPresentation`, default `Always`.
 
 The ordered-list surface is `children(&self) -> &dyn
@@ -67,10 +68,23 @@ The press below that threshold emits no drag callbacks. Core cancellation emits
 one canceled completion and item removal cancels an active drag before detach.
 
 `TabStripPosition::Top` reserves a 32 logical-pixel strip above content;
-`Bottom` reserves it below. Selected content occupies the remaining rectangle;
+`Bottom` reserves it below. Both positions use the same strip and header height
+regardless of `compact`. Selected content occupies the remaining rectangle;
 unselected items remain Visual children, are arranged to `0 x 0`, and are clipped.
 Header widths reserve the same close slot for `Always` and `OnPointerOver`, so
 hover does not resize a tab.
+
+The selected header joins the selected-content frame with the corresponding
+rounded outline treatment. Unselected headers retain their separator and
+bottom-line structure; pointer-over presents the tab-header hover background
+without changing selection. These visual states do not replace wrappers or page
+content.
+
+`compact = false` distributes available tab-strip width among the current items,
+with each header capped at 200 logical pixels. `compact = true` measures each
+header from its content and applies the same computed maximum width; long titles
+therefore do not take the entire strip. Compact mode changes width behavior only,
+not strip height, header height, selection, or content arrangement.
 
 The default template is a `Grid` containing a private non-rendering tab-strip
 presenter and a private non-rendering content presenter. The strip uses the
@@ -88,13 +102,14 @@ Bottom places it in row 1; the other row is the selected-content presenter.
 
 The item’s authored default template subtree is the tab header: it contains a
 `TextBlock`, an optional `IconSourceElement`, a fixed close slot, and a
-`Rectangle` selected-indicator slot. The inherited `content` is not rendered by
+selected-frame/indicator slot. The inherited `content` is not rendered by
 the header. A private content presenter owns the visual presentation of all
 current item contents while preserving each item as the logical owner;
 selection only changes arrangement and never reparents content.
 The item header tracks are `30` logical pixels for the header and `2` for the
 indicator at `Top`, and `2` for the indicator followed by `30` for the header at
-`Bottom`; the total item height remains `32`.
+`Bottom`; the total item height remains `32` for both compact and non-compact
+presentation.
 
 The default close affordance is a private composed component using a 20-pixel
 slot and a `TextBlock` `×` glyph. `Always` and `OnPointerOver` reserve the same

@@ -35,7 +35,7 @@ pub(crate) use custom_tab_content_presenter::{
     CustomTabContentPresenter, CustomTabContentPresenterExt,
 };
 pub(crate) use custom_tab_strip_presenter::{CustomTabStripPresenter, CustomTabStripPresenterExt};
-pub use custom_tab_view::{CustomTabView, CustomTabViewExt};
+pub use custom_tab_view::{CustomTabView, CustomTabViewExt, TabItemPointerEvent};
 pub use custom_tab_view_item::{CustomTabViewItem, CustomTabViewItemExt};
 pub(crate) use support::weak_self_from_visual_owner;
 pub use types::{

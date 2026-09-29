@@ -1,4 +1,5 @@
 use super::core;
+use super::core::base::Size;
 use super::core::graphics::IconSource;
 use super::core::input::PointerEventArgs;
 use super::core::layout::Visibility;
@@ -15,7 +16,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 const TAB_HEADER_HEIGHT: f32 = 30.0;
-const COMPACT_TAB_HEADER_HEIGHT: f32 = 26.0;
 
 #[cfg(test)]
 thread_local! {
@@ -45,8 +45,6 @@ pub struct CustomTabViewItem {
     is_pointer_over: bool,
     #[state(default = TabStripPosition::Top)]
     tab_strip_position: TabStripPosition,
-    #[state(default = false)]
-    compact: bool,
     #[state(default = CloseButtonPresentation::Always)]
     close_button_presentation: CloseButtonPresentation,
     #[computed(expr = if tab_strip_position == TabStripPosition::Top { 0 } else { 1 })]
@@ -81,12 +79,36 @@ pub struct CustomTabViewItem {
     initial_close_glyph_visible: bool,
     #[computed(expr = if is_selected { Visibility::Visible } else { Visibility::Collapsed })]
     indicator_visibility: Visibility,
+    #[computed(expr = if is_selected || is_pointer_over { Visibility::Visible } else { Visibility::Collapsed })]
+    chrome_background_visibility: Visibility,
+    #[computed(expr = if is_selected {
+        elwindui::core::theme::BrushStyle::Background
+    } else {
+        elwindui::core::theme::BrushStyle::Secondary
+    })]
+    chrome_background: elwindui::core::theme::BrushStyle,
+    #[computed(expr = if is_selected {
+        elwindui::core::theme::BrushStyle::Primary
+    } else {
+        elwindui::core::theme::BrushStyle::Value(core::graphics::Color::TRANSPARENT.into())
+    })]
+    chrome_stroke: elwindui::core::theme::BrushStyle,
+    #[computed(expr = if is_selected { 1.0 } else { 0.0 })]
+    chrome_stroke_width: f32,
+    #[computed(expr = if is_selected {
+        elwindui::core::theme::BrushStyle::Primary
+    } else {
+        elwindui::core::theme::BrushStyle::Separator
+    })]
+    indicator_fill: elwindui::core::theme::BrushStyle,
+    #[computed(expr = if is_selected { Visibility::Collapsed } else { Visibility::Visible })]
+    separator_visibility: Visibility,
     template: template_view!(|this: Self| {
         on_mount {
             this.bind_header_handlers();
             this.sync_close_button();
         }
-        on_update(header, icon, closable, is_selected, tab_strip_position, compact, close_button_presentation) {
+        on_update(header, icon, closable, is_selected, tab_strip_position, close_button_presentation) {
             this.sync_close_button();
         }
         let close_button = CustomTabCloseButton {
@@ -95,14 +117,18 @@ pub struct CustomTabViewItem {
         };
         Grid {
             rows: header_grid_rows
-            columns: [
-                elwindui::core::layout::GridLength::Fixed(10.0),
-                elwindui::core::layout::GridLength::Auto,
-                elwindui::core::layout::GridLength::Fixed(10.0),
-            ]
+            columns: [elwindui::core::layout::GridLength::Star(1.0)]
+            Rectangle {
+                Grid::row: header_row
+                fill: chrome_background
+                stroke: chrome_stroke
+                stroke_width: chrome_stroke_width
+                corner_radius: 4.0
+                visibility: chrome_background_visibility
+                hit_test_visible: false
+            }
             HorizontalLayout {
                 Grid::row: header_row
-                Grid::column: 1
                 height: header_height
                 spacing: 6.0
                 IconSourceElement {
@@ -117,12 +143,19 @@ pub struct CustomTabViewItem {
                     text_alignment: elwindui::core::ui::TextAlignment::Center
                 }
                 close_button
+                Rectangle {
+                    width: 1.0
+                    height: header_height
+                    fill: elwindui::core::theme::BrushStyle::Separator
+                    visibility: separator_visibility
+                    hit_test_visible: false
+                }
             }
             Rectangle {
                 Grid::row: indicator_row
-                Grid::column: 1
-                fill: elwindui::core::theme::BrushStyle::Primary
+                fill: indicator_fill
                 visibility: indicator_visibility
+                hit_test_visible: false
             }
         }
     }),
@@ -137,6 +170,38 @@ impl CustomTabViewItem {
 }
 
 impl CustomTabViewItem {
+    pub(crate) fn intrinsic_header_width(&self, maximum: f32, height: f32) -> f32 {
+        if let Some(width) = self.width() {
+            return width.clamp(0.0, maximum);
+        }
+        let Some(header) = self
+            .__template_root()
+            .and_then(|root| root.visual_children().get(1).cloned())
+        else {
+            return 0.0;
+        };
+        let header = header.as_ui_element();
+        let children = header.visual_children();
+        let mut width = 0.0;
+        let mut count = 0;
+        for child in children {
+            let child = child.as_ui_element();
+            child.measure(Size {
+                width: maximum,
+                height,
+            });
+            if !child.participates_in_layout() {
+                continue;
+            }
+            width += child.measured_size().map(|size| size.width).unwrap_or(0.0);
+            count += 1;
+        }
+        if count > 1 {
+            width += 6.0 * (count - 1) as f32;
+        }
+        width.min(maximum)
+    }
+
     /// Creates a tab item with its default presentation properties.
     pub fn new_item() -> Rc<Self> {
         Self::new()
@@ -191,7 +256,6 @@ impl CustomTabViewItem {
         is_pointer_over: bool,
         tab_strip_position: TabStripPosition,
         close_button_presentation: CloseButtonPresentation,
-        compact_tabs: bool,
     ) {
         #[cfg(test)]
         self.note_presentation_update();
@@ -202,10 +266,8 @@ impl CustomTabViewItem {
             self.set_is_pointer_over(is_pointer_over);
         }
         let position_changed = self.tab_strip_position() != tab_strip_position;
-        let compact_changed = self.compact() != compact_tabs;
-        if position_changed || compact_changed {
+        if position_changed {
             self.set_tab_strip_position(tab_strip_position);
-            self.set_compact(compact_tabs);
             self.sync_header_layout();
         }
         if self.close_button_presentation() != close_button_presentation {
@@ -255,33 +317,33 @@ impl CustomTabViewItem {
         let Some(root) = self.__template_root() else {
             return;
         };
-        let compact_height = if self.compact() {
-            COMPACT_TAB_HEADER_HEIGHT
-        } else {
-            TAB_HEADER_HEIGHT
-        };
         if let Some(grid) = root.as_any().downcast_ref::<Grid>() {
             let indicator_height = 2.0;
             let rows = if self.tab_strip_position() == TabStripPosition::Top {
                 vec![
-                    elwindui::core::layout::GridLength::Fixed(compact_height),
+                    elwindui::core::layout::GridLength::Fixed(TAB_HEADER_HEIGHT),
                     elwindui::core::layout::GridLength::Fixed(indicator_height),
                 ]
             } else {
                 vec![
                     elwindui::core::layout::GridLength::Fixed(indicator_height),
-                    elwindui::core::layout::GridLength::Fixed(compact_height),
+                    elwindui::core::layout::GridLength::Fixed(TAB_HEADER_HEIGHT),
                 ]
             };
             grid.set_rows(rows);
         }
         let children = root.visual_children();
-        if let Some(header) = children.first() {
+        if let Some(background) = children.first() {
+            background
+                .as_ui_element()
+                .set_attached::<i32>("Grid", "row", self.header_row());
+        }
+        if let Some(header) = children.get(1) {
             let header = header.as_ui_element();
             header.set_attached::<i32>("Grid", "row", self.header_row());
-            header.set_height(compact_height);
+            header.set_height(TAB_HEADER_HEIGHT);
         }
-        if let Some(indicator) = children.get(1) {
+        if let Some(indicator) = children.get(2) {
             indicator
                 .as_ui_element()
                 .set_attached::<i32>("Grid", "row", self.indicator_row());

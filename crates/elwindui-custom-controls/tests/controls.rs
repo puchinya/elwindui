@@ -83,7 +83,7 @@ fn item_indicator(item: &Rc<CustomTabViewItem>) -> Rc<dyn UIElementExt> {
         .expect("tab item template root")
         .visual_children()
         .into_iter()
-        .nth(1)
+        .nth(2)
         .expect("tab item indicator")
 }
 
@@ -175,8 +175,49 @@ fn compact_tab_metrics_update_the_retained_tab_view_grid() {
     view.set_compact(true);
     assert!(matches!(
         grid.rows.borrow().first(),
-        Some(GridLength::Fixed(height)) if (*height - 28.0).abs() < f32::EPSILON
+        Some(GridLength::Fixed(height)) if (*height - 32.0).abs() < f32::EPSILON
     ));
+}
+
+#[test]
+fn compact_tab_widths_follow_content_under_the_normal_width_cap() {
+    let short = CustomTabViewItem::new_item();
+    short.set_header("A".to_string());
+    let medium = CustomTabViewItem::new_item();
+    medium.set_header("Medium title".to_string());
+    let long = CustomTabViewItem::new_item();
+    long.set_header("A much longer document title that reaches the cap".to_string());
+    let view = CustomTabView::new_view();
+    view.set_children(vec![short.clone(), medium.clone(), long.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    let size = Size {
+        width: 640.0,
+        height: 120.0,
+    };
+    layout_root(&root, size);
+    let normal_widths = [
+        short.arranged_width().expect("short normal tab width"),
+        medium.arranged_width().expect("medium normal tab width"),
+        long.arranged_width().expect("long normal tab width"),
+    ];
+    let normal_height = short.arranged_height().expect("normal tab height");
+    assert!(
+        normal_widths
+            .iter()
+            .all(|width| (*width - 200.0).abs() < 0.01)
+    );
+
+    view.set_compact(true);
+    layout_root(&root, size);
+    let compact_widths = [
+        short.arranged_width().expect("short compact tab width"),
+        medium.arranged_width().expect("medium compact tab width"),
+        long.arranged_width().expect("long compact tab width"),
+    ];
+    assert!(compact_widths[0] < compact_widths[1]);
+    assert!(compact_widths[0] < compact_widths[2]);
+    assert!(compact_widths.iter().all(|width| *width <= 200.0));
+    assert_eq!(short.arranged_height(), Some(normal_height));
 }
 
 #[test]
@@ -931,12 +972,13 @@ fn tab_insertion_uses_retained_unequal_header_midpoints_and_boundaries() {
     third.set_header("C".to_string());
     third.set_width(80.0);
     let view = CustomTabView::new_view();
+    view.set_compact(true);
     view.set_children(vec![first, second, third]);
     let root: Rc<dyn UIElementExt> = view.clone();
     layout_root(
         &root,
         Size {
-            width: 300.0,
+            width: 450.0,
             height: 120.0,
         },
     );
@@ -946,7 +988,11 @@ fn tab_insertion_uses_retained_unequal_header_midpoints_and_boundaries() {
         Some(0)
     );
     assert_eq!(
-        view.tab_insertion_index_at(Point { x: 41.0, y: 16.0 }),
+        view.tab_insertion_index_at(Point { x: 42.0, y: 16.0 }),
+        Some(0)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 43.0, y: 16.0 }),
         Some(1)
     );
     assert_eq!(
@@ -954,7 +1000,7 @@ fn tab_insertion_uses_retained_unequal_header_midpoints_and_boundaries() {
         Some(1)
     );
     assert_eq!(
-        view.tab_insertion_index_at(Point { x: 151.0, y: 16.0 }),
+        view.tab_insertion_index_at(Point { x: 153.0, y: 16.0 }),
         Some(2)
     );
     assert_eq!(
@@ -962,25 +1008,25 @@ fn tab_insertion_uses_retained_unequal_header_midpoints_and_boundaries() {
         Some(2)
     );
     assert_eq!(
-        view.tab_insertion_index_at(Point { x: 261.0, y: 16.0 }),
+        view.tab_insertion_index_at(Point { x: 263.0, y: 16.0 }),
         Some(3)
     );
     assert_eq!(
         view.tab_insertion_index_at(Point { x: 150.0, y: 60.0 }),
         None
     );
-    assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(0.0));
+    assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(2.0));
     assert_eq!(
         view.tab_insertion_boundary(1).map(|rect| rect.x),
-        Some(80.0)
+        Some(82.0)
     );
     assert_eq!(
         view.tab_insertion_boundary(2).map(|rect| rect.x),
-        Some(220.0)
+        Some(222.0)
     );
     assert_eq!(
         view.tab_insertion_boundary(3).map(|rect| rect.x),
-        Some(300.0)
+        Some(302.0)
     );
 }
 
@@ -1029,6 +1075,7 @@ fn header_and_icon_property_changes_resync_the_template_subtree() {
     let item = CustomTabViewItem::new_item();
     item.set_header("a".to_string());
     let view = CustomTabView::new_view();
+    view.set_compact(true);
     view.set_children(vec![item.clone()]);
     let root: Rc<dyn UIElementExt> = view.clone();
     layout_root(
@@ -1125,8 +1172,10 @@ fn selected_indicator_moves_without_recreating_header_items() {
 fn tab_item_header_and_indicator_tracks_follow_strip_position() {
     let item = CustomTabViewItem::new_item();
     item.set_header("document".to_string());
+    let second = CustomTabViewItem::new_item();
+    second.set_header("another document".to_string());
     let view = CustomTabView::new_view();
-    view.set_children(vec![item.clone()]);
+    view.set_children(vec![item.clone(), second]);
     let root: Rc<dyn UIElementExt> = view.clone();
 
     layout_root(
@@ -2317,7 +2366,6 @@ fn close_affordance_is_composed_and_respects_presentation() {
         },
     );
 
-    let always_width = item.arranged_width().expect("tab width");
     assert!(close_icon_is_vector(&item));
 
     view.set_close_button_presentation(CloseButtonPresentation::Never);
@@ -2328,10 +2376,8 @@ fn close_affordance_is_composed_and_respects_presentation() {
             height: 120.0,
         },
     );
-    let never_width = item.arranged_width().expect("tab width");
     let _never = RenderTree::new::<()>(&root);
     assert!(!close_icon_is_vector(&item));
-    assert_eq!(always_width, never_width + 20.0);
 
     view.set_close_button_presentation(CloseButtonPresentation::OnPointerOver);
     layout_root(
@@ -2341,7 +2387,14 @@ fn close_affordance_is_composed_and_respects_presentation() {
             height: 120.0,
         },
     );
-    assert_eq!(item.arranged_width(), Some(never_width + 20.0));
+    let target: Rc<dyn UIElementExt> = item.clone();
+    dispatch_routed(
+        &target,
+        "on_pointer_entered",
+        &pointer(Point { x: 1.0, y: 1.0 }, None),
+        &RoutedEventArgs::default(),
+    );
+    assert!(close_icon_is_vector(&item));
 }
 
 #[test]

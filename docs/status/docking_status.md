@@ -1,19 +1,20 @@
 # Docking status
 
-Snapshot: 2026-09-26. Docking behavior is defined by the docking specification and its durable design documents under [`../design/`](../design/).
+Snapshot: 2026-09-29. Docking behavior is defined by the docking specification and its durable design documents under [`../design/`](../design/).
 
 ## Current implementation
 
 - `elwindui-docking` is a separate consumer crate with stable item/group IDs, authored defaults, dynamic registration, immutable `DockLayoutModel` values, version-2 snapshots, active/closed/auto-hide state, normalization, and generated groups.
 - `DockingControl` keeps authored declarations collapsed, owns one retained runtime host, publishes the initial default once, suppresses source echoes, and stages structural changes through a private `ReconcilePlan`.
 - Retained wrappers, group views, split Grids, CustomGridSplitters, tab presenters, auto-hide strips, side-aware popup panes, drop previews, insertion markers, and explicit detach-before-attach ownership are implemented.
-- CustomTabView and CustomGridSplitter callbacks use weak docking owners. Selection, close, tab drag, Grid track movement, whole-group dragging, indexed context actions, capability flags, and empty-group presentation are wired through retained hosts.
+- CustomTabView and CustomGridSplitter callbacks use weak docking owners. Selection, close, individual Document tab drag, Grid track movement, indexed context actions, capability flags, and empty-group presentation are wired through retained hosts. Dock groups have no independent drag, tear-out, or cross-dock gesture; the Top tab strip's empty space is not a group drag handle.
 - AppKit and WinUI 3 floating hosts use staged prepare/commit creation, stable host IDs, logical bounds, close interception, rejected-close preservation, and empty-host cleanup. GTK model floating remains valid but has no usable native Window implementation.
 - Docking chrome uses cached vector geometry and transparent hit-test surfaces; the docking demo composes documents, nested tools, floating windows, auto-hide, and retained DockingControl state.
 - Issue #279 keeps normal retained tab selection on a selection-only publication path: one layout publication and callback, with no DockingControl containing-tree invalidation or full runtime reconciliation. Fast-path qualification reads live model roots without snapshots. Runtime theme refresh is gated by the 11-value BrushStyle signature.
 
 ## Current verification state
 
+- Issue #285 implementation verification on the current worktree passes `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and the package regression command `cargo test -p elwindui-custom-controls -p elwindui-docking`. The package tests pass 19 library tests plus 49 controls tests and 89 docking tests. `rust-analyzer diagnostics .` passes with no hard errors; its 273 weak warnings are all `inactive-code` from cfg-disabled test code. WDF-01..16 visual comparison is BLOCKED because the pinned WinUI.Dock reference app produced no HWND on the test host. The 2026-09-29 product-side native run stopped before launch because the driver reported `input_desktop_probe: unavailable`; DNP-02/03/04L/05R/06 are NOT RUN and the empty-strip probe is BLOCKED. These are not native parity acceptance results.
 - Focused model, reconciliation, retained-presentation, pointer-path, splitter, floating-host, snapshot, auto-hide, weak-lifetime, and workspace tests pass.
 - Issue #259 AppKit revalidation passes exactly DNP-12, DNP-13, DNP-15, DNP-21, DNP-22, DNP-23, and DNP-24 on tested HEAD `6060a7725ddcae821da58e98576ecb420f5725e2`; DNP-25 passes through those native rows plus `window_lifetime_appkit` and the relevant deterministic `elwindui-docking` tests. The authoritative final manifest is immutable under `.agent-state/issues/259/e2e/6060a77/20260922T103912Z/final-result.md`; earlier incomplete retries remain retained as historical evidence and are superseded by this final run.
 - The historical WinUI3 DNP-01..25 matrix for Issue #226 passed on tested HEAD `c589a142208bc46d2c48c29d948ec92719839756` ([final matrix result](https://github.com/puchinya/elwindui/issues/226#issuecomment-5771368668)). This evidence does not verify Issue #279 or PR #281 at its current HEAD. The backend-neutral native parity case is [`../../tests/e2e/docking-native-parity.md`](../../tests/e2e/docking-native-parity.md); the separate AppKit #259 subset is recorded above and does not imply an AppKit DNP-01..25 run.

@@ -1,7 +1,11 @@
-use super::core::base::{Point, Rect};
+use super::core::base::{Point, Rect, Size};
 use super::core::ui::{LayoutExt, UIElementExt};
 use super::{CloseButtonPresentation, CustomTabViewItem, TabStripPosition};
 use std::rc::Rc;
+
+const TAB_STRIP_HEIGHT: f32 = 32.0;
+const TAB_STRIP_FRAME_INSET: f32 = 2.0;
+const TAB_HEADER_MAX_WIDTH: f32 = 200.0;
 
 /// Private presenter that owns the ordered tab-header controls and delegates layout to
 /// `HorizontalLayout`.
@@ -38,6 +42,34 @@ pub(crate) struct CustomTabStripPresenter {
 }
 
 impl CustomTabStripPresenter {
+    fn max_item_width(available_width: f32, count: usize) -> f32 {
+        if count == 0 {
+            return 0.0;
+        }
+        let inner_width = if available_width.is_finite() {
+            (available_width - TAB_STRIP_FRAME_INSET * 2.0).max(0.0)
+        } else {
+            TAB_HEADER_MAX_WIDTH * count as f32
+        };
+        (inner_width / count as f32).min(TAB_HEADER_MAX_WIDTH)
+    }
+
+    fn constrain_items(&self, items: &[Rc<CustomTabViewItem>], max_width: f32) {
+        for item in items {
+            let min_width = if self.compact() { 0.0 } else { max_width };
+            if item.min_width() != Some(min_width) {
+                item.set_min_width(min_width);
+            }
+            if item.max_width() != Some(max_width) {
+                item.set_max_width(max_width);
+            }
+        }
+    }
+
+    fn measured_item_width(item: &CustomTabViewItem, maximum: f32, height: f32) -> f32 {
+        item.intrinsic_header_width(maximum, height)
+    }
+
     /// Resolves a point against the retained arranged tab headers. This intentionally reads only
     /// the last layout result: a drag preview must not reconcile the presenter or measure pages.
     pub(crate) fn tab_insertion_index_at(&self, point: Point) -> Option<usize> {
@@ -169,7 +201,6 @@ impl CustomTabStripPresenter {
                 item.pointer_over(),
                 position,
                 presentation,
-                compact,
             );
         }
         self.set_last_presented_selected_index(Some(selected));
@@ -191,7 +222,6 @@ impl CustomTabStripPresenter {
                     item.pointer_over(),
                     self.tab_strip_position(),
                     self.close_button_presentation(),
-                    self.compact(),
                 );
             }
         }
@@ -201,4 +231,63 @@ impl CustomTabStripPresenter {
 }
 
 #[elwindui::component]
-impl CustomTabStripPresenter {}
+impl CustomTabStripPresenter {
+    #[overrides]
+    fn measure_override(&self, available: Size) -> Size {
+        let items = self.items();
+        if items.is_empty() {
+            return Size {
+                width: TAB_STRIP_FRAME_INSET * 2.0,
+                height: TAB_STRIP_HEIGHT,
+            };
+        }
+        let max_width = Self::max_item_width(available.width, items.len());
+        self.constrain_items(&items, max_width);
+        let mut content_width = 0.0;
+        for item in &items {
+            item.measure(Size {
+                width: max_width,
+                height: available.height,
+            });
+            content_width += if self.compact() {
+                Self::measured_item_width(item, max_width, available.height)
+            } else {
+                max_width
+            };
+        }
+        Size {
+            width: content_width + TAB_STRIP_FRAME_INSET * 2.0,
+            height: TAB_STRIP_HEIGHT,
+        }
+    }
+
+    #[overrides]
+    fn arrange_override(&self, final_size: Size) -> Size {
+        let items = self.items();
+        if items.is_empty() {
+            return final_size;
+        }
+        let max_width = Self::max_item_width(final_size.width, items.len());
+        self.constrain_items(&items, max_width);
+        let mut x = TAB_STRIP_FRAME_INSET;
+        for item in &items {
+            item.measure(Size {
+                width: max_width,
+                height: final_size.height,
+            });
+            let width = if self.compact() {
+                Self::measured_item_width(item, max_width, final_size.height)
+            } else {
+                max_width
+            };
+            item.arrange(Rect {
+                x,
+                y: 0.0,
+                width,
+                height: final_size.height,
+            });
+            x += width;
+        }
+        final_size
+    }
+}

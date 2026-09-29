@@ -57,7 +57,7 @@ impl SurfaceRuntime {
         owner: &std::rc::Weak<DockingControl>,
     ) -> Self {
         let auto_hide = AutoHideOverlay::new();
-        auto_hide.bind_pin_handler(owner, root.clone());
+        auto_hide.bind_handlers(owner, root.clone());
         let preview = DropPreview::new();
         let targets = DockTargetOverlay::new();
         let insertion_marker = InsertionMarker::new();
@@ -70,6 +70,9 @@ impl SurfaceRuntime {
             insertion_marker,
         };
         runtime.reset_visual_children();
+        runtime
+            .auto_hide
+            .bind_light_dismiss(&runtime.surface.content_root());
         runtime
     }
 

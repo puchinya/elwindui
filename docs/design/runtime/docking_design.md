@@ -52,16 +52,20 @@ request equal-width headers.
 ## Main surface and split realization
 
 `DockSurfaceView` is the private retained root containing the main root and the surface chrome. A
-snapshot split with N children is realized as one Grid with N Star pane tracks and N-1 Fixed(12)
-splitter tracks. Horizontal splits use columns and one Star row; vertical splits use rows and one
-Star column. Every splitter records a private `SplitAddress` (main/floating root plus child path)
-and adjacent boundary index.
+snapshot split with N children is realized as one Grid with N Star pane tracks and N-1 splitter
+controls. Horizontal splits use columns, one Star row, and `column_spacing = 12`; vertical splits
+use rows, one Star column, and `row_spacing = 12`. The 12-pixel Grid spacing separates adjacent
+pane bounds. A splitter occupies that gap: it is placed in the following pane's track, has a
+12-pixel hit extent on the split axis, and is translated -12 pixels on that axis. No separate
+splitter track is added. Every splitter records a private `SplitAddress` (main/floating root plus
+child path) and adjacent boundary index.
 
 Each realized splitter is a `CustomGridSplitter` with explicit
-`Columns`/`Rows` direction and `PreviousAndNext` behavior. Its full hit target fills the 12-pixel
-Grid gutter while the visible 4-by-24 or 24-by-4 grip stays centered. Realization copies
-Docking pane min/max rules into the Grid's indexed track constraints; fixed
-splitter tracks remain unconstrained. The splitter captures the authoritative
+`Columns`/`Rows` direction and `PreviousAndCurrent` behavior, which resolves the preceding and
+following pane tracks from its following-track placement. Its 12-pixel hit target occupies the
+spacing gap while the visible 4-by-24 or 24-by-4 grip stays centered. Realization copies Docking
+pane min/max rules into the Grid's indexed pane-track constraints; spacing and splitter visuals do
+not become pane tracks or constraints. The splitter captures the authoritative
 Grid definitions, resolved sizes, and constraints and owns all live preview,
 baseline-derived cumulative resizing, relayout, and cancellation restoration.
 
@@ -172,11 +176,14 @@ replaces a tab wrapper or page.
 
 The generic tab view paints a neutral content frame and makes the selected header meet that frame.
 Its tab row has a 6-pixel leading baseline and a trailing baseline after compact headers; header
-content uses 12-pixel leading and 8-pixel trailing insets. Docking's private group host adds an
-active-color frame over the content area and an active-document marker 12 pixels from the leading
-edge of the corresponding arranged tab. The overlay reads the retained item's arranged bounds,
-so tab widths and group resizing do not require a public Docking-specific property on
-`CustomTabView`.
+content uses 12-pixel leading and 8-pixel trailing insets. Selection and document activation remain
+separate: reconciliation drives active chrome only from `DockLayoutModel::active_item()` and never
+falls back to the selected tab. With no active item, the selected header keeps its normal outline
+but has no active marker or group frame. An active `CustomTabViewItem` owns its 4-by-16 marker
+inside the header before the title. Its intrinsic width includes the marker slot only while active,
+along with title and reserved action slot, so compact document labels remain visible. Docking's
+private group host adds the active-color frame over content only for an explicitly active document;
+it does not paint the document marker over the page.
 
 Docking-specific chrome stays in the retained group realization keyed by `DockGroupId`; there is no
 independent group title or group drag surface. In a Bottom group, the active item's title and

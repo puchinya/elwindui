@@ -39,13 +39,17 @@ content identity. Runtime ownership changes use detach-before-attach.
 capture, cancellation, root-relative position, and optional logical screen position.
 `CustomGridSplitter` owns splitter Grid discovery, track mutation, constraints, live relayout,
 rollback, and resize notifications. Split nodes with N children realize as one retained Grid with N
-panes and N-1 twelve-pixel `CustomGridSplitter`s. Horizontal splitters use explicit
-`resize_direction = Columns` and `resize_behavior = PreviousAndNext`; vertical splitters use
-`Rows` and `PreviousAndNext`.
+Star pane tracks and N-1 twelve-pixel `CustomGridSplitter`s. Horizontal splits set
+`column_spacing = 12`; vertical splits set `row_spacing = 12`, leaving a 12-logical-pixel gap between
+adjacent pane bounds. The splitter is placed at the beginning of the following pane's track and
+translated -12 logical px on the split axis, so its 12-pixel hit target occupies the gap without a
+separate splitter track. Horizontal splitters use `resize_direction = Columns` and
+`resize_behavior = PreviousAndCurrent`; vertical splitters use `Rows` and `PreviousAndCurrent`, so
+each splitter resizes exactly the two panes on either side of its gap. The visible 4-by-24 column
+grip or 24-by-4 row grip remains centered in that target.
 
-Docking supplies pane min/max rules as Grid-owned track constraints during realization. The splitter
-track and hit area occupy the full twelve-logical-pixel gutter. Splitter tracks remain unconstrained
-unless a Docking rule says otherwise. A successful splitter completion
+Docking supplies pane min/max rules as Grid-owned track constraints during realization. Splitter
+hit targets do not participate in pane min/max constraints. A successful splitter completion
 updates adjacent normalized model weights exactly once from the effective completed cumulative delta;
 Docking does not preview, clamp, restore, or reapply Grid definitions. A canceled completion
 discards only Docking's model transaction and publishes no model change because the splitter has
@@ -58,8 +62,14 @@ bottom-tab groups render tabs below their content and a content header for the s
 when exactly one Document is present, the bottom tab strip collapses while the content header and
 content remain visible.
 The selected tab joins the content frame with the reference rounded outline treatment. The active
-Document's group uses the active frame stroke, and its tab carries a distinct active marker. Top-tab
-pin/close affordances appear on pointer hover; bottom-tab actions belong to the content header.
+Document's group uses the active frame stroke, and its tab carries a distinct 4-by-16 active marker
+inside the header, after the leading inset and before the title. Active-document state comes only
+from `DockLayoutModel::active_item()` and is independent of tab selection: when there is no active
+item, selection alone does not show the active frame or marker. Compact measurement includes the
+marker when active and the title so the title remains legible. The active marker is not drawn over
+page content.
+Top-tab pin/close affordances appear on pointer hover; bottom-tab actions belong to the content
+header.
 All Docking drag sources represent one Document. A tab drag may reorder that Document, move it to a
 group/root, split a target group, or float it, subject to the item's capability checks. Docking has
 no group-level drag, tear-out, or cross-dock operation. Bottom content-header actions and drag

@@ -217,7 +217,14 @@ fn compact_tab_widths_follow_content_under_the_normal_width_cap() {
     assert!(compact_widths[0] < compact_widths[1]);
     assert!(compact_widths[0] < compact_widths[2]);
     assert!(compact_widths.iter().all(|width| *width <= 200.0));
+    assert!(
+        compact_widths[1] >= 60.0,
+        "compact tab width must retain a readable title, got {}",
+        compact_widths[1]
+    );
     assert_eq!(short.arranged_height(), Some(normal_height));
+    let texts = rendered_texts(&RenderTree::new::<()>(&root));
+    assert!(texts.iter().any(|text| text == "Medium title"));
 }
 
 #[test]

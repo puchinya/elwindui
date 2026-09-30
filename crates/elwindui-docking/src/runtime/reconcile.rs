@@ -1,6 +1,6 @@
 //! Reconciliation boundary between the value model and stable runtime item wrappers.
 
-use crate::core::base::{Point, Rect, Size};
+use crate::core::base::{Point, Rect, Size, Vector};
 use crate::core::graphics::Color;
 use crate::core::input::PointerEventArgs;
 use crate::core::layout::{
@@ -9,7 +9,7 @@ use crate::core::layout::{
 use crate::core::theme::BrushStyle;
 use crate::core::ui::{
     ControlExt, Grid, GridExt, LayoutExt, Rectangle, ShapeExt, TextBlock, TextBlockExt,
-    TextStyleOwner, UIElementExt,
+    TextStyleOwner, UIElementExt, VisualTransform,
 };
 #[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
 use crate::core::ui::{MenuExt, MenuItemExt};
@@ -257,8 +257,6 @@ struct GroupChromeOverlay {
     #[prop(default = false)]
     is_active: bool,
     #[prop(default = None)]
-    view: Option<Weak<CustomTabView>>,
-    #[prop(default = None)]
     active_tab: Option<Rc<CustomTabViewItem>>,
     #[prop(default = TabStripPosition::Top)]
     tab_position: TabStripPosition,
@@ -269,7 +267,6 @@ struct GroupChromeOverlay {
     template: template_view!(|this: Self| {
         on_update(transparent_brush) { }
         let active_frame = Rectangle {
-            Grid::row: 1
             fill: transparent_brush
             stroke: BrushStyle::Primary
             stroke_width: 1.0
@@ -277,25 +274,10 @@ struct GroupChromeOverlay {
             visibility: Visibility::Collapsed
             hit_test_visible: false
         };
-        let active_marker = Rectangle {
-            width: 4.0
-            height: 16.0
-            fill: BrushStyle::Primary
-            vertical_alignment: VerticalAlignment::Center
-            visibility: Visibility::Collapsed
-            hit_test_visible: false
-        };
-        let marker_track = Grid {
-            Grid::row: 0
-            rows: [GridLength::Star(1.0)]
-            columns: [GridLength::Star(1.0)]
-            active_marker
-        };
         Grid {
             rows: [GridLength::Fixed(32.0), GridLength::Star(1.0)]
             columns: [GridLength::Star(1.0)]
             active_frame
-            marker_track
         }
     }),
 }
@@ -319,26 +301,17 @@ impl GroupChromeOverlay {
         let Some(frame) = children.first().cloned() else {
             return final_size;
         };
-        let Some(marker_track) = children.get(1).cloned() else {
-            return final_size;
-        };
-        let Some(marker) = marker_track.visual_children().first().cloned() else {
-            return final_size;
-        };
-
         let strip_height = self.strip_height().max(0.0);
-        let (rows, strip_row, content_row) = if strip_height <= 0.0 {
-            (vec![GridLength::Star(1.0), GridLength::Fixed(0.0)], 1, 0)
+        let (rows, content_row) = if strip_height <= 0.0 {
+            (vec![GridLength::Star(1.0), GridLength::Fixed(0.0)], 0)
         } else if self.tab_position() == TabStripPosition::Top {
             (
                 vec![GridLength::Fixed(strip_height), GridLength::Star(1.0)],
-                0,
                 1,
             )
         } else {
             (
                 vec![GridLength::Star(1.0), GridLength::Fixed(strip_height)],
-                1,
                 0,
             )
         };
@@ -348,21 +321,7 @@ impl GroupChromeOverlay {
         frame
             .as_ui_element()
             .set_attached_if_changed("Grid", "row", content_row);
-        marker_track
-            .as_ui_element()
-            .set_attached_if_changed("Grid", "row", strip_row);
         frame.set_visibility(if self.is_active() {
-            Visibility::Visible
-        } else {
-            Visibility::Collapsed
-        });
-        let marker_visible = self.is_active() && self.active_tab().is_some() && strip_height > 0.0;
-        marker_track.set_visibility(if marker_visible {
-            Visibility::Visible
-        } else {
-            Visibility::Collapsed
-        });
-        marker.set_visibility(if marker_visible {
             Visibility::Visible
         } else {
             Visibility::Collapsed
@@ -375,44 +334,7 @@ impl GroupChromeOverlay {
             height: final_size.height.max(0.0),
         });
 
-        if let Some(tab_bounds) = self.active_tab_bounds_in_view() {
-            let marker_y = active_marker_y(tab_bounds);
-            marker.arrange(Rect {
-                x: tab_bounds.x + 12.0,
-                y: marker_y,
-                width: 4.0,
-                height: 16.0,
-            });
-        }
         final_size
-    }
-}
-
-fn active_marker_y(tab_bounds: Rect) -> f32 {
-    tab_bounds.y + ((tab_bounds.height - 16.0) * 0.5).max(0.0)
-}
-
-#[cfg(test)]
-mod active_marker_tests {
-    use super::*;
-
-    #[test]
-    fn active_marker_tracks_top_and_bottom_tab_rows() {
-        let top = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 120.0,
-            height: 32.0,
-        };
-        let bottom = Rect {
-            x: 0.0,
-            y: 268.0,
-            width: 120.0,
-            height: 32.0,
-        };
-
-        assert_eq!(active_marker_y(top), 8.0);
-        assert_eq!(active_marker_y(bottom), 276.0);
     }
 }
 
@@ -420,7 +342,6 @@ impl GroupChromeOverlay {
     fn set_presentation(
         &self,
         is_active: bool,
-        view: Option<Weak<CustomTabView>>,
         active_tab: Option<Rc<CustomTabViewItem>>,
         tab_position: TabStripPosition,
         strip_height: f32,
@@ -430,25 +351,20 @@ impl GroupChromeOverlay {
             self.set_is_active(is_active);
             changed = true;
         }
-        let same_view = match (self.view().and_then(|view| view.upgrade()), view.as_ref()) {
-            (Some(current), Some(next)) => next
-                .upgrade()
-                .is_some_and(|next: Rc<CustomTabView>| Rc::ptr_eq(&current, &next)),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same_view {
-            self.set_view(view);
-            changed = true;
-        }
         let same_tab = match (self.active_tab(), active_tab.as_ref()) {
             (Some(current), Some(next)) => Rc::ptr_eq(&current, next),
             (None, None) => true,
             _ => false,
         };
         if !same_tab {
-            self.set_active_tab(active_tab);
+            if let Some(previous) = self.active_tab() {
+                previous.set_active_document_marker_visible(false);
+            }
+            self.set_active_tab(active_tab.clone());
             changed = true;
+        }
+        if let Some(tab) = active_tab.as_ref() {
+            tab.set_active_document_marker_visible(is_active);
         }
         if self.tab_position() != tab_position {
             self.set_tab_position(tab_position);
@@ -463,32 +379,6 @@ impl GroupChromeOverlay {
         }
     }
 
-    fn active_tab_bounds_in_view(&self) -> Option<Rect> {
-        let tab: Rc<dyn UIElementExt> = self.active_tab()?;
-        let view: Rc<dyn UIElementExt> = self.view()?.upgrade()?;
-        let mut current = tab;
-        let mut x = 0.0;
-        let mut y = 0.0;
-        for _ in 0..64 {
-            let offset = current.arranged_offset()?;
-            let width = current.arranged_width()?;
-            let height = current.arranged_height()?;
-            x += offset.x;
-            y += offset.y;
-            let parent = current.visual_parent()?;
-            if Rc::ptr_eq(&parent, &view) {
-                return Some(Rect {
-                    x,
-                    y,
-                    width,
-                    height,
-                });
-            }
-            current = parent;
-        }
-        None
-    }
-
     fn refresh_theme(&self) {
         let Some(root) = self.__template_root() else {
             return;
@@ -499,15 +389,6 @@ impl GroupChromeOverlay {
             .and_then(|child| child.as_any().downcast_ref::<Rectangle>())
         {
             frame.set_stroke(themed_brush(BrushStyle::Primary));
-        }
-        if let Some(marker) = root
-            .visual_children()
-            .get(1)
-            .and_then(|track| track.visual_children().first().cloned())
-        {
-            if let Some(marker) = marker.as_any().downcast_ref::<Rectangle>() {
-                marker.set_fill(themed_brush(BrushStyle::Primary));
-            }
         }
     }
 }
@@ -768,7 +649,7 @@ impl RuntimeRealization {
     ) -> Result<ReconcilePlan, DockLayoutError> {
         let snapshot = model.snapshot();
         crate::snapshot::validate_snapshot(&snapshot)?;
-        let active_item = model.active_item().or_else(|| model.selected_item_id());
+        let active_item = model.active_item();
         let desired_owners = desired_owners(&snapshot);
         let floating_count = snapshot.floating_roots.len();
         let mut auto_hide_roots = BTreeMap::new();
@@ -1285,6 +1166,14 @@ impl RuntimeRealization {
     }
 
     #[cfg(test)]
+    pub(crate) fn active_group_chrome_count_for_test(&self) -> usize {
+        self.group_hosts
+            .values()
+            .filter(|host| host.active_chrome.is_active())
+            .count()
+    }
+
+    #[cfg(test)]
     pub(crate) fn active_drag_for_test(&self) -> bool {
         self.drag.is_some()
     }
@@ -1682,7 +1571,7 @@ impl RuntimeRealization {
     }
 
     fn sync_active_group_chrome(&self, model: &DockLayoutModel) {
-        let active_item = model.active_item().or_else(|| model.selected_item_id());
+        let active_item = model.active_item();
         for (group, host) in &self.group_hosts {
             let view = self.groups.get(group);
             let items = self.group_items.get(group);
@@ -1705,7 +1594,6 @@ impl RuntimeRealization {
             };
             host.active_chrome.set_presentation(
                 active_tab.is_some(),
-                view.map(Rc::downgrade),
                 active_tab,
                 tab_position,
                 strip_height,
@@ -2074,7 +1962,6 @@ impl RuntimeRealization {
             };
         planned.host.active_chrome.set_presentation(
             planned.is_active,
-            Some(Rc::downgrade(&planned.view)),
             planned.active_tab.clone(),
             planned.tab_position,
             strip_height,
@@ -2271,6 +2158,8 @@ impl RuntimeRealization {
                 grid.children().clear();
                 match planned.orientation {
                     SnapshotOrientation::Horizontal => {
+                        grid.set_row_spacing(0.0);
+                        grid.set_column_spacing(SPLITTER_HIT_SIZE);
                         grid.set_rows(vec![GridLength::Star(1.0)]);
                         let mut columns = Vec::new();
                         let mut column_constraints = Vec::new();
@@ -2293,28 +2182,58 @@ impl RuntimeRealization {
                             element.as_ui_element().set_attached_if_changed(
                                 "Grid",
                                 "column",
-                                (index * 2) as i32,
+                                index as i32,
                             );
                             grid.children().add(element);
-                            if index + 1 < children.len() {
-                                columns.push(GridLength::Fixed(SPLITTER_HIT_SIZE));
-                                column_constraints.push(GridTrackConstraint::default());
-                                let splitter = planned.splitters[index].clone();
-                                splitter.set_resize_direction(GridResizeDirection::Columns);
-                                splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
-                                splitter.set_attached_if_changed(
-                                    "Grid",
-                                    "column",
-                                    (index * 2 + 1) as i32,
-                                );
-                                self.wire_splitter(&splitter, grid.clone(), address.clone(), index);
-                                grid.children().add(splitter);
-                            }
                         }
                         grid.set_columns(columns);
                         grid.set_column_constraints(column_constraints);
+                        for index in 0..children.len().saturating_sub(1) {
+                            let splitter = planned.splitters[index].clone();
+                            if splitter.resize_direction() != GridResizeDirection::Columns {
+                                splitter.set_resize_direction(GridResizeDirection::Columns);
+                            }
+                            if splitter.resize_behavior() != GridResizeBehavior::PreviousAndCurrent
+                            {
+                                splitter
+                                    .set_resize_behavior(GridResizeBehavior::PreviousAndCurrent);
+                            }
+                            if splitter.width() != Some(SPLITTER_HIT_SIZE) {
+                                splitter.set_width(SPLITTER_HIT_SIZE);
+                            }
+                            let base = splitter.as_ui_element();
+                            if base.height.get().is_some()
+                                || base.presentation_height.get().is_some()
+                            {
+                                base.height.set(None);
+                                base.presentation_height.set(None);
+                                splitter.invalidate_measure();
+                            }
+                            if splitter.horizontal_alignment() != HorizontalAlignment::Left {
+                                splitter.set_horizontal_alignment(HorizontalAlignment::Left);
+                            }
+                            if splitter.vertical_alignment() != VerticalAlignment::Stretch {
+                                splitter.set_vertical_alignment(VerticalAlignment::Stretch);
+                            }
+                            let transform = VisualTransform::new(
+                                Vector {
+                                    x: -SPLITTER_HIT_SIZE,
+                                    y: 0.0,
+                                },
+                                1.0,
+                                0.0,
+                            );
+                            if base.visual_transform.get() != transform {
+                                splitter.set_visual_transform(transform);
+                            }
+                            splitter.set_attached_if_changed("Grid", "column", (index + 1) as i32);
+                            self.wire_splitter(&splitter, grid.clone(), address.clone(), index);
+                            grid.children().add(splitter);
+                        }
                     }
                     SnapshotOrientation::Vertical => {
+                        grid.set_column_spacing(0.0);
+                        grid.set_row_spacing(SPLITTER_HIT_SIZE);
                         grid.set_columns(vec![GridLength::Star(1.0)]);
                         let mut rows = Vec::new();
                         let mut row_constraints = Vec::new();
@@ -2337,26 +2256,53 @@ impl RuntimeRealization {
                             element.as_ui_element().set_attached_if_changed(
                                 "Grid",
                                 "row",
-                                (index * 2) as i32,
+                                index as i32,
                             );
                             grid.children().add(element);
-                            if index + 1 < children.len() {
-                                rows.push(GridLength::Fixed(SPLITTER_HIT_SIZE));
-                                row_constraints.push(GridTrackConstraint::default());
-                                let splitter = planned.splitters[index].clone();
-                                splitter.set_resize_direction(GridResizeDirection::Rows);
-                                splitter.set_resize_behavior(GridResizeBehavior::PreviousAndNext);
-                                splitter.set_attached_if_changed(
-                                    "Grid",
-                                    "row",
-                                    (index * 2 + 1) as i32,
-                                );
-                                self.wire_splitter(&splitter, grid.clone(), address.clone(), index);
-                                grid.children().add(splitter);
-                            }
                         }
                         grid.set_rows(rows);
                         grid.set_row_constraints(row_constraints);
+                        for index in 0..children.len().saturating_sub(1) {
+                            let splitter = planned.splitters[index].clone();
+                            if splitter.resize_direction() != GridResizeDirection::Rows {
+                                splitter.set_resize_direction(GridResizeDirection::Rows);
+                            }
+                            if splitter.resize_behavior() != GridResizeBehavior::PreviousAndCurrent
+                            {
+                                splitter
+                                    .set_resize_behavior(GridResizeBehavior::PreviousAndCurrent);
+                            }
+                            if splitter.height() != Some(SPLITTER_HIT_SIZE) {
+                                splitter.set_height(SPLITTER_HIT_SIZE);
+                            }
+                            let base = splitter.as_ui_element();
+                            if base.width.get().is_some() || base.presentation_width.get().is_some()
+                            {
+                                base.width.set(None);
+                                base.presentation_width.set(None);
+                                splitter.invalidate_measure();
+                            }
+                            if splitter.horizontal_alignment() != HorizontalAlignment::Stretch {
+                                splitter.set_horizontal_alignment(HorizontalAlignment::Stretch);
+                            }
+                            if splitter.vertical_alignment() != VerticalAlignment::Top {
+                                splitter.set_vertical_alignment(VerticalAlignment::Top);
+                            }
+                            let transform = VisualTransform::new(
+                                Vector {
+                                    x: 0.0,
+                                    y: -SPLITTER_HIT_SIZE,
+                                },
+                                1.0,
+                                0.0,
+                            );
+                            if base.visual_transform.get() != transform {
+                                splitter.set_visual_transform(transform);
+                            }
+                            splitter.set_attached_if_changed("Grid", "row", (index + 1) as i32);
+                            self.wire_splitter(&splitter, grid.clone(), address.clone(), index);
+                            grid.children().add(splitter);
+                        }
                     }
                 }
                 grid.clone()

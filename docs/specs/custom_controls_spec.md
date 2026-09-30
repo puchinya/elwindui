@@ -73,7 +73,10 @@ collapses the strip to zero height. Both positions use the same strip and
 header height regardless of `compact`. Selected content occupies the remaining rectangle;
 unselected items remain Visual children, are arranged to `0 x 0`, and are clipped.
 Header widths reserve the same close slot for `Always` and `OnPointerOver`, so
-hover does not resize a tab.
+hover does not resize a tab. Compact width measurement includes the title,
+leading/trailing insets, icon, and reserved action slot. A measured compact tab
+must retain enough width to show its title rather than collapsing to icon-only
+or action-only chrome.
 
 The strip baseline uses a six-logical-pixel leading rule and continues to the
 right of the compact tab headers. Header text follows the WinUI.Dock header
@@ -173,9 +176,11 @@ indices, input kind, optional positions, and the effective cumulative delta.
 Grid mutation or rollback, session update/clear, and then notification are the
 required ordering. The default template is ordinary composed chrome with a
 centered 24-by-4 logical-pixel grip for `Rows` and a 4-by-24 grip for `Columns`.
-The grip stays inside the parent-assigned splitter track; Docking assigns a
-12-pixel track and full-track hit target. `Auto` uses a centered six-by-six grip
-until an explicit direction is selected. The surface uses neutral,
+The grip stays inside the parent-assigned splitter hit target. Docking creates a
+12-logical-pixel inter-pane gap with `Grid.column_spacing` or `Grid.row_spacing`
+and places the 12-pixel hit target in that gap by translating the splitter from
+the following pane track. This does not add a separate splitter track. `Auto`
+uses a centered six-by-six grip until an explicit direction is selected. The surface uses neutral,
 pointer-over/focus, and pressed Fluent-style colors and does not draw chrome
 through a `RenderContext` override.
 

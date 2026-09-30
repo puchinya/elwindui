@@ -611,6 +611,8 @@ struct FormPanel {
         Grid {
             rows: [GridLength::Auto, GridLength::Star(1.0)]
             columns: [GridLength::Fixed(120.0), GridLength::Star(1.0)]
+            row_spacing: 8.0
+            column_spacing: 12.0
             TextBlock { text: "Header", Grid::row: 0, Grid::column: 0 }
             Button { text: "Click", Grid::row: 1, Grid::column: 1 }
         }

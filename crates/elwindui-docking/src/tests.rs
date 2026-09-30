@@ -35,8 +35,8 @@ use super::{
 };
 use elwindui_core::base::Rect;
 use elwindui_custom_controls::{
-    CustomGridSplitter, CustomTabView, CustomTabViewExt, CustomTabViewItem,
-    TabDragCompletedEventArgs, TabStripPosition,
+    CustomGridSplitter, CustomGridSplitterExt, CustomTabView, CustomTabViewExt, CustomTabViewItem,
+    GridResizeBehavior, GridResizeDirection, TabDragCompletedEventArgs, TabStripPosition,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -3436,9 +3436,149 @@ fn three_pane_runtime_split_realizes_two_splitters() {
     docking.set_content(split);
     docking.mount(application_environment());
     assert!(docking.apply_template());
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
 
     let splitters = find_all::<CustomGridSplitter>(docking.as_ref());
     assert_eq!(splitters.len(), 2);
+    let split_grid = splitters[0]
+        .visual_parent()
+        .expect("runtime splitters should share their split Grid");
+    let split_grid = split_grid
+        .as_any()
+        .downcast_ref::<Grid>()
+        .expect("splitter parent should be a Grid");
+    assert_eq!(split_grid.columns.borrow().len(), 3);
+    assert_eq!(split_grid.column_constraints.borrow().len(), 3);
+    assert_eq!(split_grid.resolved_column_sizes().len(), 3);
+
+    let children = split_grid.visual_children();
+    assert_eq!(children.len(), 5);
+    let panes = [&children[0], &children[1], &children[2]];
+    for pair in panes.windows(2) {
+        let previous_right =
+            pair[0].arranged_offset().unwrap().x + pair[0].arranged_width().unwrap();
+        let next_left = pair[1].arranged_offset().unwrap().x;
+        assert!(
+            ((next_left - previous_right) - 12.0).abs() < 0.01,
+            "pane tracks should be separated by the reference 12 px Grid spacing"
+        );
+    }
+    for (index, splitter) in splitters.iter().enumerate() {
+        let splitter = splitter
+            .as_any()
+            .downcast_ref::<CustomGridSplitter>()
+            .expect("runtime splitter should retain its control type");
+        assert_eq!(splitter.resize_direction(), GridResizeDirection::Columns);
+        assert_eq!(
+            splitter.resize_behavior(),
+            GridResizeBehavior::PreviousAndCurrent
+        );
+        assert_eq!(splitter.width(), Some(12.0));
+        assert_eq!(
+            splitter
+                .as_ui_element()
+                .get_attached::<i32>("Grid", "column", -1),
+            (index + 1) as i32
+        );
+        assert_eq!(
+            splitter
+                .as_ui_element()
+                .visual_transform
+                .get()
+                .translation
+                .x,
+            -12.0
+        );
+    }
+}
+
+#[test]
+fn selected_document_without_activation_has_no_active_chrome() {
+    let docking = mounted_default_docking();
+    assert_eq!(docking.layout().selected_item_id(), Some(item("first")));
+    assert_eq!(docking.layout().active_item(), None);
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
+
+    let visible_markers = visible_active_document_markers(&docking);
+    assert!(visible_markers.is_empty());
+    let realization = docking.realization_for_test().unwrap();
+    assert_eq!(realization.borrow().active_group_chrome_count_for_test(), 0);
+}
+
+#[test]
+fn active_document_marker_is_inside_the_tab_header_before_its_title() {
+    let docking = mounted_default_docking();
+    let active = docking
+        .layout()
+        .with_item_activated(&item("first"))
+        .expect("a live document should be activatable");
+    docking.set_layout(active);
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
+
+    let visible_markers = visible_active_document_markers(&docking);
+
+    assert_eq!(visible_markers.len(), 1);
+    let (item, marker) = &visible_markers[0];
+    let item_bounds = SurfaceRegistry::bounds_in_host_root(item).expect("tab should be arranged");
+    let marker_bounds =
+        SurfaceRegistry::bounds_in_host_root(marker).expect("active marker should be arranged");
+    assert!((marker_bounds.x - (item_bounds.x + 12.0)).abs() < 0.01);
+    assert!(marker_bounds.y >= item_bounds.y);
+    assert!(marker_bounds.y + marker_bounds.height <= item_bounds.y + item_bounds.height);
+
+    let title = find_all::<TextBlock>(item.as_ref())
+        .into_iter()
+        .find(|text| {
+            text.as_any()
+                .downcast_ref::<TextBlock>()
+                .is_some_and(|text| text.text.borrow().as_str() == "First")
+        })
+        .expect("active tab title should remain visible");
+    let title_bounds = SurfaceRegistry::bounds_in_host_root(&title).expect("title should arrange");
+    assert!(title_bounds.x > marker_bounds.x + marker_bounds.width);
+    let realization = docking.realization_for_test().unwrap();
+    assert_eq!(realization.borrow().active_group_chrome_count_for_test(), 1);
+}
+
+fn visible_active_document_markers(
+    docking: &DockingControl,
+) -> Vec<(Rc<dyn UIElementExt>, Rc<dyn UIElementExt>)> {
+    let mut visible_markers = Vec::new();
+    for wrapper in find_all::<CustomTabViewItem>(docking) {
+        let Some(item) = wrapper.as_any().downcast_ref::<CustomTabViewItem>() else {
+            continue;
+        };
+        for marker in find_all::<Rectangle>(item) {
+            if marker.width() == Some(4.0)
+                && marker.height() == Some(16.0)
+                && marker.visibility() == Visibility::Visible
+            {
+                visible_markers.push((wrapper.clone(), marker));
+            }
+        }
+    }
+    visible_markers
 }
 
 #[test]
@@ -4698,7 +4838,7 @@ fn actual_splitter_pointer_path_lets_grid_own_preview_and_commits_once_or_restor
         .expect("splitter parent should be the retained split Grid");
     let original_tracks = grid.columns.borrow().clone();
     let start = Point {
-        x: bounds.x + bounds.width * 0.5,
+        x: bounds.x + bounds.width * 0.5 - 12.0,
         y: bounds.y + bounds.height * 0.5,
     };
     let changes = Rc::new(Cell::new(0));
@@ -4799,7 +4939,7 @@ fn actual_splitter_pointer_path_lets_grid_own_preview_and_commits_once_or_restor
     let canceled_node: Rc<dyn UIElementExt> = canceled_splitter.clone();
     let canceled_bounds = SurfaceRegistry::bounds_in_host_root(&canceled_node).unwrap();
     let canceled_start = Point {
-        x: canceled_bounds.x + canceled_bounds.width * 0.5,
+        x: canceled_bounds.x + canceled_bounds.width * 0.5 - 12.0,
         y: canceled_bounds.y + canceled_bounds.height * 0.5,
     };
     let canceled_grid_node = canceled_splitter
@@ -4884,7 +5024,7 @@ fn splitter_preview_remeasures_retained_children_for_live_layout() {
     }
 
     let start = Point {
-        x: splitter_bounds.x + splitter_bounds.width * 0.5,
+        x: splitter_bounds.x + splitter_bounds.width * 0.5 - 12.0,
         y: splitter_bounds.y + splitter_bounds.height * 0.5,
     };
     let dispatcher = PointerDispatcher::new();

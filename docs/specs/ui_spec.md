@@ -460,6 +460,8 @@ A `#[elwindui::component(inherits Window)]`-declared component ("host compositio
 |---|---|---|---|
 | `rows` | `Vec<GridLength>` | OneTime | 行サイズ定義（`Auto`, `Fixed(f32)`, `Star(f32)`） |
 | `columns` | `Vec<GridLength>` | OneTime | 列サイズ定義（`Auto`, `Fixed(f32)`, `Star(f32)`） |
+| `row_spacing` | `Option<f32>` | OneTime | 隣接する行トラックの間隔（未指定時 `0.0`、先頭・末尾には加算しない） |
+| `column_spacing` | `Option<f32>` | OneTime | 隣接する列トラックの間隔（未指定時 `0.0`、先頭・末尾には加算しない） |
 | `row_constraints` | `Vec<GridTrackConstraint>` | OneTime | 行ごとの最小・最大サイズ制約 |
 | `column_constraints` | `Vec<GridTrackConstraint>` | OneTime | 列ごとの最小・最大サイズ制約 |
 
@@ -478,6 +480,13 @@ Gridの直下にある子要素は以下の添付プロパティを指定でき�
 Measure/Arrange の Fixed・Auto・Star 解決に適用され、Star は制約を満たすまで残余領域を
 反復的に比例配分する。最小値の合計が利用可能領域を超える場合はオーバーフローを許容し、
 最大値に達した Star が残る場合は余剰領域を未使用のままにする。
+
+Spacing は隣接トラック間の空白として Measure/Arrange に含まれ、各軸で `track_count - 1`
+個だけ加算される。Track sizing に渡す利用可能サイズから spacing 合計を差し引き、Grid の
+DesiredSize にはその合計を加える。Arrange では spacing を除いた領域でトラックを解決し、
+各トラック後の子要素位置に spacing を加える。`resolved_row_sizes()` と
+`resolved_column_sizes()` は spacing を含めず、実トラックのサイズだけを返す。値が負または
+非有限の場合は `0.0` として扱う。
 
 Grid は直近の成功した Arrange による実サイズを `resolved_row_sizes()` と
 `resolved_column_sizes()` で読み取り専用に公開する。Arrange 前は空で、明示定義がない場合も

@@ -105,8 +105,10 @@ owners, and mutable session/Grid borrows are released before notifications.
 
 The splitter's appearance is also composed from ordinary template visuals. Its
 centered grip is 24 by 4 logical pixels for row resizing and 4 by 24 for column
-resizing; the control itself fills the Grid-assigned hit track. Docking supplies
-a 12-pixel track, leaving the grip centered in that gutter. `Auto` keeps a
+resizing; the control fills its hit target. Docking positions a 12-pixel hit
+target in a 12-pixel `Grid` row/column spacing gap by placing it at the following
+pane track and translating it -12 pixels along the split axis. There is no extra
+splitter track; the gap remains between adjacent pane bounds. `Auto` keeps a
 centered six-by-six grip until an explicit direction is selected. The default
 fill is a subdued neutral; pointer-over or focus uses a light accent, and an
 active press uses the stronger accent. These visual states are private
@@ -145,11 +147,15 @@ authoritative value.
 
 Each item header is a composed `Grid` containing a header row with 12-pixel leading and 8-pixel
 trailing insets, an optional `IconSourceElement`, a left-aligned bound `TextBlock`, a private
-`CustomTabCloseButton`, and a separator. Docking's active-document marker is separately arranged
-12 pixels from the header's leading edge, matching the reserved marker slot. A `Rectangle` in a
-fixed two-pixel seam slot matches the content background and covers the selected header's lower
-stroke so the rounded top outline joins the content frame. Unselected headers keep their bottom
-separator and pointer-over background. The close helper uses a fixed 20-pixel slot and a composed
+`CustomTabCloseButton`, and a separator. A 4-by-16 active marker with a two-pixel corner radius is
+owned by an explicitly active item header, after the 12-pixel leading inset and before its title.
+When inactive, the marker and its following spacer are collapsed; compact width measurement
+includes the marker slot only while active, along with measured title text, so a document label
+remains visible at the arranged width. The marker is not arranged by a group overlay over page
+content. A
+`Rectangle` in a fixed two-pixel seam slot matches the content background and covers the selected
+header's lower stroke so the rounded top outline joins the content frame. Unselected headers keep
+their bottom separator and pointer-over background. The close helper uses a fixed 20-pixel slot and a composed
 `TextBlock` `×` glyph. `Always` and `OnPointerOver` reserve identical width; hover changes only the
 glyph's paint, so it does not invalidate the item's measured or arranged geometry. The glyph's text
 remains structurally present and is hidden with a transparent solid foreground; showing it clears

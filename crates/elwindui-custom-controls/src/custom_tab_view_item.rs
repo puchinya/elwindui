@@ -3,6 +3,7 @@ use super::core::base::Size;
 use super::core::graphics::IconSource;
 use super::core::input::PointerEventArgs;
 use super::core::layout::Visibility;
+use super::core::theme::BrushStyle;
 use super::core::ui::{ControlExt, Grid, GridExt, IconSourceElementExt, UIElementExt};
 use super::custom_tab_view::TabItemPointerEvent;
 use super::{
@@ -42,6 +43,8 @@ pub struct CustomTabViewItem {
     #[state(default = false)]
     is_selected: bool,
     #[state(default = false)]
+    active_document_marker: bool,
+    #[state(default = false)]
     is_pointer_over: bool,
     #[state(default = TabStripPosition::Top)]
     tab_strip_position: TabStripPosition,
@@ -79,6 +82,8 @@ pub struct CustomTabViewItem {
     initial_close_glyph_visible: bool,
     #[computed(expr = if is_selected { Visibility::Visible } else { Visibility::Collapsed })]
     indicator_visibility: Visibility,
+    #[computed(expr = if active_document_marker { Visibility::Visible } else { Visibility::Collapsed })]
+    active_document_marker_visibility: Visibility,
     #[computed(expr = if is_selected || is_pointer_over { Visibility::Visible } else { Visibility::Collapsed })]
     chrome_background_visibility: Visibility,
     #[computed(expr = if is_selected {
@@ -87,6 +92,8 @@ pub struct CustomTabViewItem {
         elwindui::core::theme::BrushStyle::Secondary
     })]
     chrome_background: elwindui::core::theme::BrushStyle,
+    #[computed(expr = elwindui::core::theme::BrushStyle::Value(core::graphics::Color::TRANSPARENT.into()))]
+    transparent_brush: elwindui::core::theme::BrushStyle,
     #[computed(expr = if is_selected {
         elwindui::core::theme::BrushStyle::Separator
     } else {
@@ -130,11 +137,27 @@ pub struct CustomTabViewItem {
             HorizontalLayout {
                 Grid::row: header_row
                 height: header_height
-                spacing: 6.0
+                spacing: 0.0
                 Rectangle {
-                    width: 16.0
+                    width: 12.0
                     height: header_height
-                    fill: chrome_background
+                    fill: transparent_brush
+                    hit_test_visible: false
+                }
+                Rectangle {
+                    width: 4.0
+                    height: 16.0
+                    fill: BrushStyle::Primary
+                    corner_radius: 2.0
+                    vertical_alignment: elwindui::core::layout::VerticalAlignment::Center
+                    visibility: active_document_marker_visibility
+                    hit_test_visible: false
+                }
+                Rectangle {
+                    width: 6.0
+                    height: header_height
+                    fill: transparent_brush
+                    visibility: active_document_marker_visibility
                     hit_test_visible: false
                 }
                 IconSourceElement {
@@ -143,9 +166,16 @@ pub struct CustomTabViewItem {
                     icon_source: icon
                     visibility: icon_visibility
                 }
+                Rectangle {
+                    width: 6.0
+                    height: header_height
+                    fill: transparent_brush
+                    visibility: icon_visibility
+                    hit_test_visible: false
+                }
                 TextBlock {
                     text: header
-                    foreground: elwindui::core::theme::BrushStyle::Foreground
+                    foreground: BrushStyle::Foreground
                     text_alignment: elwindui::core::ui::TextAlignment::Left
                 }
                 close_button
@@ -159,7 +189,7 @@ pub struct CustomTabViewItem {
                 Rectangle {
                     width: 8.0
                     height: header_height
-                    fill: chrome_background
+                    fill: transparent_brush
                     hit_test_visible: false
                 }
             }
@@ -195,9 +225,7 @@ impl CustomTabViewItem {
         let header = header.as_ui_element();
         let children = header.visual_children();
         let mut width = 0.0;
-        let mut count = 0;
         for child in children {
-            let child = child.as_ui_element();
             child.measure(Size {
                 width: maximum,
                 height,
@@ -206,10 +234,6 @@ impl CustomTabViewItem {
                 continue;
             }
             width += child.measured_size().map(|size| size.width).unwrap_or(0.0);
-            count += 1;
-        }
-        if count > 1 {
-            width += 6.0 * (count - 1) as f32;
         }
         width.min(maximum)
     }
@@ -217,6 +241,13 @@ impl CustomTabViewItem {
     /// Creates a tab item with its default presentation properties.
     pub fn new_item() -> Rc<Self> {
         Self::new()
+    }
+
+    #[doc(hidden)]
+    pub fn set_active_document_marker_visible(&self, visible: bool) {
+        if self.active_document_marker() != visible {
+            self.set_active_document_marker(visible);
+        }
     }
 
     /// Returns whether this item may be closed by a user gesture.

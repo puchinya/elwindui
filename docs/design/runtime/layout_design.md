@@ -17,6 +17,15 @@ An unconstrained axis is represented explicitly rather than by an arbitrary larg
 
 Arrange may set explicit native width/height for positioning. A backend whose native measure caches those arranged values must clear them back to its `Auto` sentinel before the next natural measurement.
 
+## Grid inter-track spacing
+
+`Grid.row_spacing` and `Grid.column_spacing` describe gaps between adjacent tracks, not edge padding.
+For an axis with N tracks, Measure and Arrange reserve `(N - 1) * spacing` from the available
+track area. Desired size includes that gap total; arranged child origins include the gaps preceding
+their tracks. Resolved track-size queries report only track extents, so callers that resize or
+constrain tracks do not accidentally include spacing in pane sizes. Spacing values are normalized
+to zero when negative or non-finite. The default is zero, preserving existing Grid layouts.
+
 ## Invalidation
 
 Property changes declare whether they affect measure, arrange, or paint. `RelayoutHost` coalesces repeated requests and runs a new root pass; elements do not synchronously recurse into layout from a setter.

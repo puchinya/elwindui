@@ -42,14 +42,37 @@ intended public `types.rs` names explicitly rather than re-exporting the module
 wildcard. Non-component cross-cutting implementation support is limited to
 `support.rs`.
 
-The tab view template is a `Grid` with two rows. Its declarative content field
-is exactly `#[content(children)] children: Vec<Rc<CustomTabViewItem>>`. The private
-`CustomTabStripPresenter` is a `HorizontalLayout` that owns the ordered item
-controls; it retains an ordinary lifecycle-only `body: view!` because it has no
-authored root of its own. The private `CustomTabContentPresenter` owns the visual presentation
-of every current item content. Top uses `Fixed(32)` then `Star(1)`; Bottom uses
-`Star(1)` then `Fixed(32)`, with the presenters’ attached `Grid::row` values
-updated together.
+The tab view template is a `Grid` with a 32-pixel strip row and a content row.
+Its declarative content field is exactly `#[content(children)] children:
+Vec<Rc<CustomTabViewItem>>`. The private `CustomTabStripPresenter` is a
+`HorizontalLayout` that owns the ordered item controls; it retains an ordinary
+lifecycle-only `body: view!` because it has no authored root of its own. A strip
+host places a 6-pixel leading baseline segment beside one bounded star track.
+The remaining baseline spans that track behind the presenter, which measures
+and arranges its headers within the finite width. This preserves equal widths
+for non-compact headers, allows an empty strip to retain its full hit area, and
+shows the baseline after compact headers. The private
+`CustomTabContentPresenter` owns the visual presentation of every current item
+content, and a rounded frame composes its outer border with the selected tab's
+top outline. Top uses `Fixed(32)` then `Star(1)`; Bottom uses `Star(1)` then
+`Fixed(32)`, except a Bottom view with exactly one item uses `Fixed(0)` for the
+strip row. The presenters’ attached `Grid::row` values are updated together,
+leaving the selected content in the full available rectangle when that strip
+collapses.
+
+The strip presenter derives each pass's item width from that pass's available or final width and
+passes the result to child `measure`/`arrange`. It does not write persistent item `min_width` or
+`max_width` properties during layout: those setters invalidate measure, and deriving their values
+from transient parent constraints can feed back when the retained tree alternates between bounded
+and unbounded measurements.
+
+The presenter retains one measured pass containing the ordered item identities, effective per-item
+width cap, height, tab mode, and resolved item widths. Arrange reuses those widths when its final
+constraints and the measured item subtree still match; after a mismatch or subtree invalidation it
+measures against the final constraints and refreshes the retained pass. This avoids remeasuring
+every tab during the common same-size measure/arrange pair and repeated same-size arrange passes
+without changing Core's unconditional `UIElement.measure` semantics or the compact/non-compact width
+rules.
 
 ## CustomGridSplitter transaction ownership
 
@@ -81,11 +104,12 @@ suppress keyboard resizing. Routed handlers and callback closures use weak
 owners, and mutable session/Grid borrows are released before notifications.
 
 The splitter's appearance is also composed from ordinary template visuals. Its
-natural short-axis surface remains six logical pixels: an explicit column
-direction uses a six-pixel vertical bar, an explicit row direction uses a
-six-pixel horizontal bar, and `Auto` keeps a centered six-by-six grip. The
-default fill is a subdued neutral; pointer-over or focus uses a light accent,
-and an active press uses the stronger accent. These visual states are private
+centered grip is 24 by 4 logical pixels for row resizing and 4 by 24 for column
+resizing; the control itself fills the Grid-assigned hit track. Docking supplies
+a 12-pixel track, leaving the grip centered in that gutter. `Auto` keeps a
+centered six-by-six grip until an explicit direction is selected. The default
+fill is a subdued neutral; pointer-over or focus uses a light accent, and an
+active press uses the stronger accent. These visual states are private
 component state and do not change the resize transaction or public API. No
 backend cursor, native GridSplitter wrapper, or VisualStateManager is involved.
 
@@ -119,17 +143,18 @@ authoritative value.
 
 ## Header template and close affordance
 
-Each item header is a composed `Grid` containing a header row with an optional
-`IconSourceElement`, a bound `TextBlock`, and a private
-`CustomTabCloseButton`. A `Rectangle` in a fixed two-pixel slot is the selected
-indicator; the slot remains present for unselected items. The close helper uses
-a fixed 20-pixel slot and a composed `TextBlock` `×` glyph. `Always` and
-`OnPointerOver` reserve identical width; hover changes only the glyph's paint,
-so it does not invalidate the item's measured or arranged geometry. The glyph's
-text remains structurally present and is hidden with a transparent solid
-foreground; showing it clears that local foreground. `Never` collapses the
-slot and is allowed to invalidate normal measure/arrange state. No SystemIcon
-geometry or direct close-X drawing is duplicated here.
+Each item header is a composed `Grid` containing a header row with 12-pixel leading and 8-pixel
+trailing insets, an optional `IconSourceElement`, a left-aligned bound `TextBlock`, a private
+`CustomTabCloseButton`, and a separator. Docking's active-document marker is separately arranged
+12 pixels from the header's leading edge, matching the reserved marker slot. A `Rectangle` in a
+fixed two-pixel seam slot matches the content background and covers the selected header's lower
+stroke so the rounded top outline joins the content frame. Unselected headers keep their bottom
+separator and pointer-over background. The close helper uses a fixed 20-pixel slot and a composed
+`TextBlock` `×` glyph. `Always` and `OnPointerOver` reserve identical width; hover changes only the
+glyph's paint, so it does not invalidate the item's measured or arranged geometry. The glyph's text
+remains structurally present and is hidden with a transparent solid foreground; showing it clears
+that local foreground. `Never` collapses the slot and is allowed to invalidate normal measure/arrange
+state. No SystemIcon geometry or direct close-X drawing is duplicated here.
 
 The item binds routed pointer handlers on its header root. The close helper
 handles its own press/release first and marks the routed event handled, so a

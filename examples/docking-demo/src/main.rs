@@ -74,6 +74,10 @@ mod docking_demo_view_model {
         active_status: String,
         #[observable(default = String::from("Floating windows: 0"))]
         floating_status: String,
+        #[observable(default = false)]
+        tools_expanded: bool,
+        #[observable(default = elwindui::core::layout::Visibility::Collapsed)]
+        tools_visibility: elwindui::core::layout::Visibility,
     }
 
     impl DockingDemoViewModel {
@@ -128,10 +132,19 @@ mod docking_demo_view_model {
                 latest_status = "Snapshot restore rejected".to_owned();
             }
         }
+
+        fn toggle_tools(&self) {
+            tools_expanded = !tools_expanded;
+            tools_visibility = if tools_expanded {
+                elwindui::core::layout::Visibility::Visible
+            } else {
+                elwindui::core::layout::Visibility::Collapsed
+            };
+        }
     }
 }
 
-#[elwindui::component(inherits VerticalLayout)]
+#[elwindui::component(inherits Grid)]
 struct DockingDemoSurface {
     #[bindable]
     vm: std::rc::Rc<DockingDemoViewModel>,
@@ -185,7 +198,7 @@ struct DockingDemoSurface {
         }
         let documents = elwindui_docking::DockGroup {
             id: documents
-            weight: 2.1
+            weight: 3.65
             elwindui_docking::DockItem {
                 id: document_a
                 title: "Document A"
@@ -251,7 +264,7 @@ struct DockingDemoSurface {
 
         let top = elwindui_docking::DockSplitPanel {
             orientation: horizontal
-            weight: 2.1
+            weight: 1.1
             documents
             solution
         };
@@ -274,13 +287,25 @@ struct DockingDemoSurface {
             root
         };
         let menu = HorizontalLayout {
-            height: 32.0
+            Grid::row: 0
+            height: 48.0
             spacing: 18.0
             background: BrushStyle::Secondary
             TextBlock { text: "File" foreground: theme_foreground }
-            TextBlock { text: "Edit" foreground: theme_foreground }
-            TextBlock { text: "View" foreground: theme_foreground }
             TextBlock { text: "Help" foreground: theme_foreground }
+            Button {
+                text: "Tools"
+                foreground: theme_foreground
+                tooltip: "Show docking demo controls"
+                on_click: vm.toggle_tools
+            }
+        };
+        let tools = HorizontalLayout {
+            Grid::row: 1
+            height: 30.0
+            spacing: 12.0
+            background: BrushStyle::Tertiary
+            visibility: vm.tools_visibility
             Button {
                 text: "Clear layout"
                 foreground: theme_foreground
@@ -315,17 +340,6 @@ struct DockingDemoSurface {
                 foreground: theme_foreground
                 on_click: || { DarkDockingTheme.apply(&application_environment()); }
             }
-        };
-        let docking_host = Grid {
-            height: 574.0
-            rows: [elwindui::core::layout::GridLength::Star(1.0)]
-            columns: [elwindui::core::layout::GridLength::Star(1.0)]
-            docking
-        };
-        let status = HorizontalLayout {
-            height: 26.0
-            spacing: 18.0
-            background: BrushStyle::Tertiary
             TextBlock {
                 text: vm.active_status
                 foreground: theme_foreground
@@ -336,13 +350,24 @@ struct DockingDemoSurface {
             }
             TextBlock { text: vm.latest_status foreground: theme_foreground }
         };
-
-        spacing: 0.0
+        let docking_host = Grid {
+            Grid::row: 2
+            rows: [elwindui::core::layout::GridLength::Star(1.0)]
+            columns: [elwindui::core::layout::GridLength::Star(1.0)]
+            docking
+        };
+        rows: [elwindui::core::layout::GridLength::Star(1.0)]
+        columns: [elwindui::core::layout::GridLength::Star(1.0)]
         background: BrushStyle::WindowBackground
-        VerticalLayout {
-            spacing: 0.0
+        Grid {
+            rows: [
+                elwindui::core::layout::GridLength::Auto,
+                elwindui::core::layout::GridLength::Auto,
+                elwindui::core::layout::GridLength::Star(1.0),
+            ]
+            columns: [elwindui::core::layout::GridLength::Star(1.0)]
             menu
-            status
+            tools
             docking_host
         }
     },
@@ -368,7 +393,7 @@ impl DockingDemoWindow {}
 
 #[elwindui::main]
 fn main() {
-    VisualStudioTheme.apply(&application_environment());
+    DarkDockingTheme.apply(&application_environment());
     let vm = DockingDemoViewModel::new();
     let window = elwindui::new!(DockingDemoWindow(vm: vm));
     window.show();

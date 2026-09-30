@@ -12,7 +12,7 @@ pub struct DockGroup {
     weight: f32,
     #[prop(default = TabStripPosition::Top)]
     tab_strip_position: TabStripPosition,
-    #[prop(default = false)]
+    #[prop(default = true)]
     compact_tabs: bool,
     #[prop(default = false)]
     show_when_empty: bool,

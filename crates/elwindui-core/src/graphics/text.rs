@@ -14,7 +14,7 @@
 
 use super::brush::Brush;
 use crate::base::Size;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -481,6 +481,7 @@ pub trait TextBackend {
 
 thread_local! {
     static TEXT_BACKEND: RefCell<Option<Rc<dyn TextBackend>>> = const { RefCell::new(None) };
+    static TEXT_BACKEND_GENERATION: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Registers the backend used by [`text_backend`]. Each backend crate's `init()` calls this once,
@@ -488,12 +489,22 @@ thread_local! {
 /// makes (`invalidate_host: Rc<dyn RelayoutHost>`, `AnyView(Rc<dyn AppKitHandle>)`).
 pub fn set_text_backend(backend: Rc<dyn TextBackend>) {
     TEXT_BACKEND.with(|cell| *cell.borrow_mut() = Some(backend));
+    TEXT_BACKEND_GENERATION.with(|generation| {
+        generation.set(generation.get().wrapping_add(1));
+    });
 }
 
 /// Un-registers the current backend, reverting to [`DummyTextBackend`]. Mainly for test hygiene —
 /// a backend integration test can restore the deterministic dummy afterward.
 pub fn clear_text_backend() {
     TEXT_BACKEND.with(|cell| *cell.borrow_mut() = None);
+    TEXT_BACKEND_GENERATION.with(|generation| {
+        generation.set(generation.get().wrapping_add(1));
+    });
+}
+
+pub(crate) fn text_backend_generation() -> u64 {
+    TEXT_BACKEND_GENERATION.with(Cell::get)
 }
 
 /// The registered backend, or a shared [`DummyTextBackend`] if none is registered (plain

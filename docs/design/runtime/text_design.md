@@ -20,6 +20,13 @@ Theme-backed properties record the Theme revision used for their last synchroniz
 
 The measurement input is text, constraints, and `ComputedTextStyle`. Backend adapters must use the same conversions for measuring and drawing.
 
+`TextBlock` retains only its most recent measured size, keyed by text, resolved style, available
+size, alignment, and the registered text-backend generation. Repeating the same measurement within
+one unchanged visual state returns that result without calling the platform text engine again.
+Text, inherited or local style, constraints, alignment, and backend replacement each miss the key.
+`UIElement::measure` still runs normally and stores its current desired size; this cache only avoids
+repeating deterministic backend font measurement and does not cache arrangement or painting.
+
 ## Native controls
 
 Native controls receive resolved font and foreground values through their backend adapter. `PlatformDefault` clears the native property instead of assigning a hard-coded family or color.

@@ -45,7 +45,9 @@ continue to move through their platform title bars. Tab context menus dispatch c
 close, indexed-close, float, and pin operations through the same model transaction boundary as
 their pointer equivalents. Empty authored groups marked `show_when_empty` retain their group host
 and display a non-hit-testable drop hint; other empty groups are normalized away. Per-group
-`compact_tabs` is applied to the retained tab view without replacing wrappers or page content.
+`compact_tabs` defaults to compact sizing to match the pinned WinUI.Dock `TabView` and is applied to
+the retained tab view without replacing wrappers or page content; authored groups can explicitly
+request equal-width headers.
 
 ## Main surface and split realization
 
@@ -56,7 +58,8 @@ Star column. Every splitter records a private `SplitAddress` (main/floating root
 and adjacent boundary index.
 
 Each realized splitter is a `CustomGridSplitter` with explicit
-`Columns`/`Rows` direction and `PreviousAndNext` behavior. Realization copies
+`Columns`/`Rows` direction and `PreviousAndNext` behavior. Its full hit target fills the 12-pixel
+Grid gutter while the visible 4-by-24 or 24-by-4 grip stays centered. Realization copies
 Docking pane min/max rules into the Grid's indexed track constraints; fixed
 splitter tracks remain unconstrained. The splitter captures the authoritative
 Grid definitions, resolved sizes, and constraints and owns all live preview,
@@ -166,6 +169,14 @@ headers share available width up to 200 pixels each; compact headers measure fro
 under the same cap. Both modes use the same 32-pixel strip and 32-pixel item height. The active and
 pointer-over header frames are template states; changing a state updates retained visuals and never
 replaces a tab wrapper or page.
+
+The generic tab view paints a neutral content frame and makes the selected header meet that frame.
+Its tab row has a 6-pixel leading baseline and a trailing baseline after compact headers; header
+content uses 12-pixel leading and 8-pixel trailing insets. Docking's private group host adds an
+active-color frame over the content area and an active-document marker 12 pixels from the leading
+edge of the corresponding arranged tab. The overlay reads the retained item's arranged bounds,
+so tab widths and group resizing do not require a public Docking-specific property on
+`CustomTabView`.
 
 Docking-specific chrome stays in the retained group realization keyed by `DockGroupId`; there is no
 independent group title or group drag surface. In a Bottom group, the active item's title and

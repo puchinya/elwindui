@@ -338,6 +338,11 @@ fn default_model() -> DockLayoutModel {
     DockLayoutModel::from_default(DefaultDockDefinition::new(Some(root)))
 }
 
+#[test]
+fn dock_group_defaults_to_compact_tab_widths() {
+    assert!(DockGroup::new_group().compact_tabs_value());
+}
+
 fn snapshot_group_items(
     snapshot: &DockLayoutSnapshot,
     target: &SnapshotGroupKey,

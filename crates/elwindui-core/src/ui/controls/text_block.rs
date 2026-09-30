@@ -2,6 +2,33 @@
 
 use super::*;
 
+#[derive(Clone)]
+struct TextMeasureCache {
+    text: String,
+    style: crate::graphics::ComputedTextStyle,
+    available: Size,
+    alignment: TextAlignment,
+    backend_generation: u64,
+    measured_size: Size,
+}
+
+impl TextMeasureCache {
+    fn matches(
+        &self,
+        text: &str,
+        style: &crate::graphics::ComputedTextStyle,
+        available: Size,
+        alignment: TextAlignment,
+        backend_generation: u64,
+    ) -> bool {
+        self.text == text
+            && self.style == *style
+            && self.available == available
+            && self.alignment == alignment
+            && self.backend_generation == backend_generation
+    }
+}
+
 /// Self-drawn primitive text (WinUI3's `TextBlock`) — no native widget. A leaf, like `NativeControlImpl`. Field named `text` (not `content`) to match `elwindui::ui::TextBlock`'s own `#[param]
 /// text` name — `elwindui-codegen`'s setter-based construction calls `.set_{param name}(..)`
 /// generically, so the Rust field/setter name must agree with the DSL's own field name.
@@ -20,6 +47,7 @@ pub struct TextBlock {
     pub text: RefCell<String>,
     pub text_style: crate::graphics::TextStyleStorage,
     pub alignment: Cell<TextAlignment>,
+    measure_cache: RefCell<Option<TextMeasureCache>>,
 }
 
 #[elwindui_macros::class]
@@ -40,8 +68,15 @@ impl TextBlock {
     #[overrides]
     fn measure_override(&self, available: Size) -> Size {
         let style = self.resolved_text_style();
-        let text = self.text.borrow();
-        crate::graphics::text_backend()
+        let text = self.text.borrow().clone();
+        let alignment = self.alignment.get();
+        let backend_generation = crate::graphics::text_backend_generation();
+        if let Some(cache) = self.measure_cache.borrow().as_ref() {
+            if cache.matches(&text, &style, available, alignment, backend_generation) {
+                return cache.measured_size;
+            }
+        }
+        let measured_size = crate::graphics::text_backend()
             .measure_text(&crate::graphics::TextMeasureRequest {
                 text: &text,
                 style: &style,
@@ -50,12 +85,21 @@ impl TextBlock {
                 // properties this pass covers — see `docs/design/runtime/text_design.md`); the request
                 // shape already has the field so adding it later needs no signature change here.
                 wrapping: crate::graphics::TextWrapping::NoWrap,
-                alignment: self.alignment.get(),
+                alignment,
                 max_lines: None,
                 // No DPI/text-scale concept exists anywhere in `elwindui-core` yet (未対応).
                 scale: 1.0,
             })
-            .size
+            .size;
+        *self.measure_cache.borrow_mut() = Some(TextMeasureCache {
+            text,
+            style,
+            available,
+            alignment,
+            backend_generation,
+            measured_size,
+        });
+        measured_size
     }
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
@@ -105,6 +149,7 @@ impl TextBlock {
             text: RefCell::new(String::new()),
             text_style: crate::graphics::TextStyleStorage::new(),
             alignment: Cell::new(TextAlignment::Left),
+            measure_cache: RefCell::new(None),
         }
     }
 }
@@ -118,6 +163,80 @@ impl TextStyleOwner for TextBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graphics::{ComputedTextStyle, TextBackend, TextMeasureRequest, TextMeasureResult};
+    use std::rc::Rc;
+
+    struct CountingTextBackend {
+        calls: Rc<Cell<usize>>,
+        width_per_character: f32,
+    }
+
+    impl TextBackend for CountingTextBackend {
+        fn default_text_style(&self) -> ComputedTextStyle {
+            ComputedTextStyle::fallback()
+        }
+
+        fn measure_text(&self, request: &TextMeasureRequest<'_>) -> TextMeasureResult {
+            self.calls.set(self.calls.get() + 1);
+            TextMeasureResult {
+                size: Size {
+                    width: request.text.chars().count() as f32 * self.width_per_character,
+                    height: 16.0,
+                },
+                baseline: 12.0,
+                line_count: 1,
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_text_measurements_reuse_only_matching_backend_inputs() {
+        crate::graphics::clear_text_backend();
+        let first_calls = Rc::new(Cell::new(0));
+        crate::graphics::set_text_backend(Rc::new(CountingTextBackend {
+            calls: first_calls.clone(),
+            width_per_character: 5.0,
+        }));
+        let text_block = TextBlock::new();
+        text_block.set_text("cache");
+        let initial = Size {
+            width: 100.0,
+            height: 24.0,
+        };
+
+        assert_eq!(text_block.measure_override(initial).width, 25.0);
+        assert_eq!(text_block.measure_override(initial).width, 25.0);
+        assert_eq!(first_calls.get(), 1);
+
+        text_block.measure_override(Size {
+            width: 80.0,
+            height: 24.0,
+        });
+        assert_eq!(first_calls.get(), 2);
+        text_block.set_text("changed");
+        text_block.measure_override(Size {
+            width: 80.0,
+            height: 24.0,
+        });
+        assert_eq!(first_calls.get(), 3);
+
+        let second_calls = Rc::new(Cell::new(0));
+        crate::graphics::set_text_backend(Rc::new(CountingTextBackend {
+            calls: second_calls.clone(),
+            width_per_character: 7.0,
+        }));
+        assert_eq!(
+            text_block
+                .measure_override(Size {
+                    width: 80.0,
+                    height: 24.0,
+                })
+                .width,
+            49.0
+        );
+        assert_eq!(second_calls.get(), 1);
+        crate::graphics::clear_text_backend();
+    }
 
     #[test]
     fn text_block_defaults_to_left_alignment_and_set_text_alignment_updates_paint() {

@@ -221,6 +221,72 @@ fn compact_tab_widths_follow_content_under_the_normal_width_cap() {
 }
 
 #[test]
+fn bottom_single_item_collapses_the_tab_strip_and_keeps_full_content_height() {
+    let item = CustomTabViewItem::new_item();
+    let view = CustomTabView::new_view();
+    view.set_tab_position(TabStripPosition::Bottom);
+    view.set_children(vec![item]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 640.0,
+            height: 200.0,
+        },
+    );
+
+    let template = view.__template_root().expect("tab view template root");
+    let grid = template
+        .as_any()
+        .downcast_ref::<Grid>()
+        .expect("tab view template root is a Grid");
+    assert_eq!(
+        grid.rows.borrow().as_slice(),
+        &[GridLength::Star(1.0), GridLength::Fixed(0.0)]
+    );
+
+    let children = template.visual_children();
+    assert_eq!(children[0].as_ui_element().arranged_height(), Some(0.0));
+    assert_eq!(children[1].as_ui_element().arranged_height(), Some(200.0));
+}
+
+#[test]
+fn tab_strip_uses_reference_leading_baseline_and_header_inset() {
+    let item = CustomTabViewItem::new_item();
+    item.set_header("Document".to_string());
+    let view = CustomTabView::new_view();
+    view.set_compact(true);
+    view.set_children(vec![item.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 640.0,
+            height: 120.0,
+        },
+    );
+
+    let template = view.__template_root().expect("tab view template root");
+    let tab_strip_host = template
+        .visual_children()
+        .into_iter()
+        .next()
+        .expect("tab strip host");
+    let tab_strip_host = tab_strip_host
+        .as_any()
+        .downcast_ref::<Grid>()
+        .expect("tab strip host is a Grid");
+    assert_eq!(
+        tab_strip_host.columns.borrow().as_slice(),
+        &[GridLength::Fixed(6.0), GridLength::Star(1.0),]
+    );
+
+    let item_visual: Rc<dyn UIElementExt> = item.clone();
+    let item_offset = absolute_offset(&item_visual);
+    assert!((item_offset.x - 6.0).abs() < 0.01);
+}
+
+#[test]
 fn mounted_public_controls_release_after_external_owners_drop() {
     let item = CustomTabViewItem::new_item();
     let view = CustomTabView::new_view();
@@ -417,7 +483,15 @@ fn close_pointer_sequence_never_selects_the_tab() {
         x: close_origin.x + close.arranged_width().unwrap_or(20.0) / 2.0,
         y: close_origin.y + close.arranged_height().unwrap_or(32.0) / 2.0,
     };
-    assert!(hit_test(&root, close_point).is_some());
+    assert!(
+        hit_test(&root, close_point).is_some(),
+        "close={close_point:?} close_origin={close_origin:?} close_size=({:?}, {:?}) item_offset={:?} item_size=({:?}, {:?})",
+        close.arranged_width(),
+        close.arranged_height(),
+        second.arranged_offset(),
+        second.arranged_width(),
+        second.arranged_height(),
+    );
     let dispatcher = elwindui_custom_controls::core::input::PointerDispatcher::new();
     let focus = elwindui_custom_controls::core::focus::FocusTracker::new();
     dispatcher.handle(
@@ -984,49 +1058,49 @@ fn tab_insertion_uses_retained_unequal_header_midpoints_and_boundaries() {
     );
 
     assert_eq!(
-        view.tab_insertion_index_at(Point { x: 40.0, y: 16.0 }),
+        view.tab_insertion_index_at(Point { x: 44.0, y: 16.0 }),
         Some(0)
     );
     assert_eq!(
-        view.tab_insertion_index_at(Point { x: 42.0, y: 16.0 }),
+        view.tab_insertion_index_at(Point { x: 46.0, y: 16.0 }),
         Some(0)
     );
     assert_eq!(
-        view.tab_insertion_index_at(Point { x: 43.0, y: 16.0 }),
+        view.tab_insertion_index_at(Point { x: 47.0, y: 16.0 }),
         Some(1)
     );
     assert_eq!(
-        view.tab_insertion_index_at(Point { x: 150.0, y: 16.0 }),
+        view.tab_insertion_index_at(Point { x: 154.0, y: 16.0 }),
         Some(1)
     );
     assert_eq!(
-        view.tab_insertion_index_at(Point { x: 153.0, y: 16.0 }),
+        view.tab_insertion_index_at(Point { x: 157.0, y: 16.0 }),
         Some(2)
     );
     assert_eq!(
-        view.tab_insertion_index_at(Point { x: 260.0, y: 16.0 }),
+        view.tab_insertion_index_at(Point { x: 264.0, y: 16.0 }),
         Some(2)
     );
     assert_eq!(
-        view.tab_insertion_index_at(Point { x: 263.0, y: 16.0 }),
+        view.tab_insertion_index_at(Point { x: 267.0, y: 16.0 }),
         Some(3)
     );
     assert_eq!(
         view.tab_insertion_index_at(Point { x: 150.0, y: 60.0 }),
         None
     );
-    assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(2.0));
+    assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(6.0));
     assert_eq!(
         view.tab_insertion_boundary(1).map(|rect| rect.x),
-        Some(82.0)
+        Some(86.0)
     );
     assert_eq!(
         view.tab_insertion_boundary(2).map(|rect| rect.x),
-        Some(222.0)
+        Some(226.0)
     );
     assert_eq!(
         view.tab_insertion_boundary(3).map(|rect| rect.x),
-        Some(302.0)
+        Some(306.0)
     );
 }
 
@@ -1067,7 +1141,7 @@ fn compact_and_empty_tab_strips_share_the_retained_geometry_path() {
         view.tab_insertion_index_at(Point { x: 20.0, y: 14.0 }),
         Some(0)
     );
-    assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(0.0));
+    assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(6.0));
 }
 
 #[test]
@@ -2449,16 +2523,16 @@ fn custom_grid_splitter_visual_follows_explicit_axis() {
             height: 120.0,
         },
     );
-    assert_eq!(rectangle.width(), Some(6.0));
-    assert_eq!(rectangle.height(), None);
-    assert_eq!(rectangle.min_height(), Some(6.0));
+    assert_eq!(rectangle.width(), Some(4.0));
+    assert_eq!(rectangle.height(), Some(24.0));
+    assert_eq!(rectangle.min_height(), None);
     assert_eq!(
         rectangle.horizontal_alignment(),
-        HorizontalAlignment::Stretch
+        HorizontalAlignment::Center
     );
-    assert_eq!(rectangle.vertical_alignment(), VerticalAlignment::Stretch);
-    assert_eq!(rectangle.arranged_width(), Some(6.0));
-    assert_eq!(rectangle.arranged_height(), Some(120.0));
+    assert_eq!(rectangle.vertical_alignment(), VerticalAlignment::Center);
+    assert_eq!(rectangle.arranged_width(), Some(4.0));
+    assert_eq!(rectangle.arranged_height(), Some(24.0));
 
     splitter.set_resize_direction(GridResizeDirection::Rows);
     layout_root(
@@ -2468,16 +2542,16 @@ fn custom_grid_splitter_visual_follows_explicit_axis() {
             height: 120.0,
         },
     );
-    assert_eq!(rectangle.width(), None);
-    assert_eq!(rectangle.height(), Some(6.0));
-    assert_eq!(rectangle.min_width(), Some(6.0));
+    assert_eq!(rectangle.width(), Some(24.0));
+    assert_eq!(rectangle.height(), Some(4.0));
+    assert_eq!(rectangle.min_width(), None);
     assert_eq!(
         rectangle.horizontal_alignment(),
-        HorizontalAlignment::Stretch
+        HorizontalAlignment::Center
     );
-    assert_eq!(rectangle.vertical_alignment(), VerticalAlignment::Stretch);
-    assert_eq!(rectangle.arranged_width(), Some(240.0));
-    assert_eq!(rectangle.arranged_height(), Some(6.0));
+    assert_eq!(rectangle.vertical_alignment(), VerticalAlignment::Center);
+    assert_eq!(rectangle.arranged_width(), Some(24.0));
+    assert_eq!(rectangle.arranged_height(), Some(4.0));
 }
 
 #[test]
@@ -2505,14 +2579,14 @@ fn pointer_dispatcher_implicit_capture_completes_tab_outside_and_cancels() {
         &focus,
         raw_pointer(
             RawPointerEventKind::Pressed(MouseButton::Left),
-            Point { x: 4.0, y: 16.0 },
+            Point { x: 8.0, y: 16.0 },
             0.0,
         ),
     );
     dispatcher.handle(
         &root,
         &focus,
-        raw_pointer(RawPointerEventKind::Moved, Point { x: 9.0, y: 16.0 }, 1.0),
+        raw_pointer(RawPointerEventKind::Moved, Point { x: 13.0, y: 16.0 }, 1.0),
     );
     dispatcher.handle(
         &root,
@@ -2540,14 +2614,14 @@ fn pointer_dispatcher_implicit_capture_completes_tab_outside_and_cancels() {
         &focus,
         raw_pointer(
             RawPointerEventKind::Pressed(MouseButton::Left),
-            Point { x: 4.0, y: 16.0 },
+            Point { x: 8.0, y: 16.0 },
             4.0,
         ),
     );
     dispatcher.handle(
         &root,
         &focus,
-        raw_pointer(RawPointerEventKind::Moved, Point { x: 9.0, y: 16.0 }, 5.0),
+        raw_pointer(RawPointerEventKind::Moved, Point { x: 13.0, y: 16.0 }, 5.0),
     );
     dispatcher.handle(
         &root,

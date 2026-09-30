@@ -54,7 +54,12 @@ the retained runtime and bound value without rebuilding unchanged structural Doc
 
 Document and tool groups expose the authored tab-strip position and chrome appropriate to that
 position. Top-tab groups render tabs above their content without a separate group title bar;
-bottom-tab groups render tabs below their content and a content header for the selected Document.
+bottom-tab groups render tabs below their content and a content header for the selected Document;
+when exactly one Document is present, the bottom tab strip collapses while the content header and
+content remain visible.
+The selected tab joins the content frame with the reference rounded outline treatment. The active
+Document's group uses the active frame stroke, and its tab carries a distinct active marker. Top-tab
+pin/close affordances appear on pointer hover; bottom-tab actions belong to the content header.
 All Docking drag sources represent one Document. A tab drag may reorder that Document, move it to a
 group/root, split a target group, or float it, subject to the item's capability checks. Docking has
 no group-level drag, tear-out, or cross-dock operation. Bottom content-header actions and drag
@@ -65,9 +70,11 @@ action uses the same capability checks and one model transaction as its pointer 
 
 An authored empty group remains visible only when `show_when_empty` is true. It keeps normal group
 chrome and displays a centered, non-interactive `Drop here` hint while remaining a valid drop target.
-`compact_tabs` selects the compact tab metrics for that group. Clear/reset operations remove the
-live presentation without consulting `can_close`, preserve the authored declaration, and restore
-the authored default deterministically.
+`compact_tabs` selects the compact tab metrics for that group and defaults to `true`, matching
+WinUI.Dock's compact `TabView` headers. Explicitly setting it to `false` distributes available
+header width up to the 200-pixel cap. Clear/reset operations remove the live presentation without
+consulting `can_close`, preserve the authored declaration, and restore the authored default
+deterministically.
 
 Drag movement changes only a custom drop-preview rectangle and candidate target. It never reparents
 page content or reconciles a preview model. Completion commits one normalized model, or cancels when

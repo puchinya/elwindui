@@ -68,11 +68,19 @@ The press below that threshold emits no drag callbacks. Core cancellation emits
 one canceled completion and item removal cancels an active drag before detach.
 
 `TabStripPosition::Top` reserves a 32 logical-pixel strip above content;
-`Bottom` reserves it below. Both positions use the same strip and header height
-regardless of `compact`. Selected content occupies the remaining rectangle;
+`Bottom` reserves it below, except that a Bottom view with exactly one item
+collapses the strip to zero height. Both positions use the same strip and
+header height regardless of `compact`. Selected content occupies the remaining rectangle;
 unselected items remain Visual children, are arranged to `0 x 0`, and are clipped.
 Header widths reserve the same close slot for `Always` and `OnPointerOver`, so
 hover does not resize a tab.
+
+The strip baseline uses a six-logical-pixel leading rule and continues to the
+right of the compact tab headers. Header text follows the WinUI.Dock header
+insets: 12 logical pixels at the leading edge and 8 at the trailing edge. The
+selected header has a one-pixel rounded top outline whose lower edge meets the
+selected-content frame; its seam is filled by the frame color. Bottom position
+mirrors the strip/header relationship while retaining upright text.
 
 The selected header joins the selected-content frame with the corresponding
 rounded outline treatment. Unselected headers retain their separator and
@@ -88,8 +96,10 @@ not strip height, header height, selection, or content arrangement.
 
 The default template is a `Grid` containing a private non-rendering tab-strip
 presenter and a private non-rendering content presenter. The strip uses the
-existing `HorizontalLayout` semantics. Top places the strip in row 0 and
-Bottom places it in row 1; the other row is the selected-content presenter.
+existing `HorizontalLayout` semantics. A private strip host places the leading
+rule, compact tab headers, and trailing baseline in that order. Top places the
+strip in row 0 and Bottom places it in row 1; the other row is the
+selected-content presenter and its rounded frame.
 
 ## CustomTabViewItem
 
@@ -102,7 +112,7 @@ Bottom places it in row 1; the other row is the selected-content presenter.
 
 The item’s authored default template subtree is the tab header: it contains a
 `TextBlock`, an optional `IconSourceElement`, a fixed close slot, and a
-selected-frame/indicator slot. The inherited `content` is not rendered by
+selected-frame slot. The inherited `content` is not rendered by
 the header. A private content presenter owns the visual presentation of all
 current item contents while preserving each item as the logical owner;
 selection only changes arrangement and never reparents content.
@@ -162,11 +172,12 @@ with `set_on_resize_started`, `set_on_resize_delta`, and
 indices, input kind, optional positions, and the effective cumulative delta.
 Grid mutation or rollback, session update/clear, and then notification are the
 required ordering. The default template is ordinary composed chrome with a
-six-logical-pixel natural splitter surface. Explicit column and row directions
-stretch a six-pixel vertical or horizontal bar along the active axis; `Auto`
-uses a centered six-by-six grip until a direction is explicitly selected. The
-surface uses neutral, pointer-over/focus, and pressed Fluent-style colors and
-does not draw chrome through a `RenderContext` override.
+centered 24-by-4 logical-pixel grip for `Rows` and a 4-by-24 grip for `Columns`.
+The grip stays inside the parent-assigned splitter track; Docking assigns a
+12-pixel track and full-track hit target. `Auto` uses a centered six-by-six grip
+until an explicit direction is selected. The surface uses neutral,
+pointer-over/focus, and pressed Fluent-style colors and does not draw chrome
+through a `RenderContext` override.
 
 ## Ownership and input
 

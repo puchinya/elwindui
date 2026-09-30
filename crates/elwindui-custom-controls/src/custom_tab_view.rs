@@ -103,6 +103,12 @@ pub struct CustomTabView {
         ]
     })]
     grid_rows: Vec<elwindui::core::layout::GridLength>,
+    #[computed(expr = if tab_strip_position == TabStripPosition::Top {
+        elwindui::core::layout::VerticalAlignment::Bottom
+    } else {
+        elwindui::core::layout::VerticalAlignment::Top
+    })]
+    baseline_alignment: elwindui::core::layout::VerticalAlignment,
     #[state(default = Vec::new())]
     template_items: Vec<Rc<CustomTabViewItem>>,
     #[state(default = None)]
@@ -117,28 +123,63 @@ pub struct CustomTabView {
     tab_items: Vec<Rc<CustomTabViewItem>>,
     #[computed(expr = template_items.clone())]
     content_items: Vec<Rc<CustomTabViewItem>>,
+    #[computed(expr = elwindui::core::theme::BrushStyle::Value(
+        elwindui::core::graphics::Color::TRANSPARENT.into()
+    ))]
+    transparent_brush: elwindui::core::theme::BrushStyle,
     template: template_view!(|this: Self| {
         on_update(children, template_items, selected_index, tab_strip_position, compact, close_button_presentation) {
             this.reconcile_children();
         }
-        let tab_strip = CustomTabStripPresenter {
-            items: tab_items
-            selected_index: selected_index
-            tab_strip_position: tab_strip_position
-            compact: compact
-            close_button_presentation: close_button_presentation
+        let tab_strip_host = Grid {
             Grid::row: tab_strip_row
+            rows: [elwindui::core::layout::GridLength::Star(1.0)]
+            columns: [
+                elwindui::core::layout::GridLength::Fixed(6.0),
+                elwindui::core::layout::GridLength::Star(1.0),
+            ]
+            Rectangle {
+                Grid::column: 0
+                height: 1.0
+                fill: elwindui::core::theme::BrushStyle::Separator
+                vertical_alignment: baseline_alignment
+                hit_test_visible: false
+            }
+            Rectangle {
+                Grid::column: 1
+                height: 1.0
+                fill: elwindui::core::theme::BrushStyle::Separator
+                vertical_alignment: baseline_alignment
+                hit_test_visible: false
+            }
+            CustomTabStripPresenter {
+                items: tab_items
+                selected_index: selected_index
+                tab_strip_position: tab_strip_position
+                compact: compact
+                close_button_presentation: close_button_presentation
+                Grid::column: 1
+            }
         };
         let content_presenter = CustomTabContentPresenter {
             items: content_items
             selected_index: selected_index
             Grid::row: content_row
         };
+        let content_frame = Rectangle {
+            Grid::row: content_row
+            fill: transparent_brush
+            stroke: elwindui::core::theme::BrushStyle::Separator
+            stroke_width: 1.0
+            corner_radius: 4.0
+            hit_test_visible: false
+        };
         Grid {
             rows: grid_rows
             columns: [elwindui::core::layout::GridLength::Star(1.0)]
-            tab_strip
+            tab_strip_host
             content_presenter
+            content_frame
         }
     }),
 }

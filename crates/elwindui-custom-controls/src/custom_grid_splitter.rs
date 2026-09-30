@@ -277,51 +277,36 @@ impl CustomGridSplitter {
         };
         let element = rectangle.as_ui_element();
         if invalidate_layout {
-            match self.resize_direction() {
-                GridResizeDirection::Columns => {
-                    element.width.set(Some(6.0));
-                    element.presentation_width.set(Some(6.0));
-                    element.height.set(None);
-                    element.presentation_height.set(None);
-                    element.min_width.set(None);
-                    element.presentation_min_width.set(None);
-                    element.min_height.set(Some(6.0));
-                    element.presentation_min_height.set(Some(6.0));
-                    element
-                        .horizontal_alignment
-                        .set(HorizontalAlignment::Stretch);
-                    element.vertical_alignment.set(VerticalAlignment::Stretch);
-                }
-                GridResizeDirection::Rows => {
-                    element.width.set(None);
-                    element.presentation_width.set(None);
-                    element.height.set(Some(6.0));
-                    element.presentation_height.set(Some(6.0));
-                    element.min_width.set(Some(6.0));
-                    element.presentation_min_width.set(Some(6.0));
-                    element.min_height.set(None);
-                    element.presentation_min_height.set(None);
-                    element
-                        .horizontal_alignment
-                        .set(HorizontalAlignment::Stretch);
-                    element.vertical_alignment.set(VerticalAlignment::Stretch);
-                }
-                GridResizeDirection::Auto => {
-                    element.width.set(Some(6.0));
-                    element.presentation_width.set(Some(6.0));
-                    element.height.set(Some(6.0));
-                    element.presentation_height.set(Some(6.0));
-                    element.min_width.set(None);
-                    element.presentation_min_width.set(None);
-                    element.min_height.set(None);
-                    element.presentation_min_height.set(None);
-                    element
-                        .horizontal_alignment
-                        .set(HorizontalAlignment::Center);
-                    element.vertical_alignment.set(VerticalAlignment::Center);
-                }
+            let (width, height) = match self.resize_direction() {
+                GridResizeDirection::Columns => (Some(4.0), Some(24.0)),
+                GridResizeDirection::Rows => (Some(24.0), Some(4.0)),
+                GridResizeDirection::Auto => (Some(6.0), Some(6.0)),
+            };
+            let horizontal_alignment = HorizontalAlignment::Center;
+            let vertical_alignment = VerticalAlignment::Center;
+            let changed = element.width.get() != width
+                || element.presentation_width.get() != width
+                || element.height.get() != height
+                || element.presentation_height.get() != height
+                || element.min_width.get().is_some()
+                || element.presentation_min_width.get().is_some()
+                || element.min_height.get().is_some()
+                || element.presentation_min_height.get().is_some()
+                || element.horizontal_alignment.get() != horizontal_alignment
+                || element.vertical_alignment.get() != vertical_alignment;
+            if changed {
+                element.width.set(width);
+                element.presentation_width.set(width);
+                element.height.set(height);
+                element.presentation_height.set(height);
+                element.min_width.set(None);
+                element.presentation_min_width.set(None);
+                element.min_height.set(None);
+                element.presentation_min_height.set(None);
+                element.horizontal_alignment.set(horizontal_alignment);
+                element.vertical_alignment.set(vertical_alignment);
+                self.invalidate_measure();
             }
-            self.invalidate_measure();
         }
         rectangle.set_fill_render_only(Some(self.visual_fill()));
     }

@@ -8,7 +8,8 @@ use crate::core::layout::{
 };
 use crate::core::theme::BrushStyle;
 use crate::core::ui::{
-    Grid, GridExt, LayoutExt, TextBlock, TextBlockExt, TextStyleOwner, UIElementExt,
+    ControlExt, Grid, GridExt, LayoutExt, Rectangle, ShapeExt, TextBlock, TextBlockExt,
+    TextStyleOwner, UIElementExt,
 };
 #[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
 use crate::core::ui::{MenuExt, MenuItemExt};
@@ -36,8 +37,8 @@ use super::floating_window::{FloatingHostId, FloatingHostRegistry, PreparedFloat
 use super::group_view::replace_group_items;
 use super::metrics::{
     CONTENT_HEADER_HEIGHT, GROUP_DOCK_BAND_FRACTION, GROUP_DOCK_BAND_MAX, GROUP_DOCK_BAND_MIN,
-    ROOT_TARGET_SIZE, SPLITTER_HIT_SIZE, TAB_INSERTION_MARKER_WIDTH, TITLE_BUTTON_COLUMN_WIDTH,
-    TITLE_BUTTON_SIZE, TITLE_TEXT_MARGIN,
+    ROOT_TARGET_SIZE, SPLITTER_HIT_SIZE, TAB_INSERTION_MARKER_WIDTH, TAB_STRIP_HEIGHT,
+    TITLE_BUTTON_COLUMN_WIDTH, TITLE_BUTTON_SIZE, TITLE_TEXT_MARGIN,
 };
 use super::split_view::SplitterSession;
 use super::surface_registry::SurfaceRegistry;
@@ -220,6 +221,7 @@ impl RuntimeNode {
 struct GroupRuntimeHost {
     container: Rc<Grid>,
     content_header: Rc<Grid>,
+    active_chrome: Rc<GroupChromeOverlay>,
     title: Rc<TextBlock>,
     empty_hint: Rc<TextBlock>,
     pin_button: Rc<Grid>,
@@ -235,6 +237,7 @@ impl GroupRuntimeHost {
             .set_foreground(themed_brush(BrushStyle::Foreground));
         self.empty_hint
             .set_foreground(themed_brush(BrushStyle::Tertiary));
+        self.active_chrome.refresh_theme();
 
         self.pin_button.children().clear();
         self.pin_button
@@ -244,6 +247,268 @@ impl GroupRuntimeHost {
         self.close_button
             .children()
             .add(RuntimeRealization::private_icon(false));
+    }
+}
+
+/// Docking-private active frame and document marker. The marker is placed from the retained tab's
+/// arranged bounds, keeping generic CustomTabView free of Docking-specific public state.
+#[elwindui::component(inherits Control)]
+struct GroupChromeOverlay {
+    #[prop(default = false)]
+    is_active: bool,
+    #[prop(default = None)]
+    view: Option<Weak<CustomTabView>>,
+    #[prop(default = None)]
+    active_tab: Option<Rc<CustomTabViewItem>>,
+    #[prop(default = TabStripPosition::Top)]
+    tab_position: TabStripPosition,
+    #[prop(default = 32.0)]
+    strip_height: f32,
+    #[computed(expr = BrushStyle::Value(Color::TRANSPARENT.into()))]
+    transparent_brush: BrushStyle,
+    template: template_view!(|this: Self| {
+        on_update(transparent_brush) { }
+        let active_frame = Rectangle {
+            Grid::row: 1
+            fill: transparent_brush
+            stroke: BrushStyle::Primary
+            stroke_width: 1.0
+            corner_radius: 4.0
+            visibility: Visibility::Collapsed
+            hit_test_visible: false
+        };
+        let active_marker = Rectangle {
+            width: 4.0
+            height: 16.0
+            fill: BrushStyle::Primary
+            vertical_alignment: VerticalAlignment::Center
+            visibility: Visibility::Collapsed
+            hit_test_visible: false
+        };
+        let marker_track = Grid {
+            Grid::row: 0
+            rows: [GridLength::Star(1.0)]
+            columns: [GridLength::Star(1.0)]
+            active_marker
+        };
+        Grid {
+            rows: [GridLength::Fixed(32.0), GridLength::Star(1.0)]
+            columns: [GridLength::Star(1.0)]
+            active_frame
+            marker_track
+        }
+    }),
+}
+
+#[elwindui::component]
+impl GroupChromeOverlay {
+    #[overrides]
+    fn measure_override(&self, _available: Size) -> Size {
+        Size {
+            width: 0.0,
+            height: 0.0,
+        }
+    }
+
+    #[overrides]
+    fn arrange_override(&self, final_size: Size) -> Size {
+        let Some(root) = self.__template_root() else {
+            return final_size;
+        };
+        let children = root.visual_children();
+        let Some(frame) = children.first().cloned() else {
+            return final_size;
+        };
+        let Some(marker_track) = children.get(1).cloned() else {
+            return final_size;
+        };
+        let Some(marker) = marker_track.visual_children().first().cloned() else {
+            return final_size;
+        };
+
+        let strip_height = self.strip_height().max(0.0);
+        let (rows, strip_row, content_row) = if strip_height <= 0.0 {
+            (vec![GridLength::Star(1.0), GridLength::Fixed(0.0)], 1, 0)
+        } else if self.tab_position() == TabStripPosition::Top {
+            (
+                vec![GridLength::Fixed(strip_height), GridLength::Star(1.0)],
+                0,
+                1,
+            )
+        } else {
+            (
+                vec![GridLength::Star(1.0), GridLength::Fixed(strip_height)],
+                1,
+                0,
+            )
+        };
+        if let Some(grid) = root.as_any().downcast_ref::<Grid>() {
+            grid.set_rows(rows);
+        }
+        frame
+            .as_ui_element()
+            .set_attached_if_changed("Grid", "row", content_row);
+        marker_track
+            .as_ui_element()
+            .set_attached_if_changed("Grid", "row", strip_row);
+        frame.set_visibility(if self.is_active() {
+            Visibility::Visible
+        } else {
+            Visibility::Collapsed
+        });
+        let marker_visible = self.is_active() && self.active_tab().is_some() && strip_height > 0.0;
+        marker_track.set_visibility(if marker_visible {
+            Visibility::Visible
+        } else {
+            Visibility::Collapsed
+        });
+        marker.set_visibility(if marker_visible {
+            Visibility::Visible
+        } else {
+            Visibility::Collapsed
+        });
+
+        root.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: final_size.width.max(0.0),
+            height: final_size.height.max(0.0),
+        });
+
+        if let Some(tab_bounds) = self.active_tab_bounds_in_view() {
+            let marker_y = active_marker_y(tab_bounds);
+            marker.arrange(Rect {
+                x: tab_bounds.x + 12.0,
+                y: marker_y,
+                width: 4.0,
+                height: 16.0,
+            });
+        }
+        final_size
+    }
+}
+
+fn active_marker_y(tab_bounds: Rect) -> f32 {
+    tab_bounds.y + ((tab_bounds.height - 16.0) * 0.5).max(0.0)
+}
+
+#[cfg(test)]
+mod active_marker_tests {
+    use super::*;
+
+    #[test]
+    fn active_marker_tracks_top_and_bottom_tab_rows() {
+        let top = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 120.0,
+            height: 32.0,
+        };
+        let bottom = Rect {
+            x: 0.0,
+            y: 268.0,
+            width: 120.0,
+            height: 32.0,
+        };
+
+        assert_eq!(active_marker_y(top), 8.0);
+        assert_eq!(active_marker_y(bottom), 276.0);
+    }
+}
+
+impl GroupChromeOverlay {
+    fn set_presentation(
+        &self,
+        is_active: bool,
+        view: Option<Weak<CustomTabView>>,
+        active_tab: Option<Rc<CustomTabViewItem>>,
+        tab_position: TabStripPosition,
+        strip_height: f32,
+    ) {
+        let mut changed = false;
+        if self.is_active() != is_active {
+            self.set_is_active(is_active);
+            changed = true;
+        }
+        let same_view = match (self.view().and_then(|view| view.upgrade()), view.as_ref()) {
+            (Some(current), Some(next)) => next
+                .upgrade()
+                .is_some_and(|next: Rc<CustomTabView>| Rc::ptr_eq(&current, &next)),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_view {
+            self.set_view(view);
+            changed = true;
+        }
+        let same_tab = match (self.active_tab(), active_tab.as_ref()) {
+            (Some(current), Some(next)) => Rc::ptr_eq(&current, next),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_tab {
+            self.set_active_tab(active_tab);
+            changed = true;
+        }
+        if self.tab_position() != tab_position {
+            self.set_tab_position(tab_position);
+            changed = true;
+        }
+        if self.strip_height() != strip_height {
+            self.set_strip_height(strip_height);
+            changed = true;
+        }
+        if changed {
+            self.invalidate_arrange();
+        }
+    }
+
+    fn active_tab_bounds_in_view(&self) -> Option<Rect> {
+        let tab: Rc<dyn UIElementExt> = self.active_tab()?;
+        let view: Rc<dyn UIElementExt> = self.view()?.upgrade()?;
+        let mut current = tab;
+        let mut x = 0.0;
+        let mut y = 0.0;
+        for _ in 0..64 {
+            let offset = current.arranged_offset()?;
+            let width = current.arranged_width()?;
+            let height = current.arranged_height()?;
+            x += offset.x;
+            y += offset.y;
+            let parent = current.visual_parent()?;
+            if Rc::ptr_eq(&parent, &view) {
+                return Some(Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                });
+            }
+            current = parent;
+        }
+        None
+    }
+
+    fn refresh_theme(&self) {
+        let Some(root) = self.__template_root() else {
+            return;
+        };
+        if let Some(frame) = root
+            .visual_children()
+            .first()
+            .and_then(|child| child.as_any().downcast_ref::<Rectangle>())
+        {
+            frame.set_stroke(themed_brush(BrushStyle::Primary));
+        }
+        if let Some(marker) = root
+            .visual_children()
+            .get(1)
+            .and_then(|track| track.visual_children().first().cloned())
+        {
+            if let Some(marker) = marker.as_any().downcast_ref::<Rectangle>() {
+                marker.set_fill(themed_brush(BrushStyle::Primary));
+            }
+        }
     }
 }
 
@@ -260,6 +525,8 @@ struct PlannedGroup {
     title_visibility: Visibility,
     pin_visibility: Visibility,
     close_visibility: Visibility,
+    is_active: bool,
+    active_tab: Option<Rc<CustomTabViewItem>>,
 }
 
 struct PlannedSplit {
@@ -501,6 +768,7 @@ impl RuntimeRealization {
     ) -> Result<ReconcilePlan, DockLayoutError> {
         let snapshot = model.snapshot();
         crate::snapshot::validate_snapshot(&snapshot)?;
+        let active_item = model.active_item().or_else(|| model.selected_item_id());
         let desired_owners = desired_owners(&snapshot);
         let floating_count = snapshot.floating_roots.len();
         let mut auto_hide_roots = BTreeMap::new();
@@ -577,6 +845,16 @@ impl RuntimeRealization {
                 identity,
                 surface,
             });
+        }
+
+        for planned in planned_groups.values_mut() {
+            if let Some(index) = active_item
+                .as_ref()
+                .and_then(|active| planned.items.iter().position(|item| item == active))
+            {
+                planned.is_active = true;
+                planned.active_tab = planned.tabs.get(index).cloned();
+            }
         }
 
         groups.retain(|key, _| used_groups.contains(key));
@@ -1393,6 +1671,7 @@ impl RuntimeRealization {
 
         self.group_selected
             .insert(group.clone(), Some(item.clone()));
+        self.sync_active_group_chrome(model);
         for owner in self.owners.values_mut() {
             if matches!(owner, RuntimePresentationOwner::AutoHide { .. }) {
                 *owner = RuntimePresentationOwner::None;
@@ -1400,6 +1679,38 @@ impl RuntimeRealization {
         }
         self.clear_auto_hide_presentations();
         true
+    }
+
+    fn sync_active_group_chrome(&self, model: &DockLayoutModel) {
+        let active_item = model.active_item().or_else(|| model.selected_item_id());
+        for (group, host) in &self.group_hosts {
+            let view = self.groups.get(group);
+            let items = self.group_items.get(group);
+            let active_index = active_item.as_ref().and_then(|active| {
+                items.and_then(|items| items.iter().position(|item| item == active))
+            });
+            let active_tab = active_item
+                .as_ref()
+                .filter(|_| active_index.is_some())
+                .and_then(|active| self.registry.wrapper(active));
+            let tab_position = view
+                .map(|view| view.tab_strip_position())
+                .unwrap_or(TabStripPosition::Top);
+            let strip_height = if tab_position == TabStripPosition::Bottom
+                && items.is_some_and(|items| items.len() == 1)
+            {
+                0.0
+            } else {
+                TAB_STRIP_HEIGHT
+            };
+            host.active_chrome.set_presentation(
+                active_tab.is_some(),
+                view.map(Rc::downgrade),
+                active_tab,
+                tab_position,
+                strip_height,
+            );
+        }
     }
 
     pub(crate) fn open_auto_hide_item_on(&self, root: &RootKind) -> Option<DockItemId> {
@@ -1547,6 +1858,8 @@ impl RuntimeRealization {
                         title_visibility,
                         pin_visibility,
                         close_visibility,
+                        is_active: false,
+                        active_tab: None,
                     },
                 );
                 Ok(RuntimeNode::Group {
@@ -1618,6 +1931,10 @@ impl RuntimeRealization {
         let container = Grid::new();
         container.set_rows(vec![GridLength::Auto, GridLength::Star(1.0)]);
         container.set_columns(vec![GridLength::Star(1.0)]);
+
+        let active_chrome = GroupChromeOverlay::new();
+        active_chrome.set_attached("Grid", "row", 1i32);
+        active_chrome.set_attached("Grid", "column", 0i32);
 
         let content_header = Grid::new();
         content_header.set_rows(vec![GridLength::Star(1.0)]);
@@ -1713,6 +2030,7 @@ impl RuntimeRealization {
         GroupRuntimeHost {
             container,
             content_header,
+            active_chrome,
             title,
             empty_hint,
             pin_button,
@@ -1748,6 +2066,19 @@ impl RuntimeRealization {
                 planned.view.select_index(index);
             }
         }
+        let strip_height =
+            if planned.tab_position == TabStripPosition::Bottom && planned.items.len() == 1 {
+                0.0
+            } else {
+                TAB_STRIP_HEIGHT
+            };
+        planned.host.active_chrome.set_presentation(
+            planned.is_active,
+            Some(Rc::downgrade(&planned.view)),
+            planned.active_tab.clone(),
+            planned.tab_position,
+            strip_height,
+        );
         planned.host.container.children().clear();
         planned.host.container.set_visibility(planned.visibility);
         planned.host.title.set_text(&planned.title);
@@ -1780,6 +2111,11 @@ impl RuntimeRealization {
             .add(planned.host.content_header.clone());
         self.bind_content_header_drag(&planned.host, &planned.view);
         planned.host.container.children().add(planned.view.clone());
+        planned
+            .host
+            .container
+            .children()
+            .add(planned.host.active_chrome.clone());
         planned
             .host
             .container

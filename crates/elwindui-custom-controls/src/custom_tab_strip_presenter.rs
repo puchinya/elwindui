@@ -1,11 +1,91 @@
 use super::core::base::{Point, Rect, Size};
 use super::core::ui::{LayoutExt, UIElementExt};
 use super::{CloseButtonPresentation, CustomTabViewItem, TabStripPosition};
-use std::rc::Rc;
+#[cfg(test)]
+use std::cell::Cell;
+use std::cell::RefCell;
+use std::rc::{Rc, Weak};
 
 const TAB_STRIP_HEIGHT: f32 = 32.0;
-const TAB_STRIP_FRAME_INSET: f32 = 2.0;
+const TAB_STRIP_FRAME_INSET: f32 = 0.0;
 const TAB_HEADER_MAX_WIDTH: f32 = 200.0;
+
+#[derive(Clone)]
+struct MeasuredTabStripPass {
+    item_identities: Vec<Weak<CustomTabViewItem>>,
+    max_item_width: f32,
+    height: f32,
+    compact: bool,
+    tab_strip_position: TabStripPosition,
+    close_button_presentation: CloseButtonPresentation,
+    widths: Vec<f32>,
+}
+
+impl MeasuredTabStripPass {
+    fn new(
+        items: &[Rc<CustomTabViewItem>],
+        max_item_width: f32,
+        height: f32,
+        compact: bool,
+        tab_strip_position: TabStripPosition,
+        close_button_presentation: CloseButtonPresentation,
+        widths: Vec<f32>,
+    ) -> Self {
+        Self {
+            item_identities: items.iter().map(Rc::downgrade).collect(),
+            max_item_width,
+            height,
+            compact,
+            tab_strip_position,
+            close_button_presentation,
+            widths,
+        }
+    }
+
+    fn matches(
+        &self,
+        items: &[Rc<CustomTabViewItem>],
+        max_item_width: f32,
+        height: f32,
+        compact: bool,
+        tab_strip_position: TabStripPosition,
+        close_button_presentation: CloseButtonPresentation,
+    ) -> bool {
+        self.item_identities.len() == items.len()
+            && self
+                .item_identities
+                .iter()
+                .zip(items)
+                .all(|(identity, item)| {
+                    identity
+                        .upgrade()
+                        .is_some_and(|cached| Rc::ptr_eq(&cached, item))
+                })
+            && self.max_item_width == max_item_width
+            && self.height == height
+            && self.compact == compact
+            && self.tab_strip_position == tab_strip_position
+            && self.close_button_presentation == close_button_presentation
+            && self.widths.len() == items.len()
+            && items
+                .iter()
+                .all(|item| Self::measurement_tree_is_valid(item.as_ui_element()))
+    }
+
+    fn measurement_tree_is_valid(element: &dyn UIElementExt) -> bool {
+        element.measured_size().is_some()
+            && element
+                .visual_children()
+                .iter()
+                .all(|child| Self::measurement_tree_is_valid(child.as_ui_element()))
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static ITEM_MEASURE_CALLS: Cell<usize> = const { Cell::new(0) };
+    static INTRINSIC_WIDTH_CALLS: Cell<usize> = const { Cell::new(0) };
+}
 
 /// Private presenter that owns the ordered tab-header controls and delegates layout to
 /// `HorizontalLayout`.
@@ -31,6 +111,8 @@ pub(crate) struct CustomTabStripPresenter {
     last_presented_compact_tabs: Option<bool>,
     #[state(default = None)]
     last_presented_close_button_presentation: Option<CloseButtonPresentation>,
+    #[state(default = Rc::new(RefCell::new(None)))]
+    last_measurement_pass: Rc<RefCell<Option<MeasuredTabStripPass>>>,
     body: view! {
         on_mount {
             this.reconcile_items();
@@ -54,20 +136,35 @@ impl CustomTabStripPresenter {
         (inner_width / count as f32).min(TAB_HEADER_MAX_WIDTH)
     }
 
-    fn constrain_items(&self, items: &[Rc<CustomTabViewItem>], max_width: f32) {
-        for item in items {
-            let min_width = if self.compact() { 0.0 } else { max_width };
-            if item.min_width() != Some(min_width) {
-                item.set_min_width(min_width);
-            }
-            if item.max_width() != Some(max_width) {
-                item.set_max_width(max_width);
-            }
-        }
+    fn measured_item_width(item: &CustomTabViewItem, maximum: f32, height: f32) -> f32 {
+        #[cfg(test)]
+        INTRINSIC_WIDTH_CALLS.with(|calls| calls.set(calls.get() + 1));
+        item.intrinsic_header_width(maximum, height)
     }
 
-    fn measured_item_width(item: &CustomTabViewItem, maximum: f32, height: f32) -> f32 {
-        item.intrinsic_header_width(maximum, height)
+    fn measure_item_widths(
+        &self,
+        items: &[Rc<CustomTabViewItem>],
+        max_width: f32,
+        height: f32,
+    ) -> Vec<f32> {
+        let compact = self.compact();
+        items
+            .iter()
+            .map(|item| {
+                #[cfg(test)]
+                ITEM_MEASURE_CALLS.with(|calls| calls.set(calls.get() + 1));
+                item.measure(Size {
+                    width: max_width,
+                    height,
+                });
+                if compact {
+                    Self::measured_item_width(item, max_width, height)
+                } else {
+                    max_width
+                }
+            })
+            .collect()
     }
 
     /// Resolves a point against the retained arranged tab headers. This intentionally reads only
@@ -236,25 +333,24 @@ impl CustomTabStripPresenter {
     fn measure_override(&self, available: Size) -> Size {
         let items = self.items();
         if items.is_empty() {
+            self.last_measurement_pass().borrow_mut().take();
             return Size {
                 width: TAB_STRIP_FRAME_INSET * 2.0,
                 height: TAB_STRIP_HEIGHT,
             };
         }
         let max_width = Self::max_item_width(available.width, items.len());
-        self.constrain_items(&items, max_width);
-        let mut content_width = 0.0;
-        for item in &items {
-            item.measure(Size {
-                width: max_width,
-                height: available.height,
-            });
-            content_width += if self.compact() {
-                Self::measured_item_width(item, max_width, available.height)
-            } else {
-                max_width
-            };
-        }
+        let widths = self.measure_item_widths(&items, max_width, available.height);
+        let content_width = widths.iter().sum::<f32>();
+        *self.last_measurement_pass().borrow_mut() = Some(MeasuredTabStripPass::new(
+            &items,
+            max_width,
+            available.height,
+            self.compact(),
+            self.tab_strip_position(),
+            self.close_button_presentation(),
+            widths,
+        ));
         Size {
             width: content_width + TAB_STRIP_FRAME_INSET * 2.0,
             height: TAB_STRIP_HEIGHT,
@@ -265,21 +361,38 @@ impl CustomTabStripPresenter {
     fn arrange_override(&self, final_size: Size) -> Size {
         let items = self.items();
         if items.is_empty() {
+            self.last_measurement_pass().borrow_mut().take();
             return final_size;
         }
         let max_width = Self::max_item_width(final_size.width, items.len());
-        self.constrain_items(&items, max_width);
-        let mut x = TAB_STRIP_FRAME_INSET;
-        for item in &items {
-            item.measure(Size {
-                width: max_width,
-                height: final_size.height,
+        let measured_pass = self
+            .last_measurement_pass()
+            .borrow()
+            .clone()
+            .filter(|pass| {
+                pass.matches(
+                    &items,
+                    max_width,
+                    final_size.height,
+                    self.compact(),
+                    self.tab_strip_position(),
+                    self.close_button_presentation(),
+                )
             });
-            let width = if self.compact() {
-                Self::measured_item_width(item, max_width, final_size.height)
-            } else {
-                max_width
-            };
+        let widths = measured_pass
+            .map(|pass| pass.widths)
+            .unwrap_or_else(|| self.measure_item_widths(&items, max_width, final_size.height));
+        *self.last_measurement_pass().borrow_mut() = Some(MeasuredTabStripPass::new(
+            &items,
+            max_width,
+            final_size.height,
+            self.compact(),
+            self.tab_strip_position(),
+            self.close_button_presentation(),
+            widths.clone(),
+        ));
+        let mut x = TAB_STRIP_FRAME_INSET;
+        for (item, width) in items.iter().zip(widths) {
             item.arrange(Rect {
                 x,
                 y: 0.0,
@@ -289,5 +402,115 @@ impl CustomTabStripPresenter {
             x += width;
         }
         final_size
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::ui::UIElementExt;
+
+    #[test]
+    fn layout_does_not_mutate_tab_width_constraints() {
+        let presenter = CustomTabStripPresenter::new();
+        let item = CustomTabViewItem::new_item();
+        presenter.set_items(vec![item.clone()]);
+        presenter.reconcile_items();
+        ITEM_MEASURE_CALLS.with(|calls| calls.set(0));
+
+        presenter.measure(Size {
+            width: 640.0,
+            height: TAB_STRIP_HEIGHT,
+        });
+        assert_eq!(item.min_width(), None);
+        assert_eq!(item.max_width(), None);
+
+        presenter.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 80.0,
+            height: TAB_STRIP_HEIGHT,
+        });
+
+        assert_eq!(item.min_width(), None);
+        assert_eq!(item.max_width(), None);
+        assert_eq!(item.arranged_width(), Some(80.0));
+        presenter.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 80.0,
+            height: TAB_STRIP_HEIGHT,
+        });
+        assert_eq!(ITEM_MEASURE_CALLS.with(Cell::get), 2);
+    }
+
+    #[test]
+    fn arrange_reuses_tab_measurements_when_constraints_match() {
+        let presenter = CustomTabStripPresenter::new();
+        let item = CustomTabViewItem::new_item();
+        presenter.set_items(vec![item]);
+        presenter.set_compact(true);
+        presenter.reconcile_items();
+        ITEM_MEASURE_CALLS.with(|calls| calls.set(0));
+        INTRINSIC_WIDTH_CALLS.with(|calls| calls.set(0));
+
+        presenter.measure(Size {
+            width: 200.0,
+            height: TAB_STRIP_HEIGHT,
+        });
+        assert_eq!(ITEM_MEASURE_CALLS.with(Cell::get), 1);
+        assert_eq!(INTRINSIC_WIDTH_CALLS.with(Cell::get), 1);
+
+        presenter.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: TAB_STRIP_HEIGHT,
+        });
+
+        presenter.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: TAB_STRIP_HEIGHT,
+        });
+
+        assert_eq!(ITEM_MEASURE_CALLS.with(Cell::get), 1);
+        assert_eq!(INTRINSIC_WIDTH_CALLS.with(Cell::get), 1);
+    }
+
+    #[test]
+    fn arrange_remeasures_when_a_header_measurement_is_invalidated() {
+        let presenter = CustomTabStripPresenter::new();
+        let item = CustomTabViewItem::new_item();
+        item.set_header("First".to_owned());
+        presenter.set_items(vec![item.clone()]);
+        presenter.set_compact(true);
+        presenter.reconcile_items();
+        ITEM_MEASURE_CALLS.with(|calls| calls.set(0));
+        INTRINSIC_WIDTH_CALLS.with(|calls| calls.set(0));
+
+        presenter.measure(Size {
+            width: 200.0,
+            height: TAB_STRIP_HEIGHT,
+        });
+        item.set_header("A substantially longer header".to_owned());
+
+        presenter.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: TAB_STRIP_HEIGHT,
+        });
+
+        presenter.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: TAB_STRIP_HEIGHT,
+        });
+
+        assert_eq!(ITEM_MEASURE_CALLS.with(Cell::get), 2);
+        assert_eq!(INTRINSIC_WIDTH_CALLS.with(Cell::get), 2);
     }
 }

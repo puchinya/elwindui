@@ -88,7 +88,7 @@ pub struct CustomTabViewItem {
     })]
     chrome_background: elwindui::core::theme::BrushStyle,
     #[computed(expr = if is_selected {
-        elwindui::core::theme::BrushStyle::Primary
+        elwindui::core::theme::BrushStyle::Separator
     } else {
         elwindui::core::theme::BrushStyle::Value(core::graphics::Color::TRANSPARENT.into())
     })]
@@ -96,7 +96,7 @@ pub struct CustomTabViewItem {
     #[computed(expr = if is_selected { 1.0 } else { 0.0 })]
     chrome_stroke_width: f32,
     #[computed(expr = if is_selected {
-        elwindui::core::theme::BrushStyle::Primary
+        elwindui::core::theme::BrushStyle::Background
     } else {
         elwindui::core::theme::BrushStyle::Separator
     })]
@@ -131,6 +131,12 @@ pub struct CustomTabViewItem {
                 Grid::row: header_row
                 height: header_height
                 spacing: 6.0
+                Rectangle {
+                    width: 16.0
+                    height: header_height
+                    fill: chrome_background
+                    hit_test_visible: false
+                }
                 IconSourceElement {
                     width: 16.0
                     height: 16.0
@@ -140,7 +146,7 @@ pub struct CustomTabViewItem {
                 TextBlock {
                     text: header
                     foreground: elwindui::core::theme::BrushStyle::Foreground
-                    text_alignment: elwindui::core::ui::TextAlignment::Center
+                    text_alignment: elwindui::core::ui::TextAlignment::Left
                 }
                 close_button
                 Rectangle {
@@ -148,6 +154,12 @@ pub struct CustomTabViewItem {
                     height: header_height
                     fill: elwindui::core::theme::BrushStyle::Separator
                     visibility: separator_visibility
+                    hit_test_visible: false
+                }
+                Rectangle {
+                    width: 8.0
+                    height: header_height
+                    fill: chrome_background
                     hit_test_visible: false
                 }
             }

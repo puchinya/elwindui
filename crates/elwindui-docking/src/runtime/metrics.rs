@@ -5,6 +5,7 @@ pub(crate) const CONTENT_HEADER_HEIGHT: f32 = 40.0;
 pub(crate) const TITLE_BUTTON_COLUMN_WIDTH: f32 = 28.0;
 pub(crate) const TITLE_BUTTON_SIZE: f32 = 22.0;
 pub(crate) const TITLE_TEXT_MARGIN: f32 = 8.0;
+pub(crate) const TAB_STRIP_HEIGHT: f32 = 32.0;
 
 pub(crate) const SPLITTER_HIT_SIZE: f32 = 12.0;
 pub(crate) const ROOT_TARGET_SIZE: f32 = 40.0;

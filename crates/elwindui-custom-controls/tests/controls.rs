@@ -120,10 +120,11 @@ fn long_tab_title_is_arranged_inside_its_header_before_the_action_slot() {
     let title_left = absolute_offset(&title).x;
     let title_right = title_left + title.arranged_width().unwrap();
     let close_left = absolute_offset(&close).x;
-    assert_eq!(title_left, 8.0);
+    // A generic header rect includes the 4 px outline overhang on each side of its logical width.
+    assert_eq!(title_left, 4.0 + 8.0);
     assert!(title.arranged_width().unwrap() > 0.0);
     assert!(title_right <= close_left);
-    assert!(close_left + close.arranged_width().unwrap() <= 80.0 - 4.0);
+    assert!(close_left + close.arranged_width().unwrap() <= 80.0 - 4.0 - 4.0);
 }
 
 #[test]
@@ -141,7 +142,8 @@ fn native_and_connected_chrome_switch_without_replacing_items_or_pages() {
     };
     layout_root(&root, size);
     let page_parent = page.visual_parent().unwrap();
-    assert_eq!(item.arranged_width(), Some(240.0));
+    // 240 px logical width plus the 4 px generic outline overhang on each side.
+    assert_eq!(item.arranged_width(), Some(248.0));
     assert_eq!(item.arranged_height(), Some(32.0));
     assert_eq!(
         absolute_offset(&(item.clone() as Rc<dyn UIElementExt>)).y,
@@ -185,7 +187,7 @@ fn native_and_connected_chrome_switch_without_replacing_items_or_pages() {
 
     view.set_connected_chrome(false);
     layout_root(&root, size);
-    assert_eq!(item.arranged_width(), Some(240.0));
+    assert_eq!(item.arranged_width(), Some(248.0));
     assert_eq!(item.close_button().arranged_width(), Some(32.0));
     assert_eq!(page.arranged_height(), Some(120.0));
     assert!(Rc::ptr_eq(&page.visual_parent().unwrap(), &page_parent));

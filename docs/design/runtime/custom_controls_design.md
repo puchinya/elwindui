@@ -51,7 +51,14 @@ dimensions and paint, never page ownership, callback authority or selection
 invalidation. Normal generic widths are 100–240 pixels and close actions are
 32×24; connected widths retain the 200-pixel maximum. Header outlines are
 independently constructed vector geometry rather than copied native XAML paths.
-Fixed edge pieces preserve corner radii while the center track stretches. Both
+Fixed edge pieces preserve corner radii while the center track stretches.
+The generic strip host starts with an 8-pixel leading inset, rounds equal header
+widths down to whole pixels so the edge pieces never meet on a fractional pixel
+(where antialiasing shows a seam), and arranges each generic header 4 pixels wider
+on both sides. That overhang carries the selected outline's feet past the logical
+edge; header insets, hover fill, intrinsic width and insertion boundaries subtract
+it, so content and insertion geometry keep their logical positions; within the
+4-pixel overlap between neighbours the later header receives pointer input. Both
 presentations retain their separate radii and seam dimensions. Docking installs
 a weak document pin callback on each stable item; generic hosts hide that action,
 and close/pin input is consumed before the tab gesture route. Application

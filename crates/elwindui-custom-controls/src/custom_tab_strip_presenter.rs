@@ -148,8 +148,10 @@ impl CustomTabStripPresenter {
         if self.compact() {
             available.min(240.0).max(0.0)
         } else if available.is_finite() {
-            // Keep the current bounded strip rather than allowing offscreen headers.
-            (available / count as f32).clamp(0.0, 240.0)
+            // Keep the current bounded strip rather than allowing offscreen headers. Whole-pixel
+            // widths (native TabView rounds down too) keep header edges off fractional pixels,
+            // where the selected outline's fixed edge pieces would show an antialiased seam.
+            (available / count as f32).floor().clamp(0.0, 240.0)
         } else {
             240.0
         }
@@ -207,7 +209,7 @@ impl CustomTabStripPresenter {
                 #[cfg(test)]
                 ITEM_MEASURE_CALLS.with(|calls| calls.set(calls.get() + 1));
                 item.measure(Size {
-                    width: max_width,
+                    width: max_width + 2.0 * item.header_overhang(),
                     height,
                 });
                 if compact {
@@ -274,14 +276,18 @@ impl CustomTabStripPresenter {
             let item = items.last()?;
             let offset = item.arranged_offset()?;
             (
-                offset.x + item.arranged_width()?,
+                offset.x + item.arranged_width()? - item.header_overhang(),
                 offset.y,
                 item.arranged_height()?,
             )
         } else {
             let item = items.get(index)?;
             let offset = item.arranged_offset()?;
-            (offset.x, offset.y, item.arranged_height()?)
+            (
+                offset.x + item.header_overhang(),
+                offset.y,
+                item.arranged_height()?,
+            )
         };
         (x.is_finite() && y.is_finite() && item_height.is_finite() && item_height >= 0.0).then_some(
             Rect {
@@ -450,10 +456,11 @@ impl CustomTabStripPresenter {
         ));
         let mut x = frame_inset;
         for (item, width) in items.iter().zip(widths) {
+            let overhang = item.header_overhang();
             item.arrange(Rect {
-                x,
+                x: x - overhang,
                 y: 0.0,
-                width,
+                width: width + 2.0 * overhang,
                 height: final_size.height,
             });
             x += width;
@@ -527,7 +534,11 @@ mod tests {
 
         assert_eq!(item.min_width(), None);
         assert_eq!(item.max_width(), None);
-        assert_eq!(item.arranged_width(), Some(80.0));
+        // Generic headers extend by the outline overhang on both sides of the logical width.
+        assert_eq!(
+            item.arranged_width(),
+            Some(80.0 + 2.0 * crate::custom_tab_view_item::GENERIC_HEADER_OVERHANG)
+        );
         presenter.arrange(Rect {
             x: 0.0,
             y: 0.0,
@@ -535,6 +546,36 @@ mod tests {
             height: TAB_STRIP_HEIGHT,
         });
         assert_eq!(ITEM_MEASURE_CALLS.with(Cell::get), 2);
+    }
+
+    #[test]
+    fn generic_equal_headers_use_whole_pixel_widths_and_overhang_both_edges() {
+        let presenter = CustomTabStripPresenter::new();
+        let items: Vec<_> = (0..3).map(|_| CustomTabViewItem::new_item()).collect();
+        presenter.set_items(items.clone());
+        presenter.reconcile_items();
+        let size = Size {
+            width: 452.0,
+            height: TAB_STRIP_HEIGHT,
+        };
+        presenter.measure(size);
+        presenter.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: size.width,
+            height: size.height,
+        });
+        let overhang = crate::custom_tab_view_item::GENERIC_HEADER_OVERHANG;
+        for (index, item) in items.iter().enumerate() {
+            // 452 / 3 rounds down to the native 150 px; edges stay on whole pixels.
+            assert_eq!(
+                item.arranged_offset().unwrap().x,
+                index as f32 * 150.0 - overhang
+            );
+            assert_eq!(item.arranged_width(), Some(150.0 + 2.0 * overhang));
+        }
+        assert_eq!(presenter.tab_insertion_boundary(1).unwrap().x, 150.0);
+        assert_eq!(presenter.tab_insertion_boundary(3).unwrap().x, 450.0);
     }
 
     #[test]

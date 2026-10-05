@@ -98,7 +98,9 @@ pub struct CustomTabView {
     compact: bool,
     #[state(default = false)]
     connected_chrome_internal: bool,
-    #[computed(expr = if connected_chrome_internal { 6.0 } else { 0.0 })]
+    // Connected (Docking) strips start with a 6 px rule; the generic strip keeps the native
+    // TabView 8 px leading inset, matching its 8 px top inset.
+    #[computed(expr = if connected_chrome_internal { 6.0 } else { 8.0 })]
     leading_rule_width: f32,
     #[computed(expr = header_host_tracks(tab_strip_position, connected_chrome_internal))]
     strip_host_rows: Vec<elwindui::core::layout::GridLength>,

@@ -17,6 +17,18 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 const TAB_HEADER_HEIGHT: f32 = 30.0;
+/// Generic headers are arranged this much wider on each side so the selected outline's bottom
+/// feet reach past the logical tab edge, as in the native TabView; header content keeps its
+/// logical position.
+pub(crate) const GENERIC_HEADER_OVERHANG: f32 = 4.0;
+
+fn header_overhang(connected: bool) -> f32 {
+    if connected {
+        0.0
+    } else {
+        GENERIC_HEADER_OVERHANG
+    }
+}
 
 fn item_tracks(position: TabStripPosition, connected: bool) -> Vec<core::layout::GridLength> {
     use core::layout::GridLength::Fixed;
@@ -106,13 +118,13 @@ pub struct CustomTabViewItem {
     header_grid_rows: Vec<elwindui::core::layout::GridLength>,
     #[computed(expr = if connected_chrome { TAB_HEADER_HEIGHT } else { 32.0 })]
     header_height: f32,
-    #[computed(expr = if connected_chrome { 12.0 } else { 8.0 })]
+    #[computed(expr = if connected_chrome { 12.0 } else { 8.0 + GENERIC_HEADER_OVERHANG })]
     leading_inset: f32,
-    #[computed(expr = if connected_chrome || !closable || close_button_presentation == CloseButtonPresentation::Never { 8.0 } else { 4.0 })]
+    #[computed(expr = header_overhang(connected_chrome) + if connected_chrome || !closable || close_button_presentation == CloseButtonPresentation::Never { 8.0 } else { 4.0 })]
     trailing_inset: f32,
     #[computed(expr = header_tracks(if connected_chrome { TAB_HEADER_HEIGHT } else { 32.0 }))]
     inner_header_rows: Vec<core::layout::GridLength>,
-    #[computed(expr = header_columns(if connected_chrome { 12.0 } else { 8.0 }, if connected_chrome || !closable || close_button_presentation == CloseButtonPresentation::Never { 8.0 } else { 4.0 }))]
+    #[computed(expr = header_columns(if connected_chrome { 12.0 } else { 8.0 + GENERIC_HEADER_OVERHANG }, header_overhang(connected_chrome) + if connected_chrome || !closable || close_button_presentation == CloseButtonPresentation::Never { 8.0 } else { 4.0 }))]
     inner_header_columns: Vec<core::layout::GridLength>,
     #[computed(expr = if connected_chrome { 6.0 } else { 10.0 })]
     icon_gap: f32,
@@ -148,6 +160,8 @@ pub struct CustomTabViewItem {
     native_outline_visibility: Visibility,
     #[computed(expr = outline_tracks(connected_chrome))]
     outline_columns: Vec<core::layout::GridLength>,
+    #[computed(expr = { let overhang = header_overhang(connected_chrome); vec![core::layout::GridLength::Fixed(overhang), core::layout::GridLength::Star(1.0), core::layout::GridLength::Fixed(overhang)] })]
+    background_columns: Vec<core::layout::GridLength>,
     #[computed(expr = if !is_selected && is_pointer_over { Visibility::Visible } else { Visibility::Collapsed })]
     simple_background_visibility: Visibility,
     #[computed(expr = if !connected_chrome {
@@ -209,13 +223,19 @@ pub struct CustomTabViewItem {
                 rows: [elwindui::core::layout::GridLength::Star(1.0)]
                 columns: [elwindui::core::layout::GridLength::Star(1.0)]
                 hit_test_visible: false
-                Rectangle {
-                    fill: chrome_background
-                    stroke: chrome_stroke
-                    stroke_width: chrome_stroke_width
-                    corner_radius: 4.0
+                Grid {
+                    columns: background_columns
+                    rows: [elwindui::core::layout::GridLength::Star(1.0)]
                     visibility: simple_background_visibility
                     hit_test_visible: false
+                    Rectangle {
+                        Grid::column: 1
+                        fill: chrome_background
+                        stroke: chrome_stroke
+                        stroke_width: chrome_stroke_width
+                        corner_radius: 4.0
+                        hit_test_visible: false
+                    }
                 }
                 Grid {
                     columns: outline_columns
@@ -394,7 +414,13 @@ impl CustomTabViewItem {
             }
             width += child.measured_size().map(|size| size.width).unwrap_or(0.0);
         }
-        width.min(maximum)
+        // The overhang is arranged outside the logical width (`header_overhang`).
+        (width - 2.0 * self.header_overhang()).clamp(0.0, maximum)
+    }
+
+    /// Extra width the strip arranges on each side of this header beyond its logical width.
+    pub(crate) fn header_overhang(&self) -> f32 {
+        header_overhang(self.connected_chrome())
     }
 
     /// Creates a tab item with its default presentation properties.

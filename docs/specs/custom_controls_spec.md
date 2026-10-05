@@ -68,8 +68,11 @@ The press below that threshold emits no drag callbacks. Core cancellation emits
 one canceled completion and item removal cancels an active drag before detach.
 
 The default presentation follows standard WinUI 3 TabView: a 40 logical-pixel
-strip includes an 8-pixel outer inset and a 32-pixel item header. Normal headers
-use a 100–240-pixel width range, constrained by the available strip when narrower.
+strip includes an 8-pixel outer inset and a 32-pixel item header; the first header
+also starts 8 pixels after the leading edge. Normal headers use a 100–240-pixel
+width range, constrained by the available strip when narrower, and resolve to
+whole logical pixels. The selected outline's lower feet extend 4 pixels beyond
+each logical header edge, as in the native TabView.
 Titles use 12-pixel type and selected titles are semibold. Closable headers use
 8/4-pixel leading/trailing insets and a 32×24 close-button slot. Selected outlines
 join the content edge; hover and pressed actions use subtle backgrounds. Colors

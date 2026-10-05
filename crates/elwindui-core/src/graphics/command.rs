@@ -105,6 +105,8 @@ pub enum RenderCommand {
         /// `None` means the backend must use its platform-default text paint.
         foreground: Option<Brush>,
         alignment: TextAlignment,
+        /// Uses the same wrapping policy as the text's layout measurement.
+        wrapping: super::TextWrapping,
     },
     PushClip {
         clip: Clip,

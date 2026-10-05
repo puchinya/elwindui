@@ -85,9 +85,11 @@ impl DragSession {
         bounds: Rect,
     ) -> Result<DockLayoutModel, DockLayoutError> {
         let placement = InternalDockPlacement::Floating { bounds };
+        // A committed drop makes the moved Document the active item (`docking_spec.md`).
         let candidate = self
             .original
-            .with_item_moved_internal(&self.item, placement.clone())?;
+            .with_item_moved_internal(&self.item, placement.clone())?
+            .with_item_activated(&self.item)?;
         self.candidate = Some(placement);
         Ok(candidate)
     }
@@ -110,8 +112,10 @@ impl DragSession {
         self.candidate
             .take()
             .and_then(|placement| {
+                // A committed drop makes the moved Document the active item.
                 self.original
                     .with_item_moved_internal(&self.item, placement)
+                    .and_then(|moved| moved.with_item_activated(&self.item))
                     .ok()
             })
             .or_else(|| Some(self.original.clone()))

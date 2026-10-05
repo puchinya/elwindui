@@ -7,7 +7,14 @@ custom-control contracts.
 ## Authored declarations
 
 Applications author one `DockingControl` whose content is a `DockGroup` or `DockSplitPanel` tree.
-`DockGroup` registers a stable `DockGroupId`, tab-strip position, and authored weight. `DockItem`
+`DockGroup` registers a stable `DockGroupId`, tab-strip position, and authored weight.
+`DockGroup` and `DockSplitPanel` also accept an authored `DockSize` (optional pixel `width`,
+`height`, and min/max per axis), mirroring WinUI.Dock module sizes. Inside a parent split, a node
+with a fixed extent along the split axis is a fixed-size track and other nodes share the remaining
+space by weight; min/max bound the track either way. A split panel's size applies to its children
+across the panel's own axis, and a perpendicular split is fixed when all of its children are.
+Resizing a fixed track with a splitter keeps the new pixel extent for the lifetime of the runtime.
+`DockSize` is authored input only; it never enters `DockLayoutSnapshot` (V2 unchanged). `DockItem`
 registers a stable `DockItemId`, title, optional `IconSource`, page content, and the capability
 flags `can_close`, `can_pin`, `can_float`, and `can_dock`.
 
@@ -38,8 +45,8 @@ content identity. Runtime ownership changes use detach-before-attach.
 `CustomTabView` supplies selection, close, and tab-drag callbacks, including its existing threshold,
 capture, cancellation, root-relative position, and optional logical screen position.
 `CustomGridSplitter` owns splitter Grid discovery, track mutation, constraints, live relayout,
-rollback, and resize notifications. Split nodes with N children realize as one retained Grid with N
-Star pane tracks and N-1 twelve-pixel `CustomGridSplitter`s. Horizontal splits set
+rollback, and resize notifications. Split nodes with N children realize as a retained pane Grid
+with N Star tracks and N-1 twelve-pixel `CustomGridSplitter` hit targets. Horizontal splits set
 `column_spacing = 12`; vertical splits set `row_spacing = 12`, leaving a 12-logical-pixel gap between
 adjacent pane bounds. The splitter is placed at the beginning of the following pane's track and
 translated -12 logical px on the split axis, so its 12-pixel hit target occupies the gap without a
@@ -70,11 +77,24 @@ marker when active and the title so the title remains legible. The active marker
 page content.
 Top-tab pin/close affordances appear on pointer hover; bottom-tab actions belong to the content
 header.
+Bottom content headers keep pin/close actions at the trailing edge with the
+reference insets. The title wraps in the remaining width and the header grows
+from its 40-logical-pixel minimum as necessary, without overlapping actions.
+Docked headers (tab hover actions and content headers) use adjacent 24-logical-pixel action buttons
+with the auto-hide glyph (a pin with a small badge) and a 10-pixel close cross, each centered in its
+button. The auto-hide pane header uses adjacent 28-logical-pixel buttons with a plain push-pin
+(re-dock) glyph and the same close cross. Action buttons show subtle hover/pressed fills.
 All Docking drag sources represent one Document. A tab drag may reorder that Document, move it to a
 group/root, split a target group, or float it, subject to the item's capability checks. Docking has
 no group-level drag, tear-out, or cross-dock operation. Bottom content-header actions and drag
 operate on the selected Document and never move its containing group. A floating native window
-continues to move through its platform title bar. Supported tab context actions are `Close`,
+continues to move through platform-owned title dragging. Windows floating hosts
+retain the native resizing border, hide the standard caption, and reserve a
+32-logical-pixel custom title area above the Dock surface. This title is centered,
+16 pixels and bold; it adds no minimize/maximize/close actions absent from the
+pinned reference adapter. Tab/content close and system close (including Alt+F4)
+retain the existing capability and close-veto lifecycle. Other backends retain
+their existing native decorations. Supported tab context actions are `Close`,
 `Close Others`, `Close Tabs to Left`, `Close Tabs to Right`, `Float`, and `Auto Hide / Pin`; each
 action uses the same capability checks and one model transaction as its pointer equivalent.
 
@@ -87,17 +107,24 @@ consulting `can_close`, preserve the authored declaration, and restore the autho
 deterministically.
 
 Drag movement changes only a custom drop-preview rectangle and candidate target. It never reparents
-page content or reconciles a preview model. Completion commits one normalized model, or cancels when
-there is no valid target. The private resolved target retains the destination root, target group,
+page content or reconciles a preview model. Like the reference, a dragged tab leaves its strip while
+the drag is active, and when it was selected its group presents the neighbouring Document; both are
+presentation-only and restored before the drop commits or the drag cancels. Completion commits one normalized model. A release with
+no resolved target, inside or outside every surface, floats the Document when `can_float` allows it
+and otherwise cancels. Every committed drop makes the moved Document the model's active item in the
+same transaction. The private resolved target retains the destination root, target group,
 and surface-local preview rectangle as one value, so preview, hit testing, and commit cannot diverge.
-Outer surface bands provide four Dock targets; the deepest containing runtime group provides Center
-or four Split targets. Cross-window discovery uses only Core `screen_to_root`/`root_to_screen`
+Targets resolve only where they are drawn: a root Dock target only while the pointer is inside one
+of the four 36-logical-pixel root-edge target rectangles of the main surface (floating surfaces,
+like the WinUI.Dock reference, draw and resolve only the group compass), and a group Center or Split target only
+while the pointer is inside one of the five compass cells of the deepest containing runtime group.
+The drawn rectangles and the resolution rectangles come from one geometry source. Cross-window discovery uses only Core `screen_to_root`/`root_to_screen`
 conversions and arranged visual bounds, converting screen coordinates to host-root and then
 surface-local coordinates by subtracting the surface origin. Without a screen position, only the
 source surface is eligible.
 
 Preview geometry is the complete target group for Center, the corresponding half for Split, and the
-corresponding quarter of the surface for an outer Dock target. The rectangle is arranged by a
+corresponding half of the surface for an outer Dock target, matching the committed 1:1 root wrap. The rectangle is arranged by a
 retained surface-local overlay layer. Its visual uses the active/accent fill, default separator
 border, four-logical-pixel border thickness, four-logical-pixel-equivalent corner radius, and 0.4
 opacity. It remains non-hit-testable; this chrome does not change the resolved geometry.
@@ -106,7 +133,9 @@ The five group targets are a retained 124-logical-pixel connected cross compass
 (`SplitTop`, `SplitLeft`, `Center`, `SplitRight`, `SplitBottom`) with five 36-logical-pixel target
 cells. Each 36-pixel visual has a 4-pixel inset, default fill and separator stroke, and a document
 glyph with active/accent stroke. Center shows a whole document; Split shows a whole document with a
-dashed midline in the split direction; Dock shows a half document and direction indicator. The
+dashed midline in the split direction; Dock shows a half document on the docking side and a small
+square where the existing content goes. Root-edge targets sit flush against the surface edges,
+centered along each edge. The
 connected compass backing has a 2-pixel outer inset and joins the five cells as one rounded, stroked
 cross. Target selection is conveyed by the preview rectangle, not a large selected-color cell fill.
 Target visuals do not own input or resolve a drop. The compass is centered on the arranged bounds of
@@ -118,9 +147,9 @@ oriented group Split target. Both sets are non-hit-testable and the source drag 
 the only input authority.
 
 For an individual Document drag, a pointer inside the target group's arranged tab-header rectangle
-takes precedence over the group's compass split bands. This makes the actual header midpoint
-available for Center insertion while the same document drag resolves compass targets elsewhere in
-the group.
+resolves Center insertion for that group. This makes the actual header midpoint available for
+Center insertion and same-group reorder, while the same document drag resolves compass targets only
+inside their cells.
 
 For a Center drop, the resolved target also carries an optional tab insertion index. The index is
 resolved from the retained arranged header rectangles and their actual midpoints: the left side of
@@ -139,14 +168,25 @@ hit testing.
 
 Every surface has four private custom-rendered auto-hide strips, a single overlay pane, a custom
 pin affordance, and a drop-preview layer. An auto-hide entry opens in the one overlay pane; opening
-another entry closes only the previous presentation. Pinning chooses the nearest surface edge with
-the deterministic order Left, Top, Right, Bottom. Unpinning restores the remembered group/index,
-then the current authored default, then the root fallback.
+another entry closes only the previous presentation. Pinning uses the item's runtime preferred side
+when one exists, the side of its last root-edge drop or the side it was last unpinned from, and
+appends the entry to that side's strip. Otherwise the side follows the item's arranged bounds on its surface: a narrower than
+tall item chooses the nearer of Left and Right, any other item the nearer of Top and Bottom. The
+pane's pin action docks the item to the root edge of the same side, makes it the active item, and
+records that side as preferred. The preferred side is runtime-only state; V2 snapshot shape
+is unchanged, and stored return-state fields remain accepted but are not consulted by unpinning.
+Visible strips reserve their extent in the surface layout; the surface's main root is arranged
+inside them and is never covered by a strip.
 
 Auto-hide strip entries are title-first, content-sized side tabs with sixteen logical pixels between
 entries and a four-logical-pixel active/hover marker. Left and Right titles are rotated; Top and
 Bottom titles remain horizontal. The strip does not show a document icon. The active marker and text
 follow the active/accent theme brush.
+
+Docking's active/accent chrome (active frame and marker, target glyphs, drop preview, auto-hide
+marker and pane border) uses the application Theme's `Primary` brush when it resolves to a value.
+When `Primary` resolves to `PlatformDefault`, this chrome uses the platform accent color (the
+Windows user accent, the macOS control accent) and re-reads it on theme refresh.
 
 An open pane fills the usable center area on its perpendicular axis. Its initial width for Left/Right
 or height for Top/Bottom is one third of the available center extent, unless that item has a remembered
@@ -155,8 +195,10 @@ Right and Bottom resize directions are inverted. The extent is retained by `Dock
 close/reopen and pin/unpin for the lifetime of the owning runtime, and is cleared when that runtime
 is destroyed. A pane cannot consume the full surface and make its remaining content unusable.
 
-Clicking outside the pane and strip on the same surface dismisses its presentation without changing
-the item. Escape dismisses it when the existing input route can deliver the key. Opening another
+Clicking a strip entry opens its pane and makes that item active. Clicking outside the pane and strip
+on the same surface dismisses its presentation without moving or closing the item; when the item was
+active, the model has no active item afterward. The pane's close action closes the item under its
+`can_close` capability. Escape dismisses it when the existing input route can deliver the key. Opening another
 entry, pinning, closing, or starting a drag dismisses the prior pane through the existing runtime
 and model paths. The pane has an active border, rounded outer corner, and a forty-logical-pixel
 title header for its Document with pin/close actions and page content below it. The non-action
@@ -165,8 +207,8 @@ portion of that header may start a drag for the open Document only.
 On macOS and Windows, a floating model root is hosted by a real backend `Window` containing its
 retained `DockSurfaceView`. Bounds are the model's normalized logical desktop `Rect`. A new host is
 prepared with bounds, content, and a weak close handler before the candidate ownership/model is
-committed; it is shown only after that commit. Interactive floating bounds derive from the source
-group's arranged size and the individual drag's pointer offset, with a minimum size of 160 by 120;
+committed; it is shown only after that commit. An interactive floating root is 400 by 400 logical
+pixels, positioned from the individual drag's pointer offset, with a minimum size of 160 by 120;
 only the dragged Document moves into the resulting floating root. A floating-host
 failure returns `DockLayoutError::FloatingHostUnavailable` and leaves the source ownership/model
 unchanged.

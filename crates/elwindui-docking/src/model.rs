@@ -299,6 +299,23 @@ impl DockLayoutModel {
                 .any(|root| contains_live_item(&root.root, item))
     }
 
+    /// Closes an auto-hidden item's presentation after a light dismissal, releasing its active
+    /// state when it was the active item. The item stays auto-hidden.
+    pub(crate) fn with_auto_hide_dismissed(&self, item: &DockItemId) -> Self {
+        let mut next = self.clone();
+        for side in &mut next.workspace.auto_hide {
+            for entry in side {
+                if &entry.item == item {
+                    entry.open = false;
+                }
+            }
+        }
+        if next.workspace.active_item.as_ref() == Some(item) {
+            next.workspace.active_item = None;
+        }
+        next
+    }
+
     /// Returns a model with the item selected, reopening it when it is closed.
     pub fn with_item_activated(&self, item: &DockItemId) -> Result<Self, DockLayoutError> {
         let mut next = self.clone();

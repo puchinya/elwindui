@@ -11,6 +11,10 @@ Layout is a two-pass process:
 
 Common width, height, alignment, margin, visibility, min/max, and container rules are applied around element-specific `measure_override` / `arrange_override` behavior. Rendering consumes arranged bounds and does not perform layout.
 
+During Arrange, explicit width and height constrain the element's own arranged size without
+shrinking the parent-assigned slot. Alignment positions that size within the remaining slot;
+explicit size combined with `Stretch` uses leading-edge placement (`Left` / `Top`) on that axis.
+
 ## Constraints
 
 An unconstrained axis is represented explicitly rather than by an arbitrary large number. `ScrollView` measures content without the viewport constraint on scrollable axes while constraining the cross axis. Native measurement adapters translate this contract into each toolkit's natural-size mechanism.
@@ -18,6 +22,14 @@ An unconstrained axis is represented explicitly rather than by an arbitrary larg
 Arrange may set explicit native width/height for positioning. A backend whose native measure caches those arranged values must clear them back to its `Auto` sentinel before the next natural measurement.
 
 ## Grid inter-track spacing
+
+Grid probes natural child sizes only when an axis contains an Auto or implicit track, or a Star
+track with an unconstrained viewport. If both axes consist entirely of Fixed tracks and finite
+Star tracks, the existing constrained track resolver can determine every cell without child
+metrics. That path measures each child once at its resolved cell size. It preserves the same
+spacing, min/max constraints, DesiredSize, and Arrange resolution while avoiding multiplicative
+natural-size probes through nested fully determined Grids. Every explicit Measure call still
+recomputes layout; this is not a subtree cache.
 
 `Grid.row_spacing` and `Grid.column_spacing` describe gaps between adjacent tracks, not edge padding.
 For an axis with N tracks, Measure and Arrange reserve `(N - 1) * spacing` from the available
@@ -37,3 +49,15 @@ Inactive subtrees do not schedule independent layout. Reactivation invalidates f
 Every root or independently hosted subtree has one layout host that owns the current viewport, pending invalidation, and backend application of final rectangles. Container implementations such as `TabView` delegate page layout to those boundaries instead of mixing two root coordinate systems.
 
 A host consumes a viewport supplied by its owner. Native size changes produced by that same host's own layout/presentation must never feed back as a viewport invalidation to itself. Nested hosts receive viewport changes only from their parent/native-container authority (e.g. a window, a tab strip, a scroll viewport, a popup placement) — never from observing their own native output. A backend that lets a host's own presentation size double as its next layout input creates a same-host feedback cascade: each layout's own size output re-triggers another layout of the same host, one step per event-loop turn, with no natural termination.
+
+For a Grid whose columns resolve independently of child metrics (Fixed or finite Star),
+the natural-size pass uses those resolved column widths even when Auto rows still require
+child heights. This lets width-dependent content such as wrapped text determine the Auto row
+height in the existing two passes; it does not add a third recursive measurement pass.
+
+When Auto columns prevent resolving columns up front, the Grid follows WinUI's order: the
+natural-size pass resolves Auto/Fixed column widths, finite Star columns then take the remaining
+width, and only the children in Star columns are measured again at that resolved width before row
+sizes are resolved. Wrapped content beside Auto columns (for example a title next to collapsible
+action buttons) therefore contributes its wrapped height to an Auto row, and a collapsed child in
+an Auto column takes no width.

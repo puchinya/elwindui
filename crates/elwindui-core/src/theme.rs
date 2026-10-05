@@ -12,6 +12,26 @@ use crate::graphics::{Brush, Color};
 use crate::reactive::Subscription;
 use std::rc::Rc;
 
+thread_local! {
+    static PLATFORM_ACCENT: std::cell::RefCell<Option<Rc<dyn Fn() -> Option<Color>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Backend integration hook: registers the query for the platform accent color (the Windows user
+/// accent, the macOS control accent). Each backend's `init()` calls this on the main thread.
+#[doc(hidden)]
+pub fn set_platform_accent_provider(provider: Option<Rc<dyn Fn() -> Option<Color>>>) {
+    PLATFORM_ACCENT.set(provider);
+}
+
+/// The current platform accent color, or `None` when no backend provides one. Self-drawn chrome
+/// that must stay visible when `BrushStyle::Primary` resolves to `PlatformDefault` uses this; the
+/// semantic resolution itself still never materializes a platform default.
+pub fn platform_accent_color() -> Option<Color> {
+    let provider = PLATFORM_ACCENT.with_borrow(Clone::clone);
+    provider.and_then(|provider| provider())
+}
+
 /// The result of resolving a semantic value without materializing a toolkit-owned default.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedValue<T> {

@@ -1,4 +1,5 @@
 use super::core::base::{Point, Rect, Size};
+use super::core::layout::Visibility;
 use super::core::ui::{LayoutExt, UIElementExt};
 use super::{CloseButtonPresentation, CustomTabViewItem, TabStripPosition};
 #[cfg(test)]
@@ -73,11 +74,12 @@ impl MeasuredTabStripPass {
     }
 
     fn measurement_tree_is_valid(element: &dyn UIElementExt) -> bool {
-        element.measured_size().is_some()
-            && element
-                .visual_children()
-                .iter()
-                .all(|child| Self::measurement_tree_is_valid(child.as_ui_element()))
+        !element.participates_in_layout()
+            || (element.measured_size().is_some()
+                && element
+                    .visual_children()
+                    .iter()
+                    .all(|child| Self::measurement_tree_is_valid(child.as_ui_element())))
     }
 }
 
@@ -99,6 +101,8 @@ pub(crate) struct CustomTabStripPresenter {
     tab_strip_position: TabStripPosition,
     #[prop(default = false)]
     compact: bool,
+    #[state(default = false)]
+    connected_chrome: bool,
     #[prop(default = CloseButtonPresentation::Always)]
     close_button_presentation: CloseButtonPresentation,
     #[state(default = Vec::new())]
@@ -124,7 +128,33 @@ pub(crate) struct CustomTabStripPresenter {
 }
 
 impl CustomTabStripPresenter {
-    fn max_item_width(available_width: f32, count: usize) -> f32 {
+    pub(crate) fn apply_connected_chrome(&self, connected: bool) {
+        if self.connected_chrome() != connected {
+            self.set_connected_chrome(connected);
+            self.last_measurement_pass().borrow_mut().take();
+            for item in self.items() {
+                item.apply_connected_chrome(connected);
+            }
+        }
+    }
+
+    fn effective_max_width(&self, available: f32, count: usize) -> f32 {
+        if self.connected_chrome() {
+            return Self::max_item_width(available, count, self.compact());
+        }
+        if count == 0 {
+            return 0.0;
+        }
+        if self.compact() {
+            available.min(240.0).max(0.0)
+        } else if available.is_finite() {
+            // Keep the current bounded strip rather than allowing offscreen headers.
+            (available / count as f32).clamp(0.0, 240.0)
+        } else {
+            240.0
+        }
+    }
+    fn max_item_width(available_width: f32, count: usize, compact: bool) -> f32 {
         if count == 0 {
             return 0.0;
         }
@@ -133,13 +163,30 @@ impl CustomTabStripPresenter {
         } else {
             TAB_HEADER_MAX_WIDTH * count as f32
         };
-        (inner_width / count as f32).min(TAB_HEADER_MAX_WIDTH)
+        if compact {
+            inner_width.min(TAB_HEADER_MAX_WIDTH)
+        } else {
+            (inner_width / count as f32).min(TAB_HEADER_MAX_WIDTH)
+        }
     }
 
     fn measured_item_width(item: &CustomTabViewItem, maximum: f32, height: f32) -> f32 {
         #[cfg(test)]
         INTRINSIC_WIDTH_CALLS.with(|calls| calls.set(calls.get() + 1));
         item.intrinsic_header_width(maximum, height)
+    }
+
+    fn fit_compact_widths(widths: &mut [f32], available_content_width: f32) {
+        if !available_content_width.is_finite() {
+            return;
+        }
+        let content_width = widths.iter().sum::<f32>();
+        if content_width > available_content_width && content_width > 0.0 {
+            let scale = available_content_width.max(0.0) / content_width;
+            for width in widths {
+                *width *= scale;
+            }
+        }
     }
 
     fn measure_item_widths(
@@ -152,6 +199,11 @@ impl CustomTabStripPresenter {
         items
             .iter()
             .map(|item| {
+                // A collapsed header (Docking hides a dragged tab) takes no strip width, so the
+                // remaining headers close up like the reference.
+                if item.visibility() != Visibility::Visible {
+                    return 0.0;
+                }
                 #[cfg(test)]
                 ITEM_MEASURE_CALLS.with(|calls| calls.set(calls.get() + 1));
                 item.measure(Size {
@@ -293,6 +345,7 @@ impl CustomTabStripPresenter {
         let compact = self.compact();
         let presentation = self.close_button_presentation();
         for (index, item) in items.iter().enumerate() {
+            item.apply_connected_chrome(self.connected_chrome());
             item.set_presentation(
                 index == selected,
                 item.pointer_over(),
@@ -339,7 +392,7 @@ impl CustomTabStripPresenter {
                 height: TAB_STRIP_HEIGHT,
             };
         }
-        let max_width = Self::max_item_width(available.width, items.len());
+        let max_width = self.effective_max_width(available.width, visible_count(&items));
         let widths = self.measure_item_widths(&items, max_width, available.height);
         let content_width = widths.iter().sum::<f32>();
         *self.last_measurement_pass().borrow_mut() = Some(MeasuredTabStripPass::new(
@@ -364,7 +417,7 @@ impl CustomTabStripPresenter {
             self.last_measurement_pass().borrow_mut().take();
             return final_size;
         }
-        let max_width = Self::max_item_width(final_size.width, items.len());
+        let max_width = self.effective_max_width(final_size.width, visible_count(&items));
         let measured_pass = self
             .last_measurement_pass()
             .borrow()
@@ -379,9 +432,13 @@ impl CustomTabStripPresenter {
                     self.close_button_presentation(),
                 )
             });
-        let widths = measured_pass
+        let mut widths = measured_pass
             .map(|pass| pass.widths)
             .unwrap_or_else(|| self.measure_item_widths(&items, max_width, final_size.height));
+        let frame_inset = TAB_STRIP_FRAME_INSET;
+        if self.compact() {
+            Self::fit_compact_widths(&mut widths, (final_size.width - frame_inset * 2.0).max(0.0));
+        }
         *self.last_measurement_pass().borrow_mut() = Some(MeasuredTabStripPass::new(
             &items,
             max_width,
@@ -391,7 +448,7 @@ impl CustomTabStripPresenter {
             self.close_button_presentation(),
             widths.clone(),
         ));
-        let mut x = TAB_STRIP_FRAME_INSET;
+        let mut x = frame_inset;
         for (item, width) in items.iter().zip(widths) {
             item.arrange(Rect {
                 x,
@@ -405,10 +462,46 @@ impl CustomTabStripPresenter {
     }
 }
 
+fn visible_count(items: &[Rc<CustomTabViewItem>]) -> usize {
+    items
+        .iter()
+        .filter(|item| item.visibility() == Visibility::Visible)
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::ui::UIElementExt;
+
+    #[test]
+    fn compact_headers_get_a_content_width_cap_instead_of_a_shared_slot() {
+        assert_eq!(
+            CustomTabStripPresenter::max_item_width(200.0, 2, true),
+            200.0
+        );
+        assert_eq!(
+            CustomTabStripPresenter::max_item_width(200.0, 2, false),
+            100.0
+        );
+        assert_eq!(
+            CustomTabStripPresenter::max_item_width(640.0, 4, true),
+            200.0
+        );
+    }
+
+    #[test]
+    fn compact_header_widths_fit_the_strip_only_when_their_sum_overflows() {
+        let mut overflowing = vec![140.0, 100.0];
+        CustomTabStripPresenter::fit_compact_widths(&mut overflowing, 188.0);
+        assert!((overflowing[0] - 188.0 * 140.0 / 240.0).abs() < 0.001);
+        assert!((overflowing[1] - 188.0 * 100.0 / 240.0).abs() < 0.001);
+        assert!((overflowing.iter().sum::<f32>() - 188.0).abs() < 0.001);
+
+        let mut fitting = vec![70.0, 50.0];
+        CustomTabStripPresenter::fit_compact_widths(&mut fitting, 188.0);
+        assert_eq!(fitting, vec![70.0, 50.0]);
+    }
 
     #[test]
     fn layout_does_not_mutate_tab_width_constraints() {

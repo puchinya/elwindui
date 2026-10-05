@@ -20,14 +20,29 @@ Theme-backed properties record the Theme revision used for their last synchroniz
 
 The measurement input is text, constraints, and `ComputedTextStyle`. Backend adapters must use the same conversions for measuring and drawing.
 
-`TextBlock` retains only its most recent measured size, keyed by text, resolved style, available
-size, alignment, and the registered text-backend generation. Repeating the same measurement within
-one unchanged visual state returns that result without calling the platform text engine again.
-Text, inherited or local style, constraints, alignment, and backend replacement each miss the key.
+WinUI3 keeps a dedicated untouched thread-local XAML TextBlock for reading live platform default
+style values. It is separate from the measurement scratch whose properties are overwritten for
+each request. Default-style resolution reads the native properties each time without constructing
+a new native object or freezing theme/language defaults in a computed-style cache.
+
+`TextBlock` retains up to eight measured sizes for available-size constraints within one text,
+resolved-style, alignment, and registered text-backend generation. Hits move to the most recently
+used position; inserting a ninth constraint evicts the oldest entry. This allows alternating
+natural-size and resolved-cell Grid probes to reuse their own font metrics without evicting each
+other. Text, inherited or local style, alignment, and backend replacement clear the whole local
+set; a previously unseen constraint misses only its own size entry.
 `UIElement::measure` still runs normally and stores its current desired size; this cache only avoids
 repeating deterministic backend font measurement and does not cache arrangement or painting.
 
 ## Native controls
+
+`TextBlock.text_wrapping` defaults to `NoWrap` and participates in its measurement-cache
+signature. Text measurement and `RenderCommand::Text` carry the same `TextWrapping` value.
+Existing RenderContext text helpers retain NoWrap; the explicit wrapping helper supplies the
+requested value. WinUI3 sets TextWrapping on both measurement and retained paint TextBlocks;
+AppKit uses the matching paragraph line-break mode and CATextLayer wrapping setting.
+Docking's selected-document content header explicitly uses Wrap and an Auto middle row so
+its retained title grows the header above its 40px minimum without replacing page ownership.
 
 Native controls receive resolved font and foreground values through their backend adapter. `PlatformDefault` clears the native property instead of assigning a hard-coded family or color.
 

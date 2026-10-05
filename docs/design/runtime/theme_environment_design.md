@@ -91,6 +91,8 @@ The code generator has a fixed compile-time table for the eleven framework names
 
 `BrushStyle::resolve` follows aliases through the effective `EnvironmentContext`. A fixed role bitset detects a repeated role without allocation; a cycle resolves to `ResolvedValue::PlatformDefault`. `Value(Brush)` and `PlatformDefault` terminate immediately.
 
+`core::theme::platform_accent_color()` is a separate query, not a resolution step: `resolve` still never materializes `PlatformDefault`. Backends register it in `init()` through the doc-hidden `set_platform_accent_provider` hook (WinUI3 `UISettings` accent, AppKit `controlAccentColor` in sRGB). Self-drawn framework chrome that must stay visible under an unset `Primary` (Docking active/target chrome, the custom tab active marker) uses it as its fallback; it is read when that chrome is created or refreshed.
+
 ### Brush-property codegen
 
 The semantic Brush surface is deliberately limited to the existing `foreground`, `background`, `fill`, and `stroke` DSL properties. Capability is declared beside the property rather than inferred from those spellings: ordinary class properties use `#[prop(semantic_brush, ..)]`, while `#[text_style]` marks its injected `foreground` field as semantic-brush capable. Same-crate `TypeInfo` retains this marker; cross-crate builtin use defers both the capability query and value application to `__elwindui_props_{Name}!(@is_semantic_brush ..)` / `@set_with_environment`. Therefore an unrelated user property named `fill` or `foreground` keeps its declared type and setter semantics.

@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Executable,
     [Parameter(Mandatory = $true)]
-    [string] $EvidenceDirectory
+    [string] $EvidenceDirectory,
+    [switch] $StartupOnly
 )
 
 Set-StrictMode -Version Latest
@@ -21,8 +22,9 @@ $startParameters = @{
     WorkingDirectory = $workingDirectory
     RedirectStandardOutput = $stdoutPath
     RedirectStandardError = $stderrPath
-    Environment = @{ ELWINDUI_PERF_TRACE = '1' }
+    Environment = if ($StartupOnly) { @{ ELWINDUI_STARTUP_TRACE = '1' } } else { @{ ELWINDUI_PERF_TRACE = '1' } }
     PassThru = $true
+    WindowStyle = 'Hidden'
 }
 $process = Start-Process @startParameters
 

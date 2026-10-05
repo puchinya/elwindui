@@ -115,6 +115,7 @@ ElwindUI のすべてのビジュアル要素（`UIElement`）は、**Measure（
 - **整列（Alignment）の適用**:
   - `horizontal_alignment` (`Left`, `Center`, `Right`, `Stretch`) および `vertical_alignment` (`Top`, `Center`, `Bottom`, `Stretch`) を評価し、`final_rect` 内での配置座標を確定する。
   - `margin` によるオフセットを最終位置へ加算する。
+  - 明示的な `width` / `height` は要素自身の配置サイズを制約するが、親から渡された `final_rect` は縮めない。各軸の alignment はその矩形内で要素を配置するため、明示サイズと `Center` / `Right` / `Bottom` を組み合わせても余白に合わせて位置が決まる。明示サイズと `Stretch` を同じ軸に指定した場合、要素は明示サイズを保ち、先頭側 (`Left` / `Top`) に配置される。
 
 #### 3. Render パス（描画出力）
 
@@ -540,6 +541,9 @@ Grid {
 |---|---|---|---|
 | `text` | `String` | OneWay | 表示テキスト |
 | `text_alignment` | `Option<TextAlignment>` | OneWay | テキスト配置（`Left`, `Center`, `Right`, `Justified`） |
+| `text_wrapping` | `TextWrapping` | OneWay | 既定値 `NoWrap`。`Wrap` / `WrapWholeWords` は利用可能幅で折り返す |
+
+折り返し設定は文字の測定と描画で一致させる。変更は測定を無効化し、無制約の幅では自然幅を測定する。
 
 `TextBlock` は `#[text_style]` を持ち、共通フォント属性（`font_family`, `font_size`, `font_weight`, `font_style`, `font_stretch`, `character_spacing`, `foreground`）が使用可能である。
 

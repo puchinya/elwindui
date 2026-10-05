@@ -57,6 +57,7 @@ pub use ffi::AnyView;
 /// WinUI 3 object. The operation is idempotent; the App SDK bootstrap remains active until process
 /// exit, which is the lifetime required by WinUI 3 and Win2D objects.
 pub fn init() -> windows::core::Result<()> {
+    app::trace_startup_phase("bootstrap_entry");
     use std::sync::OnceLock;
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
@@ -72,6 +73,18 @@ pub fn init() -> windows::core::Result<()> {
     // `docs/design/runtime/text_design.md` for why this needs to happen before any `TextBlock`
     // measurement or `NativeControl::sync_text_style` call.
     elwindui_core::graphics::set_text_backend(std::rc::Rc::new(render::WinUi3TextBackend));
+    // Self-drawn accent chrome falls back to the user's Windows accent when the app Theme leaves
+    // `Primary` unset (`docs/specs/docking_spec.md`). Queried on demand so theme refreshes see
+    // accent changes.
+    elwindui_core::theme::set_platform_accent_provider(Some(std::rc::Rc::new(|| {
+        let settings = windows::UI::ViewManagement::UISettings::new().ok()?;
+        let color = settings
+            .GetColorValue(windows::UI::ViewManagement::UIColorType::Accent)
+            .ok()?;
+        Some(elwindui_core::graphics::Color::rgba(
+            color.R, color.G, color.B, color.A,
+        ))
+    })));
 
     static BOOTSTRAP: OnceLock<std::result::Result<(), HRESULT>> = OnceLock::new();
     let result = BOOTSTRAP.get_or_init(|| unsafe {

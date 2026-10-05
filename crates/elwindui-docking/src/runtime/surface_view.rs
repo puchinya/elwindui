@@ -44,6 +44,8 @@ impl DockSurfaceView {
 pub(crate) struct SurfaceRuntime {
     pub(crate) root: RootKind,
     pub(crate) surface: Rc<DockSurfaceView>,
+    /// Hosts the main root in its center cell; edge tracks reserve the visible auto-hide strips.
+    main_host: Rc<Grid>,
     pub(crate) auto_hide: AutoHideOverlay,
     pub(crate) preview: DropPreview,
     pub(crate) targets: DockTargetOverlay,
@@ -61,22 +63,28 @@ impl SurfaceRuntime {
         let preview = DropPreview::new();
         let targets = DockTargetOverlay::new();
         let insertion_marker = InsertionMarker::new();
+        let main_host = Grid::new();
         let runtime = Self {
             root,
             surface,
+            main_host,
             auto_hide,
             preview,
             targets,
             insertion_marker,
         };
+        runtime
+            .targets
+            .set_root_targets_hidden(runtime.root != RootKind::Main);
         runtime.reset_visual_children();
         runtime
             .auto_hide
-            .bind_light_dismiss(&runtime.surface.content_root());
+            .bind_light_dismiss(&runtime.surface.content_root(), owner);
         runtime
     }
 
     pub(crate) fn set_root(&mut self, root: RootKind) {
+        self.targets.set_root_targets_hidden(root != RootKind::Main);
         self.root = root.clone();
         self.auto_hide.set_root(root);
     }
@@ -84,6 +92,9 @@ impl SurfaceRuntime {
     pub(crate) fn reset_visual_children(&self) {
         let root = self.surface.content_root();
         root.children().clear();
+        self.main_host.children().clear();
+        self.update_strip_reservation();
+        root.children().add(self.main_host.clone());
         root.children().add(self.auto_hide.visual());
         root.children().add(self.preview.visual());
         root.children().add(self.targets.visual());
@@ -91,7 +102,29 @@ impl SurfaceRuntime {
     }
 
     pub(crate) fn add_main_child(&self, child: Rc<dyn UIElementExt>) {
-        self.surface.content_root().children().insert(0, child);
+        child
+            .as_ui_element()
+            .set_attached_if_changed("Grid", "row", 1i32);
+        child
+            .as_ui_element()
+            .set_attached_if_changed("Grid", "column", 1i32);
+        self.main_host.children().add(child);
+    }
+
+    /// Shrinks the main root by the visible strip extents, matching the strips' own Auto tracks.
+    fn update_strip_reservation(&self) {
+        let [left, top, right, bottom] = self.auto_hide.strip_extents();
+        // Grid track setters ignore unchanged values, so repeated renders do not invalidate.
+        self.main_host.set_rows(vec![
+            GridLength::Fixed(top),
+            GridLength::Star(1.0),
+            GridLength::Fixed(bottom),
+        ]);
+        self.main_host.set_columns(vec![
+            GridLength::Fixed(left),
+            GridLength::Star(1.0),
+            GridLength::Fixed(right),
+        ]);
     }
 
     pub(crate) fn refresh_theme(&self) {
@@ -111,5 +144,6 @@ impl SurfaceRuntime {
     ) {
         self.auto_hide
             .render_strips(titles, owner, self.root.clone());
+        self.update_strip_reservation();
     }
 }

@@ -470,6 +470,7 @@ impl CompositionIslandState {
         }
 
         let mut next_order = Vec::with_capacity(wanted.nodes.len());
+        let mut visuals_replaced = false;
         for desired in &wanted.nodes {
             match self.nodes.get_mut(&desired.id) {
                 Some(existing) if existing.can_update(desired, rasterization_scale) => {
@@ -507,6 +508,7 @@ impl CompositionIslandState {
                 ) {
                     Ok(state) => {
                         self.nodes.insert(desired.id, state);
+                        visuals_replaced = true;
                         next_order.push(desired.id);
                     }
                     Err(reason) => {
@@ -521,7 +523,12 @@ impl CompositionIslandState {
         }
 
         let shape_runs_changed = self.reconcile_shape_runs(compositor, &next_order)?;
-        if self.order != next_order || shape_runs_changed {
+        if island_children_need_rebind(
+            &self.order,
+            &next_order,
+            visuals_replaced,
+            shape_runs_changed,
+        ) {
             let children = self.root.Children()?;
             children.RemoveAll()?;
             let runs_by_first_id: HashMap<_, _> = self
@@ -613,9 +620,34 @@ impl CompositionIslandState {
     }
 }
 
+fn island_children_need_rebind(
+    previous: &[RenderNodeId],
+    next: &[RenderNodeId],
+    visuals_replaced: bool,
+    shape_runs_changed: bool,
+) -> bool {
+    // A stable RenderNodeId can acquire a new SpriteVisual when its image surface
+    // is recreated. Ordering alone cannot detect the old attached visual.
+    previous != next || visuals_replaced || shape_runs_changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recreated_image_rebinds_children_even_when_node_order_is_unchanged() {
+        let order = [(42, 0), (43, 0)];
+        assert!(!island_children_need_rebind(&order, &order, false, false));
+        assert!(island_children_need_rebind(&order, &order, true, false));
+        assert!(island_children_need_rebind(&order, &order, false, true));
+        assert!(island_children_need_rebind(
+            &order,
+            &order[..1],
+            false,
+            false
+        ));
+    }
 
     #[test]
     fn transformed_bounds_include_rotation() {

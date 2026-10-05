@@ -13,8 +13,33 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-const TAB_STRIP_HEIGHT: f32 = 32.0;
+const TAB_STRIP_HEIGHT: f32 = 40.0;
 const TAB_DRAG_THRESHOLD: f32 = 4.0;
+
+fn strip_tracks(
+    position: TabStripPosition,
+    height: f32,
+) -> Vec<elwindui::core::layout::GridLength> {
+    use elwindui::core::layout::GridLength::{Fixed, Star};
+    if position == TabStripPosition::Top {
+        vec![Fixed(height), Star(1.0)]
+    } else {
+        vec![Star(1.0), Fixed(height)]
+    }
+}
+
+fn header_host_tracks(
+    position: TabStripPosition,
+    connected: bool,
+) -> Vec<elwindui::core::layout::GridLength> {
+    use elwindui::core::layout::GridLength::Fixed;
+    let inset = if connected { 0.0 } else { 8.0 };
+    if position == TabStripPosition::Top {
+        vec![Fixed(inset), Fixed(32.0)]
+    } else {
+        vec![Fixed(32.0), Fixed(inset)]
+    }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -58,6 +83,10 @@ pub enum TabItemPointerEvent {
 #[elwindui::component(inherits Control)]
 #[content(children)]
 pub struct CustomTabView {
+    #[environment(foreground)]
+    palette_foreground: elwindui::core::theme::BrushStyle,
+    #[state(default = false)]
+    palette_dark: bool,
     #[prop(default = Vec::new())]
     children: Vec<Rc<CustomTabViewItem>>,
     #[prop(default = 0)]
@@ -67,6 +96,14 @@ pub struct CustomTabView {
     tab_strip_position: TabStripPosition,
     #[prop(default = false)]
     compact: bool,
+    #[state(default = false)]
+    connected_chrome_internal: bool,
+    #[computed(expr = if connected_chrome_internal { 6.0 } else { 0.0 })]
+    leading_rule_width: f32,
+    #[computed(expr = header_host_tracks(tab_strip_position, connected_chrome_internal))]
+    strip_host_rows: Vec<elwindui::core::layout::GridLength>,
+    #[computed(expr = if tab_strip_position == TabStripPosition::Top { 1 } else { 0 })]
+    strip_item_row: i32,
     #[prop(default = CloseButtonPresentation::Always)]
     close_button_presentation: CloseButtonPresentation,
     #[state(default = None)]
@@ -91,17 +128,7 @@ pub struct CustomTabView {
     tab_strip_row: i32,
     #[computed(expr = if tab_strip_position == TabStripPosition::Top { 1 } else { 0 })]
     content_row: i32,
-    #[computed(expr = if tab_strip_position == TabStripPosition::Top {
-        vec![
-            elwindui::core::layout::GridLength::Fixed(TAB_STRIP_HEIGHT),
-            elwindui::core::layout::GridLength::Star(1.0),
-        ]
-    } else {
-        vec![
-            elwindui::core::layout::GridLength::Star(1.0),
-            elwindui::core::layout::GridLength::Fixed(TAB_STRIP_HEIGHT),
-        ]
-    })]
+    #[computed(expr = strip_tracks(tab_strip_position, if connected_chrome_internal { 32.0 } else { TAB_STRIP_HEIGHT }))]
     grid_rows: Vec<elwindui::core::layout::GridLength>,
     #[computed(expr = if tab_strip_position == TabStripPosition::Top {
         elwindui::core::layout::VerticalAlignment::Bottom
@@ -113,6 +140,10 @@ pub struct CustomTabView {
     template_items: Vec<Rc<CustomTabViewItem>>,
     #[state(default = None)]
     last_presented_selected_index: Option<usize>,
+    // The item that received a forwarded press keeps the rest of that gesture, even if the
+    // presented selection changes while it is active (Docking shows a neighbour during a drag).
+    #[state(default = None)]
+    forwarded_gesture_index: Option<usize>,
     #[state(default = None)]
     last_presented_tab_strip_position: Option<TabStripPosition>,
     #[state(default = None)]
@@ -127,32 +158,40 @@ pub struct CustomTabView {
         elwindui::core::graphics::Color::TRANSPARENT.into()
     ))]
     transparent_brush: elwindui::core::theme::BrushStyle,
+    #[computed(expr = if connected_chrome_internal { transparent_brush.clone() } else { super::support::native_tab_background(true, palette_dark) })]
+    content_background: elwindui::core::theme::BrushStyle,
+    #[computed(expr = if connected_chrome_internal { elwindui::core::theme::BrushStyle::Separator } else { super::support::native_tab_stroke(palette_dark) })]
+    frame_stroke: elwindui::core::theme::BrushStyle,
     template: template_view!(|this: Self| {
-        on_update(children, template_items, selected_index, tab_strip_position, compact, close_button_presentation) {
+        on_update(children, template_items, selected_index, tab_strip_position, compact, close_button_presentation, palette_foreground) {
+            this.sync_palette();
             this.reconcile_children();
         }
         let tab_strip_host = Grid {
             Grid::row: tab_strip_row
-            rows: [elwindui::core::layout::GridLength::Star(1.0)]
+            rows: strip_host_rows
             columns: [
-                elwindui::core::layout::GridLength::Fixed(6.0),
+                elwindui::core::layout::GridLength::Fixed(leading_rule_width),
                 elwindui::core::layout::GridLength::Star(1.0),
             ]
             Rectangle {
+                Grid::row: strip_item_row
                 Grid::column: 0
                 height: 1.0
-                fill: elwindui::core::theme::BrushStyle::Separator
+                fill: frame_stroke
                 vertical_alignment: baseline_alignment
                 hit_test_visible: false
             }
             Rectangle {
+                Grid::row: strip_item_row
                 Grid::column: 1
                 height: 1.0
-                fill: elwindui::core::theme::BrushStyle::Separator
+                fill: frame_stroke
                 vertical_alignment: baseline_alignment
                 hit_test_visible: false
             }
             CustomTabStripPresenter {
+                Grid::row: strip_item_row
                 items: tab_items
                 selected_index: selected_index
                 tab_strip_position: tab_strip_position
@@ -168,8 +207,8 @@ pub struct CustomTabView {
         };
         let content_frame = Rectangle {
             Grid::row: content_row
-            fill: transparent_brush
-            stroke: elwindui::core::theme::BrushStyle::Separator
+            fill: content_background
+            stroke: frame_stroke
             stroke_width: 1.0
             corner_radius: 4.0
             hit_test_visible: false
@@ -178,16 +217,46 @@ pub struct CustomTabView {
             rows: grid_rows
             columns: [elwindui::core::layout::GridLength::Star(1.0)]
             tab_strip_host
-            content_presenter
             content_frame
+            content_presenter
         }
     }),
+}
+
+impl CustomTabView {
+    fn sync_palette(&self) {
+        let dark = super::support::native_tab_dark(self.palette_foreground());
+        if self.palette_dark() != dark {
+            self.set_palette_dark(dark);
+        }
+    }
+    /// Framework integration for connected document chrome. This is not a DSL property.
+    #[doc(hidden)]
+    pub fn set_connected_chrome(&self, connected: bool) {
+        if self.connected_chrome_internal() == connected {
+            return;
+        }
+        // Invalidate the presentation signature, retaining item/page ownership.
+        self.set_connected_chrome_internal(connected);
+        self.set_last_presented_tab_strip_position(None);
+        let children = self.children_values();
+        for item in &children {
+            item.apply_connected_chrome(connected);
+        }
+        let strip: Option<Rc<CustomTabStripPresenter>> =
+            self.strip_presenter().and_then(|strip| strip.upgrade());
+        if let Some(strip) = strip {
+            strip.apply_connected_chrome(connected);
+        }
+        self.sync_presentation(&children);
+    }
 }
 
 #[elwindui::component]
 impl CustomTabView {
     #[overrides]
     fn on_apply_template(&self) {
+        self.sync_palette();
         self.set_clip_to_bounds(Some(true));
         self.cache_presenters();
         self.reconcile_children();
@@ -197,12 +266,31 @@ impl CustomTabView {
 /// A templated splitter that reports logical-axis drag deltas.
 
 impl CustomTabView {
+    fn strip_offset(&self, strip: &Rc<CustomTabStripPresenter>) -> Option<Point> {
+        let mut node: Rc<dyn UIElementExt> = strip.clone();
+        let mut offset = Point { x: 0.0, y: 0.0 };
+        for _ in 0..32 {
+            if node
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|view| std::ptr::eq(view, self))
+            {
+                return Some(offset);
+            }
+            let local = node.arranged_offset()?;
+            offset.x += local.x;
+            offset.y += local.y;
+            node = node.visual_parent()?;
+        }
+        None
+    }
+
     /// Resolves a group-local point against the retained tab-strip header geometry.
     #[doc(hidden)]
     pub fn tab_insertion_index_at(&self, point: Point) -> Option<usize> {
         let (strip, _) = self.presenters();
         let strip = strip?;
-        let offset = strip.arranged_offset()?;
+        let offset = self.strip_offset(&strip)?;
         strip.tab_insertion_index_at(Point {
             x: point.x - offset.x,
             y: point.y - offset.y,
@@ -214,7 +302,7 @@ impl CustomTabView {
     pub fn tab_insertion_boundary(&self, index: usize) -> Option<Rect> {
         let (strip, _) = self.presenters();
         let strip = strip?;
-        let offset = strip.arranged_offset()?;
+        let offset = self.strip_offset(&strip)?;
         let boundary = strip.tab_insertion_boundary(index)?;
         Some(Rect {
             x: offset.x + boundary.x,
@@ -361,7 +449,25 @@ impl CustomTabView {
     /// Forwards a pointer event from a selected-document surface through its tab header gesture.
     #[doc(hidden)]
     pub fn forward_selected_item_pointer_event(&self, event: TabItemPointerEvent) {
-        self.forward_item_pointer_event(self.selected_index(), event);
+        let index = match &event {
+            TabItemPointerEvent::Pressed(_) => {
+                let index = self.selected_index();
+                self.set_forwarded_gesture_index(Some(index));
+                index
+            }
+            TabItemPointerEvent::Moved(_) => self
+                .forwarded_gesture_index()
+                .unwrap_or_else(|| self.selected_index()),
+            TabItemPointerEvent::Released(_) | TabItemPointerEvent::Canceled(_) => {
+                let index = self
+                    .forwarded_gesture_index()
+                    .unwrap_or_else(|| self.selected_index());
+                self.set_forwarded_gesture_index(None);
+                index
+            }
+            TabItemPointerEvent::Entered | TabItemPointerEvent::Exited => self.selected_index(),
+        };
+        self.forward_item_pointer_event(index, event);
     }
 
     /// Reapplies runtime-owned tab chrome that is resolved from the application theme.
@@ -534,6 +640,7 @@ impl CustomTabView {
         self.sync_grid_rows();
         let (strip_presenter, content_presenter) = self.presenters();
         if let Some(presenter) = strip_presenter {
+            presenter.apply_connected_chrome(self.connected_chrome_internal());
             presenter.set_items(children.to_vec());
             presenter.set_selected_index(selected);
             presenter.set_tab_strip_position(position);
@@ -541,7 +648,7 @@ impl CustomTabView {
             presenter.set_close_button_presentation(close);
             presenter
                 .as_ui_element()
-                .set_attached::<i32>("Grid", "row", self.tab_strip_row());
+                .set_attached::<i32>("Grid", "row", self.strip_item_row());
             presenter.reconcile_items();
         }
         if let Some(presenter) = content_presenter {
@@ -553,6 +660,7 @@ impl CustomTabView {
             presenter.reconcile_contents();
         }
         for (index, item) in children.iter().enumerate() {
+            item.apply_connected_chrome(self.connected_chrome_internal());
             item.set_presentation(index == selected, item.pointer_over(), position, close);
         }
         self.set_last_presented_selected_index(Some(selected));
@@ -598,7 +706,7 @@ impl CustomTabView {
                 presenter.set_close_button_presentation(close);
                 presenter
                     .as_ui_element()
-                    .set_attached::<i32>("Grid", "row", self.tab_strip_row());
+                    .set_attached::<i32>("Grid", "row", self.strip_item_row());
             }
             if let Some(presenter) = content_presenter.as_ref() {
                 presenter.set_selected_index(selected);
@@ -652,7 +760,11 @@ impl CustomTabView {
         let Some(grid) = root.as_any().downcast_ref::<Grid>() else {
             return;
         };
-        let strip_height = TAB_STRIP_HEIGHT;
+        let strip_height = if self.connected_chrome_internal() {
+            32.0
+        } else {
+            TAB_STRIP_HEIGHT
+        };
         let rows = if self.tab_strip_position() == TabStripPosition::Top {
             vec![
                 elwindui::core::layout::GridLength::Fixed(strip_height),
@@ -970,6 +1082,103 @@ mod tests {
     use crate::core::ui::{ContentControlExt, UIElement, UIElementExt, layout_root};
     use std::cell::Cell;
     use std::rc::Rc;
+
+    #[test]
+    fn docking_pin_press_consumes_selection_and_drag_and_invokes_once_on_release() {
+        use crate::core::input::{RawPointerEvent, RawPointerEventKind};
+        use crate::{ChromeIcon, CustomTabCloseButton, CustomTabCloseButtonExt};
+        let view = CustomTabView::new_view();
+        view.set_connected_chrome(true);
+        let first = CustomTabViewItem::new_item();
+        let second = CustomTabViewItem::new_item();
+        let pin_count = Rc::new(Cell::new(0));
+        let pins = pin_count.clone();
+        second.set_document_pin_action(true, Rc::new(move || pins.set(pins.get() + 1)));
+        view.replace_children(vec![first, second.clone()]);
+        let drag_count = Rc::new(Cell::new(0));
+        let drags = drag_count.clone();
+        view.set_on_tab_drag_started(Box::new(move |_| drags.set(drags.get() + 1)));
+        let root: Rc<dyn UIElementExt> = view.clone();
+        layout_root(
+            &root,
+            Size {
+                width: 400.0,
+                height: 160.0,
+            },
+        );
+        let pin = crate::core::visual_tree::find_all::<CustomTabCloseButton>(second.as_ref())
+            .into_iter()
+            .find(|node| {
+                node.as_any()
+                    .downcast_ref::<CustomTabCloseButton>()
+                    .is_some_and(|button| button.glyph_kind() == ChromeIcon::Pin)
+            })
+            .expect("pin action");
+        let button = pin
+            .as_any()
+            .downcast_ref::<CustomTabCloseButton>()
+            .expect("pin button");
+        assert!(
+            button.slot_visible(),
+            "enabled pin must reserve its action slot"
+        );
+        assert_eq!(pin.arranged_width(), Some(24.0));
+        assert_eq!(pin.arranged_height(), Some(24.0));
+        let mut point = Point { x: 12.0, y: 12.0 };
+        let mut current = Some(pin.clone());
+        while let Some(node) = current {
+            let offset = node.arranged_offset().expect("arranged action");
+            point.x += offset.x;
+            point.y += offset.y;
+            current = node.visual_parent();
+        }
+        let mut hit = crate::core::ui::hit_test(&root, point);
+        let mut hit_pin = false;
+        while let Some(node) = hit {
+            hit_pin |= Rc::ptr_eq(&node, &pin);
+            hit = node.visual_parent();
+        }
+        assert!(hit_pin, "pin point {point:?} must hit its action subtree");
+        let dispatcher = crate::core::input::PointerDispatcher::new();
+        let focus = crate::core::focus::FocusTracker::new();
+        for (index, kind) in [
+            RawPointerEventKind::Moved,
+            RawPointerEventKind::Pressed(MouseButton::Left),
+            RawPointerEventKind::Moved,
+            RawPointerEventKind::Released(MouseButton::Left),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let position = Point {
+                x: point.x + if index >= 2 { 6.0 } else { 0.0 },
+                y: point.y,
+            };
+            dispatcher.handle(
+                &root,
+                &focus,
+                RawPointerEvent {
+                    kind,
+                    position,
+                    screen_position: Some(position),
+                    modifiers: Default::default(),
+                    timestamp_ms: index as f64,
+                },
+            );
+            // The native host performs this pass after hover reveals its glyph. Keep the
+            // reserved action geometry valid before the next independently dispatched input.
+            layout_root(
+                &root,
+                Size {
+                    width: 400.0,
+                    height: 160.0,
+                },
+            );
+        }
+        assert_eq!(pin_count.get(), 1);
+        assert_eq!(view.selected_index(), 0);
+        assert_eq!(drag_count.get(), 0);
+    }
 
     #[elwindui_macros::class(inherits = elwindui_core::ui::UIElement)]
     struct SelectionPageProbe {

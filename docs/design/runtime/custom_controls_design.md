@@ -42,7 +42,35 @@ intended public `types.rs` names explicitly rather than re-exporting the module
 wildcard. Non-component cross-cutting implementation support is limited to
 `support.rs`.
 
-The tab view template is a `Grid` with a 32-pixel strip row and a content row.
+The generic tab view uses a 40-pixel strip row (8-pixel outer inset and 32-pixel
+item); Docking uses the connected 32-pixel presentation. One doc-hidden
+`CustomTabView::set_connected_chrome` integration setter propagates presentation
+to retained strip/items without exposing a DSL property or depending on Docking.
+An item moved to a generic host resets this state. The presentation changes
+dimensions and paint, never page ownership, callback authority or selection
+invalidation. Normal generic widths are 100–240 pixels and close actions are
+32×24; connected widths retain the 200-pixel maximum. Header outlines are
+independently constructed vector geometry rather than copied native XAML paths.
+Fixed edge pieces preserve corner radii while the center track stretches. Both
+presentations retain their separate radii and seam dimensions. Docking installs
+a weak document pin callback on each stable item; generic hosts hide that action,
+and close/pin input is consumed before the tab gesture route. Application
+foreground environment changes select the light/dark palette through component
+notification rather than replacing items or retaining stale colors. Collapsed
+presentation subtrees do not invalidate a measured strip pass merely because
+their unmeasured descendants have no metrics; making them visible still
+invalidates measurement through the normal visibility setter.
+The content presenter retains the last arranged content size as well as selected
+identity. A viewport/style change with the same selection rearranges the selected
+page once; it does not revisit unchanged hidden pages. Selection-only updates
+continue to arrange only the previous and current page.
+The same-size shortcut also requires valid arrangement throughout the selected
+page's participating visual subtree. A subtree invalidated after a splitter
+commit must be arranged again even when the final size matches the last preview.
+
+The connected tab view template is a `Grid` with a 32-pixel strip row and a content row.
+The default tab-title template uses a 12-pixel font, matching the pinned WinUI TabView header
+resource; page text and bottom content-header text keep their independent inherited styles.
 Its declarative content field is exactly `#[content(children)] children:
 Vec<Rc<CustomTabViewItem>>`. The private `CustomTabStripPresenter` is a
 `HorizontalLayout` that owns the ordered item controls; it retains an ordinary
@@ -72,16 +100,23 @@ constraints and the measured item subtree still match; after a mismatch or subtr
 measures against the final constraints and refreshes the retained pass. This avoids remeasuring
 every tab during the common same-size measure/arrange pair and repeated same-size arrange passes
 without changing Core's unconditional `UIElement.measure` semantics or the compact/non-compact width
-rules.
+rules. If compact headers' measured widths exceed their finite strip, Arrange scales those widths
+proportionally to fit the content span. Each header uses a Grid with a Star title column and
+Auto marker/icon/action columns between fixed edge insets, so Arrange constrains the title to
+the remaining tab width instead of preserving an unbounded horizontal-stack width. Header bounds
+also clip their chrome; labels and action slots cannot paint over neighboring tabs.
 
 ## CustomGridSplitter transaction ownership
 
 `CustomGridSplitter` is the only owner of live Grid mutation for splitter input.
 At transaction start it walks the visual-parent chain according to
-`parent_level`, requires the target's visual parent to be a Core `Grid`, and
-reads the target placement from the target's attached `Grid::row` or
-`Grid::column`. It snapshots the exact active-axis definitions, the Grid-owned
-constraints, and the authoritative resolved sizes from the Grid. Direction,
+`parent_level`, resolves the target's resize Grid, and reads the target placement
+from its attached `Grid::row` or `Grid::column`. Normally the resize Grid is the
+target's visual-parent Grid. Docking's full-span splitter overlay supplies a
+weak reference to its pane Grid, allowing the overlaid hit target to resize the
+Grid that owns the split tracks without extending that Grid's lifetime. The
+splitter snapshots the exact active-axis definitions, the Grid-owned
+constraints, and the authoritative resolved sizes from that Grid. Direction,
 behavior, indices, and effective increments are frozen in the private session.
 
 Pointer moves calculate one cumulative axis delta from the original press,
@@ -109,10 +144,16 @@ resizing; the control fills its hit target. Docking positions a 12-pixel hit
 target in a 12-pixel `Grid` row/column spacing gap by placing it at the following
 pane track and translating it -12 pixels along the split axis. There is no extra
 splitter track; the gap remains between adjacent pane bounds. `Auto` keeps a
-centered six-by-six grip until an explicit direction is selected. The default
-fill is a subdued neutral; pointer-over or focus uses a light accent, and an
-active press uses the stronger accent. These visual states are private
-component state and do not change the resize transaction or public API. No
+centered six-by-six grip until an explicit direction is selected. The template
+is a single-cell Star Grid holding a full-size state background (4-pixel corner)
+under the grip, following the WinUI 3 CommunityToolkit Sizers `GridSplitter`:
+the background is transparent at rest, uses the subtle secondary fill on
+pointer-over or focus and the subtle tertiary fill while pressed, and the grip
+keeps the control strong fill. Light/dark values come from the live foreground
+the same way as the custom tab palette. `measure_override` reports the grip's
+desired size so the background never inflates the splitter's natural size.
+These visual states are private component state and do not change the resize
+transaction or public API. No
 backend cursor, native GridSplitter wrapper, or VisualStateManager is involved.
 
 ## Visual ownership and reconciliation

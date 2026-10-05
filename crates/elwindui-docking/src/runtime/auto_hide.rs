@@ -18,7 +18,7 @@ use crate::runtime::metrics::{
     AUTO_HIDE_ENTRY_HEIGHT, AUTO_HIDE_ENTRY_SPACING, AUTO_HIDE_MARKER_SIZE,
     AUTO_HIDE_PANEL_HEADER_HEIGHT, AUTO_HIDE_RESIZE_GRIP_SIZE, AUTO_HIDE_STRIP_SIZE,
 };
-use crate::runtime::themed_brush;
+use crate::runtime::{accent_brush, themed_brush};
 use elwindui_custom_controls::{ChromeIcon, chrome_icon};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -67,6 +67,79 @@ struct HeaderDragGesture {
     last_position: Point,
     last_screen_position: Option<Point>,
     dragging: bool,
+}
+
+/// Keeps the unrotated text rectangle intact inside a narrow side tab. A normal Grid cell
+/// would clamp the title to the rail width before its presentation rotation is applied.
+#[elwindui::component(inherits Control)]
+pub(crate) struct RotatedStripLabel {
+    #[state(default = None)]
+    text: Option<Rc<TextBlock>>,
+    #[state(default = AUTO_HIDE_ENTRY_HEIGHT)]
+    label_width: f32,
+    template: template_view!(|_this: Self| {
+        Grid {
+            rows: [GridLength::Star(1.0)]
+            columns: [GridLength::Star(1.0)]
+        }
+    }),
+}
+
+#[elwindui::component]
+impl RotatedStripLabel {
+    #[overrides]
+    fn on_apply_template(&self) {
+        if let Some(root) = self.__template_root()
+            && let Some(grid) = root.as_any().downcast_ref::<Grid>()
+            && let Some(text) = self.text()
+        {
+            grid.children().add(text);
+        }
+    }
+
+    #[overrides]
+    fn measure_override(&self, _available: Size) -> Size {
+        if let Some(text) = self.text() {
+            text.measure(Size {
+                width: self.label_width(),
+                height: AUTO_HIDE_ENTRY_HEIGHT,
+            });
+        }
+        Size {
+            width: AUTO_HIDE_STRIP_SIZE,
+            height: self.label_width(),
+        }
+    }
+
+    #[overrides]
+    fn arrange_override(&self, final_size: Size) -> Size {
+        if let Some(root) = self.__template_root() {
+            root.arrange(crate::core::base::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: final_size.width,
+                height: final_size.height,
+            });
+        }
+        if let Some(text) = self.text() {
+            text.arrange(crate::core::base::Rect {
+                x: (final_size.width - self.label_width()) * 0.5,
+                y: (final_size.height - AUTO_HIDE_ENTRY_HEIGHT) * 0.5,
+                width: self.label_width(),
+                height: AUTO_HIDE_ENTRY_HEIGHT,
+            });
+        }
+        final_size
+    }
+}
+
+impl RotatedStripLabel {
+    fn new_label(text: Rc<TextBlock>, width: f32) -> Rc<Self> {
+        let label = Self::new();
+        label.set_text(Some(text));
+        label.set_label_width(width);
+        label
+    }
 }
 
 /// Only one auto-hide Document owns the open popup on a surface. Pane extent memory is deliberately
@@ -158,11 +231,15 @@ impl AutoHideOverlay {
         });
 
         let pane = Grid::new();
-        pane.set_rows(vec![
+        pane.set_rows(vec![GridLength::Star(1.0)]);
+        pane.set_columns(vec![GridLength::Star(1.0)]);
+        let body = Grid::new();
+        body.set_rows(vec![
             GridLength::Fixed(AUTO_HIDE_PANEL_HEADER_HEIGHT),
             GridLength::Star(1.0),
         ]);
-        pane.set_columns(vec![GridLength::Star(1.0)]);
+        body.set_columns(vec![GridLength::Star(1.0)]);
+        pane.children().add(body.clone());
         pane.set_background(None);
         pane.set_visibility(Visibility::Collapsed);
         pane.set_attached("Grid", "row", 1i32);
@@ -180,7 +257,7 @@ impl AutoHideOverlay {
 
         let frame = Rectangle::new();
         frame.set_fill(None);
-        frame.set_stroke(themed_brush(BrushStyle::Primary));
+        frame.set_stroke(Some(accent_brush()));
         frame.set_stroke_width(1.0);
         frame.set_corner_radius(4.0);
         frame.set_hit_test_visible(false);
@@ -192,25 +269,31 @@ impl AutoHideOverlay {
         let header = Grid::new();
         header.set_height(AUTO_HIDE_PANEL_HEADER_HEIGHT);
         header.set_rows(vec![GridLength::Star(1.0)]);
+        // Reference popup header: 4 px border padding plus an 8 px content margin on each side.
         header.set_columns(vec![
+            GridLength::Fixed(12.0),
             GridLength::Star(1.0),
             GridLength::Auto,
             GridLength::Auto,
+            GridLength::Fixed(12.0),
         ]);
         header.set_background(themed_brush(BrushStyle::Secondary));
         header.set_attached("Grid", "row", 0i32);
         header.set_attached("Grid", "column", 0i32);
-        pane.children().add(header.clone());
+        body.children().add(header.clone());
 
         let title = TextBlock::new();
         title.set_foreground(themed_brush(BrushStyle::Foreground));
-        title.set_margin(8.0);
+        // Same title treatment as the group content header and the reference popup header.
+        title.set_font_weight(crate::core::graphics::FontWeight(600));
+        title.set_font_size(14.0);
+        title.set_vertical_alignment(crate::core::layout::VerticalAlignment::Center);
         title.set_attached("Grid", "row", 0i32);
-        title.set_attached("Grid", "column", 0i32);
+        title.set_attached("Grid", "column", 1i32);
         header.children().add(title.clone());
 
-        let pin_button = action_button(ChromeIcon::Pin, 1);
-        let close_button = action_button(ChromeIcon::Close, 2);
+        let pin_button = action_button(ChromeIcon::Pinned, 2);
+        let close_button = action_button(ChromeIcon::Close, 3);
         close_button.set_visibility(Visibility::Collapsed);
         header.children().add(pin_button.clone());
         header.children().add(close_button.clone());
@@ -218,7 +301,7 @@ impl AutoHideOverlay {
         let page_host = Grid::new();
         page_host.set_attached("Grid", "row", 1i32);
         page_host.set_attached("Grid", "column", 0i32);
-        pane.children().add(page_host.clone());
+        body.children().add(page_host.clone());
 
         let resize_grip = Grid::new();
         resize_grip.set_background(Some(Color::TRANSPARENT.into()));
@@ -321,6 +404,18 @@ impl AutoHideOverlay {
         self.frame.set_visibility(Visibility::Visible);
         self.resize_grip.set_visibility(Visibility::Visible);
         previous
+    }
+
+    /// Layout extent each visible strip reserves, in `DockSide::ALL` order (Left, Top, Right,
+    /// Bottom). Main content is arranged inside these insets so strips never cover it.
+    pub(crate) fn strip_extents(&self) -> [f32; 4] {
+        std::array::from_fn(|index| {
+            if self.strips[index].visibility() == Visibility::Visible {
+                AUTO_HIDE_STRIP_SIZE
+            } else {
+                0.0
+            }
+        })
     }
 
     fn configure_pane(&self, item: &DockItemId, side: DockSide, surface_size: Size) {
@@ -684,9 +779,15 @@ impl AutoHideOverlay {
             entry.set_width(text_width);
             entry.set_height(AUTO_HIDE_STRIP_SIZE);
         }
-        entry.children().add(text);
+        if matches!(side, DockSide::Left | DockSide::Right) {
+            entry
+                .children()
+                .add(RotatedStripLabel::new_label(text, text_width));
+        } else {
+            entry.children().add(text);
+        }
         let marker = Rectangle::new();
-        marker.set_fill(themed_brush(BrushStyle::Primary));
+        marker.set_fill(Some(accent_brush()));
         marker.set_hit_test_visible(false);
         match side {
             DockSide::Left => {
@@ -795,7 +896,8 @@ impl AutoHideOverlay {
             );
     }
 
-    pub(crate) fn bind_light_dismiss(&self, surface_root: &Rc<Grid>) {
+    pub(crate) fn bind_light_dismiss(&self, surface_root: &Rc<Grid>, owner: &Weak<DockingControl>) {
+        let weak_owner = owner.clone();
         let open = self.open.clone();
         let dismissed = self.dismissed.clone();
         let open_context = self.open_context.clone();
@@ -818,7 +920,7 @@ impl AutoHideOverlay {
                 {
                     return;
                 }
-                dismiss_shared(
+                let dismissed_item = dismiss_shared(
                     &open,
                     &dismissed,
                     &open_context,
@@ -833,9 +935,11 @@ impl AutoHideOverlay {
                     &resize_gesture,
                     &header_gesture,
                 );
+                notify_dismissed(&weak_owner, dismissed_item);
             }),
         );
 
+        let weak_owner = owner.clone();
         let open = self.open.clone();
         let dismissed = self.dismissed.clone();
         let open_context = self.open_context.clone();
@@ -855,7 +959,7 @@ impl AutoHideOverlay {
                 if args.handled.get() || event.key != Key::Escape || open.borrow().is_none() {
                     return;
                 }
-                dismiss_shared(
+                let dismissed_item = dismiss_shared(
                     &open,
                     &dismissed,
                     &open_context,
@@ -870,6 +974,7 @@ impl AutoHideOverlay {
                     &resize_gesture,
                     &header_gesture,
                 );
+                notify_dismissed(&weak_owner, dismissed_item);
                 args.handled.set(true);
             }),
         );
@@ -911,15 +1016,17 @@ impl AutoHideOverlay {
     pub(crate) fn refresh_theme(&self) {
         self.backplate
             .set_fill(themed_brush(BrushStyle::Background));
-        self.frame.set_stroke(themed_brush(BrushStyle::Primary));
+        self.frame.set_stroke(Some(accent_brush()));
         for strip in &self.strips {
             strip.set_background(themed_brush(BrushStyle::Secondary));
         }
+        self.header
+            .set_background(themed_brush(BrushStyle::Secondary));
         self.title
             .set_foreground(themed_brush(BrushStyle::Foreground));
         self.pin_button.children().clear();
         self.pin_button.children().add(chrome_icon(
-            ChromeIcon::Pin,
+            ChromeIcon::Pinned,
             themed_brush(BrushStyle::Foreground),
         ));
         self.close_button.children().clear();
@@ -928,7 +1035,7 @@ impl AutoHideOverlay {
             themed_brush(BrushStyle::Foreground),
         ));
         for (marker, _) in self.markers.borrow().values() {
-            marker.set_fill(themed_brush(BrushStyle::Primary));
+            marker.set_fill(Some(accent_brush()));
         }
     }
 }
@@ -936,10 +1043,14 @@ impl AutoHideOverlay {
 fn action_button(icon: ChromeIcon, column: i32) -> Rc<Grid> {
     let button = Grid::new();
     button.set_background(Some(Color::TRANSPARENT.into()));
-    button.set_min_width(32.0);
-    button.set_max_width(32.0);
-    button.set_min_height(32.0);
-    button.set_max_height(32.0);
+    // Reference pane buttons are 28x28 (padding 8 around a 12-pixel glyph); star tracks center
+    // the 16-pixel glyph box inside.
+    button.set_min_width(28.0);
+    button.set_max_width(28.0);
+    button.set_min_height(28.0);
+    button.set_max_height(28.0);
+    button.set_rows(vec![GridLength::Star(1.0)]);
+    button.set_columns(vec![GridLength::Star(1.0)]);
     button.set_horizontal_alignment(HorizontalAlignment::Center);
     button.set_vertical_alignment(VerticalAlignment::Center);
     button.set_attached("Grid", "row", 0i32);
@@ -989,7 +1100,9 @@ fn bind_resize_handlers(
     let gesture_move = gesture.clone();
     let current_move = current.clone();
     let limit_move = limit.clone();
-    let pane_move = pane.clone();
+    // The grip belongs to the pane. Holding its parent strongly from a grip callback
+    // would keep the entire popup and its remembered extents alive after teardown.
+    let pane_move = Rc::downgrade(&pane);
     let backplate_move = backplate.clone();
     let frame_move = frame.clone();
     grip.register_routed_handler::<PointerEventArgs>(
@@ -1009,7 +1122,9 @@ fn bind_resize_handlers(
             };
             let extent = (initial + delta).clamp(1.0, limit_move.get().max(1.0));
             current_move.set(extent);
-            set_pane_extent(&pane_move, &backplate_move, &frame_move, side, extent);
+            if let Some(pane) = pane_move.upgrade() {
+                set_pane_extent(&pane, &backplate_move, &frame_move, side, extent);
+            }
             args.handled.set(true);
         }),
     );
@@ -1034,6 +1149,7 @@ fn bind_resize_handlers(
 
     let gesture_cancel = gesture.clone();
     let current_cancel = current;
+    let pane_cancel = Rc::downgrade(&pane);
     let backplate_cancel = backplate;
     let frame_cancel = frame;
     grip.register_routed_handler::<PointerEventArgs>(
@@ -1041,7 +1157,9 @@ fn bind_resize_handlers(
         Box::new(move |_, args| {
             if let Some((_, initial, side)) = gesture_cancel.take() {
                 current_cancel.set(initial);
-                set_pane_extent(&pane, &backplate_cancel, &frame_cancel, side, initial);
+                if let Some(pane) = pane_cancel.upgrade() {
+                    set_pane_extent(&pane, &backplate_cancel, &frame_cancel, side, initial);
+                }
                 args.handled.set(true);
             }
         }),
@@ -1192,10 +1310,10 @@ fn dismiss_shared(
     markers: &Rc<RefCell<BTreeMap<DockItemId, (Rc<Rectangle>, Rc<Cell<bool>>)>>>,
     resize_gesture: &Rc<Cell<Option<(Point, f32, DockSide)>>>,
     header_gesture: &Rc<RefCell<Option<HeaderDragGesture>>>,
-) {
+) -> Option<DockItemId> {
     let previous = open.borrow_mut().take();
-    if let Some(item) = previous {
-        *dismissed.borrow_mut() = Some(item);
+    if let Some(item) = &previous {
+        *dismissed.borrow_mut() = Some(item.clone());
     }
     *open_context.borrow_mut() = None;
     pane.set_visibility(Visibility::Collapsed);
@@ -1211,6 +1329,17 @@ fn dismiss_shared(
     }
     resize_gesture.set(None);
     header_gesture.borrow_mut().take();
+    previous
+}
+
+/// A light dismissal releases the dismissed item's active state through the model
+/// (`docking_spec.md`), committed from the routed handler like the pane's pin/close actions.
+fn notify_dismissed(owner: &Weak<DockingControl>, item: Option<DockItemId>) {
+    let owner: Option<Rc<DockingControl>> = owner.upgrade();
+    let (Some(owner), Some(item)) = (owner, item) else {
+        return;
+    };
+    owner.handle_auto_hide_dismissed(item);
 }
 
 fn axis_for_side(side: DockSide) -> ExtentAxis {

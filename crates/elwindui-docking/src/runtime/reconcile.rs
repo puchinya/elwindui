@@ -1,7 +1,7 @@
 //! Reconciliation boundary between the value model and stable runtime item wrappers.
 
-use crate::core::base::{Point, Rect, Size, Vector};
-use crate::core::graphics::Color;
+use crate::core::base::{Point, Rect, Size};
+use crate::core::graphics::{Color, FontWeight};
 use crate::core::input::PointerEventArgs;
 use crate::core::layout::{
     GridLength, GridTrackConstraint, HorizontalAlignment, VerticalAlignment, Visibility,
@@ -9,7 +9,7 @@ use crate::core::layout::{
 use crate::core::theme::BrushStyle;
 use crate::core::ui::{
     ControlExt, Grid, GridExt, LayoutExt, Rectangle, ShapeExt, TextBlock, TextBlockExt,
-    TextStyleOwner, UIElementExt, VisualTransform,
+    TextStyleOwner, UIElementExt,
 };
 #[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
 use crate::core::ui::{MenuExt, MenuItemExt};
@@ -36,14 +36,15 @@ use super::floating_window::FloatingHostFactory;
 use super::floating_window::{FloatingHostId, FloatingHostRegistry, PreparedFloatingHostSync};
 use super::group_view::replace_group_items;
 use super::metrics::{
-    CONTENT_HEADER_HEIGHT, GROUP_DOCK_BAND_FRACTION, GROUP_DOCK_BAND_MAX, GROUP_DOCK_BAND_MIN,
-    ROOT_TARGET_SIZE, SPLITTER_HIT_SIZE, TAB_INSERTION_MARKER_WIDTH, TAB_STRIP_HEIGHT,
-    TITLE_BUTTON_COLUMN_WIDTH, TITLE_BUTTON_SIZE, TITLE_TEXT_MARGIN,
+    CONTENT_HEADER_HEIGHT, SPLITTER_HIT_SIZE, TAB_INSERTION_MARKER_WIDTH, TAB_STRIP_HEIGHT,
+    TITLE_BUTTON_SIZE,
 };
+use super::overlay::{group_target_rect, root_target_rect};
+use super::split_layout::DockSplitView;
 use super::split_view::SplitterSession;
 use super::surface_registry::SurfaceRegistry;
 use super::surface_view::{DockSurfaceView, SurfaceRuntime};
-use super::themed_brush;
+use super::{accent_brush, themed_brush};
 use elwindui_custom_controls::{ChromeIcon, chrome_icon};
 
 /// Stable registration-to-presentation map for one authored docking surface.
@@ -59,6 +60,16 @@ pub(crate) struct StableItemRegistry {
     group_positions: BTreeMap<DockGroupId, TabStripPosition>,
     group_compact_tabs: BTreeMap<DockGroupId, bool>,
     group_show_when_empty: BTreeMap<DockGroupId, bool>,
+    group_extents: BTreeMap<DockGroupId, crate::DockSize>,
+}
+
+/// Inherits a split panel's cross-axis extent into a child that does not set one.
+fn inherit_cross_extent(own: crate::DockSize, parent: crate::DockSize) -> crate::DockSize {
+    crate::DockSize {
+        width: own.width.or(parent.width),
+        height: own.height.or(parent.height),
+        ..own
+    }
 }
 
 impl StableItemRegistry {
@@ -77,12 +88,15 @@ impl StableItemRegistry {
         let mut groups = BTreeMap::new();
         let mut compact_tabs = BTreeMap::new();
         let mut show_when_empty = BTreeMap::new();
+        let mut extents = BTreeMap::new();
         collect_authored(
             root,
             &mut items,
             &mut groups,
             &mut compact_tabs,
             &mut show_when_empty,
+            &mut extents,
+            crate::DockSize::default(),
         )?;
 
         let removed = self
@@ -114,7 +128,12 @@ impl StableItemRegistry {
         self.group_positions = groups;
         self.group_compact_tabs = compact_tabs;
         self.group_show_when_empty = show_when_empty;
+        self.group_extents = extents;
         Ok(())
+    }
+
+    pub(crate) fn group_extent(&self, id: &DockGroupId) -> crate::DockSize {
+        self.group_extents.get(id).copied().unwrap_or_default()
     }
 
     pub(crate) fn wrapper(&self, id: &DockItemId) -> Option<Rc<CustomTabViewItem>> {
@@ -143,6 +162,8 @@ fn collect_authored(
     groups: &mut BTreeMap<DockGroupId, TabStripPosition>,
     compact_tabs: &mut BTreeMap<DockGroupId, bool>,
     show_when_empty: &mut BTreeMap<DockGroupId, bool>,
+    extents: &mut BTreeMap<DockGroupId, crate::DockSize>,
+    inherited: crate::DockSize,
 ) -> Result<(), DockLayoutError> {
     if let Some(group) = node.as_any().downcast_ref::<DockGroup>() {
         let id = group.id_value();
@@ -157,6 +178,10 @@ fn collect_authored(
         }
         compact_tabs.insert(id.clone(), group.compact_tabs_value());
         show_when_empty.insert(id.clone(), group.show_when_empty_value());
+        extents.insert(
+            id.clone(),
+            inherit_cross_extent(group.dock_size_value().sanitized(), inherited),
+        );
         for item in group.authored_children() {
             let item_id = item.id_value();
             if item_id.as_ref().is_empty() || items.insert(item_id.clone(), item).is_some() {
@@ -168,8 +193,29 @@ fn collect_authored(
         return Ok(());
     }
     if let Some(panel) = node.as_any().downcast_ref::<DockSplitPanel>() {
+        // Children of a split span its cross axis, so they inherit only that cross-axis size:
+        // a horizontal panel's height, or a vertical panel's width.
+        let panel_extent = inherit_cross_extent(panel.dock_size_value().sanitized(), inherited);
+        let inherited = match panel.orientation_value() {
+            crate::Orientation::Horizontal => crate::DockSize {
+                height: panel_extent.height,
+                ..crate::DockSize::default()
+            },
+            crate::Orientation::Vertical => crate::DockSize {
+                width: panel_extent.width,
+                ..crate::DockSize::default()
+            },
+        };
         for child in panel.authored_children() {
-            collect_authored(child.as_ref(), items, groups, compact_tabs, show_when_empty)?;
+            collect_authored(
+                child.as_ref(),
+                items,
+                groups,
+                compact_tabs,
+                show_when_empty,
+                extents,
+                inherited,
+            )?;
         }
         return Ok(());
     }
@@ -186,6 +232,9 @@ pub(crate) enum RuntimeNode {
     Split {
         children: Vec<RuntimeNode>,
         grid: Rc<Grid>,
+        splitters: Vec<Rc<CustomGridSplitter>>,
+        view: Rc<DockSplitView>,
+        orientation: SnapshotOrientation,
     },
 }
 
@@ -212,7 +261,7 @@ impl RuntimeNode {
     fn element(&self) -> Rc<dyn UIElementExt> {
         match self {
             Self::Group { host, .. } => host.clone(),
-            Self::Split { grid, .. } => grid.clone(),
+            Self::Split { view, .. } => view.clone(),
         }
     }
 }
@@ -388,7 +437,7 @@ impl GroupChromeOverlay {
             .first()
             .and_then(|child| child.as_any().downcast_ref::<Rectangle>())
         {
-            frame.set_stroke(themed_brush(BrushStyle::Primary));
+            frame.set_stroke(Some(accent_brush()));
         }
     }
 }
@@ -413,6 +462,7 @@ struct PlannedGroup {
 struct PlannedSplit {
     grid: Rc<Grid>,
     splitters: Vec<Rc<CustomGridSplitter>>,
+    view: Rc<DockSplitView>,
     orientation: SnapshotOrientation,
     weights: Vec<f32>,
 }
@@ -454,7 +504,7 @@ pub struct RuntimeRealization {
     owners: BTreeMap<DockItemId, RuntimePresentationOwner>,
     root: Option<RuntimeNode>,
     floating: Vec<FloatingRuntime>,
-    split_views: BTreeMap<SplitAddress, (Rc<Grid>, Vec<Rc<CustomGridSplitter>>)>,
+    split_views: BTreeMap<SplitAddress, (Rc<Grid>, Vec<Rc<CustomGridSplitter>>, Rc<DockSplitView>)>,
     drag: Option<DragSession>,
     splitter: Option<SplitterSession>,
     floating_hosts: FloatingHostRegistry,
@@ -462,6 +512,18 @@ pub struct RuntimeRealization {
     main_surface: SurfaceRuntime,
     surface_root: Rc<Grid>,
     main_surface_child: Option<Rc<dyn UIElementExt>>,
+    /// Runtime-only preferred auto-hide side per item: the side of its last root-edge drop or of
+    /// the strip it was last unpinned from (`docking_spec.md`). Not persisted in snapshots.
+    preferred_sides: BTreeMap<DockItemId, DockSide>,
+    /// Runtime-only fixed extents after a splitter drag resized a fixed-size track, keyed by
+    /// authored group and axis (`true` = width). Never persisted in snapshots.
+    fixed_overrides: BTreeMap<(DockGroupId, bool), f32>,
+    /// The dragged Document's tab header, hidden while its drag is active (the reference detaches
+    /// the tab at drag start) and restored before the drag commits or cancels.
+    drag_hidden_tab: Option<Rc<CustomTabViewItem>>,
+    /// Presentation-only selection moved to a neighbour while the selected tab is dragged, with
+    /// the index to restore. The model's selection is never changed by this.
+    drag_shown_selection: Option<(Rc<CustomTabView>, usize)>,
     owner: Weak<crate::DockingControl>,
     reconciling: Rc<Cell<bool>>,
     native_bounds_syncing: Cell<bool>,
@@ -546,6 +608,10 @@ impl RuntimeRealization {
             main_surface,
             surface_root,
             main_surface_child: None,
+            preferred_sides: BTreeMap::new(),
+            fixed_overrides: BTreeMap::new(),
+            drag_hidden_tab: None,
+            drag_shown_selection: None,
             owner,
             reconciling: Rc::new(Cell::new(false)),
             native_bounds_syncing: Cell::new(false),
@@ -567,6 +633,7 @@ impl RuntimeRealization {
         // native gesture. Cancel both transient sessions before the next model reconciliation;
         // this is safer than allowing a stale wrapper to commit into the new registry.
         self.drag = None;
+        self.restore_drag_hidden_tab();
         if let Some(mut splitter) = self.splitter.take() {
             splitter.cancel();
         }
@@ -576,6 +643,7 @@ impl RuntimeRealization {
 
     pub(crate) fn cancel_transient(&mut self) {
         self.drag = None;
+        self.restore_drag_hidden_tab();
         if let Some(mut splitter) = self.splitter.take() {
             splitter.cancel();
         }
@@ -830,6 +898,12 @@ impl RuntimeRealization {
         for planned in planned_groups.values() {
             self.apply_planned_group(planned);
         }
+        // Split track sizing resolves each child's authored group through its host, so the
+        // planned hosts must be visible before the split tree is applied.
+        self.group_hosts = planned_groups
+            .iter()
+            .map(|(key, planned)| (key.clone(), planned.host.clone()))
+            .collect();
 
         if let Some(root_node) = root.as_ref() {
             let _ = self.apply_planned_node(root_node, RootKind::Main, &[], &planned_splits);
@@ -914,11 +988,7 @@ impl RuntimeRealization {
                     floating.get_mut(*index).map(|runtime| &mut runtime.surface)
                 }
             } {
-                let root = surface.surface.content_root();
-                let size = Size {
-                    width: root.arranged_width().unwrap_or(1.0),
-                    height: root.arranged_height().unwrap_or(1.0),
-                };
+                let size = surface_extent(&surface.surface);
                 surface.auto_hide.open_from_model(item.clone(), side, size);
                 if surface.auto_hide.current().as_ref() == Some(&item) {
                     surface
@@ -947,7 +1017,7 @@ impl RuntimeRealization {
         self.surfaces = surfaces;
         self.split_views = planned_splits
             .into_iter()
-            .map(|(address, planned)| (address, (planned.grid, planned.splitters)))
+            .map(|(address, planned)| (address, (planned.grid, planned.splitters, planned.view)))
             .collect();
         #[cfg(test)]
         {
@@ -1019,6 +1089,15 @@ impl RuntimeRealization {
             source_bounds_host,
             pointer_offset,
         };
+        let from_group = !matches!(
+            self.owners.get(&item),
+            Some(RuntimePresentationOwner::AutoHide { .. })
+        );
+        let wrapper = self.registry.wrapper(&item);
+        let source_tabs = self.group_items.iter().find_map(|(group, items)| {
+            let index = items.iter().position(|candidate| candidate == &item)?;
+            Some((self.groups.get(group)?.clone(), index, items.len()))
+        });
         self.drag = Some(DragSession::begin(
             model,
             item,
@@ -1026,7 +1105,38 @@ impl RuntimeRealization {
             source_geometry,
         )?);
         self.clear_previews();
+        // Like the reference, the dragged tab leaves its strip while the drag is active. This is
+        // presentation only: the model and the page wrapper's ownership are unchanged.
+        if from_group
+            && let Some(wrapper) = wrapper
+            && wrapper.visibility() == Visibility::Visible
+        {
+            wrapper.set_visibility(Visibility::Collapsed);
+            self.drag_hidden_tab = Some(wrapper);
+            // The reference shows the next Document while the selected one is dragged away.
+            if let Some((view, index, count)) = source_tabs
+                && count > 1
+                && view.selected_index() == index
+            {
+                let neighbour = if index + 1 < count {
+                    index + 1
+                } else {
+                    index - 1
+                };
+                view.set_selected_index(neighbour);
+                self.drag_shown_selection = Some((view, index));
+            }
+        }
         Ok(())
+    }
+
+    fn restore_drag_hidden_tab(&mut self) {
+        if let Some(wrapper) = self.drag_hidden_tab.take() {
+            wrapper.set_visibility(Visibility::Visible);
+        }
+        if let Some((view, index)) = self.drag_shown_selection.take() {
+            view.set_selected_index(index);
+        }
     }
 
     pub(crate) fn request_close(
@@ -1079,7 +1189,7 @@ impl RuntimeRealization {
                 reason: "dock preview requested without an active drag".to_owned(),
             });
         }
-        self.clear_previews();
+        self.clear_previews_except(&target.root);
         let Some(surface) = self.surface_runtime_mut(&target.root) else {
             return Err(DockLayoutError::InvalidFloatingRoot {
                 index: match target.root {
@@ -1089,13 +1199,34 @@ impl RuntimeRealization {
             });
         };
         surface.preview.show(target);
-        surface.targets.show(target.target, target.group_bounds);
+        surface
+            .targets
+            .show(Some(target.target), target.group_bounds);
         surface.insertion_marker.show(insertion_marker);
         Ok(())
     }
 
     pub(crate) fn clear_drag_target(&mut self) {
         self.clear_previews();
+    }
+
+    /// Keeps the hovered group's compass and the root targets visible on `root`, with `target`
+    /// as the resolved cell when the pointer is over one. Without a resolved target the drop
+    /// preview stays cleared.
+    pub(crate) fn show_drag_targets(
+        &mut self,
+        root: &RootKind,
+        hovered_group: Option<Rect>,
+        target: Option<crate::DockTarget>,
+    ) {
+        self.clear_previews_except(root);
+        if let Some(surface) = self.surface_runtime_mut(root) {
+            if target.is_none() {
+                surface.preview.clear();
+                surface.insertion_marker.clear();
+            }
+            surface.targets.show(target, hovered_group);
+        }
     }
 
     pub(crate) fn drag_source_geometry(&self) -> Option<DragSourceGeometry> {
@@ -1234,6 +1365,11 @@ impl RuntimeRealization {
     }
 
     #[cfg(test)]
+    pub(crate) fn wrapper_for_test(&self, item: &DockItemId) -> Option<Rc<CustomTabViewItem>> {
+        self.registry.wrapper(item)
+    }
+
+    #[cfg(test)]
     pub(crate) fn preview_for_test(&self, root: &RootKind) -> Option<(crate::DockTarget, Rect)> {
         self.surface_runtime(root)
             .and_then(|runtime| runtime.preview.target().zip(runtime.preview.preview_rect()))
@@ -1251,7 +1387,9 @@ impl RuntimeRealization {
         self.clear_previews();
         if let Some(surface) = self.surface_runtime_mut(&target.root) {
             surface.preview.show(&target);
-            surface.targets.show(target.target, target.group_bounds);
+            surface
+                .targets
+                .show(Some(target.target), target.group_bounds);
             surface.insertion_marker.show(insertion_marker);
         }
     }
@@ -1271,6 +1409,17 @@ impl RuntimeRealization {
         screen_position: Option<Point>,
         host_root_position: Point,
     ) -> Option<ResolvedDockTarget> {
+        self.resolve_drop(screen_position, host_root_position)
+            .and_then(|resolution| resolution.target)
+    }
+
+    /// Pointer-hover resolution for a Document drag: the surface under the pointer, the deepest
+    /// hovered group (its compass is shown), and the target resolved where a target is drawn.
+    pub(crate) fn resolve_drop(
+        &self,
+        screen_position: Option<Point>,
+        host_root_position: Point,
+    ) -> Option<DropResolution> {
         let source_root = self.drag.as_ref().map(DragSession::source_root)?;
         let (root, surface, surface_local_point) = if let Some(screen) = screen_position {
             self.surfaces
@@ -1313,6 +1462,30 @@ impl RuntimeRealization {
                     .map(|bounds| (key.clone(), bounds))
             })
             .collect();
+        // The compass and Center/Split previews use the whole group frame, including a bottom-tab
+        // content header, so they center on the group as drawn (the WinUI.Dock reference does
+        // the same). Tab-header resolution below stays in tab-view coordinates.
+        let frames: Vec<_> = groups
+            .iter()
+            .map(|(key, bounds)| {
+                let frame = self
+                    .group_hosts
+                    .get(key)
+                    .and_then(|host| {
+                        let container: Rc<dyn UIElementExt> = host.container.clone();
+                        SurfaceRegistry::bounds_in_surface_local(&container, &surface)
+                    })
+                    .unwrap_or(*bounds);
+                (key.clone(), frame)
+            })
+            .collect();
+        let frame_of = |key: &SnapshotGroupKey, fallback: Rect| {
+            frames
+                .iter()
+                .find(|(candidate, _)| candidate == key)
+                .map(|(_, frame)| *frame)
+                .unwrap_or(fallback)
+        };
         // A root outer band would otherwise cover the first 40 px of the top strip (and the last
         // 40 px of the bottom strip), leaving individual Documents unable to reorder from the
         // strip that actually contains their pointer. While a Document drag is active, a point
@@ -1341,53 +1514,31 @@ impl RuntimeRealization {
                     (left.width * left.height).total_cmp(&(right.width * right.height))
                 })
         {
-            return Some(ResolvedDockTarget {
-                root,
-                target: crate::DockTarget::Center,
-                group: Some(group),
-                group_bounds: Some(bounds),
-                preview_rect: group_preview(bounds, crate::DockTarget::Center)?,
-                tab_insert_index: Some(index),
+            let frame = frame_of(&group, bounds);
+            return Some(DropResolution {
+                root: root.clone(),
+                hovered_group: Some(frame),
+                target: Some(ResolvedDockTarget {
+                    root,
+                    target: crate::DockTarget::Center,
+                    group: Some(group),
+                    group_bounds: Some(frame),
+                    preview_rect: group_preview(frame, crate::DockTarget::Center)?,
+                    tab_insert_index: Some(index),
+                }),
             });
         }
-        let target = resolve_local_target(
-            root,
+        let (hovered, target) = resolve_local_target(
+            root.clone(),
             surface_bounds,
             surface_local_point,
-            groups.iter().cloned(),
-        )?;
-        let Some(group) = target.group.as_ref() else {
-            return Some(target);
-        };
-        let Some((_, bounds)) = groups.iter().find(|(key, _)| key == group) else {
-            return Some(target);
-        };
-        let local = Point {
-            x: surface_local_point.x - bounds.x,
-            y: surface_local_point.y - bounds.y,
-        };
-        let Some(group_view) = self.groups.get(group) else {
-            return Some(target);
-        };
-        let in_tab_strip = group_view
-            .tab_insertion_boundary(0)
-            .is_some_and(|header| local.y >= header.y && local.y <= header.y + header.height);
-        if self.drag.is_some() && in_tab_strip {
-            if let Some(index) = group_view.tab_insertion_index_at(local) {
-                let mut resolved = target;
-                resolved.target = crate::DockTarget::Center;
-                resolved.preview_rect = group_preview(*bounds, crate::DockTarget::Center)?;
-                resolved.tab_insert_index = Some(index);
-                return Some(resolved);
-            }
-        }
-        if target.target != crate::DockTarget::Center {
-            return Some(target);
-        }
-        let index = group_view.tab_insertion_index_at(local);
-        let mut resolved = target;
-        resolved.tab_insert_index = index;
-        Some(resolved)
+            frames.iter().cloned(),
+        );
+        Some(DropResolution {
+            root,
+            hovered_group: hovered.map(|(_, bounds)| bounds),
+            target,
+        })
     }
 
     fn insertion_marker_rect(&self, target: &ResolvedDockTarget) -> Option<Rect> {
@@ -1411,6 +1562,7 @@ impl RuntimeRealization {
     }
 
     pub(crate) fn finish_drag(&mut self, commit: bool) -> Option<DockLayoutModel> {
+        self.restore_drag_hidden_tab();
         let result = if let Some(mut drag) = self.drag.take() {
             if commit {
                 drag.commit()
@@ -1441,14 +1593,146 @@ impl RuntimeRealization {
         canceled: bool,
         cumulative_delta: f32,
     ) -> Option<DockLayoutModel> {
-        self.splitter.take().and_then(|mut splitter| {
-            if canceled {
-                splitter.cancel();
-                None
-            } else {
-                splitter.commit(cumulative_delta)
+        let mut splitter = self.splitter.take()?;
+        if canceled {
+            splitter.cancel();
+            return None;
+        }
+        self.remember_fixed_tracks(&splitter.address().clone());
+        splitter.commit(cumulative_delta)
+    }
+
+    /// Authored groups contained by a runtime node.
+    fn node_group_ids(&self, node: &RuntimeNode) -> Vec<DockGroupId> {
+        match node {
+            RuntimeNode::Group { host } => self
+                .group_hosts
+                .iter()
+                .find(|(_, candidate)| Rc::ptr_eq(&candidate.container, host))
+                .and_then(|(key, _)| match key {
+                    SnapshotGroupKey::Authored(id) => Some(vec![id.clone()]),
+                    SnapshotGroupKey::Generated(_) => None,
+                })
+                .unwrap_or_default(),
+            RuntimeNode::Split { children, .. } => children
+                .iter()
+                .flat_map(|child| self.node_group_ids(child))
+                .collect(),
+        }
+    }
+
+    /// Fixed extent of `node` along an axis (`width` = true), following the reference: a group
+    /// with an authored (or runtime-resized) size is fixed; a split perpendicular to the axis is
+    /// fixed when every child is, at the largest child extent. Anything else is star-sized.
+    fn node_fixed_extent(&self, node: &RuntimeNode, width: bool) -> Option<f32> {
+        match node {
+            RuntimeNode::Group { .. } => {
+                let id = self.node_group_ids(node).into_iter().next()?;
+                self.fixed_overrides.get(&(id.clone(), width)).copied().or({
+                    let extent = self.registry.group_extent(&id);
+                    if width { extent.width } else { extent.height }
+                })
             }
-        })
+            RuntimeNode::Split {
+                children,
+                orientation,
+                ..
+            } => {
+                let perpendicular = match orientation {
+                    SnapshotOrientation::Horizontal => !width,
+                    SnapshotOrientation::Vertical => width,
+                };
+                if !perpendicular || children.is_empty() {
+                    return None;
+                }
+                children
+                    .iter()
+                    .map(|child| self.node_fixed_extent(child, width))
+                    .try_fold(0.0_f32, |acc, extent| extent.map(|extent| acc.max(extent)))
+            }
+        }
+    }
+
+    /// Authored minimum/maximum of `node` along an axis; a split perpendicular to the axis uses
+    /// the largest child minimum and the smallest child maximum.
+    fn node_extent_limits(&self, node: &RuntimeNode, width: bool) -> (Option<f32>, Option<f32>) {
+        match node {
+            RuntimeNode::Group { .. } => {
+                let Some(id) = self.node_group_ids(node).into_iter().next() else {
+                    return (None, None);
+                };
+                let extent = self.registry.group_extent(&id);
+                if width {
+                    (extent.min_width, extent.max_width)
+                } else {
+                    (extent.min_height, extent.max_height)
+                }
+            }
+            RuntimeNode::Split {
+                children,
+                orientation,
+                ..
+            } => {
+                let perpendicular = match orientation {
+                    SnapshotOrientation::Horizontal => !width,
+                    SnapshotOrientation::Vertical => width,
+                };
+                if !perpendicular {
+                    return (None, None);
+                }
+                let limits: Vec<_> = children
+                    .iter()
+                    .map(|child| self.node_extent_limits(child, width))
+                    .collect();
+                let min = limits.iter().filter_map(|(min, _)| *min).reduce(f32::max);
+                let max = limits.iter().filter_map(|(_, max)| *max).reduce(f32::min);
+                (min, max)
+            }
+        }
+    }
+
+    fn runtime_node_at(&self, address: &SplitAddress) -> Option<&RuntimeNode> {
+        let mut node = match &address.root {
+            RootKind::Main => self.root.as_ref()?,
+            RootKind::Floating(index) => &self.floating.get(*index)?.node,
+        };
+        for index in &address.path {
+            let RuntimeNode::Split { children, .. } = node else {
+                return None;
+            };
+            node = children.get(*index)?;
+        }
+        Some(node)
+    }
+
+    /// After a splitter drag, keeps each fixed-size child at its new pixel extent for this runtime.
+    fn remember_fixed_tracks(&mut self, address: &SplitAddress) {
+        let Some(RuntimeNode::Split {
+            children,
+            grid,
+            orientation,
+            ..
+        }) = self.runtime_node_at(address)
+        else {
+            return;
+        };
+        let width = *orientation == SnapshotOrientation::Horizontal;
+        let tracks = if width {
+            grid.columns.borrow().clone()
+        } else {
+            grid.rows.borrow().clone()
+        };
+        let mut remembered = Vec::new();
+        for (child, track) in children.iter().zip(tracks) {
+            if let GridLength::Fixed(extent) = track
+                && self.node_fixed_extent(child, width).is_some()
+            {
+                for id in self.node_group_ids(child) {
+                    remembered.push(((id, width), extent));
+                }
+            }
+        }
+        self.fixed_overrides.extend(remembered);
     }
 
     #[allow(dead_code)]
@@ -1495,11 +1779,7 @@ impl RuntimeRealization {
         self.clear_auto_hide_presentations();
         let wrapper = self.registry.wrapper(&item);
         let side = self.auto_hide_roots.get(&item)?.1;
-        let root_element = self.surface_runtime(&root)?.surface.content_root();
-        let size = Size {
-            width: root_element.arranged_width().unwrap_or(1.0),
-            height: root_element.arranged_height().unwrap_or(1.0),
-        };
+        let size = surface_extent(&self.surface_runtime(&root)?.surface);
         let authored = self.registry.items.get(&item)?;
         let title = authored.title_value();
         let can_pin = authored.can_pin_value();
@@ -1560,6 +1840,28 @@ impl RuntimeRealization {
 
         self.group_selected
             .insert(group.clone(), Some(item.clone()));
+        // The retained bottom header belongs to the selected document just as the page does.
+        // Update this group's metadata without rebuilding any group or page wrappers.
+        if self
+            .groups
+            .get(group)
+            .is_some_and(|view| view.tab_strip_position() == TabStripPosition::Bottom)
+            && let Some(host) = self.group_hosts.get(group)
+            && let Some(authored) = self.registry.items.get(item)
+        {
+            host.title.set_text(&authored.title_value());
+            host.pin_button.set_visibility(if authored.can_pin_value() {
+                Visibility::Visible
+            } else {
+                Visibility::Collapsed
+            });
+            host.close_button
+                .set_visibility(if authored.can_close_value() {
+                    Visibility::Visible
+                } else {
+                    Visibility::Collapsed
+                });
+        }
         self.sync_active_group_chrome(model);
         for owner in self.owners.values_mut() {
             if matches!(owner, RuntimePresentationOwner::AutoHide { .. }) {
@@ -1624,6 +1926,7 @@ impl RuntimeRealization {
         self.detach_existing_tree();
         self.surface_root.children().clear();
         self.drag = None;
+        self.restore_drag_hidden_tab();
         self.splitter = None;
         self.clear_previews();
         self.main_surface.auto_hide.close();
@@ -1673,6 +1976,7 @@ impl RuntimeRealization {
                     view.clone()
                 } else {
                     let view = CustomTabView::new_view();
+                    view.set_connected_chrome(true);
                     self.wire_group_callbacks(&view, group.clone());
                     groups.insert(group.clone(), view.clone());
                     view
@@ -1789,11 +2093,11 @@ impl RuntimeRealization {
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let (grid, mut splitters) = self
+                let (grid, mut splitters, view) = self
                     .split_views
                     .get(&split_address)
                     .cloned()
-                    .unwrap_or_else(|| (Grid::new(), Vec::new()));
+                    .unwrap_or_else(|| (Grid::new(), Vec::new(), DockSplitView::new_view()));
                 while splitters.len() < children.len().saturating_sub(1) {
                     let index = splitters.len();
                     let splitter = CustomGridSplitter::new_splitter();
@@ -1805,12 +2109,19 @@ impl RuntimeRealization {
                     split_address,
                     PlannedSplit {
                         grid: grid.clone(),
-                        splitters,
+                        splitters: splitters.clone(),
+                        view: view.clone(),
                         orientation: *orientation,
                         weights,
                     },
                 );
-                Ok(RuntimeNode::Split { children, grid })
+                Ok(RuntimeNode::Split {
+                    children,
+                    grid,
+                    splitters,
+                    view,
+                    orientation: *orientation,
+                })
             }
         }
     }
@@ -1825,21 +2136,33 @@ impl RuntimeRealization {
         active_chrome.set_attached("Grid", "column", 0i32);
 
         let content_header = Grid::new();
-        content_header.set_rows(vec![GridLength::Star(1.0)]);
-        content_header.set_columns(vec![
-            GridLength::Star(1.0),
-            GridLength::Fixed(TITLE_BUTTON_COLUMN_WIDTH),
-            GridLength::Fixed(TITLE_BUTTON_COLUMN_WIDTH),
+        content_header.set_rows(vec![
+            GridLength::Fixed(6.0),
+            GridLength::Auto,
+            GridLength::Fixed(6.0),
         ]);
-        content_header.set_height(CONTENT_HEADER_HEIGHT);
+        // Action columns are Auto: a collapsed action takes no space, so the visible actions stay
+        // packed at the trailing edge like the reference's horizontal StackPanel.
+        content_header.set_columns(vec![
+            GridLength::Fixed(8.0),
+            GridLength::Star(1.0),
+            GridLength::Fixed(8.0),
+            GridLength::Auto,
+            GridLength::Auto,
+            GridLength::Fixed(8.0),
+        ]);
+        content_header.set_min_height(CONTENT_HEADER_HEIGHT);
         content_header.set_background(themed_brush(BrushStyle::Secondary));
         content_header.set_visibility(Visibility::Collapsed);
 
         let title = TextBlock::new();
         title.set_foreground(themed_brush(BrushStyle::Foreground));
-        title.set_margin(TITLE_TEXT_MARGIN);
-        title.set_attached("Grid", "row", 0i32);
-        title.set_attached("Grid", "column", 0i32);
+        title.set_font_weight(FontWeight(600));
+        title.set_font_size(14.0);
+        title.set_text_wrapping(crate::core::graphics::TextWrapping::Wrap);
+        title.set_vertical_alignment(VerticalAlignment::Center);
+        title.set_attached("Grid", "row", 1i32);
+        title.set_attached("Grid", "column", 1i32);
         content_header.children().add(title.clone());
 
         let empty_hint = TextBlock::new();
@@ -1857,8 +2180,12 @@ impl RuntimeRealization {
         pin_button.set_background(Some(Color::TRANSPARENT.into()));
         pin_button.set_width(TITLE_BUTTON_SIZE);
         pin_button.set_height(TITLE_BUTTON_SIZE);
-        pin_button.set_attached("Grid", "row", 0i32);
-        pin_button.set_attached("Grid", "column", 1i32);
+        // Star tracks center the 16-pixel glyph in the 24-pixel button (reference padding 6).
+        pin_button.set_rows(vec![GridLength::Star(1.0)]);
+        pin_button.set_columns(vec![GridLength::Star(1.0)]);
+        pin_button.set_vertical_alignment(VerticalAlignment::Center);
+        pin_button.set_attached("Grid", "row", 1i32);
+        pin_button.set_attached("Grid", "column", 3i32);
         pin_button.children().add(Self::private_icon(true));
         let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let pin_group = group.clone();
@@ -1887,8 +2214,11 @@ impl RuntimeRealization {
         close_button.set_background(Some(Color::TRANSPARENT.into()));
         close_button.set_width(TITLE_BUTTON_SIZE);
         close_button.set_height(TITLE_BUTTON_SIZE);
-        close_button.set_attached("Grid", "row", 0i32);
-        close_button.set_attached("Grid", "column", 2i32);
+        close_button.set_rows(vec![GridLength::Star(1.0)]);
+        close_button.set_columns(vec![GridLength::Star(1.0)]);
+        close_button.set_vertical_alignment(VerticalAlignment::Center);
+        close_button.set_attached("Grid", "row", 1i32);
+        close_button.set_attached("Grid", "column", 4i32);
         close_button.children().add(Self::private_icon(false));
         let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let close_group = group.clone();
@@ -1939,6 +2269,22 @@ impl RuntimeRealization {
     }
 
     fn apply_planned_group(&self, planned: &PlannedGroup) {
+        for (id, tab) in planned.items.iter().zip(&planned.tabs) {
+            let weak_owner = self.owner.clone();
+            let pin_item = id.clone();
+            tab.set_document_pin_action(
+                self.can_pin(id),
+                Rc::new(move || {
+                    let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                    if let Some(owner) = owner {
+                        owner.handle_tab_context_action(
+                            pin_item.clone(),
+                            crate::docking_control::DockTabContextAction::Pin,
+                        );
+                    }
+                }),
+            );
+        }
         replace_group_items(&planned.view, planned.tabs.clone());
         planned.view.set_tab_strip_position(planned.tab_position);
         planned.view.set_compact(planned.compact_tabs);
@@ -2147,7 +2493,13 @@ impl RuntimeRealization {
     ) -> Rc<dyn UIElementExt> {
         match node {
             RuntimeNode::Group { host } => host.clone(),
-            RuntimeNode::Split { children, grid } => {
+            RuntimeNode::Split {
+                children,
+                grid,
+                splitters,
+                view,
+                orientation,
+            } => {
                 let address = SplitAddress {
                     root: root_kind.clone(),
                     path: path.to_vec(),
@@ -2164,9 +2516,14 @@ impl RuntimeRealization {
                         let mut columns = Vec::new();
                         let mut column_constraints = Vec::new();
                         for (index, child) in children.iter().enumerate() {
-                            columns.push(GridLength::Star(snapshot_split_weight(
-                                planned.weights[index],
-                            )));
+                            columns.push(
+                                self.node_fixed_extent(child, true)
+                                    .map(GridLength::Fixed)
+                                    .unwrap_or(GridLength::Star(snapshot_split_weight(
+                                        planned.weights[index],
+                                    ))),
+                            );
+                            let (authored_min, authored_max) = self.node_extent_limits(child, true);
                             let mut child_path = path.to_vec();
                             child_path.push(index);
                             let element = self.apply_planned_node(
@@ -2176,8 +2533,8 @@ impl RuntimeRealization {
                                 splits,
                             );
                             column_constraints.push(GridTrackConstraint {
-                                min: element.min_width(),
-                                max: element.max_width(),
+                                min: element.min_width().or(authored_min),
+                                max: element.max_width().or(authored_max),
                             });
                             element.as_ui_element().set_attached_if_changed(
                                 "Grid",
@@ -2209,26 +2566,7 @@ impl RuntimeRealization {
                                 base.presentation_height.set(None);
                                 splitter.invalidate_measure();
                             }
-                            if splitter.horizontal_alignment() != HorizontalAlignment::Left {
-                                splitter.set_horizontal_alignment(HorizontalAlignment::Left);
-                            }
-                            if splitter.vertical_alignment() != VerticalAlignment::Stretch {
-                                splitter.set_vertical_alignment(VerticalAlignment::Stretch);
-                            }
-                            let transform = VisualTransform::new(
-                                Vector {
-                                    x: -SPLITTER_HIT_SIZE,
-                                    y: 0.0,
-                                },
-                                1.0,
-                                0.0,
-                            );
-                            if base.visual_transform.get() != transform {
-                                splitter.set_visual_transform(transform);
-                            }
-                            splitter.set_attached_if_changed("Grid", "column", (index + 1) as i32);
                             self.wire_splitter(&splitter, grid.clone(), address.clone(), index);
-                            grid.children().add(splitter);
                         }
                     }
                     SnapshotOrientation::Vertical => {
@@ -2238,9 +2576,15 @@ impl RuntimeRealization {
                         let mut rows = Vec::new();
                         let mut row_constraints = Vec::new();
                         for (index, child) in children.iter().enumerate() {
-                            rows.push(GridLength::Star(snapshot_split_weight(
-                                planned.weights[index],
-                            )));
+                            rows.push(
+                                self.node_fixed_extent(child, false)
+                                    .map(GridLength::Fixed)
+                                    .unwrap_or(GridLength::Star(snapshot_split_weight(
+                                        planned.weights[index],
+                                    ))),
+                            );
+                            let (authored_min, authored_max) =
+                                self.node_extent_limits(child, false);
                             let mut child_path = path.to_vec();
                             child_path.push(index);
                             let element = self.apply_planned_node(
@@ -2250,8 +2594,8 @@ impl RuntimeRealization {
                                 splits,
                             );
                             row_constraints.push(GridTrackConstraint {
-                                min: element.min_height(),
-                                max: element.max_height(),
+                                min: element.min_height().or(authored_min),
+                                max: element.max_height().or(authored_max),
                             });
                             element.as_ui_element().set_attached_if_changed(
                                 "Grid",
@@ -2282,30 +2626,12 @@ impl RuntimeRealization {
                                 base.presentation_width.set(None);
                                 splitter.invalidate_measure();
                             }
-                            if splitter.horizontal_alignment() != HorizontalAlignment::Stretch {
-                                splitter.set_horizontal_alignment(HorizontalAlignment::Stretch);
-                            }
-                            if splitter.vertical_alignment() != VerticalAlignment::Top {
-                                splitter.set_vertical_alignment(VerticalAlignment::Top);
-                            }
-                            let transform = VisualTransform::new(
-                                Vector {
-                                    x: 0.0,
-                                    y: -SPLITTER_HIT_SIZE,
-                                },
-                                1.0,
-                                0.0,
-                            );
-                            if base.visual_transform.get() != transform {
-                                splitter.set_visual_transform(transform);
-                            }
-                            splitter.set_attached_if_changed("Grid", "row", (index + 1) as i32);
                             self.wire_splitter(&splitter, grid.clone(), address.clone(), index);
-                            grid.children().add(splitter);
                         }
                     }
                 }
-                grid.clone()
+                view.configure(grid.clone(), splitters.clone(), *orientation);
+                view.clone()
             }
         }
     }
@@ -2476,7 +2802,13 @@ impl RuntimeRealization {
         })
     }
 
-    pub(crate) fn nearest_pin_side(&self, item: &DockItemId) -> Option<crate::DockSide> {
+    /// Side for pinning `item`: its runtime preferred side, otherwise the reference shape rule —
+    /// a group narrower than tall picks the nearer of Left/Right, any other the nearer of
+    /// Top/Bottom, measured from the group's surface-local origin.
+    pub(crate) fn pin_side(&self, item: &DockItemId) -> Option<crate::DockSide> {
+        if let Some(side) = self.preferred_sides.get(item) {
+            return Some(*side);
+        }
         let key = self
             .group_items
             .iter()
@@ -2488,28 +2820,29 @@ impl RuntimeRealization {
         let surface = self.surfaces.surface_for_root(root)?;
         let bounds = SurfaceRegistry::surface_bounds(&surface)?;
         let group_bounds = SurfaceRegistry::bounds_in_surface_local(&group_node, &surface)?;
-        let distances = [
-            (group_bounds.x, crate::DockSide::Left),
-            (group_bounds.y, crate::DockSide::Top),
-            (
-                bounds.width - group_bounds.x - group_bounds.width,
-                crate::DockSide::Right,
-            ),
-            (
-                bounds.height - group_bounds.y - group_bounds.height,
-                crate::DockSide::Bottom,
-            ),
-        ];
-        let mut nearest = None;
-        for (distance, side) in distances {
-            if !distance.is_finite() {
-                continue;
-            }
-            if nearest.is_none_or(|(best, _): (f32, crate::DockSide)| distance < best) {
-                nearest = Some((distance, side));
-            }
+        if !group_bounds.x.is_finite() || !group_bounds.y.is_finite() {
+            return None;
         }
-        nearest.map(|(_, side)| side)
+        Some(if group_bounds.width < group_bounds.height {
+            if group_bounds.x < bounds.width - group_bounds.x {
+                crate::DockSide::Left
+            } else {
+                crate::DockSide::Right
+            }
+        } else if group_bounds.y < bounds.height - group_bounds.y {
+            crate::DockSide::Top
+        } else {
+            crate::DockSide::Bottom
+        })
+    }
+
+    pub(crate) fn set_preferred_side(&mut self, item: DockItemId, side: crate::DockSide) {
+        self.preferred_sides.insert(item, side);
+    }
+
+    /// Root and side of an auto-hidden item, for docking it back to the same root edge.
+    pub(crate) fn auto_hide_location(&self, item: &DockItemId) -> Option<(RootKind, DockSide)> {
+        self.auto_hide_roots.get(item).cloned()
     }
 
     fn item_root(&self, item: &DockItemId) -> Option<RootKind> {
@@ -2535,6 +2868,24 @@ impl RuntimeRealization {
                 .floating
                 .get_mut(*index)
                 .map(|runtime| &mut runtime.surface),
+        }
+    }
+
+    /// Clears transient drag visuals on every surface except `root`, whose visuals the caller
+    /// updates in place (no hide/show churn while the pointer stays on one surface).
+    fn clear_previews_except(&mut self, root: &RootKind) {
+        if root != &RootKind::Main {
+            self.main_surface.preview.clear();
+            self.main_surface.targets.clear();
+            self.main_surface.insertion_marker.clear();
+        }
+        for (index, runtime) in self.floating.iter_mut().enumerate() {
+            if root == &RootKind::Floating(index) {
+                continue;
+            }
+            runtime.surface.preview.clear();
+            runtime.surface.targets.clear();
+            runtime.surface.insertion_marker.clear();
         }
     }
 
@@ -2737,6 +3088,30 @@ fn snapshot_split_weight(weight: f32) -> f32 {
     }
 }
 
+/// Result of hovering a Document drag over a surface; see `RuntimeRealization::resolve_drop`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DropResolution {
+    pub(crate) root: RootKind,
+    pub(crate) hovered_group: Option<Rect>,
+    pub(crate) target: Option<ResolvedDockTarget>,
+}
+
+/// Last arranged size of a surface for sizing its auto-hide pane. The retained surface view keeps
+/// its arrangement while reconciliation rebuilds (and re-invalidates) its content root.
+fn surface_extent(surface: &Rc<DockSurfaceView>) -> Size {
+    let content = surface.content_root();
+    Size {
+        width: surface
+            .arranged_width()
+            .or_else(|| content.arranged_width())
+            .unwrap_or(1.0),
+        height: surface
+            .arranged_height()
+            .or_else(|| content.arranged_height())
+            .unwrap_or(1.0),
+    }
+}
+
 fn contains(bounds: Rect, point: Point) -> bool {
     point.x >= bounds.x
         && point.y >= bounds.y
@@ -2747,49 +3122,22 @@ fn contains(bounds: Rect, point: Point) -> bool {
 /// Resolves a pointer already expressed in one surface's local coordinate space. Keeping this
 /// separate from the screen/root conversion makes the target facts and preview geometry one
 /// operation: the exact object returned here is also the object used by the drag commit path.
+/// Resolves a drop only where its target is drawn: a root-edge target rect, or one of the five
+/// compass cells of the deepest group under the pointer. Also returns that hovered group, which
+/// keeps its compass visible while no cell is resolved.
 fn resolve_local_target(
     root: RootKind,
     surface_bounds: Rect,
     surface_local_point: Point,
     groups: impl IntoIterator<Item = (SnapshotGroupKey, Rect)>,
-) -> Option<ResolvedDockTarget> {
+) -> (Option<(SnapshotGroupKey, Rect)>, Option<ResolvedDockTarget>) {
     if !valid_preview_rect(surface_bounds)
         || !surface_local_point.x.is_finite()
         || !surface_local_point.y.is_finite()
         || !contains(surface_bounds, surface_local_point)
     {
-        return None;
+        return (None, None);
     }
-    let outer_band = ROOT_TARGET_SIZE;
-    let outer = [
-        (
-            surface_local_point.x <= outer_band,
-            crate::DockTarget::DockLeft,
-        ),
-        (
-            surface_local_point.y <= outer_band,
-            crate::DockTarget::DockTop,
-        ),
-        (
-            surface_local_point.x >= surface_bounds.width - outer_band,
-            crate::DockTarget::DockRight,
-        ),
-        (
-            surface_local_point.y >= surface_bounds.height - outer_band,
-            crate::DockTarget::DockBottom,
-        ),
-    ];
-    if let Some((_, target)) = outer.into_iter().find(|(inside, _)| *inside) {
-        return Some(ResolvedDockTarget {
-            root,
-            target,
-            group: None,
-            group_bounds: None,
-            preview_rect: outer_preview(surface_bounds, target)?,
-            tab_insert_index: None,
-        });
-    }
-
     let mut deepest = None;
     let mut smallest_area = f32::INFINITY;
     for (key, bounds) in groups {
@@ -2802,37 +3150,70 @@ fn resolve_local_target(
             deepest = Some((key, bounds));
         }
     }
-    let (group, bounds) = deepest?;
-    let group_band = (bounds.width.min(bounds.height) * GROUP_DOCK_BAND_FRACTION)
-        .clamp(GROUP_DOCK_BAND_MIN, GROUP_DOCK_BAND_MAX);
-    let local = Point {
-        x: surface_local_point.x - bounds.x,
-        y: surface_local_point.y - bounds.y,
+
+    let surface_size = Size {
+        width: surface_bounds.width,
+        height: surface_bounds.height,
     };
-    let target = [
-        (local.x <= group_band, crate::DockTarget::SplitLeft),
-        (local.y <= group_band, crate::DockTarget::SplitTop),
-        (
-            local.x >= bounds.width - group_band,
-            crate::DockTarget::SplitRight,
-        ),
-        (
-            local.y >= bounds.height - group_band,
-            crate::DockTarget::SplitBottom,
-        ),
+    // Floating surfaces have no root-edge targets, like the WinUI.Dock reference.
+    let root_target = [
+        crate::DockTarget::DockLeft,
+        crate::DockTarget::DockTop,
+        crate::DockTarget::DockRight,
+        crate::DockTarget::DockBottom,
     ]
     .into_iter()
-    .find(|(inside, _)| *inside)
-    .map(|(_, target)| target)
-    .unwrap_or(crate::DockTarget::Center);
-    Some(ResolvedDockTarget {
-        root,
-        target,
-        group: Some(group),
-        group_bounds: Some(bounds),
-        preview_rect: group_preview(bounds, target)?,
-        tab_insert_index: None,
-    })
+    .filter(|_| root == RootKind::Main)
+    .find(|target| {
+        root_target_rect(*target, surface_size).is_some_and(|rect| {
+            contains(
+                Rect {
+                    x: surface_bounds.x + rect.x,
+                    y: surface_bounds.y + rect.y,
+                    ..rect
+                },
+                surface_local_point,
+            )
+        })
+    });
+    if let Some(target) = root_target {
+        let resolved =
+            outer_preview(surface_bounds, target).map(|preview_rect| ResolvedDockTarget {
+                root,
+                target,
+                group: None,
+                group_bounds: None,
+                preview_rect,
+                tab_insert_index: None,
+            });
+        return (deepest, resolved);
+    }
+
+    let Some((group, bounds)) = deepest.clone() else {
+        return (None, None);
+    };
+    let target = [
+        crate::DockTarget::Center,
+        crate::DockTarget::SplitLeft,
+        crate::DockTarget::SplitTop,
+        crate::DockTarget::SplitRight,
+        crate::DockTarget::SplitBottom,
+    ]
+    .into_iter()
+    .find(|target| {
+        group_target_rect(*target, bounds).is_some_and(|rect| contains(rect, surface_local_point))
+    });
+    let resolved = target.and_then(|target| {
+        Some(ResolvedDockTarget {
+            root,
+            target,
+            group: Some(group),
+            group_bounds: Some(bounds),
+            preview_rect: group_preview(bounds, target)?,
+            tab_insert_index: None,
+        })
+    });
+    (deepest, resolved)
 }
 
 #[cfg(test)]
@@ -2842,7 +3223,7 @@ pub(crate) fn resolve_local_target_for_test(
     surface_local_point: Point,
     groups: Vec<(SnapshotGroupKey, Rect)>,
 ) -> Option<ResolvedDockTarget> {
-    resolve_local_target(root, surface_bounds, surface_local_point, groups)
+    resolve_local_target(root, surface_bounds, surface_local_point, groups).1
 }
 
 fn auto_hide_root(entry: &SnapshotAutoHideEntry, floating_count: usize) -> RootKind {
@@ -2877,26 +3258,26 @@ fn outer_preview(surface: Rect, target: crate::DockTarget) -> Option<Rect> {
         crate::DockTarget::DockLeft => Rect {
             x: surface.x,
             y: surface.y,
-            width: surface.width * 0.25,
+            width: surface.width * 0.5,
             height: surface.height,
         },
         crate::DockTarget::DockRight => Rect {
-            x: surface.x + surface.width * 0.75,
+            x: surface.x + surface.width * 0.5,
             y: surface.y,
-            width: surface.width * 0.25,
+            width: surface.width * 0.5,
             height: surface.height,
         },
         crate::DockTarget::DockTop => Rect {
             x: surface.x,
             y: surface.y,
             width: surface.width,
-            height: surface.height * 0.25,
+            height: surface.height * 0.5,
         },
         crate::DockTarget::DockBottom => Rect {
             x: surface.x,
-            y: surface.y + surface.height * 0.75,
+            y: surface.y + surface.height * 0.5,
             width: surface.width,
-            height: surface.height * 0.25,
+            height: surface.height * 0.5,
         },
         _ => return None,
     };

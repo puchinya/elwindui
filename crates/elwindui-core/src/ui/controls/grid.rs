@@ -73,17 +73,77 @@ impl Grid {
             column_spacing,
         );
 
-        // Pass 1: each child's own natural size, constrained only by its own track where that
-        // track already has a known size (`Fixed`) — see `grid_measure_pass1_available`'s own doc
-        // comment.
-        let pass1_available = grid_measure_pass1_available(&rows, &columns, &cells);
-        for (child, avail) in children.iter().zip(&pass1_available) {
-            child.measure(*avail);
-        }
-        let pass1_sizes: Vec<Size> = children
-            .iter()
-            .map(|c| c.measured_size().unwrap_or_default())
-            .collect();
+        // Fixed tracks and finite Star tracks resolve without child metrics. Probing them
+        // naturally first would double every descendant measurement at each nested Grid.
+        // Auto/implicit tracks and unconstrained Star tracks still need the natural-size pass.
+        let pass1_sizes: Vec<Size> =
+            if tracks_resolve_without_children(&rows, track_available.height)
+                && tracks_resolve_without_children(&columns, track_available.width)
+            {
+                Vec::new()
+            } else {
+                let mut pass1_available = grid_measure_pass1_available(&rows, &columns, &cells);
+                if tracks_resolve_without_children(&columns, track_available.width) {
+                    // Auto row heights can depend on a known column width (wrapped text).
+                    // Keep the natural height probe, using the final width without an extra pass.
+                    let (known_rows, known_columns) = grid_resolve_track_sizes_with_constraints(
+                        &rows,
+                        &columns,
+                        &cells,
+                        &[],
+                        track_available,
+                        &row_constraints,
+                        &column_constraints,
+                    );
+                    let known_cells =
+                        grid_pass2_available(&rows, &columns, &cells, &known_rows, &known_columns);
+                    for (natural, known) in pass1_available.iter_mut().zip(known_cells) {
+                        natural.width = known.width;
+                    }
+                }
+                for (child, avail) in children.iter().zip(&pass1_available) {
+                    child.measure(*avail);
+                }
+                let mut sizes: Vec<Size> = children
+                    .iter()
+                    .map(|child| child.measured_size().unwrap_or_default())
+                    .collect();
+                // WinUI order: Auto/Fixed columns resolve from natural sizes first, then finite
+                // Star columns take the remaining width, and their children are measured again at
+                // that width so Auto rows get the height of wrapped content.
+                if track_available.width.is_finite()
+                    && columns
+                        .iter()
+                        .any(|track| matches!(track, GridLength::Star(_)))
+                    && !tracks_resolve_without_children(&columns, track_available.width)
+                {
+                    let (_, star_columns) = grid_resolve_track_sizes_with_constraints(
+                        &rows,
+                        &columns,
+                        &cells,
+                        &sizes,
+                        track_available,
+                        &row_constraints,
+                        &column_constraints,
+                    );
+                    for (index, (child, cell)) in children.iter().zip(&cells).enumerate() {
+                        let column = (cell.column.max(0) as usize)
+                            .min(columns.len().max(1).saturating_sub(1));
+                        if !matches!(columns.get(column), Some(GridLength::Star(_))) {
+                            continue;
+                        }
+                        let Some(width) = star_columns.get(column).copied() else {
+                            continue;
+                        };
+                        child.measure(Size {
+                            width,
+                            height: pass1_available[index].height,
+                        });
+                        sizes[index] = child.measured_size().unwrap_or_default();
+                    }
+                }
+                sizes
+            };
 
         let (row_sizes, col_sizes) = grid_resolve_track_sizes_with_constraints(
             &rows,
@@ -95,7 +155,7 @@ impl Grid {
             &column_constraints,
         );
 
-        // Pass 2: re-measure every child against its now-fully-resolved cell size, so
+        // Measure every child against its now-fully-resolved cell size, so
         // `measured_size()` afterward — read back by `arrange_override`'s own track resolution
         // below, and by whatever measured this `Grid` for its own desired size returned here —
         // reflects the size each child will actually occupy, not pass 1's Auto/Star-unconstrained
@@ -255,6 +315,15 @@ impl Grid {
     }
 }
 
+fn tracks_resolve_without_children(tracks: &[GridLength], available: f32) -> bool {
+    !tracks.is_empty()
+        && tracks.iter().all(|track| match track {
+            GridLength::Fixed(_) => true,
+            GridLength::Star(_) => available.is_finite(),
+            GridLength::Auto => false,
+        })
+}
+
 fn effective_grid_spacing(spacing: f32) -> f32 {
     if spacing.is_finite() && spacing > 0.0 {
         spacing
@@ -293,6 +362,27 @@ mod tests {
     use crate::ui::testsupport::*;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    #[test]
+    fn star_column_content_beside_auto_columns_sizes_auto_rows_at_the_resolved_width() {
+        // WinUI measures Star-column children again at the resolved Star width, so wrapped
+        // content beside Auto columns contributes its wrapped height to an Auto row.
+        let root = Grid::new();
+        root.set_rows(vec![GridLength::Auto]);
+        root.set_columns(vec![GridLength::Star(1.0), GridLength::Auto]);
+        let text = WrapProbe::new(300.0, 20.0);
+        text.set_attached("Grid", "column", 0i32);
+        let action = MeasureProbe::new(size(24.0, 24.0));
+        action.set_attached("Grid", "column", 1i32);
+        root.children().add(text.clone());
+        root.children().add(action.clone());
+        let root_node: Rc<dyn UIElementExt> = root.clone();
+        layout_root(&root_node, size(124.0, 400.0));
+        // Star column = 124 - 24 = 100, so the 300-wide run wraps to three 20-pixel lines.
+        assert_eq!(root.resolved_column_sizes(), vec![100.0, 24.0]);
+        assert_eq!(root.resolved_row_sizes(), vec![60.0]);
+        assert_eq!(text.arranged_height(), Some(60.0));
+    }
 
     #[test]
     fn identical_track_definitions_do_not_invalidate_measure() {
@@ -392,6 +482,91 @@ mod tests {
                 height: 10.0
             }
         );
+    }
+
+    #[test]
+    fn nested_determined_grids_measure_the_leaf_once_and_recompute_for_a_new_viewport() {
+        let leaf = MeasureProbe::new(size(10.0, 10.0));
+        let mut root: Rc<dyn UIElementExt> = leaf.clone();
+        for _ in 0..12 {
+            let grid = Grid::new();
+            grid.set_rows(vec![GridLength::Fixed(80.0)]);
+            grid.set_columns(vec![GridLength::Star(1.0)]);
+            grid.children().add(root);
+            root = grid;
+        }
+
+        root.measure(size(300.0, 80.0));
+        assert_eq!(leaf.calls.borrow().as_slice(), &[size(300.0, 80.0)]);
+        assert_eq!(root.measured_size(), Some(size(300.0, 80.0)));
+        root.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 80.0,
+        });
+        assert_eq!(leaf.arranged_width(), Some(300.0));
+        assert_eq!(leaf.arranged_height(), Some(80.0));
+
+        root.measure(size(320.0, 80.0));
+        assert_eq!(leaf.calls.borrow().len(), 2);
+        assert_eq!(leaf.last_available(), size(320.0, 80.0));
+        assert_eq!(root.measured_size(), Some(size(320.0, 80.0)));
+    }
+
+    #[test]
+    fn determined_grid_keeps_spacing_and_track_constraints_without_a_natural_probe() {
+        let root = Grid::new();
+        root.set_rows(vec![GridLength::Fixed(20.0)]);
+        root.set_columns(vec![GridLength::Star(1.0), GridLength::Star(1.0)]);
+        root.set_column_spacing(12.0);
+        root.set_row_constraints(vec![GridTrackConstraint {
+            min: Some(30.0),
+            max: None,
+        }]);
+        root.set_column_constraints(vec![GridTrackConstraint {
+            min: Some(200.0),
+            max: None,
+        }]);
+        let left = MeasureProbe::new(size(10.0, 10.0));
+        let right = MeasureProbe::new(size(10.0, 10.0));
+        right.set_attached("Grid", "column", 1i32);
+        root.children().add(left.clone());
+        root.children().add(right.clone());
+
+        root.measure(size(300.0, 80.0));
+        assert_eq!(left.calls.borrow().as_slice(), &[size(200.0, 30.0)]);
+        assert_eq!(right.calls.borrow().as_slice(), &[size(88.0, 30.0)]);
+        assert_eq!(root.measured_size(), Some(size(300.0, 30.0)));
+        root.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 80.0,
+        });
+        assert_eq!(root.resolved_column_sizes(), vec![200.0, 88.0]);
+        assert_eq!(right.arranged_offset(), Some(Point { x: 212.0, y: 0.0 }));
+    }
+
+    #[test]
+    fn unconstrained_star_and_implicit_tracks_still_measure_natural_sizes() {
+        let root = Grid::new();
+        root.set_rows(vec![GridLength::Fixed(30.0)]);
+        root.set_columns(vec![GridLength::Star(1.0)]);
+        let leaf = MeasureProbe::new(size(20.0, 10.0));
+        root.children().add(leaf.clone());
+
+        root.measure(size(f32::INFINITY, 80.0));
+        assert_eq!(leaf.calls.borrow().len(), 2);
+        assert_eq!(leaf.calls.borrow()[0], size(f32::INFINITY, 30.0));
+        assert_eq!(leaf.last_available(), size(20.0, 30.0));
+        assert_eq!(root.measured_size(), Some(size(20.0, 30.0)));
+
+        root.set_columns(Vec::new());
+        root.measure(size(300.0, 80.0));
+        assert_eq!(leaf.calls.borrow().len(), 4);
+        assert_eq!(leaf.last_available(), size(20.0, 30.0));
+        assert_eq!(root.measured_size(), Some(size(20.0, 30.0)));
     }
 
     #[test]

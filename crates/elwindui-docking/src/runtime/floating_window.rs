@@ -90,9 +90,14 @@ fn create_platform_host() -> Result<Rc<dyn FloatingWindowHost>, DockLayoutError>
     }
     #[cfg(target_os = "windows")]
     {
-        Ok(Rc::new(PlatformFloatingHost {
-            window: elwindui_backend_winui3::Window::new(),
-        }))
+        let window = elwindui_backend_winui3::Window::new();
+        if let Err(error) = window.configure_floating_title() {
+            window.close();
+            return Err(DockLayoutError::FloatingHostUnavailable {
+                reason: format!("floating title configuration failed: {error}"),
+            });
+        }
+        Ok(Rc::new(PlatformFloatingHost { window }))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {

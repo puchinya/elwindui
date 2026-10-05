@@ -17,7 +17,7 @@ use crate::runtime::drag::ResolvedDockTarget;
 use crate::runtime::metrics::{
     COMPASS_BUTTON_SIZE, COMPASS_SIZE, ROOT_TARGET_EDGE_INSET, TAB_INSERTION_MARKER_WIDTH,
 };
-use crate::runtime::themed_brush;
+use crate::runtime::{accent_brush, themed_brush};
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -44,8 +44,7 @@ pub(crate) struct InsertionMarkerLayer {
 
 #[derive(Clone, Copy)]
 enum OverlayElementRole {
-    GroupCrossHorizontal,
-    GroupCrossVertical,
+    GroupCross,
     GroupTarget(DockTarget),
     RootTarget(DockTarget),
 }
@@ -59,6 +58,9 @@ struct OverlayElement {
 pub struct OverlayLayout {
     elements: Vec<OverlayElement>,
     group_bounds: Option<Rect>,
+    /// Floating surfaces have no root-edge targets (the WinUI.Dock reference shows only the group
+    /// compass there).
+    root_targets_hidden: bool,
 }
 
 /// Surface-sized retained layer. Its children are arranged from the coordinator's resolved
@@ -128,7 +130,11 @@ impl DockTargetOverlayLayer {
         };
         let layout = layout.borrow();
         for entry in &layout.elements {
-            if let Some(rect) = overlay_element_rect(entry.role, final_size, layout.group_bounds) {
+            let hidden_root = layout.root_targets_hidden
+                && matches!(entry.role, OverlayElementRole::RootTarget(_));
+            if let Some(rect) = overlay_element_rect(entry.role, final_size, layout.group_bounds)
+                .filter(|_| !hidden_root)
+            {
                 entry.element.set_visibility(Visibility::Visible);
                 entry.element.arrange(rect);
             } else {
@@ -143,6 +149,24 @@ impl DockTargetOverlayLayer {
         }
         final_size
     }
+}
+
+/// Surface-local rect of a drawn root-edge target. Drop resolution uses this same geometry, so a
+/// root target resolves exactly where it is drawn.
+pub(crate) fn root_target_rect(target: DockTarget, surface: Size) -> Option<Rect> {
+    overlay_element_rect(OverlayElementRole::RootTarget(target), surface, None)
+}
+
+/// Surface-local rect of a drawn compass cell for a group arranged at `group_bounds`.
+pub(crate) fn group_target_rect(target: DockTarget, group_bounds: Rect) -> Option<Rect> {
+    overlay_element_rect(
+        OverlayElementRole::GroupTarget(target),
+        Size {
+            width: 0.0,
+            height: 0.0,
+        },
+        Some(group_bounds),
+    )
 }
 
 fn overlay_element_rect(
@@ -204,27 +228,16 @@ fn overlay_element_rect(
                 height: COMPASS_BUTTON_SIZE,
             })
         }
-        OverlayElementRole::GroupCrossHorizontal | OverlayElementRole::GroupCrossVertical => {
+        OverlayElementRole::GroupCross => {
             let group = group_bounds.filter(valid_rect)?;
             let origin_x = group.x + (group.width - COMPASS_SIZE) * 0.5;
             let origin_y = group.y + (group.height - COMPASS_SIZE) * 0.5;
-            Some(
-                if matches!(role, OverlayElementRole::GroupCrossHorizontal) {
-                    Rect {
-                        x: origin_x,
-                        y: origin_y + 44.0,
-                        width: COMPASS_SIZE,
-                        height: COMPASS_BUTTON_SIZE,
-                    }
-                } else {
-                    Rect {
-                        x: origin_x + 44.0,
-                        y: origin_y,
-                        width: COMPASS_BUTTON_SIZE,
-                        height: COMPASS_SIZE,
-                    }
-                },
-            )
+            Some(Rect {
+                x: origin_x,
+                y: origin_y,
+                width: COMPASS_SIZE,
+                height: COMPASS_SIZE,
+            })
         }
     }
 }
@@ -232,6 +245,10 @@ fn overlay_element_rect(
 impl InsertionMarkerLayer {
     fn set_rect(&self, rect: Option<Rect>) {
         let rect = rect.filter(valid_rect);
+        // Pointer moves repeat the same state; skip it so a drag never re-invalidates layout.
+        if self.marker_rect() == rect {
+            return;
+        }
         self.set_marker_rect(rect);
         if let Some(root) = self.__template_root() {
             root.set_visibility(if self.marker_rect().is_some() {
@@ -319,8 +336,9 @@ impl DockTargetVisual {
         frame.set_stroke_width(1.0);
         frame.set_hit_test_visible(false);
         let glyph = IconSourceElement::new();
-        glyph.set_width(24.0);
-        glyph.set_height(24.0);
+        // A one-pixel outer frame plus four pixels of padding leaves a 26px glyph.
+        glyph.set_width(26.0);
+        glyph.set_height(26.0);
         glyph.set_horizontal_alignment(HorizontalAlignment::Center);
         glyph.set_vertical_alignment(VerticalAlignment::Center);
         glyph.set_hit_test_visible(false);
@@ -358,66 +376,72 @@ fn target_glyph(kind: TargetGlyphKind) -> crate::core::graphics::VectorImage {
     use crate::core::graphics::VectorFill;
     use crate::core::theme::BrushStyle;
 
-    let accent =
-        themed_brush(BrushStyle::Primary).unwrap_or_else(|| Brush::Solid(Color::rgb(72, 144, 232)));
+    let accent = accent_brush();
     let mut outline = PathBuilder::new();
     let mut detail = PathBuilder::new();
+    let mut top_edge = PathBuilder::new();
     let mut fill = None;
     let mut detail_dash: Arc<[f32]> = Arc::from([]);
     match kind {
         TargetGlyphKind::Center => {
-            outline.add_rect(Rect {
-                x: 4.0,
-                y: 3.0,
-                width: 16.0,
-                height: 18.0,
-            });
-            detail.add_line(Point { x: 4.0, y: 7.0 }, Point { x: 20.0, y: 7.0 });
+            outline.add_rounded_rect(
+                Rect {
+                    x: 0.5,
+                    y: 0.5,
+                    width: 25.0,
+                    height: 25.0,
+                },
+                crate::core::base::CornerRadius::uniform(2.0),
+            );
+            top_edge.add_line(Point { x: 2.0, y: 1.5 }, Point { x: 24.0, y: 1.5 });
         }
         TargetGlyphKind::Split(target) => {
-            outline.add_rect(Rect {
-                x: 4.0,
-                y: 3.0,
-                width: 16.0,
-                height: 18.0,
-            });
-            detail.add_line(Point { x: 4.0, y: 7.0 }, Point { x: 20.0, y: 7.0 });
+            outline.add_rounded_rect(
+                Rect {
+                    x: 0.5,
+                    y: 0.5,
+                    width: 25.0,
+                    height: 25.0,
+                },
+                crate::core::base::CornerRadius::uniform(2.0),
+            );
+            top_edge.add_line(Point { x: 2.0, y: 1.5 }, Point { x: 24.0, y: 1.5 });
             match target {
                 DockTarget::SplitLeft | DockTarget::SplitRight => {
-                    detail.add_line(Point { x: 12.0, y: 4.0 }, Point { x: 12.0, y: 20.0 });
+                    detail.add_line(Point { x: 13.0, y: 3.0 }, Point { x: 13.0, y: 25.0 });
                 }
                 DockTarget::SplitTop | DockTarget::SplitBottom => {
-                    detail.add_line(Point { x: 5.0, y: 12.0 }, Point { x: 19.0, y: 12.0 });
+                    detail.add_line(Point { x: 1.0, y: 13.0 }, Point { x: 25.0, y: 13.0 });
                 }
                 _ => {}
             }
-            detail_dash = Arc::from([2.5, 2.0]);
+            detail_dash = Arc::from([3.0, 1.0]);
         }
         TargetGlyphKind::Dock(target) => {
             let half = match target {
                 DockTarget::DockLeft => Rect {
-                    x: 4.0,
-                    y: 6.0,
-                    width: 7.0,
-                    height: 12.0,
+                    x: 0.5,
+                    y: 0.5,
+                    width: 11.5,
+                    height: 25.0,
                 },
                 DockTarget::DockRight => Rect {
-                    x: 13.0,
-                    y: 6.0,
-                    width: 7.0,
-                    height: 12.0,
+                    x: 14.0,
+                    y: 0.5,
+                    width: 11.5,
+                    height: 25.0,
                 },
                 DockTarget::DockTop => Rect {
-                    x: 6.0,
-                    y: 4.0,
-                    width: 12.0,
-                    height: 7.0,
+                    x: 0.5,
+                    y: 0.5,
+                    width: 25.0,
+                    height: 11.5,
                 },
                 DockTarget::DockBottom => Rect {
-                    x: 6.0,
-                    y: 13.0,
-                    width: 12.0,
-                    height: 7.0,
+                    x: 0.5,
+                    y: 14.0,
+                    width: 25.0,
+                    height: 11.5,
                 },
                 _ => Rect {
                     x: 4.0,
@@ -426,43 +450,63 @@ fn target_glyph(kind: TargetGlyphKind) -> crate::core::graphics::VectorImage {
                     height: 16.0,
                 },
             };
-            outline.add_rect(half);
+            outline.add_rounded_rect(half, crate::core::base::CornerRadius::uniform(2.0));
+            top_edge.add_line(
+                Point {
+                    x: half.x + 1.5,
+                    y: half.y + 1.0,
+                },
+                Point {
+                    x: half.x + half.width - 1.5,
+                    y: half.y + 1.0,
+                },
+            );
             fill = Some(VectorFill {
                 paint: VectorPaint::Brush(
-                    themed_brush(BrushStyle::Tertiary)
+                    themed_brush(BrushStyle::Secondary)
                         .unwrap_or_else(|| Brush::Solid(Color::rgb(112, 112, 112))),
                 ),
                 opacity: 1.0,
                 rule: crate::core::graphics::FillRule::NonZero,
             });
-            match target {
-                DockTarget::DockLeft => {
-                    detail.add_line(Point { x: 12.0, y: 12.0 }, Point { x: 20.0, y: 12.0 });
-                    detail.add_line(Point { x: 16.0, y: 8.0 }, Point { x: 20.0, y: 12.0 });
-                    detail.add_line(Point { x: 16.0, y: 16.0 }, Point { x: 20.0, y: 12.0 });
-                }
-                DockTarget::DockRight => {
-                    detail.add_line(Point { x: 12.0, y: 12.0 }, Point { x: 4.0, y: 12.0 });
-                    detail.add_line(Point { x: 8.0, y: 8.0 }, Point { x: 4.0, y: 12.0 });
-                    detail.add_line(Point { x: 8.0, y: 16.0 }, Point { x: 4.0, y: 12.0 });
-                }
-                DockTarget::DockTop => {
-                    detail.add_line(Point { x: 12.0, y: 12.0 }, Point { x: 12.0, y: 20.0 });
-                    detail.add_line(Point { x: 8.0, y: 16.0 }, Point { x: 12.0, y: 20.0 });
-                    detail.add_line(Point { x: 16.0, y: 16.0 }, Point { x: 12.0, y: 20.0 });
-                }
-                DockTarget::DockBottom => {
-                    detail.add_line(Point { x: 12.0, y: 12.0 }, Point { x: 12.0, y: 4.0 });
-                    detail.add_line(Point { x: 8.0, y: 8.0 }, Point { x: 12.0, y: 4.0 });
-                    detail.add_line(Point { x: 16.0, y: 8.0 }, Point { x: 12.0, y: 4.0 });
-                }
-                _ => {}
+            // The reference marks the docking side with a half document and a small square on the
+            // opposite side (where the existing content goes), not an arrow.
+            let marker = match target {
+                DockTarget::DockLeft => Some(Rect {
+                    x: 17.5,
+                    y: 10.5,
+                    width: 5.0,
+                    height: 5.0,
+                }),
+                DockTarget::DockRight => Some(Rect {
+                    x: 3.5,
+                    y: 10.5,
+                    width: 5.0,
+                    height: 5.0,
+                }),
+                DockTarget::DockTop => Some(Rect {
+                    x: 10.5,
+                    y: 17.5,
+                    width: 5.0,
+                    height: 5.0,
+                }),
+                DockTarget::DockBottom => Some(Rect {
+                    x: 10.5,
+                    y: 3.5,
+                    width: 5.0,
+                    height: 5.0,
+                }),
+                _ => None,
+            };
+            if let Some(marker) = marker {
+                detail.add_rect(marker);
             }
         }
     }
 
     let outline = outline.build().expect("static dock target path is valid");
     let detail = detail.build().expect("static dock target detail is valid");
+    let top_edge = top_edge.build().expect("static document top edge is valid");
     let mut nodes = Vec::new();
     nodes.push(VectorNode::Path(VectorPathNode {
         path: outline,
@@ -472,7 +516,7 @@ fn target_glyph(kind: TargetGlyphKind) -> crate::core::graphics::VectorImage {
             paint: VectorPaint::Brush(accent.clone()),
             opacity: 1.0,
             style: StrokeStyle {
-                width: 1.5,
+                width: 1.0,
                 start_cap: LineCap::Round,
                 end_cap: LineCap::Round,
                 line_join: LineJoin::Round,
@@ -488,10 +532,10 @@ fn target_glyph(kind: TargetGlyphKind) -> crate::core::graphics::VectorImage {
         transform: AffineTransform::IDENTITY,
         fill: None,
         stroke: Some(VectorStroke {
-            paint: VectorPaint::Brush(accent),
+            paint: VectorPaint::Brush(accent.clone()),
             opacity: 1.0,
             style: StrokeStyle {
-                width: 1.5,
+                width: 1.0,
                 start_cap: LineCap::Round,
                 end_cap: LineCap::Round,
                 dash_cap: LineCap::Round,
@@ -504,16 +548,32 @@ fn target_glyph(kind: TargetGlyphKind) -> crate::core::graphics::VectorImage {
         rendering: VectorShapeRendering::GeometricPrecision,
         visibility: true,
     }));
+    nodes.push(VectorNode::Path(VectorPathNode {
+        path: top_edge,
+        transform: AffineTransform::IDENTITY,
+        fill: None,
+        stroke: Some(VectorStroke {
+            paint: VectorPaint::Brush(accent),
+            opacity: 1.0,
+            style: StrokeStyle {
+                width: 3.0,
+                ..StrokeStyle::default()
+            },
+        }),
+        paint_order: VectorPaintOrder::default(),
+        rendering: VectorShapeRendering::GeometricPrecision,
+        visibility: true,
+    }));
     VectorImageBuilder::new(
         Size {
-            width: 24.0,
-            height: 24.0,
+            width: 26.0,
+            height: 26.0,
         },
         Rect {
             x: 0.0,
             y: 0.0,
-            width: 24.0,
-            height: 24.0,
+            width: 26.0,
+            height: 26.0,
         },
     )
     .expect("target glyph viewport is valid")
@@ -525,6 +585,96 @@ fn target_glyph(kind: TargetGlyphKind) -> crate::core::graphics::VectorImage {
     .expect("target glyph scene is valid")
 }
 
+/// Builds one rounded cross from a three-cell grid. Rounding the contour rather than
+/// overlapping stroked rectangles avoids seams through the connected backing.
+fn compass_backing() -> crate::core::graphics::VectorImage {
+    use crate::core::graphics::VectorFill;
+    let cell = (COMPASS_SIZE - 4.0) / 3.0;
+    let low = cell + 0.5;
+    let high = COMPASS_SIZE - low;
+    let edge = COMPASS_SIZE - 0.5;
+    let corners = [
+        Point { x: low, y: 0.5 },
+        Point { x: high, y: 0.5 },
+        Point { x: high, y: low },
+        Point { x: edge, y: low },
+        Point { x: edge, y: high },
+        Point { x: high, y: high },
+        Point { x: high, y: edge },
+        Point { x: low, y: edge },
+        Point { x: low, y: high },
+        Point { x: 0.5, y: high },
+        Point { x: 0.5, y: low },
+        Point { x: low, y: low },
+    ];
+    let toward = |corner: Point, neighbor: Point| {
+        let dx = neighbor.x - corner.x;
+        let dy = neighbor.y - corner.y;
+        let distance = dx.hypot(dy);
+        Point {
+            x: corner.x + dx * 4.0 / distance,
+            y: corner.y + dy * 4.0 / distance,
+        }
+    };
+    let mut path = PathBuilder::new();
+    for (index, corner) in corners.iter().copied().enumerate() {
+        let before = toward(corner, corners[(index + corners.len() - 1) % corners.len()]);
+        let after = toward(corner, corners[(index + 1) % corners.len()]);
+        if index == 0 {
+            path.move_to(before);
+        } else {
+            path.line_to(before);
+        }
+        path.quad_to(corner, after);
+    }
+    path.close();
+    let node = VectorNode::Path(VectorPathNode {
+        path: path.build().expect("rounded compass contour is valid"),
+        transform: AffineTransform::IDENTITY,
+        fill: Some(VectorFill {
+            paint: VectorPaint::Brush(
+                themed_brush(BrushStyle::Secondary)
+                    .unwrap_or_else(|| Brush::Solid(Color::rgb(32, 32, 32))),
+            ),
+            opacity: 1.0,
+            rule: crate::core::graphics::FillRule::NonZero,
+        }),
+        stroke: Some(VectorStroke {
+            paint: VectorPaint::Brush(
+                themed_brush(BrushStyle::Separator)
+                    .unwrap_or_else(|| Brush::Solid(Color::rgb(96, 96, 96))),
+            ),
+            opacity: 1.0,
+            style: StrokeStyle {
+                width: 1.0,
+                ..StrokeStyle::default()
+            },
+        }),
+        paint_order: VectorPaintOrder::default(),
+        rendering: VectorShapeRendering::GeometricPrecision,
+        visibility: true,
+    });
+    VectorImageBuilder::new(
+        Size {
+            width: COMPASS_SIZE,
+            height: COMPASS_SIZE,
+        },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: COMPASS_SIZE,
+            height: COMPASS_SIZE,
+        },
+    )
+    .expect("compass viewport is valid")
+    .root(VectorGroup {
+        children: Arc::from([node]),
+        ..VectorGroup::default()
+    })
+    .finish()
+    .expect("compass scene is valid")
+}
+
 /// The target chrome stays retained and non-hit-testable; its selected state is tracked for
 /// diagnostics while the resolver-owned preview communicates the active destination.
 pub(crate) struct DockTargetOverlay {
@@ -532,7 +682,7 @@ pub(crate) struct DockTargetOverlay {
     layout: Rc<RefCell<OverlayLayout>>,
     group_buttons: Vec<(DockTarget, Rc<DockTargetVisual>)>,
     root_buttons: Vec<(DockTarget, Rc<DockTargetVisual>)>,
-    cross_backgrounds: [Rc<Rectangle>; 2],
+    cross_background: Rc<IconSourceElement>,
     selected: Cell<Option<DockTarget>>,
 }
 
@@ -553,30 +703,18 @@ impl DockTargetOverlay {
         let layout = Rc::new(RefCell::new(OverlayLayout::default()));
         layer.set_layout_state(Some(layout.clone()));
 
-        let horizontal = Rectangle::new();
-        horizontal.set_width(COMPASS_SIZE);
-        horizontal.set_height(COMPASS_BUTTON_SIZE);
-        horizontal.set_corner_radius(4.0);
-        horizontal.set_stroke_width(1.0);
-        horizontal.set_hit_test_visible(false);
-        let vertical = Rectangle::new();
-        vertical.set_width(COMPASS_BUTTON_SIZE);
-        vertical.set_height(COMPASS_SIZE);
-        vertical.set_corner_radius(4.0);
-        vertical.set_stroke_width(1.0);
-        vertical.set_hit_test_visible(false);
-        root.children().add(horizontal.clone());
-        root.children().add(vertical.clone());
-        layout.borrow_mut().elements.extend([
-            OverlayElement {
-                element: horizontal.clone(),
-                role: OverlayElementRole::GroupCrossHorizontal,
-            },
-            OverlayElement {
-                element: vertical.clone(),
-                role: OverlayElementRole::GroupCrossVertical,
-            },
-        ]);
+        let cross_background = IconSourceElement::new();
+        cross_background.set_width(COMPASS_SIZE);
+        cross_background.set_height(COMPASS_SIZE);
+        cross_background.set_hit_test_visible(false);
+        cross_background.set_icon_source(Some(IconSource::Image(ImageSource::Vector(
+            compass_backing(),
+        ))));
+        root.children().add(cross_background.clone());
+        layout.borrow_mut().elements.push(OverlayElement {
+            element: cross_background.clone(),
+            role: OverlayElementRole::GroupCross,
+        });
 
         let group_buttons = [
             DockTarget::SplitTop,
@@ -621,16 +759,37 @@ impl DockTargetOverlay {
             layout,
             group_buttons,
             root_buttons,
-            cross_backgrounds: [horizontal, vertical],
+            cross_background,
             selected: Cell::new(None),
         }
     }
 
-    pub(crate) fn show(&self, target: DockTarget, group_bounds: Option<Rect>) {
-        self.selected.set(Some(target));
-        self.layout.borrow_mut().group_bounds = group_bounds.filter(valid_rect);
+    /// Shows root targets and, when a group is hovered, its compass. `target` is the resolved
+    /// target, if any; the compass and root targets stay visible while no cell is resolved.
+    pub(crate) fn show(&self, target: Option<DockTarget>, group_bounds: Option<Rect>) {
+        let group_bounds = group_bounds.filter(valid_rect);
+        let changed = self.selected.get() != target
+            || self.layout.borrow().group_bounds != group_bounds
+            || self.layer.visibility() != Visibility::Visible;
+        if !changed {
+            return;
+        }
+        self.selected.set(target);
+        self.layout.borrow_mut().group_bounds = group_bounds;
+        // Visibility only flips when the overlay first appears; a moving drag changes arrangement
+        // only, so it never pays for a whole-tree Measure pass.
         self.layer.set_visibility(Visibility::Visible);
         self.layer.invalidate_arrange();
+    }
+
+    /// Floating surfaces show only the group compass; their root-edge targets stay hidden and
+    /// never resolve (`docking_spec.md`).
+    pub(crate) fn set_root_targets_hidden(&self, hidden: bool) {
+        let changed = self.layout.borrow().root_targets_hidden != hidden;
+        if changed {
+            self.layout.borrow_mut().root_targets_hidden = hidden;
+            self.layer.invalidate_arrange();
+        }
     }
 
     pub(crate) fn clear(&self) {
@@ -640,10 +799,10 @@ impl DockTargetOverlay {
     }
 
     pub(crate) fn refresh_theme(&self) {
-        for background in &self.cross_backgrounds {
-            background.set_fill(themed_brush(BrushStyle::Secondary));
-            background.set_stroke(themed_brush(BrushStyle::Separator));
-        }
+        self.cross_background
+            .set_icon_source(Some(IconSource::Image(ImageSource::Vector(
+                compass_backing(),
+            ))));
         for (_, visual) in self.group_buttons.iter().chain(self.root_buttons.iter()) {
             visual.refresh_theme();
         }
@@ -699,6 +858,11 @@ impl DockTargetOverlay {
             .map(|(target, visual)| (*target, visual.kind))
             .collect()
     }
+
+    #[cfg(test)]
+    pub(crate) fn cross_background_for_test(&self) -> Rc<IconSourceElement> {
+        self.cross_background.clone()
+    }
 }
 
 #[elwindui::component]
@@ -736,6 +900,9 @@ impl DropPreviewLayer {
 impl DropPreviewLayer {
     fn set_rect(&self, rect: Option<Rect>) {
         let rect = rect.filter(valid_rect);
+        if self.preview_rect() == rect {
+            return;
+        }
         self.set_preview_rect(rect);
         if let Some(root) = self.__template_root() {
             root.set_visibility(if self.preview_rect().is_some() {
@@ -764,7 +931,7 @@ impl DropPreview {
                 .as_any()
                 .downcast_ref::<Rectangle>()
                 .expect("drop preview template root is a Rectangle");
-            rectangle.set_fill(themed_brush(BrushStyle::Primary));
+            rectangle.set_fill(Some(accent_brush()));
             rectangle.set_stroke(themed_brush(BrushStyle::Separator));
             rectangle.set_stroke_width(4.0);
             rectangle.set_corner_radius(4.0);
@@ -806,7 +973,7 @@ impl DropPreview {
                 .as_any()
                 .downcast_ref::<Rectangle>()
                 .expect("drop preview template root is a Rectangle");
-            rectangle.set_fill(themed_brush(BrushStyle::Primary));
+            rectangle.set_fill(Some(accent_brush()));
             rectangle.set_stroke(themed_brush(BrushStyle::Separator));
         }
     }

@@ -31,3 +31,12 @@ pub(crate) fn themed_brush(style: BrushStyle) -> Option<Brush> {
         ResolvedValue::PlatformDefault => None,
     }
 }
+
+/// Active/accent chrome brush: the Theme's `Primary` when it resolves to a value, otherwise the
+/// platform accent (`docs/specs/docking_spec.md`). Self-drawn accent chrome must not disappear
+/// when the application leaves `Primary` to the platform default.
+pub(crate) fn accent_brush() -> Brush {
+    themed_brush(BrushStyle::Primary)
+        .or_else(|| crate::core::theme::platform_accent_color().map(Brush::Solid))
+        .unwrap_or_else(|| Brush::Solid(crate::core::graphics::Color::rgb(0, 120, 215)))
+}

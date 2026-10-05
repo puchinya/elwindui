@@ -1592,27 +1592,32 @@ impl UIElement {
             });
         }
         let desired_with_margin = self.measured_size().unwrap_or_default();
-        let mut slot = shrink_rect_by_margin(final_rect, self.presentation_margin());
+        let slot = shrink_rect_by_margin(final_rect, self.presentation_margin());
         let desired_without_margin =
             shrink_by_margin(desired_with_margin, self.presentation_margin());
-        // WinUI3/WPF: an explicit `Width`/`Height` wins over `Stretch` — `Stretch` only fills the
-        // slot when that axis was never set at all (`align_within`'s own "fills the slot" rule).
-        // Shrinking the slot itself to the explicit size here (rather than teaching `align_within`
-        // about "explicit-ness") keeps that function exactly what its own doc comment says it is:
-        // pure size-in/rect-out math with no widget knowledge — the same way real WPF's own
-        // `FrameworkElement.ArrangeCore` consults `this.Width`/`this.Height` directly, right where
-        // `this` is available, rather than threading an "is explicit" flag into a separate helper.
-        if self.presentation_width().is_some() {
-            slot.width = slot.width.min(desired_without_margin.width);
-        }
-        if self.presentation_height().is_some() {
-            slot.height = slot.height.min(desired_without_margin.height);
-        }
+        // Explicit dimensions constrain the element's desired size, not the space its parent
+        // granted it. Keep the original slot intact so Center/Right/Bottom alignment can position
+        // that explicit size within it. Stretch with an explicit dimension retains the existing
+        // leading-edge placement, since the explicit dimension prevents filling the slot.
+        let horizontal_alignment = if self.presentation_width().is_some()
+            && self.horizontal_alignment() == HorizontalAlignment::Stretch
+        {
+            HorizontalAlignment::Left
+        } else {
+            self.horizontal_alignment()
+        };
+        let vertical_alignment = if self.presentation_height().is_some()
+            && self.vertical_alignment() == VerticalAlignment::Stretch
+        {
+            VerticalAlignment::Top
+        } else {
+            self.vertical_alignment()
+        };
         let own_rect = align_within(
             slot,
             desired_without_margin,
-            self.horizontal_alignment(),
-            self.vertical_alignment(),
+            horizontal_alignment,
+            vertical_alignment,
         );
         let own_size = Size {
             width: own_rect.width,

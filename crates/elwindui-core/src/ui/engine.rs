@@ -735,6 +735,29 @@ mod tests {
     }
 
     #[test]
+    fn explicit_dimensions_remain_centered_inside_the_parent_slot() {
+        let tree: Rc<dyn UIElementExt> = FakeNativeControl::new(FakeHandle("a", size(40.0, 50.0)));
+        tree.as_ui_element().set_width(10.0);
+        tree.as_ui_element().set_height(20.0);
+        tree.as_ui_element()
+            .set_horizontal_alignment(HorizontalAlignment::Center);
+        tree.as_ui_element()
+            .set_vertical_alignment(VerticalAlignment::Center);
+
+        let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
+
+        assert_eq!(
+            natives[0].1,
+            Rect {
+                x: 45.0,
+                y: 40.0,
+                width: 10.0,
+                height: 20.0,
+            }
+        );
+    }
+
+    #[test]
     fn min_and_max_clamp_the_elements_own_measured_size() {
         let tree: Rc<dyn UIElementExt> = FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0)));
         tree.as_ui_element().set_min_width(30.0);

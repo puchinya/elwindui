@@ -413,6 +413,7 @@ pub(crate) fn reconcile_native_children(
                     style,
                     foreground,
                     alignment,
+                    wrapping,
                     transform,
                     opacity,
                 },
@@ -428,6 +429,12 @@ pub(crate) fn reconcile_native_children(
                     foreground.as_ref(),
                 );
                 let _ = text_block.SetTextAlignment(xaml_text_alignment(alignment));
+                let _ = text_block.SetTextWrapping(match wrapping {
+                    elwindui_core::graphics::TextWrapping::NoWrap => {
+                        crate::bindings::Microsoft::UI::Xaml::TextWrapping::NoWrap
+                    }
+                    _ => crate::bindings::Microsoft::UI::Xaml::TextWrapping::Wrap,
+                });
                 let fe: FrameworkElement = text_block
                     .clone()
                     .cast()
@@ -464,6 +471,7 @@ pub(crate) fn reconcile_native_children(
                         style,
                         foreground,
                         alignment,
+                        wrapping,
                         transform,
                         opacity,
                     } => {
@@ -481,6 +489,12 @@ pub(crate) fn reconcile_native_children(
                             foreground.as_ref(),
                         );
                         let _ = text_block.SetTextAlignment(xaml_text_alignment(alignment));
+                        let _ = text_block.SetTextWrapping(match wrapping {
+                            elwindui_core::graphics::TextWrapping::NoWrap => {
+                                crate::bindings::Microsoft::UI::Xaml::TextWrapping::NoWrap
+                            }
+                            _ => crate::bindings::Microsoft::UI::Xaml::TextWrapping::Wrap,
+                        });
                         let fe: FrameworkElement = text_block
                             .clone()
                             .cast()
@@ -730,6 +744,7 @@ pub(crate) enum RenderedNativeChild {
         style: elwindui_core::graphics::ComputedTextStyle,
         foreground: Option<elwindui_core::graphics::Brush>,
         alignment: elwindui_core::graphics::TextAlignment,
+        wrapping: elwindui_core::graphics::TextWrapping,
         transform: elwindui_core::base::AffineTransform,
         opacity: f32,
     },

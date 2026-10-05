@@ -24,6 +24,7 @@ pub mod ui {
 
 mod dock_group;
 mod dock_item;
+mod dock_size;
 mod dock_split_panel;
 mod docking_control;
 mod id;
@@ -34,6 +35,7 @@ mod snapshot;
 
 pub use dock_group::{DockGroup, DockGroupExt};
 pub use dock_item::{DockItem, DockItemExt};
+pub use dock_size::DockSize;
 pub use dock_split_panel::{DockSplitPanel, DockSplitPanelExt};
 pub use docking_control::{DockRuntimeHost, DockRuntimeHostExt, DockingControl, DockingControlExt};
 pub use id::{DockGroupId, DockItemId};

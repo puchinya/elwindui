@@ -22,34 +22,73 @@ thread_local! {
 /// Private close-slot control used by [`CustomTabViewItem`]'s authored header template.
 #[elwindui::component(inherits Control)]
 pub(crate) struct CustomTabCloseButton {
+    #[environment(foreground)]
+    palette_foreground: BrushStyle,
+    #[state(default = false)]
+    palette_dark: bool,
     #[prop(default = true)]
     slot_visible: bool,
     #[prop(default = false)]
     glyph_visible: bool,
+    #[prop(default = false)]
+    connected_chrome: bool,
+    #[prop(default = ChromeIcon::Close)]
+    glyph_kind: ChromeIcon,
+    #[computed(expr = if connected_chrome { 24.0 } else { 32.0 })]
+    slot_width: f32,
+    #[computed(expr = 24.0)]
+    slot_height: f32,
     #[state(default = None)]
     close_callback: Option<Rc<dyn Fn()>>,
     #[state(default = false)]
     pressed: bool,
     #[state(default = false)]
+    pointer_over: bool,
+    #[computed(expr = super::support::native_tab_action(pressed, pointer_over, palette_dark))]
+    action_background: BrushStyle,
+    #[state(default = false)]
     handlers_bound: bool,
     #[state(default = None)]
-    last_glyph_signature: Option<(bool, Option<Brush>)>,
+    last_glyph_signature: Option<(bool, ChromeIcon, Option<Brush>)>,
     #[computed(expr = if slot_visible { Visibility::Visible } else { Visibility::Collapsed })]
     slot_visibility: Visibility,
     template: template_view!(|this: Self| {
         on_mount {
+            this.sync_palette();
             this.bind_pointer_handlers();
             this.sync_glyph_paint();
         }
-        on_update(glyph_visible) {
+        on_update(glyph_visible, palette_foreground) {
+            this.sync_palette();
             this.sync_glyph_paint();
         }
         Grid {
-            width: 20.0
-            height: 32.0
+            rows: [core::layout::GridLength::Star(1.0)]
+            columns: [core::layout::GridLength::Star(1.0)]
+            width: slot_width
+            height: slot_height
+            vertical_alignment: core::layout::VerticalAlignment::Center
             visibility: slot_visibility
+            Rectangle {
+                fill: action_background
+                corner_radius: 4.0
+                hit_test_visible: false
+            }
+            Grid {
+                rows: [core::layout::GridLength::Star(1.0)]
+                columns: [core::layout::GridLength::Star(1.0)]
+            }
         }
     }),
+}
+
+impl CustomTabCloseButton {
+    fn sync_palette(&self) {
+        let dark = super::support::native_tab_dark(self.palette_foreground());
+        if self.palette_dark() != dark {
+            self.set_palette_dark(dark);
+        }
+    }
 }
 
 #[elwindui::component]
@@ -61,6 +100,9 @@ impl CustomTabCloseButton {
 
     #[overrides]
     fn on_apply_template(&self) {
+        self.set_height(24.0);
+        self.set_vertical_alignment(core::layout::VerticalAlignment::Center);
+        self.bind_pointer_handlers();
         self.sync_glyph_paint();
     }
 }
@@ -75,13 +117,13 @@ impl CustomTabCloseButton {
         } else {
             None
         };
-        let Some(slot_node) = core::visual_tree::find_all::<Grid>(self).into_iter().next() else {
+        let Some(slot_node) = core::visual_tree::find_all::<Grid>(self).into_iter().nth(1) else {
             return;
         };
         let Some(slot) = slot_node.as_any().downcast_ref::<Grid>() else {
             return;
         };
-        let signature = (self.glyph_visible(), foreground.clone());
+        let signature = (self.glyph_visible(), self.glyph_kind(), foreground.clone());
         let structure_matches = if signature.0 {
             slot.children().len() == 1
         } else {
@@ -92,7 +134,7 @@ impl CustomTabCloseButton {
         }
         slot.children().clear();
         if self.glyph_visible() {
-            let glyph = chrome_icon(ChromeIcon::Close, foreground);
+            let glyph = chrome_icon(self.glyph_kind(), foreground);
             glyph.set_hit_test_visible(false);
             slot.children().add(glyph);
         }
@@ -126,6 +168,19 @@ impl CustomTabCloseButton {
             return;
         }
         self.set_handlers_bound(true);
+
+        for (event_name, value) in [("on_pointer_entered", true), ("on_pointer_exited", false)] {
+            let weak_self = weak_self.clone();
+            self.register_routed_handler::<PointerEventArgs>(
+                event_name,
+                Box::new(move |_, _| {
+                    let button: Option<Rc<CustomTabCloseButton>> = weak_self.upgrade();
+                    if let Some(button) = button {
+                        button.set_pointer_over(value);
+                    }
+                }),
+            );
+        }
 
         let weak_self = weak_self.clone();
         self.register_routed_handler::<PointerEventArgs>(

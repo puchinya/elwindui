@@ -97,18 +97,18 @@ and that no split is created.
 
 ## DNP-04L/T/R/B — group-relative Split targets
 
-From reset, run four independent subcases. Drop a dockable item into the intended Left, Top,
-Right, or Bottom split band of an interior destination group.
+From reset, run four independent subcases. Drop a dockable item on the intended Left, Top, Right,
+or Bottom compass cell drawn for an interior destination group.
 
 PASS requires a visible new pane on the requested side of that destination group.
 
 ## DNP-05L/T/R/B — surface-root Dock targets
 
-From reset, run four independent subcases. Drop a dockable item into the main DockSurface root
-edge band for Left, Top, Right, or Bottom.
+From reset, run four independent subcases. Drop a dockable item on the main DockSurface root-edge
+target drawn for Left, Top, Right, or Bottom.
 
-PASS requires the new pane to attach at the requested surface-root edge, not merely split relative
-to the nearest group.
+PASS requires the new pane to attach at the requested surface-root edge, taking half of the
+surface on that axis, not merely split relative to the nearest group.
 
 ## DNP-06 — item tear-out and outside-bounds continuity
 
@@ -194,14 +194,14 @@ stale preview.
 ## DNP-15 — auto-hide, open, and pin back
 
 Use Solution Explorer. Request Auto Hide / Pin, activate its auto-hide strip item, observe the
-side-aware overlay, then use the visible pin affordance to return it. Accessibility discovery is
+side-aware overlay, then use the visible pin affordance to dock it again. Accessibility discovery is
 platform-specific: Windows uses UIA and AppKit uses AX. Auto-hide chrome may be self-drawn and
 need not be exposed through either mechanism; when the platform accessibility tree does not expose
 the strip or overlay, use a fresh whole-screen capture plus current native-window geometry to
 identify and real-click the visible target. Non-discoverability alone is not BLOCKED.
 
-PASS requires one overlay, an interactive item, and return to the remembered/default live placement
-without duplication. If the normal action is delivered but the required strip/overlay is absent,
+PASS requires one overlay, an interactive item, and a pin-back that docks the item at the root edge
+of its strip's side as the active item, without duplication. If the normal action is delivered but the required strip/overlay is absent,
 classify FAIL; classify BLOCKED only when host/tool/capture conditions prevent identifying or
 clicking a visually present target after the required fallback.
 
@@ -257,9 +257,10 @@ group ownership, floating HWND count, and layout topology, with no duplicate cal
 
 ## DNP-21 — native title-bar close, allowed
 
-Float a closeable item or group. Freshly identify the native title-bar Close affordance for the
-current native floating window and activate the real native close action. Windows maps the native
-window identity to HWND; AppKit maps it to the CGWindowID returned by `macos-ui-driver list-windows`.
+Float a closeable item and invoke its native window close request. Windows floating hosts with
+the approved custom title region have no caption buttons: focus the current floating HWND and
+send Alt+F4 through the platform driver. AppKit uses its native title-bar Close affordance and the
+CGWindowID returned by `macos-ui-driver list-windows`. Rediscover the native identity before input.
 
 PASS requires the request to be accepted; the native floating window to disappear; all contained
 closeable items to be removed once; no stale second native floating window; a live process; and a
@@ -267,8 +268,8 @@ subsequent successful main-window selection/action.
 
 ## DNP-22 — native title-bar close veto
 
-Float a root containing Error List and activate that native floating window's real title-bar Close
-affordance. Use the platform identity mapping from DNP-21 (HWND on Windows, CGWindowID on AppKit).
+Float Error List and invoke the same native window close request described in DNP-21. Use the
+platform identity mapping from DNP-21 (HWND on Windows, CGWindowID on AppKit).
 
 PASS requires close veto, the native floating window to remain, all model contents to remain, no
 partial item close, and main/floating UI to continue responding.

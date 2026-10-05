@@ -22,8 +22,9 @@ use objc2::{AnyThread, msg_send};
 use objc2_app_kit::{
     NSAttributedStringNSExtendedStringDrawing, NSColor, NSFont, NSFontAttributeName,
     NSFontDescriptor, NSFontDescriptorSymbolicTraits, NSFontTraitsAttribute, NSFontWeightTrait,
-    NSFontWidthTrait, NSForegroundColorAttributeName, NSKernAttributeName, NSMutableParagraphStyle,
-    NSParagraphStyleAttributeName, NSStringDrawingOptions, NSTextAlignment,
+    NSFontWidthTrait, NSForegroundColorAttributeName, NSKernAttributeName, NSLineBreakMode,
+    NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSStringDrawingOptions,
+    NSTextAlignment,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -239,6 +240,7 @@ pub(crate) fn text_attributes(
     style: &ComputedTextStyle,
     foreground: Option<&Brush>,
     alignment: TextAlignment,
+    wrapping: TextWrapping,
 ) -> Retained<NSDictionary<NSAttributedStringKey, AnyObject>> {
     let font = ns_font(style);
     let color = foreground_ns_color(foreground);
@@ -248,6 +250,10 @@ pub(crate) fn text_attributes(
     let kern = NSNumber::new_f64(style.character_spacing as f64 / 1000.0 * style.font_size as f64);
     let paragraph_style = NSMutableParagraphStyle::new();
     paragraph_style.setAlignment(ns_text_alignment(alignment));
+    paragraph_style.setLineBreakMode(match wrapping {
+        TextWrapping::NoWrap => NSLineBreakMode::ByClipping,
+        TextWrapping::Wrap | TextWrapping::WrapWholeWords => NSLineBreakMode::ByWordWrapping,
+    });
 
     let keys: [&NSAttributedStringKey; 4] = unsafe {
         [
@@ -275,9 +281,10 @@ pub(crate) fn attributed_string(
     style: &ComputedTextStyle,
     foreground: Option<&Brush>,
     alignment: TextAlignment,
+    wrapping: TextWrapping,
 ) -> Retained<NSAttributedString> {
     super::stats::bump(|s| s.attributed_strings_created += 1);
-    let attrs = text_attributes(style, foreground, alignment);
+    let attrs = text_attributes(style, foreground, alignment, wrapping);
     unsafe {
         NSAttributedString::initWithString_attributes(
             NSAttributedString::alloc(),
@@ -309,6 +316,7 @@ impl TextBackend for AppKitTextBackend {
             req.style,
             Some(&req.style.foreground),
             req.alignment,
+            req.wrapping,
         );
         let constraint_width =
             if req.wrapping == TextWrapping::NoWrap || !req.available.width.is_finite() {

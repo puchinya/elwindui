@@ -14,8 +14,13 @@ use std::sync::OnceLock;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChromeIcon {
     Close,
+    /// Auto-hide ("unpin") affordance of docked chrome: a pin with a small badge, like the
+    /// reference's Segoe Fluent `E77A` button.
     Pin,
     Float,
+    /// Re-dock affordance of an open auto-hide pane: a plain push-pin, like the reference's
+    /// `E840` button.
+    Pinned,
 }
 
 impl ChromeIcon {
@@ -24,6 +29,7 @@ impl ChromeIcon {
             Self::Close => 0,
             Self::Pin => 1,
             Self::Float => 2,
+            Self::Pinned => 1,
         }
     }
 }
@@ -34,8 +40,9 @@ fn point(x: f32, y: f32) -> Point {
 
 fn close_path() -> Path {
     let mut path = PathBuilder::new();
-    path.add_line(point(4.0, 4.0), point(12.0, 12.0));
-    path.add_line(point(12.0, 4.0), point(4.0, 12.0));
+    // A 10-pixel cross centered in the 16-pixel box, the visible size of the reference glyph.
+    path.add_line(point(3.0, 3.0), point(13.0, 13.0));
+    path.add_line(point(13.0, 3.0), point(3.0, 13.0));
     path.build().expect("static close icon geometry is valid")
 }
 
@@ -74,16 +81,26 @@ fn chrome_geometry() -> &'static [Path; 3] {
     CACHE.get_or_init(|| [close_path(), pin_path(), float_path()])
 }
 
-/// Creates a crisp, backend-neutral vector glyph with a centered 16x16 drawing box.
-pub fn chrome_icon(kind: ChromeIcon, foreground: Option<Brush>) -> Rc<dyn UIElementExt> {
-    let brush = foreground
-        .unwrap_or_else(|| Brush::Solid(super::core::graphics::Color::rgb(232, 232, 232)));
-    let node = VectorNode::Path(VectorPathNode {
-        path: chrome_geometry()[kind.index()].clone(),
-        transform: super::core::base::AffineTransform::IDENTITY,
+fn badge_path() -> &'static Path {
+    static CACHE: OnceLock<Path> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut path = PathBuilder::new();
+        path.add_circle(point(12.0, 12.0), 2.0);
+        path.build().expect("static pin badge geometry is valid")
+    })
+}
+
+fn stroke_node(
+    path: Path,
+    transform: super::core::base::AffineTransform,
+    brush: &Brush,
+) -> VectorNode {
+    VectorNode::Path(VectorPathNode {
+        path,
+        transform,
         fill: None,
         stroke: Some(VectorStroke {
-            paint: VectorPaint::Brush(brush),
+            paint: VectorPaint::Brush(brush.clone()),
             opacity: 1.0,
             style: StrokeStyle {
                 width: 1.5,
@@ -97,7 +114,37 @@ pub fn chrome_icon(kind: ChromeIcon, foreground: Option<Brush>) -> Rc<dyn UIElem
         paint_order: VectorPaintOrder::default(),
         rendering: VectorShapeRendering::GeometricPrecision,
         visibility: true,
+    })
+}
+
+/// Creates a crisp, backend-neutral vector glyph with a centered 16x16 drawing box.
+pub fn chrome_icon(kind: ChromeIcon, foreground: Option<Brush>) -> Rc<dyn UIElementExt> {
+    let brush = foreground.unwrap_or_else(|| {
+        super::core::graphics::text_backend()
+            .default_text_style()
+            .foreground
     });
+    use super::core::base::AffineTransform;
+    let tilted = matches!(kind, ChromeIcon::Pin | ChromeIcon::Pinned);
+    let transform = if tilted {
+        AffineTransform::translation(8.0, 8.0)
+            .concat(&AffineTransform::rotation(std::f32::consts::FRAC_PI_4))
+            .concat(&AffineTransform::translation(-8.0, -8.0))
+    } else {
+        AffineTransform::IDENTITY
+    };
+    let mut nodes = vec![stroke_node(
+        chrome_geometry()[kind.index()].clone(),
+        transform,
+        &brush,
+    )];
+    if kind == ChromeIcon::Pin {
+        nodes.push(stroke_node(
+            badge_path().clone(),
+            AffineTransform::IDENTITY,
+            &brush,
+        ));
+    }
     let image = VectorImageBuilder::new(
         Size {
             width: 16.0,
@@ -112,7 +159,7 @@ pub fn chrome_icon(kind: ChromeIcon, foreground: Option<Brush>) -> Rc<dyn UIElem
     )
     .expect("16x16 chrome icon canvas is valid")
     .root(VectorGroup {
-        children: std::sync::Arc::from([node]),
+        children: std::sync::Arc::from(nodes),
         ..VectorGroup::default()
     })
     .finish()

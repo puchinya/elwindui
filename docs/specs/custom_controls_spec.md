@@ -67,7 +67,17 @@ also carries `canceled`. A left header press becomes a drag at 4 logical pixels.
 The press below that threshold emits no drag callbacks. Core cancellation emits
 one canceled completion and item removal cancels an active drag before detach.
 
-`TabStripPosition::Top` reserves a 32 logical-pixel strip above content;
+The default presentation follows standard WinUI 3 TabView: a 40 logical-pixel
+strip includes an 8-pixel outer inset and a 32-pixel item header. Normal headers
+use a 100–240-pixel width range, constrained by the available strip when narrower.
+Titles use 12-pixel type and selected titles are semibold. Closable headers use
+8/4-pixel leading/trailing insets and a 32×24 close-button slot. Selected outlines
+join the content edge; hover and pressed actions use subtle backgrounds. Colors
+remain legible under platform light and dark themes.
+
+Docking uses a framework-internal connected presentation, preserving its
+WinUI.Dock decoration. In that presentation, `TabStripPosition::Top` reserves
+a 32 logical-pixel strip above content;
 `Bottom` reserves it below, except that a Bottom view with exactly one item
 collapses the strip to zero height. Both positions use the same strip and
 header height regardless of `compact`. Selected content occupies the remaining rectangle;
@@ -78,7 +88,7 @@ leading/trailing insets, icon, and reserved action slot. A measured compact tab
 must retain enough width to show its title rather than collapsing to icon-only
 or action-only chrome.
 
-The strip baseline uses a six-logical-pixel leading rule and continues to the
+The connected strip baseline uses a six-logical-pixel leading rule and continues to the
 right of the compact tab headers. Header text follows the WinUI.Dock header
 insets: 12 logical pixels at the leading edge and 8 at the trailing edge. The
 selected header has a one-pixel rounded top outline whose lower edge meets the
@@ -91,11 +101,13 @@ bottom-line structure; pointer-over presents the tab-header hover background
 without changing selection. These visual states do not replace wrappers or page
 content.
 
-`compact = false` distributes available tab-strip width among the current items,
+In the connected presentation, `compact = false` distributes available tab-strip width among the current items,
 with each header capped at 200 logical pixels. `compact = true` measures each
 header from its content and applies the same computed maximum width; long titles
-therefore do not take the entire strip. Compact mode changes width behavior only,
-not strip height, header height, selection, or content arrangement.
+therefore do not take the entire strip. If compact header widths together exceed
+the finite strip width, Arrange reduces them proportionally to fit the strip and
+clips each header's content to its own bounds. Compact mode changes width behavior
+only, not strip height, header height, selection, or content arrangement.
 
 The default template is a `Grid` containing a private non-rendering tab-strip
 presenter and a private non-rendering content presenter. The strip uses the
@@ -119,13 +131,16 @@ selected-frame slot. The inherited `content` is not rendered by
 the header. A private content presenter owns the visual presentation of all
 current item contents while preserving each item as the logical owner;
 selection only changes arrangement and never reparents content.
-The item header tracks are `30` logical pixels for the header and `2` for the
+The default item uses a `32`-pixel header with no separate indicator track.
+In Docking's connected presentation, the item header tracks are `30` logical pixels for the header and `2` for the
 indicator at `Top`, and `2` for the indicator followed by `30` for the header at
 `Bottom`; the total item height remains `32` for both compact and non-compact
 presentation.
 
-The default close affordance is a private composed component using a 20-pixel
-slot and a `TextBlock` `×` glyph. `Always` and `OnPointerOver` reserve the same
+The default close affordance is a private composed component using a 32×24-pixel
+slot preceded by a 4-pixel gap and a vector close glyph; connected chrome uses
+a 24×24-pixel slot matching WinUI.Dock's 6-pixel action padding and 12-pixel icon box.
+`Always` and `OnPointerOver` reserve the same
 slot width; `Never` removes the slot. Close press/release is handled by that
 private visual through Core routed input and implicit capture.
 
@@ -180,9 +195,12 @@ The grip stays inside the parent-assigned splitter hit target. Docking creates a
 12-logical-pixel inter-pane gap with `Grid.column_spacing` or `Grid.row_spacing`
 and places the 12-pixel hit target in that gap by translating the splitter from
 the following pane track. This does not add a separate splitter track. `Auto`
-uses a centered six-by-six grip until an explicit direction is selected. The surface uses neutral,
-pointer-over/focus, and pressed Fluent-style colors and does not draw chrome
-through a `RenderContext` override.
+uses a centered six-by-six grip until an explicit direction is selected. The presentation follows
+the WinUI 3 CommunityToolkit Sizers `GridSplitter`: at rest the surface is transparent and the grip
+uses the control strong fill with a 2-pixel radius; pointer-over fills the whole hit target with the
+subtle secondary fill and pressed/dragging with the subtle tertiary fill, each with a 4-pixel
+corner radius, while the grip stays visible in the control strong fill. Colors use the Fluent light
+and dark values of those roles. The control does not draw chrome through a `RenderContext` override.
 
 ## Ownership and input
 

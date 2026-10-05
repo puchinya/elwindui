@@ -180,6 +180,7 @@ struct WinUI3RenderingState {
     host: RefCell<Weak<WinUI3RelayoutHost>>,
     token: Cell<Option<i64>>,
     handler: RefCell<Option<EventHandler<IInspectable>>>,
+    first_frame_pending: Cell<bool>,
 }
 
 impl WinUI3RenderingState {
@@ -228,6 +229,16 @@ impl WinUI3RenderingState {
             self.stop();
             return;
         };
+        if self.first_frame_pending.get() {
+            let render_tree: Option<Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>> =
+                host.render_tree.upgrade();
+            let realized_content = render_tree.is_some_and(|tree| tree.borrow().as_ref().is_some());
+            if !realized_content {
+                return;
+            }
+            self.first_frame_pending.set(false);
+            crate::app::trace_startup_phase("first_content_rendering");
+        }
         let runtime: Option<Rc<AnimationRuntime>> = host.animation_runtime.upgrade();
         let Some(runtime) = runtime else {
             self.stop();
@@ -241,6 +252,7 @@ impl WinUI3RenderingState {
     }
 
     fn stop(&self) {
+        self.first_frame_pending.set(false);
         if let Some(token) = self.token.take() {
             let _ = CompositionTarget::RemoveRendering(token);
         }
@@ -254,6 +266,7 @@ impl Default for WinUI3RenderingState {
             host: RefCell::new(Weak::<WinUI3RelayoutHost>::new()),
             token: Cell::new(None::<i64>),
             handler: RefCell::new(None::<EventHandler<IInspectable>>),
+            first_frame_pending: Cell::new(false),
         }
     }
 }
@@ -2036,6 +2049,10 @@ impl TreeHost {
         *self.tree.borrow_mut() = Some(tree);
         *self.render_tree.borrow_mut() = None;
         self.force_relayout_with_source(RelayoutSource::SetTreeInitial);
+        if crate::app::startup_trace_enabled() {
+            self.rendering.first_frame_pending.set(true);
+            self.rendering.ensure_started();
+        }
     }
 
     /// Clears this host's tree, cleans up native composition and children, and closes any active popup.
@@ -2650,6 +2667,7 @@ impl TreeHost {
                     style,
                     foreground,
                     alignment,
+                    wrapping,
                 } => {
                     native_wanted.push((
                         (group_id, command_index),
@@ -2664,6 +2682,7 @@ impl TreeHost {
                             style: style.clone(),
                             foreground: foreground.clone(),
                             alignment: *alignment,
+                            wrapping: *wrapping,
                             transform,
                             opacity,
                         },
@@ -3045,6 +3064,7 @@ pub fn display_area_to_core_work_area(
 }
 
 /// Pure helper: converts canvas-to-window local DIP + window origin physical px into desktop screen logical DIP.
+#[cfg(test)]
 pub fn canvas_local_to_screen_logical_pure(
     canvas_to_window_local_dip: Point,
     window_origin_physical: (i32, i32),

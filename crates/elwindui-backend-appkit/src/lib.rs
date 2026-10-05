@@ -35,6 +35,30 @@
 /// layout pass) relies on to call `NSFont`/`NSFontDescriptor` APIs without its own `mtm()` check.
 pub fn init() -> Result<(), std::convert::Infallible> {
     elwindui_core::graphics::set_text_backend(std::rc::Rc::new(render::AppKitTextBackend));
+    // Self-drawn accent chrome falls back to the system control accent when the app Theme leaves
+    // `Primary` unset (`docs/specs/docking_spec.md`). Queried on demand so theme refreshes see
+    // accent changes.
+    elwindui_core::theme::set_platform_accent_provider(Some(std::rc::Rc::new(|| {
+        use objc2_app_kit::{NSColor, NSColorSpace};
+        #[allow(unused_unsafe)]
+        let rgba = unsafe {
+            let accent = NSColor::controlAccentColor();
+            let srgb = accent.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())?;
+            (
+                srgb.redComponent(),
+                srgb.greenComponent(),
+                srgb.blueComponent(),
+                srgb.alphaComponent(),
+            )
+        };
+        let channel = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+        Some(elwindui_core::graphics::Color::rgba(
+            channel(rgba.0 as f64),
+            channel(rgba.1 as f64),
+            channel(rgba.2 as f64),
+            channel(rgba.3 as f64),
+        ))
+    })));
     Ok(())
 }
 

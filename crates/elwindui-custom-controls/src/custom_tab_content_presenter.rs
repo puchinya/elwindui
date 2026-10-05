@@ -48,6 +48,8 @@ pub(crate) struct CustomTabContentPresenter {
     presentation_state: Option<Rc<std::cell::RefCell<Vec<ContentEntry>>>>,
     #[state(default = None)]
     last_arranged_selected_index: Option<usize>,
+    #[state(default = None)]
+    last_arranged_size: Option<Size>,
     #[state(default = true)]
     structure_dirty: bool,
     #[state(default = false)]
@@ -225,6 +227,17 @@ impl CustomTabContentPresenter {
             .collect()
     }
 
+    fn arrangement_is_valid(element: &dyn UIElementExt) -> bool {
+        !element.participates_in_layout()
+            || (element.arranged_offset().is_some()
+                && element.arranged_width().is_some()
+                && element.arranged_height().is_some()
+                && element
+                    .visual_children()
+                    .iter()
+                    .all(|child| Self::arrangement_is_valid(child.as_ref())))
+    }
+
     fn weak_self(&self) -> std::rc::Weak<Self> {
         weak_self_from_visual_owner(self)
     }
@@ -257,6 +270,7 @@ impl CustomTabContentPresenter {
 mod tests {
     use super::*;
     use crate::CustomTabView;
+    use crate::core::ui::{GridExt, LayoutExt};
     use std::cell::{Cell, RefCell};
 
     #[elwindui_macros::class(inherits = elwindui_core::ui::UIElement)]
@@ -362,9 +376,100 @@ mod tests {
         assert_eq!(probes[0].last_arranged_size.borrow().unwrap().width, 0.0);
         assert_eq!(probes[0].last_arranged_size.borrow().unwrap().height, 0.0);
         assert_eq!(probes[2].last_arranged_size.borrow().unwrap().width, 320.0);
-        assert_eq!(probes[2].last_arranged_size.borrow().unwrap().height, 148.0);
+        assert_eq!(probes[2].last_arranged_size.borrow().unwrap().height, 140.0);
         assert_eq!(probes[1].arrange_count.get(), 0);
         assert_eq!(probes[3].arrange_count.get(), 0);
+    }
+
+    #[test]
+    fn unchanged_selection_resizes_only_the_visible_page() {
+        let (view, probes) = probe_view(4);
+        let root: Rc<dyn UIElementExt> = view.clone();
+        crate::core::ui::layout_root(
+            &root,
+            Size {
+                width: 320.0,
+                height: 180.0,
+            },
+        );
+        for probe in &probes {
+            probe.reset_counts();
+        }
+        crate::core::ui::layout_root(
+            &root,
+            Size {
+                width: 400.0,
+                height: 240.0,
+            },
+        );
+        assert_eq!(
+            *probes[0].last_arranged_size.borrow(),
+            Some(Size {
+                width: 400.0,
+                height: 200.0
+            })
+        );
+        assert_eq!(probes[0].arrange_count.get(), 1);
+        assert!(
+            probes[1..]
+                .iter()
+                .all(|probe| probe.arrange_count.get() == 0)
+        );
+    }
+
+    #[test]
+    fn unchanged_page_size_restores_invalidated_selected_arrangement() {
+        let (view, probes) = probe_view(4);
+        let root: Rc<dyn UIElementExt> = view.clone();
+        let size = Size {
+            width: 320.0,
+            height: 180.0,
+        };
+        crate::core::ui::layout_root(&root, size);
+        for probe in &probes {
+            probe.reset_counts();
+        }
+        // Docking invalidates its containing visual subtree after a splitter commit.
+        // The final page size can match the last interactive preview exactly.
+        probes[0].invalidate_measure();
+        assert_eq!(probes[0].arranged_width(), None);
+        crate::core::ui::layout_root(&root, size);
+        assert_eq!(probes[0].arranged_width(), Some(320.0));
+        assert_eq!(probes[0].arranged_height(), Some(140.0));
+        assert_eq!(probes[0].arrange_count.get(), 1);
+        assert!(
+            probes[1..]
+                .iter()
+                .all(|probe| probe.arrange_count.get() == 0)
+        );
+    }
+
+    #[test]
+    fn unchanged_page_size_restores_invalidated_nested_content() {
+        let view = CustomTabView::new_view();
+        let page = crate::core::ui::Grid::new();
+        let probe = LayoutProbe::new(Size {
+            width: 40.0,
+            height: 20.0,
+        });
+        page.set_rows(vec![crate::core::layout::GridLength::Star(1.0)]);
+        page.set_columns(vec![crate::core::layout::GridLength::Star(1.0)]);
+        page.children().add(probe.clone());
+        let item = CustomTabViewItem::new_item();
+        item.set_content(page);
+        view.replace_children(vec![item]);
+        let root: Rc<dyn UIElementExt> = view;
+        let size = Size {
+            width: 320.0,
+            height: 180.0,
+        };
+        crate::core::ui::layout_root(&root, size);
+        probe.reset_counts();
+        probe.invalidate_measure();
+        crate::core::ui::layout_root(&root, size);
+        assert_eq!(probe.arranged_width(), Some(320.0));
+        assert_eq!(probe.arranged_height(), Some(140.0));
+        assert_eq!(probe.arrange_count.get(), 1);
     }
 
     #[test]
@@ -515,8 +620,20 @@ impl CustomTabContentPresenter {
                     });
                 }
             }
+        } else if let Some((_, Some(content))) =
+            entries.iter().find(|(index, _)| *index == selected)
+        {
+            // A splitter commit or a descendant property can invalidate arrangement while
+            // the selected page and its final size remain unchanged. Cached size alone is
+            // insufficient to skip the selected subtree's arrange pass.
+            if self.last_arranged_size() != Some(final_size)
+                || !Self::arrangement_is_valid(content.as_ref())
+            {
+                content.arrange(full_rect);
+            }
         }
         self.set_last_arranged_selected_index(Some(selected));
+        self.set_last_arranged_size(Some(final_size));
         self.set_structure_dirty(false);
         final_size
     }

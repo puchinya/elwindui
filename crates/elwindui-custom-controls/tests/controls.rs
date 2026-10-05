@@ -100,6 +100,105 @@ fn absolute_offset(node: &Rc<dyn UIElementExt>) -> Point {
 }
 
 #[test]
+fn long_tab_title_is_arranged_inside_its_header_before_the_action_slot() {
+    let item = CustomTabViewItem::new_item();
+    item.set_header("A title much longer than this compact tab".to_string());
+    item.measure(Size {
+        width: 80.0,
+        height: 32.0,
+    });
+    item.arrange(elwindui_custom_controls::core::base::Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 80.0,
+        height: 32.0,
+    });
+    let root = item.__template_root().expect("header template");
+    let title = find_visual(&root, "TextBlock").expect("header title");
+    assert_eq!(title.as_text_style_owner().unwrap().font_size(), Some(12.0));
+    let close: Rc<dyn UIElementExt> = item.close_button();
+    let title_left = absolute_offset(&title).x;
+    let title_right = title_left + title.arranged_width().unwrap();
+    let close_left = absolute_offset(&close).x;
+    assert_eq!(title_left, 8.0);
+    assert!(title.arranged_width().unwrap() > 0.0);
+    assert!(title_right <= close_left);
+    assert!(close_left + close.arranged_width().unwrap() <= 80.0 - 4.0);
+}
+
+#[test]
+fn native_and_connected_chrome_switch_without_replacing_items_or_pages() {
+    let item = CustomTabViewItem::new_item();
+    item.set_header("Document".to_string());
+    let page = elwindui_custom_controls::core::ui::TextBlock::new();
+    item.set_content(page.clone());
+    let view = CustomTabView::new_view();
+    view.set_children(vec![item.clone()]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    let size = Size {
+        width: 400.0,
+        height: 160.0,
+    };
+    layout_root(&root, size);
+    let page_parent = page.visual_parent().unwrap();
+    assert_eq!(item.arranged_width(), Some(240.0));
+    assert_eq!(item.arranged_height(), Some(32.0));
+    assert_eq!(
+        absolute_offset(&(item.clone() as Rc<dyn UIElementExt>)).y,
+        8.0
+    );
+    assert_eq!(item.close_button().arranged_width(), Some(32.0));
+    assert_eq!(item.close_button().arranged_height(), Some(24.0));
+    let close = item.close_button();
+    let glyph = elwindui_custom_controls::core::visual_tree::find_all::<
+        elwindui_custom_controls::core::ui::IconSourceElement,
+    >(close.as_ref())
+    .into_iter()
+    .next()
+    .unwrap();
+    let close_offset = absolute_offset(&close);
+    let glyph_offset = absolute_offset(&glyph);
+    assert_eq!(glyph_offset.x - close_offset.x, 8.0);
+    assert_eq!(glyph_offset.y - close_offset.y, 4.0);
+    assert_eq!(page.arranged_height(), Some(120.0));
+    let template = item.__template_root().unwrap();
+    let background = template.visual_children()[0].clone();
+    let outline = background.visual_children()[1].clone();
+    assert_eq!(
+        outline.visibility(),
+        elwindui_custom_controls::core::layout::Visibility::Visible
+    );
+    assert_eq!(outline.arranged_height(), Some(32.0));
+    assert_eq!(outline.arranged_width(), item.arranged_width());
+
+    view.set_connected_chrome(true);
+    layout_root(&root, size);
+    assert_eq!(item.arranged_width(), Some(200.0));
+    assert_eq!(
+        absolute_offset(&(item.clone() as Rc<dyn UIElementExt>)).y,
+        0.0
+    );
+    assert_eq!(item.close_button().arranged_width(), Some(24.0));
+    assert_eq!(page.arranged_height(), Some(128.0));
+    assert_eq!(outline.arranged_height(), Some(30.0));
+    assert_eq!(outline.arranged_width(), item.arranged_width());
+
+    view.set_connected_chrome(false);
+    layout_root(&root, size);
+    assert_eq!(item.arranged_width(), Some(240.0));
+    assert_eq!(item.close_button().arranged_width(), Some(32.0));
+    assert_eq!(page.arranged_height(), Some(120.0));
+    assert!(Rc::ptr_eq(&page.visual_parent().unwrap(), &page_parent));
+    assert!(std::ptr::eq(
+        view.children().to_vec()[0]
+            .as_any()
+            .downcast_ref::<CustomTabViewItem>()
+            .unwrap(),
+        item.as_ref()
+    ));
+}
+
+#[test]
 fn tab_view_owns_ordered_items_and_exposes_public_presentation_properties() {
     let first = CustomTabViewItem::new_item();
     first.set_header("first".to_string());
@@ -169,13 +268,13 @@ fn compact_tab_metrics_update_the_retained_tab_view_grid() {
         .expect("tab view template root is a Grid");
     assert!(matches!(
         grid.rows.borrow().first(),
-        Some(GridLength::Fixed(height)) if (*height - 32.0).abs() < f32::EPSILON
+        Some(GridLength::Fixed(height)) if (*height - 40.0).abs() < f32::EPSILON
     ));
 
     view.set_compact(true);
     assert!(matches!(
         grid.rows.borrow().first(),
-        Some(GridLength::Fixed(height)) if (*height - 32.0).abs() < f32::EPSILON
+        Some(GridLength::Fixed(height)) if (*height - 40.0).abs() < f32::EPSILON
     ));
 }
 
@@ -188,6 +287,7 @@ fn compact_tab_widths_follow_content_under_the_normal_width_cap() {
     let long = CustomTabViewItem::new_item();
     long.set_header("A much longer document title that reaches the cap".to_string());
     let view = CustomTabView::new_view();
+    view.set_connected_chrome(true);
     view.set_children(vec![short.clone(), medium.clone(), long.clone()]);
     let root: Rc<dyn UIElementExt> = view.clone();
     let size = Size {
@@ -262,6 +362,7 @@ fn tab_strip_uses_reference_leading_baseline_and_header_inset() {
     let item = CustomTabViewItem::new_item();
     item.set_header("Document".to_string());
     let view = CustomTabView::new_view();
+    view.set_connected_chrome(true);
     view.set_compact(true);
     view.set_children(vec![item.clone()]);
     let root: Rc<dyn UIElementExt> = view.clone();
@@ -1053,6 +1154,7 @@ fn tab_insertion_uses_retained_unequal_header_midpoints_and_boundaries() {
     third.set_header("C".to_string());
     third.set_width(80.0);
     let view = CustomTabView::new_view();
+    view.set_connected_chrome(true);
     view.set_compact(true);
     view.set_children(vec![first, second, third]);
     let root: Rc<dyn UIElementExt> = view.clone();
@@ -1117,6 +1219,7 @@ fn compact_and_empty_tab_strips_share_the_retained_geometry_path() {
     first.set_header("compact".to_string());
     first.set_width(120.0);
     let view = CustomTabView::new_view();
+    view.set_connected_chrome(true);
     view.set_compact(true);
     view.set_children(vec![first]);
     let root: Rc<dyn UIElementExt> = view.clone();
@@ -1149,6 +1252,61 @@ fn compact_and_empty_tab_strips_share_the_retained_geometry_path() {
         Some(0)
     );
     assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(6.0));
+}
+
+#[test]
+fn native_tab_insertion_geometry_includes_top_inset_and_bottom_strip_offset() {
+    for position in [TabStripPosition::Top, TabStripPosition::Bottom] {
+        let view = CustomTabView::new_view();
+        view.set_tab_strip_position(position);
+        let items = (0..2)
+            .map(|index| {
+                let item = CustomTabViewItem::new_item();
+                item.set_header(format!("item-{index}"));
+                item
+            })
+            .collect();
+        view.set_children(items);
+        let root: Rc<dyn UIElementExt> = view.clone();
+        layout_root(
+            &root,
+            Size {
+                width: 300.0,
+                height: 160.0,
+            },
+        );
+        let boundary = view
+            .tab_insertion_boundary(0)
+            .expect("mounted strip boundary");
+        let expected_y = if position == TabStripPosition::Top {
+            8.0
+        } else {
+            120.0
+        };
+        assert_eq!(boundary.y, expected_y);
+        assert_eq!(boundary.height, 32.0);
+        assert_eq!(
+            view.tab_insertion_index_at(Point {
+                x: 20.0,
+                y: expected_y + 16.0
+            }),
+            Some(0)
+        );
+        assert_eq!(
+            view.tab_insertion_index_at(Point {
+                x: 20.0,
+                y: expected_y - 1.0
+            }),
+            None
+        );
+        assert_eq!(
+            view.tab_insertion_index_at(Point {
+                x: 20.0,
+                y: expected_y + 33.0
+            }),
+            None
+        );
+    }
 }
 
 #[test]
@@ -1256,6 +1414,7 @@ fn tab_item_header_and_indicator_tracks_follow_strip_position() {
     let second = CustomTabViewItem::new_item();
     second.set_header("another document".to_string());
     let view = CustomTabView::new_view();
+    view.set_connected_chrome(true);
     view.set_children(vec![item.clone(), second]);
     let root: Rc<dyn UIElementExt> = view.clone();
 
@@ -1266,8 +1425,13 @@ fn tab_item_header_and_indicator_tracks_follow_strip_position() {
             height: 120.0,
         },
     );
-    let item_root: Rc<dyn UIElementExt> = item.clone();
-    let header = find_visual(&item_root, "HorizontalLayout").expect("header row");
+    let header = item
+        .__template_root()
+        .expect("header template")
+        .visual_children()
+        .into_iter()
+        .nth(1)
+        .expect("header row");
     let indicator = item_indicator(&item);
     assert_eq!(header.arranged_offset().expect("header offset").y, 0.0);
     assert_eq!(header.arranged_height(), Some(30.0));
@@ -1439,7 +1603,7 @@ fn selected_content_replacement_is_arranged_full_without_rebuilding_other_pages(
             .is_some_and(|parent| Rc::ptr_eq(&parent, &presenter))
     );
     assert_eq!(replacement.arranged_width(), Some(240.0));
-    assert_eq!(replacement.arranged_height(), Some(88.0));
+    assert_eq!(replacement.arranged_height(), Some(80.0));
     assert!(
         first_content
             .visual_parent()
@@ -1466,7 +1630,7 @@ fn content_presenter_preserves_item_indices_when_a_tab_has_no_content() {
     );
 
     assert_eq!(second_content.arranged_width(), Some(240.0));
-    assert_eq!(second_content.arranged_height(), Some(88.0));
+    assert_eq!(second_content.arranged_height(), Some(80.0));
 }
 
 #[test]
@@ -2344,14 +2508,14 @@ fn selected_content_is_arranged_below_top_strip_and_unselected_is_zero_clipped()
         .expect("selected content presenter");
     assert_eq!(
         content_presenter.arranged_offset(),
-        Some(Point { x: 0.0, y: 32.0 })
+        Some(Point { x: 0.0, y: 40.0 })
     );
     assert_eq!(
         first_content.arranged_offset(),
         Some(Point { x: 0.0, y: 0.0 })
     );
     assert_eq!(first_content.arranged_width(), Some(240.0));
-    assert_eq!(first_content.arranged_height(), Some(88.0));
+    assert_eq!(first_content.arranged_height(), Some(80.0));
     assert_eq!(second_content.arranged_width(), Some(0.0));
     assert_eq!(second_content.arranged_height(), Some(0.0));
     assert!(second_content.clip_to_bounds());
@@ -2362,7 +2526,7 @@ fn selected_content_is_arranged_below_top_strip_and_unselected_is_zero_clipped()
         content_presenter.arranged_offset(),
         Some(Point { x: 0.0, y: 0.0 })
     );
-    assert_eq!(first_content.arranged_height(), Some(88.0));
+    assert_eq!(first_content.arranged_height(), Some(80.0));
 }
 
 #[test]
@@ -2510,10 +2674,18 @@ fn custom_grid_splitter_visual_follows_explicit_axis() {
     );
 
     let template_root = splitter.__template_root().expect("splitter template root");
-    let rectangle = template_root
+    let parts = template_root.visual_children();
+    let background = parts[0]
         .as_any()
         .downcast_ref::<Rectangle>()
-        .expect("splitter template rectangle");
+        .expect("splitter state background");
+    // The pointer-over/pressed state background fills the whole hit target.
+    assert_eq!(background.arranged_width(), splitter.arranged_width());
+    assert_eq!(background.arranged_height(), splitter.arranged_height());
+    let rectangle = parts[1]
+        .as_any()
+        .downcast_ref::<Rectangle>()
+        .expect("splitter grip rectangle");
     assert_eq!(rectangle.width(), Some(6.0));
     assert_eq!(rectangle.height(), Some(6.0));
     assert_eq!(

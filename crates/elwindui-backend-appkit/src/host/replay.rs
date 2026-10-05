@@ -1198,12 +1198,14 @@ pub(crate) fn replay_paint_command(
             style,
             foreground,
             alignment,
+            wrapping,
         } => {
             crate::render::stats::bump(|s| {
                 s.layers_created += 1;
                 s.text_layers_created += 1;
             });
             let text_layer = CATextLayer::new();
+            text_layer.setWrapped(*wrapping != elwindui_core::graphics::TextWrapping::NoWrap);
             text_layer.setName(Some(&crate::render::paint_layer_name()));
             text_layer.setFrame(NSRect::new(
                 transform_point(
@@ -1230,6 +1232,7 @@ pub(crate) fn replay_paint_command(
                     style,
                     foreground.as_ref(),
                     *alignment,
+                    *wrapping,
                 )));
             }
             text_layer.setOpacity(opacity);
@@ -2130,6 +2133,7 @@ mod tests {
                 style: elwindui_core::graphics::ComputedTextStyle::default(),
                 foreground: None,
                 alignment: elwindui_core::ui::TextAlignment::Left,
+                wrapping: elwindui_core::graphics::TextWrapping::NoWrap,
             },
             RenderCommand::FillRect {
                 rect: Rect {

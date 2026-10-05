@@ -201,6 +201,45 @@ fn native_and_connected_chrome_switch_without_replacing_items_or_pages() {
 }
 
 #[test]
+fn item_moved_from_a_connected_host_to_a_generic_host_resets_its_presentation() {
+    let item = CustomTabViewItem::new_item();
+    item.set_header("Document".to_string());
+    let size = Size {
+        width: 400.0,
+        height: 160.0,
+    };
+    let connected = CustomTabView::new_view();
+    connected.set_connected_chrome(true);
+    connected.set_children(vec![item.clone()]);
+    let connected_root: Rc<dyn UIElementExt> = connected.clone();
+    layout_root(&connected_root, size);
+    assert_eq!(item.arranged_width(), Some(200.0));
+    assert_eq!(item.close_button().arranged_width(), Some(24.0));
+
+    connected.set_children(Vec::new());
+    layout_root(&connected_root, size);
+    let generic = CustomTabView::new_view();
+    generic.set_children(vec![item.clone()]);
+    let generic_root: Rc<dyn UIElementExt> = generic.clone();
+    layout_root(&generic_root, size);
+    // Generic: 240 px logical width plus the 4 px outline overhang on each side, 32x24 close.
+    assert_eq!(item.arranged_width(), Some(248.0));
+    assert_eq!(item.close_button().arranged_width(), Some(32.0));
+    assert_eq!(item.close_button().arranged_height(), Some(24.0));
+
+    // A property change after the move keeps the generic presentation.
+    item.set_header("Renamed document".to_string());
+    layout_root(&generic_root, size);
+    assert_eq!(item.arranged_width(), Some(248.0));
+    assert_eq!(item.close_button().arranged_width(), Some(32.0));
+    let title = find_visual(&item.__template_root().unwrap(), "TextBlock").unwrap();
+    assert_eq!(
+        absolute_offset(&title).x - absolute_offset(&(item.clone() as Rc<dyn UIElementExt>)).x,
+        4.0 + 8.0
+    );
+}
+
+#[test]
 fn tab_view_owns_ordered_items_and_exposes_public_presentation_properties() {
     let first = CustomTabViewItem::new_item();
     first.set_header("first".to_string());

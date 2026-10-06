@@ -548,6 +548,15 @@ mod tests {
     }
 }
 
+/// Pages clip to their arranged rect. The setter always invalidates arrangement and this runs
+/// inside arrange, so writing an unchanged flag would make the host rerun a whole-tree pass on
+/// every selection change (Docking presents a neighbouring tab during a drag).
+fn clip_page(content: &dyn UIElementExt) {
+    if content.as_ui_element().clip_to_bounds.get() != Some(true) {
+        content.set_clip_to_bounds(Some(true));
+    }
+}
+
 #[elwindui::component]
 impl CustomTabContentPresenter {
     #[overrides]
@@ -599,7 +608,7 @@ impl CustomTabContentPresenter {
         if self.structure_dirty() || previous.is_none() {
             for (index, content) in entries {
                 if let Some(content) = content {
-                    content.set_clip_to_bounds(Some(true));
+                    clip_page(content.as_ref());
                     content.arrange(if index == selected {
                         full_rect
                     } else {
@@ -612,7 +621,7 @@ impl CustomTabContentPresenter {
                 if let Some((_, Some(content))) =
                     entries.iter().find(|(candidate, _)| *candidate == index)
                 {
-                    content.set_clip_to_bounds(Some(true));
+                    clip_page(content.as_ref());
                     content.arrange(if index == selected {
                         full_rect
                     } else {

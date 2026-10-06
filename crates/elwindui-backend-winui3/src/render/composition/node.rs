@@ -422,6 +422,35 @@ impl ImageClipState {
     }
 }
 
+thread_local! {
+    static SHARED_GRAPHICS_DEVICE: std::cell::RefCell<Option<(usize, usize, CompositionGraphicsDevice)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Returns the composition graphics device for this compositor and Win2D device, creating it
+/// once instead of once per drawing surface. A subtree that realizes many vector images at once
+/// (the Docking drag overlay) otherwise pays a device creation for each of them. A new
+/// compositor or a replaced (device-lost) Win2D device gets a fresh graphics device.
+pub(crate) fn shared_graphics_device(
+    compositor: &Compositor,
+    canvas_device: &CanvasDevice,
+) -> Result<CompositionGraphicsDevice> {
+    let key = (
+        compositor.as_raw() as usize,
+        canvas_device.as_raw() as usize,
+    );
+    SHARED_GRAPHICS_DEVICE.with(|slot| {
+        if let Some((compositor_key, device_key, device)) = slot.borrow().as_ref()
+            && (*compositor_key, *device_key) == key
+        {
+            return Ok(device.clone());
+        }
+        let device = CanvasComposition::CreateCompositionGraphicsDevice(compositor, canvas_device)?;
+        *slot.borrow_mut() = Some((key.0, key.1, device.clone()));
+        Ok(device)
+    })
+}
+
 /// Win2D replay for image features that CompositionSurfaceBrush cannot express:
 /// source rectangles and wrapped/mirrored texture brushes. The completed drawing
 /// surface is still presented by a retained SpriteVisual, never by an XAML immediate-draw control.
@@ -448,9 +477,8 @@ impl DrawingSurfaceImageNode {
         if rect.width <= 0.0 || rect.height <= 0.0 {
             return Err("image has an empty destination rectangle");
         }
-        let graphics_device =
-            CanvasComposition::CreateCompositionGraphicsDevice(compositor, canvas_device)
-                .map_err(|_| "CreateCompositionGraphicsDevice failed")?;
+        let graphics_device = shared_graphics_device(compositor, canvas_device)
+            .map_err(|_| "CreateCompositionGraphicsDevice failed")?;
         let surface =
             create_drawing_surface(&graphics_device, surface_size(rect, rasterization_scale))
                 .map_err(|_| "CreateDrawingSurface fallback failed")?;
@@ -547,9 +575,8 @@ impl VectorSurfaceNode {
         if rect.width <= 0.0 || rect.height <= 0.0 {
             return Err("vector image has an empty destination rectangle");
         }
-        let graphics_device =
-            CanvasComposition::CreateCompositionGraphicsDevice(compositor, canvas_device)
-                .map_err(|_| "CreateCompositionGraphicsDevice failed")?;
+        let graphics_device = shared_graphics_device(compositor, canvas_device)
+            .map_err(|_| "CreateCompositionGraphicsDevice failed")?;
         let surface =
             create_drawing_surface(&graphics_device, surface_size(rect, rasterization_scale))
                 .map_err(|_| "CreateDrawingSurface vector fallback failed")?;

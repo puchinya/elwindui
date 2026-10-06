@@ -172,7 +172,9 @@ a half-group split, or the half surface matching the committed 1:1 root-edge wra
 group's compass and the root targets visible while no cell is resolved. Per-move updates are idempotent:
 unchanged preview, marker, and target state performs no invalidation, overlay visibility flips only
 when a surface's overlay first appears or is cleared, and only surfaces other than the hovered one
-are cleared, so a moving drag costs arrange-only work instead of a whole-tree Measure. Release without a resolved
+are cleared, so a moving drag costs arrange-only work instead of a whole-tree Measure. Which overlay
+elements are visible is decided when the overlay state changes, never inside arrange, so even the
+first appearance settles in one layout pass. Release without a resolved
 target follows the floating path (subject to `can_float`). The model transaction that commits any
 drop also activates the moved Document.
 

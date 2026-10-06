@@ -201,6 +201,50 @@ fn native_and_connected_chrome_switch_without_replacing_items_or_pages() {
 }
 
 #[test]
+fn selection_change_settles_in_one_layout_pass() {
+    let first = CustomTabViewItem::new_item();
+    first.set_content(elwindui_custom_controls::core::ui::TextBlock::new());
+    let second = CustomTabViewItem::new_item();
+    second.set_content(elwindui_custom_controls::core::ui::TextBlock::new());
+    let view = CustomTabView::new_view();
+    view.set_children(vec![first, second]);
+    let root: Rc<dyn UIElementExt> = view.clone();
+    let size = Size {
+        width: 400.0,
+        height: 160.0,
+    };
+    layout_root(&root, size);
+    // Arranging the newly selected page must not invalidate layout from inside arrange, or every
+    // selection change (Docking presents a neighbouring tab during a drag) makes the host run a
+    // second whole-tree pass.
+    struct CountingHost {
+        in_layout: std::cell::Cell<bool>,
+        during_layout: std::cell::Cell<usize>,
+    }
+    impl elwindui_custom_controls::core::ui::RelayoutHost for CountingHost {
+        fn request_relayout(
+            &self,
+            _dirty_group_id: u64,
+            _kind: elwindui_custom_controls::core::ui::InvalidationKind,
+        ) {
+            if self.in_layout.get() {
+                self.during_layout.set(self.during_layout.get() + 1);
+            }
+        }
+    }
+    let host = Rc::new(CountingHost {
+        in_layout: std::cell::Cell::new(false),
+        during_layout: std::cell::Cell::new(0),
+    });
+    root.as_ui_element().set_invalidate_host(Some(host.clone()));
+    view.set_selected_index(1);
+    host.in_layout.set(true);
+    layout_root(&root, size);
+    host.in_layout.set(false);
+    assert_eq!(host.during_layout.get(), 0);
+}
+
+#[test]
 fn item_moved_from_a_connected_host_to_a_generic_host_resets_its_presentation() {
     let item = CustomTabViewItem::new_item();
     item.set_header("Document".to_string());

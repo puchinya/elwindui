@@ -132,13 +132,13 @@ impl DockTargetOverlayLayer {
         for entry in &layout.elements {
             let hidden_root = layout.root_targets_hidden
                 && matches!(entry.role, OverlayElementRole::RootTarget(_));
+            // Visibility is decided outside layout (`OverlayLayout::sync_visibility`): flipping it
+            // here would invalidate measure mid-arrange and rerun the whole-tree pass.
             if let Some(rect) = overlay_element_rect(entry.role, final_size, layout.group_bounds)
                 .filter(|_| !hidden_root)
             {
-                entry.element.set_visibility(Visibility::Visible);
                 entry.element.arrange(rect);
             } else {
-                entry.element.set_visibility(Visibility::Collapsed);
                 entry.element.arrange(Rect {
                     x: 0.0,
                     y: 0.0,
@@ -148,6 +148,30 @@ impl DockTargetOverlayLayer {
             }
         }
         final_size
+    }
+}
+
+impl OverlayLayout {
+    /// Shows exactly the elements the next arrange will place: root targets unless hidden, and
+    /// the group compass only while a group is hovered. Runs before layout, so the first overlay
+    /// appearance costs one layout pass instead of a second one triggered from inside arrange.
+    fn sync_visibility(&self) {
+        for entry in &self.elements {
+            let visible = match entry.role {
+                OverlayElementRole::RootTarget(_) => !self.root_targets_hidden,
+                OverlayElementRole::GroupTarget(_) | OverlayElementRole::GroupCross => {
+                    self.group_bounds.is_some()
+                }
+            };
+            let visibility = if visible {
+                Visibility::Visible
+            } else {
+                Visibility::Collapsed
+            };
+            if entry.element.visibility() != visibility {
+                entry.element.set_visibility(visibility);
+            }
+        }
     }
 }
 
@@ -776,6 +800,7 @@ impl DockTargetOverlay {
         }
         self.selected.set(target);
         self.layout.borrow_mut().group_bounds = group_bounds;
+        self.layout.borrow().sync_visibility();
         // Visibility only flips when the overlay first appears; a moving drag changes arrangement
         // only, so it never pays for a whole-tree Measure pass.
         self.layer.set_visibility(Visibility::Visible);
@@ -788,6 +813,7 @@ impl DockTargetOverlay {
         let changed = self.layout.borrow().root_targets_hidden != hidden;
         if changed {
             self.layout.borrow_mut().root_targets_hidden = hidden;
+            self.layout.borrow().sync_visibility();
             self.layer.invalidate_arrange();
         }
     }

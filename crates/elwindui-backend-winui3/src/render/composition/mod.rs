@@ -13,7 +13,6 @@ use geometry::*;
 use node::*;
 
 use crate::bindings::Microsoft::Graphics::Canvas::CanvasDevice;
-use crate::bindings::Microsoft::Graphics::Canvas::UI::Composition::CanvasComposition;
 use crate::bindings::Microsoft::UI::Composition::{
     CompositionDrawingSurface, CompositionGraphicsDevice, Compositor, ContainerVisual, Visual,
 };
@@ -299,9 +298,8 @@ impl CompositionRenderer {
         let element_visual = ElementCompositionPreview::GetElementVisual(&host)?;
         let compositor = element_visual.Compositor()?;
         let canvas_device = CanvasDevice::GetSharedDevice()?;
-        let graphics_device =
-            CanvasComposition::CreateCompositionGraphicsDevice(&compositor, &canvas_device)?;
         if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+            let graphics_device = node::shared_graphics_device(&compositor, &canvas_device)?;
             // Exercise the one raw ABI call during explicit diagnostics. This is
             // deliberately a tiny, detached surface: it verifies the fallback
             // factory without changing normal retained-island rendering.

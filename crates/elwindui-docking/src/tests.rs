@@ -1564,6 +1564,52 @@ fn repeated_drag_overlay_state_does_not_invalidate_layout() {
 }
 
 #[test]
+fn first_overlay_appearance_settles_in_one_layout_pass() {
+    let overlay = DockTargetOverlay::new();
+    let visual = overlay.visual();
+    let size = Size {
+        width: 400.0,
+        height: 240.0,
+    };
+    // Root targets only, then the compass appears: each first appearance must leave layout
+    // valid after one pass. Visibility flipped inside arrange would invalidate it again and make
+    // the host rerun a whole-tree pass.
+    overlay.show(None, None);
+    super::core::ui::layout_root(&visual, size);
+    assert!(visual.measured_size().is_some() && visual.arranged_width().is_some());
+    overlay.show(
+        None,
+        Some(Rect {
+            x: 80.0,
+            y: 40.0,
+            width: 240.0,
+            height: 160.0,
+        }),
+    );
+    super::core::ui::layout_root(&visual, size);
+    assert!(visual.measured_size().is_some() && visual.arranged_width().is_some());
+    assert!(
+        overlay
+            .button_rects()
+            .iter()
+            .all(|(_, rect)| rect.is_some_and(|rect| rect.width > 0.0))
+    );
+    assert_eq!(
+        overlay.cross_background_for_test().visibility(),
+        Visibility::Visible
+    );
+
+    // Leaving the group hides the compass before layout, again without a second pass.
+    overlay.show(None, None);
+    assert_eq!(
+        overlay.cross_background_for_test().visibility(),
+        Visibility::Collapsed
+    );
+    super::core::ui::layout_root(&visual, size);
+    assert!(visual.measured_size().is_some() && visual.arranged_width().is_some());
+}
+
+#[test]
 fn root_and_group_target_visuals_are_retained_and_never_alias_highlights() {
     let overlay = DockTargetOverlay::new();
     assert_eq!(overlay.button_counts(), (5, 4));

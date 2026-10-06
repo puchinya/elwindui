@@ -111,6 +111,8 @@ pub struct CustomTabView {
     #[state(default = None)]
     selected_index_callback: Option<Rc<dyn Fn(usize)>>,
     #[state(default = None)]
+    tab_pressed_callback: Option<Rc<dyn Fn(usize)>>,
+    #[state(default = None)]
     close_requested_callback: Option<Rc<dyn Fn(usize)>>,
     #[state(default = None)]
     tab_drag_started_callback: Option<Rc<dyn Fn(TabDragStartedEventArgs)>>,
@@ -391,6 +393,14 @@ impl CustomTabView {
     /// Registers the callback used by user-driven TwoWay selected-index changes.
     pub fn set_on_selected_index_changed(&self, callback: impl Fn(usize) + 'static) {
         self.set_on_selected_index_change(Box::new(callback));
+    }
+
+    /// Docking integration: called for every left press on a header, including a press on the
+    /// header that is already selected (which emits no selection change). Docking activates the
+    /// pressed Document on it, as the WinUI.Dock reference does on tab pointer press.
+    #[doc(hidden)]
+    pub fn set_on_tab_pressed(&self, callback: Option<Box<dyn Fn(usize)>>) {
+        self.set_tab_pressed_callback(callback.map(Rc::from));
     }
 
     /// Removes the selected-index callback.
@@ -886,6 +896,9 @@ impl CustomTabView {
         }));
         if let Some(index) = self.index_of(item) {
             let _ = self.select_index(index);
+            if let Some(callback) = self.tab_pressed_callback() {
+                callback(index);
+            }
         }
     }
 

@@ -480,12 +480,17 @@ pub(crate) fn invoke_handlers_at<T: 'static>(
     let handlers = elem.as_ui_element().routed_handlers.borrow();
     if let Some(handlers) = handlers.get(name) {
         for handler in handlers {
-            let handler = handler
-                .downcast_ref::<Box<dyn Fn(&T, &RoutedEventArgs)>>()
-                .expect("elwindui: routed handler registered under a mismatched payload type");
-            handler(payload, args);
-            if args.handled.get() {
-                return;
+            if let Some(handler) = handler.downcast_ref::<Box<dyn Fn(&T, &RoutedEventArgs)>>() {
+                // Ordinary handlers never see an already-handled event.
+                if !args.handled.get() {
+                    handler(payload, args);
+                }
+            } else if let Some(handler) =
+                handler.downcast_ref::<crate::ui::HandledEventsTooHandler<T>>()
+            {
+                (handler.0)(payload, args);
+            } else {
+                panic!("elwindui: routed handler registered under a mismatched payload type");
             }
         }
     }
@@ -505,10 +510,9 @@ pub fn dispatch_routed<T: 'static>(
 ) {
     let mut current = Some(Rc::clone(target));
     while let Some(elem) = current {
+        // Once handled, bubbling continues only so `HandledEventsTooHandler`s on ancestors still
+        // run; `invoke_handlers_at` skips ordinary handlers for a handled event.
         invoke_handlers_at(&elem, name, payload, args);
-        if args.handled.get() {
-            return;
-        }
         current = elem.visual_parent();
     }
 }
@@ -1135,6 +1139,47 @@ mod tests {
         assert_eq!(*leaf_calls.borrow(), 1);
         assert_eq!(*root_calls.borrow(), 1);
         assert!(args.handled.get());
+    }
+
+    #[test]
+    fn handled_events_too_handlers_still_run_after_a_descendant_handles_the_event() {
+        let leaf = native("a", size(10.0, 20.0));
+        let middle = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&middle)]);
+
+        let ordinary_calls = Rc::new(RefCell::new(0));
+        let handled_too_calls = Rc::new(RefCell::new(Vec::new()));
+        leaf.as_ui_element()
+            .register_routed_handler::<()>("on_click", Box::new(|_, args| args.handled.set(true)));
+        {
+            let ordinary_calls = Rc::clone(&ordinary_calls);
+            middle.as_ui_element().register_routed_handler::<()>(
+                "on_click",
+                Box::new(move |_, _| *ordinary_calls.borrow_mut() += 1),
+            );
+        }
+        {
+            let handled_too_calls = Rc::clone(&handled_too_calls);
+            root.as_ui_element()
+                .register_routed_handler_handled_too::<()>(
+                    "on_click",
+                    Box::new(move |_, args| {
+                        handled_too_calls.borrow_mut().push(args.handled.get())
+                    }),
+                );
+        }
+
+        let args = RoutedEventArgs::default();
+        dispatch_routed(&leaf, "on_click", &(), &args);
+        // The ordinary ancestor handler is skipped; the handled-too one runs and sees `handled`.
+        assert_eq!(*ordinary_calls.borrow(), 0);
+        assert_eq!(*handled_too_calls.borrow(), vec![true]);
+
+        // An unhandled event reaches both kinds.
+        let free_args = RoutedEventArgs::default();
+        dispatch_routed(&middle, "on_click", &(), &free_args);
+        assert_eq!(*ordinary_calls.borrow(), 1);
+        assert_eq!(*handled_too_calls.borrow(), vec![true, false]);
     }
 
     #[test]

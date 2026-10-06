@@ -459,6 +459,26 @@ pub fn register_routed_handler<T: 'static>(
         .push(Box::new(handler));
 }
 
+/// A routed handler that also runs for events an earlier handler already marked handled —
+/// WinUI3's `UIElement.AddHandler(event, handler, handledEventsToo: true)`. Stored in the same
+/// [`RoutedHandlers`] map as ordinary handlers, distinguished by this wrapper type.
+pub struct HandledEventsTooHandler<T: 'static>(pub Box<dyn Fn(&T, &RoutedEventArgs)>);
+
+/// Registers a [`HandledEventsTooHandler`]. Ordering with ordinary handlers on the same element
+/// follows registration order; bubbling continues past a handled event only to reach handlers of
+/// this kind.
+pub fn register_routed_handler_handled_too<T: 'static>(
+    handlers: &RoutedHandlers,
+    name: &'static str,
+    handler: Box<dyn Fn(&T, &RoutedEventArgs)>,
+) {
+    handlers
+        .borrow_mut()
+        .entry(name)
+        .or_default()
+        .push(Box::new(HandledEventsTooHandler(handler)));
+}
+
 #[elwindui_macros::class]
 impl UIElement {
     fn construct() -> Self {
@@ -1291,6 +1311,17 @@ impl UIElement {
         Self: Sized,
     {
         register_routed_handler(&self.as_ui_element().routed_handlers, name, handler);
+    }
+    /// Registers a handler for `name` that also runs when an earlier handler (on this element or
+    /// a descendant) already set `handled` — WinUI3's `AddHandler(..., handledEventsToo: true)`.
+    fn register_routed_handler_handled_too<T: 'static>(
+        &self,
+        name: &'static str,
+        handler: Box<dyn Fn(&T, &RoutedEventArgs)>,
+    ) where
+        Self: Sized,
+    {
+        register_routed_handler_handled_too(&self.as_ui_element().routed_handlers, name, handler);
     }
     /// Stores an attached-property value under `(owner, field)` — e.g. `("Grid", "row")` — type-
     /// erased into the shared `attached` bag (see that field's own doc comment). `owner`/`field` are

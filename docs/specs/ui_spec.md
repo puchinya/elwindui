@@ -145,6 +145,7 @@ ElwindUI のイベント伝播はルーティングイベントモデルを採�
 
 ルーティングイベントは引数として `RoutedEventArgs` を受け取る。
 - **`handled` フラグ**: いずれかのハンドラが `args.set_handled(true)` を呼び出すと、その時点で上位ノードへのイベント伝播が打ち切られる。
+- **処理済みイベントも受け取るハンドラ**: `register_routed_handler_handled_too` で登録したハンドラは、WinUI3 の `AddHandler(..., handledEventsToo: true)` と同様に、下位のハンドラが `handled` を設定した後も呼ばれる。通常のハンドラは処理済みのイベントでは呼ばれず、伝播はこの種類のハンドラに届くためだけに続く。
 - コントロールが固有の標準動作（例: `Button` が Enter キーでクリックを発火する処理）を完了した場合、通常 `handled = true` を設定して親要素への重複伝播を防止する。
 
 #### 3. Input Dispatch & Hit Testing

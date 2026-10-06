@@ -202,6 +202,8 @@ struct DockingDemoSurface {
         let documents = elwindui_docking::DockGroup {
             compact_tabs: false
             id: documents
+            // Like the pinned WinUI.Dock example, only the main document group stays when empty.
+            show_when_empty: true
             weight: 3.65
             elwindui_docking::DockItem {
                 id: document_a
@@ -221,7 +223,6 @@ struct DockingDemoSurface {
             id: solution_tools
             tab_strip_position: elwindui_docking::TabStripPosition::Bottom
             compact_tabs: true
-            show_when_empty: true
             weight: 1.0
             dock_size: solution_tools_size
             elwindui_docking::DockItem {
@@ -240,7 +241,6 @@ struct DockingDemoSurface {
         let error = elwindui_docking::DockGroup {
             id: error_tools
             tab_strip_position: elwindui_docking::TabStripPosition::Bottom
-            show_when_empty: true
             weight: 1.0
             elwindui_docking::DockItem {
                 id: error_list

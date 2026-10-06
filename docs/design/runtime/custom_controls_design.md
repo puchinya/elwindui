@@ -43,7 +43,8 @@ wildcard. Non-component cross-cutting implementation support is limited to
 `support.rs`.
 
 The generic tab view uses a 40-pixel strip row (8-pixel outer inset and 32-pixel
-item); Docking uses the connected 32-pixel presentation. One doc-hidden
+item); Docking uses the connected 32-pixel presentation. The doc-hidden `set_on_tab_pressed` integration hook reports every left
+header press, including one on the selected header that changes no selection. One doc-hidden
 `CustomTabView::set_connected_chrome` integration setter propagates presentation
 to retained strip/items without exposing a DSL property or depending on Docking.
 An item moved to a generic host resets this state. The presentation changes

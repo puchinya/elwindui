@@ -72,7 +72,13 @@ The selected tab joins the content frame with the reference rounded outline trea
 Document's group uses the active frame stroke, and its tab carries a distinct 4-by-16 active marker
 inside the header, after the leading inset and before the title. Active-document state comes only
 from `DockLayoutModel::active_item()` and is independent of tab selection: when there is no active
-item, selection alone does not show the active frame or marker. Compact measurement includes the
+item, selection alone does not show the active frame or marker. Like WinUI.Dock, a left press on a
+Document's tab activates that Document even when the tab is already selected, and a left press
+anywhere inside a docked group (tab strip, content header or page) activates its selected Document
+even when the content handles the press. The active group's frame is drawn in the accent color
+(theme Primary when set, otherwise the platform accent) and, for bottom-tab groups, encloses the
+content header. Closing the active Document activates its group's new selection, or leaves no
+active Document when that group becomes empty; a Document of another group is never activated. Compact measurement includes the
 marker when active and the title so the title remains legible. The active marker is not drawn over
 page content.
 Top-tab pin/close affordances appear on pointer hover; bottom-tab actions belong to the content
@@ -98,8 +104,9 @@ their existing native decorations. Supported tab context actions are `Close`,
 `Close Others`, `Close Tabs to Left`, `Close Tabs to Right`, `Float`, and `Auto Hide / Pin`; each
 action uses the same capability checks and one model transaction as its pointer equivalent.
 
-An authored empty group remains visible only when `show_when_empty` is true. It keeps normal group
-chrome and displays a centered, non-interactive `Drop here` hint while remaining a valid drop target.
+An authored empty group remains visible only when `show_when_empty` is true, like WinUI.Dock's
+`ShowWhenEmpty`. It keeps its empty tab view and frame, draws no hint text, and remains a valid drop
+target. Without `show_when_empty` an empty group is removed and its split collapses.
 `compact_tabs` selects the compact tab metrics for that group and defaults to `true`, matching
 WinUI.Dock's compact `TabView` headers. Explicitly setting it to `false` distributes available
 header width up to the 200-pixel cap. Clear/reset operations remove the live presentation without

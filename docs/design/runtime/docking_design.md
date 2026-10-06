@@ -176,7 +176,11 @@ are cleared, so a moving drag costs arrange-only work instead of a whole-tree Me
 elements are visible is decided when the overlay state changes, never inside arrange, so even the
 first appearance settles in one layout pass. Release without a resolved
 target follows the floating path (subject to `can_float`). The model transaction that commits any
-drop also activates the moved Document.
+drop also activates the moved Document. Each group view reports every tab press through the
+doc-hidden `CustomTabView::set_on_tab_pressed`, so pressing an already-selected tab still activates
+it; each group container also registers a handled-events-too `on_pointer_pressed` handler that
+activates the selected Document for presses its content consumes. Each group container holds a body Grid (content header row
+above the tab view) and, as its sibling, the active-frame overlay, so the frame spans the header.
 
 `DockTargetOverlay` has two retained visual layers per surface. The root-target layer stays in
 surface coordinates and owns the four edge targets. The group-compass layer uses the target group's

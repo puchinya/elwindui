@@ -3571,7 +3571,7 @@ fn authored_docking_declaration_is_collapsed_and_runtime_wrapper_is_visible() {
 }
 
 #[test]
-fn authored_show_when_empty_group_keeps_chrome_and_non_interactive_drop_hint() {
+fn authored_show_when_empty_group_keeps_its_empty_tab_view_without_hint_text() {
     let (dock_item, _) = authored_item("empty-item", "Empty item", true);
     let dock_group = DockGroup::new_group();
     dock_group.set_id(group("empty-group"));
@@ -3589,17 +3589,19 @@ fn authored_show_when_empty_group_keeps_chrome_and_non_interactive_drop_hint() {
         .expect("clear should preserve the authored default metadata");
     docking.set_layout(cleared);
 
-    let hints = find_all::<TextBlock>(docking.as_ref())
+    // Like WinUI.Dock's `ShowWhenEmpty`, the empty group keeps its (empty) tab view and draws
+    // no hint text of its own.
+    let visible_text = find_all::<TextBlock>(docking.as_ref())
         .into_iter()
-        .filter(|hint| {
-            hint.as_any()
+        .filter(|text| text.visibility() == Visibility::Visible)
+        .filter_map(|text| {
+            text.as_any()
                 .downcast_ref::<TextBlock>()
-                .is_some_and(|hint| hint.text.borrow().as_str() == "Drop here")
+                .map(|text| text.text.borrow().clone())
         })
+        .filter(|text| !text.is_empty())
         .collect::<Vec<_>>();
-    assert_eq!(hints.len(), 1);
-    assert_eq!(hints[0].visibility(), Visibility::Visible);
-    assert!(!hints[0].hit_test_visible());
+    assert!(visible_text.is_empty(), "{visible_text:?}");
     assert!(
         find_all::<CustomTabView>(docking.as_ref())
             .into_iter()
@@ -3764,6 +3766,57 @@ fn selected_document_without_activation_has_no_active_chrome() {
     assert!(visible_markers.is_empty());
     let realization = docking.realization_for_test().unwrap();
     assert_eq!(realization.borrow().active_group_chrome_count_for_test(), 0);
+}
+
+#[test]
+fn closing_the_active_document_activates_only_its_own_group_selection() {
+    let docking = mounted_default_docking();
+    // "first" and "second" share the documents group; "third" is alone in the tools group.
+    let model = docking.layout();
+    let closed = model
+        .with_item_activated(&item("first"))
+        .unwrap()
+        .with_item_closed(&item("first"))
+        .unwrap();
+    assert_eq!(closed.active_item(), Some(item("second")));
+
+    // WinUI.Dock leaves no active Document when the closed one's group becomes empty; it never
+    // activates a Document of another group.
+    let emptied = model
+        .with_item_activated(&item("third"))
+        .unwrap()
+        .with_item_closed(&item("third"))
+        .unwrap();
+    assert_eq!(emptied.active_item(), None);
+}
+
+#[test]
+fn active_group_frame_is_drawn_in_the_accent_color() {
+    let docking = mounted_default_docking();
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    let size = Size {
+        width: 720.0,
+        height: 420.0,
+    };
+    layout_root(&root, size);
+    let realization = docking.realization_for_test().unwrap();
+    assert!(
+        realization
+            .borrow()
+            .visible_active_frames_for_test()
+            .is_empty()
+    );
+
+    // Without a theme Primary the frame still uses a visible accent (WinUI.Dock draws the
+    // active group border in the system accent).
+    activate_first_document(&docking);
+    layout_root(&root, size);
+    let frames = realization.borrow().visible_active_frames_for_test();
+    assert_eq!(frames.len(), 1);
+    match &frames[0] {
+        Some(crate::core::graphics::Brush::Solid(color)) => assert!(color.a > 0),
+        other => panic!("active frame stroke should be a visible accent, got {other:?}"),
+    }
 }
 
 fn sized_group(name: &str) -> Rc<DockGroup> {
@@ -4071,6 +4124,124 @@ fn selecting_a_different_document_moves_the_active_marker_with_it() {
     assert_eq!(active_title.as_deref(), Some("Second"));
 }
 
+#[test]
+fn pressing_the_selected_tab_of_another_group_activates_its_document() {
+    let docking = mounted_default_docking();
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    let size = Size {
+        width: 720.0,
+        height: 420.0,
+    };
+    layout_root(&root, size);
+    let realization = docking.realization_for_test().unwrap();
+    let documents = realization
+        .borrow()
+        .group_for_test(&SnapshotGroupKey::Authored(group("documents")))
+        .expect("document group should be realized");
+    let tools = realization
+        .borrow()
+        .group_for_test(&SnapshotGroupKey::Authored(group("tools")))
+        .expect("tool group should be realized");
+    assert!(documents.select_index(1));
+    assert_eq!(docking.layout().active_item(), Some(item("second")));
+    assert_eq!(tools.selected_index(), 0);
+
+    // "Third" is already selected in its own group, so the press changes no selection; it must
+    // still activate the Document and move the single active marker (WinUI.Dock activates on
+    // every tab press).
+    let press = PointerEventArgs {
+        position: Point { x: 10.0, y: 10.0 },
+        screen_position: None,
+        button: Some(MouseButton::Left),
+        modifiers: KeyModifiers::default(),
+    };
+    tools.forward_item_pointer_event(
+        0,
+        elwindui_custom_controls::TabItemPointerEvent::Pressed(press),
+    );
+    assert_eq!(docking.layout().active_item(), Some(item("third")));
+    layout_root(&root, size);
+    let markers = visible_active_document_markers(&docking);
+    assert_eq!(markers.len(), 1);
+    let active_title = find_all::<TextBlock>(markers[0].0.as_ref())
+        .into_iter()
+        .find_map(|text| {
+            text.as_any()
+                .downcast_ref::<TextBlock>()
+                .map(|text| text.text.borrow().clone())
+        });
+    assert_eq!(active_title.as_deref(), Some("Third"));
+}
+
+#[test]
+fn pressing_inside_a_document_activates_it_even_when_the_content_handles_the_press() {
+    let (first, _) = authored_item("first", "First", true);
+    let (third, third_page) = authored_item("third", "Third", true);
+    let documents = DockGroup::new_group();
+    documents.set_id(group("documents"));
+    documents.set_children(vec![first]);
+    let tools = DockGroup::new_group();
+    tools.set_id(group("tools"));
+    tools.set_children(vec![third]);
+    let split = DockSplitPanel::new_panel();
+    split.set_children(vec![
+        documents as Rc<dyn UIElementExt>,
+        tools as Rc<dyn UIElementExt>,
+    ]);
+    let docking = DockingControl::__new_unmounted();
+    docking.set_content(split);
+    docking.mount(application_environment());
+    assert!(docking.apply_template());
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    layout_root(
+        &root,
+        Size {
+            width: 720.0,
+            height: 420.0,
+        },
+    );
+    activate_first_document(&docking);
+
+    // The page consumes the press itself (like a button inside a tool window).
+    third_page.register_routed_handler::<PointerEventArgs>(
+        "on_pointer_pressed",
+        Box::new(|_, args| args.handled.set(true)),
+    );
+    let press = PointerEventArgs {
+        position: Point { x: 10.0, y: 10.0 },
+        screen_position: None,
+        button: Some(MouseButton::Left),
+        modifiers: KeyModifiers::default(),
+    };
+    let page: Rc<dyn UIElementExt> = third_page.clone();
+    super::core::ui::dispatch_routed(
+        &page,
+        "on_pointer_pressed",
+        &press,
+        &RoutedEventArgs::default(),
+    );
+    assert_eq!(docking.layout().active_item(), Some(item("third")));
+
+    // A right press does not activate.
+    activate_first_document(&docking);
+    let right = PointerEventArgs {
+        button: Some(MouseButton::Right),
+        ..press
+    };
+    super::core::ui::dispatch_routed(
+        &page,
+        "on_pointer_pressed",
+        &right,
+        &RoutedEventArgs::default(),
+    );
+    assert_eq!(docking.layout().active_item(), Some(item("first")));
+}
+
+fn activate_first_document(docking: &DockingControl) {
+    docking.handle_group_selected(SnapshotGroupKey::Authored(group("documents")), 0);
+    assert_eq!(docking.layout().active_item(), Some(item("first")));
+}
+
 fn visible_active_document_markers(
     docking: &DockingControl,
 ) -> Vec<(Rc<dyn UIElementExt>, Rc<dyn UIElementExt>)> {
@@ -4337,6 +4508,9 @@ fn runtime_theme_signature_resets_and_reinitializes_with_runtime_lifecycle() {
 #[test]
 fn actual_tab_pointer_path_starts_and_cancels_docking_drag_after_four_pixels() {
     let docking = mounted_default_docking();
+    // A press now activates the pressed Document (WinUI.Dock); start from it active so the
+    // gesture under test is the only model change.
+    activate_first_document(&docking);
     let original = docking.layout();
     let root: Rc<dyn UIElementExt> = docking.clone();
     layout_root(
@@ -4964,6 +5138,9 @@ fn auto_hide_pane_opened_through_the_control_uses_one_third_of_the_center() {
 #[test]
 fn bottom_content_header_drags_only_the_selected_document() {
     let docking = mounted_bottom_documents_docking();
+    // A press now activates the pressed Document (WinUI.Dock); start from it active so the
+    // gesture under test is the only model change.
+    activate_first_document(&docking);
     let original = docking.layout();
     let root: Rc<dyn UIElementExt> = docking.clone();
     layout_root(
@@ -5034,6 +5211,9 @@ fn bottom_content_header_drags_only_the_selected_document() {
 #[test]
 fn actual_tab_pointer_path_commits_a_root_edge_drop_once() {
     let docking = mounted_default_docking();
+    // A press now activates the pressed Document (WinUI.Dock); start from it active so the
+    // gesture under test is the only model change.
+    activate_first_document(&docking);
     let original = docking.layout();
     let root: Rc<dyn UIElementExt> = docking.clone();
     layout_root(
@@ -5218,6 +5398,9 @@ fn actual_marker_boundary_matches_resolved_index_and_committed_order() {
 #[test]
 fn actual_item_pointer_path_respects_float_capability() {
     let docking = mounted_capability_docking(false, true, true, true);
+    // A press now activates the pressed Document (WinUI.Dock); start from it active so the
+    // gesture under test is the only model change.
+    activate_first_document(&docking);
     let original = docking.layout();
     let root: Rc<dyn UIElementExt> = docking.clone();
     root.set_coordinate_host(Some(Rc::new(OffsetCoordinateHost {
@@ -5276,6 +5459,9 @@ fn actual_item_pointer_path_respects_float_capability() {
 #[test]
 fn actual_item_pointer_path_respects_dock_capability() {
     let docking = mounted_capability_docking(true, true, false, true);
+    // A press now activates the pressed Document (WinUI.Dock); start from it active so the
+    // gesture under test is the only model change.
+    activate_first_document(&docking);
     let original = docking.layout();
     let root: Rc<dyn UIElementExt> = docking.clone();
     layout_root(
@@ -5323,6 +5509,9 @@ fn actual_item_pointer_path_respects_dock_capability() {
 #[test]
 fn actual_tab_float_prepare_failure_leaves_model_and_wrapper_parent_unchanged() {
     let docking = mounted_default_docking();
+    // A press now activates the pressed Document (WinUI.Dock); start from it active so the
+    // gesture under test is the only model change.
+    activate_first_document(&docking);
     let failing_factory: FloatingHostFactory = Rc::new(|| {
         Err(DockLayoutError::FloatingHostUnavailable {
             reason: "actual drag host failure".to_owned(),
@@ -5500,6 +5689,9 @@ fn actual_tab_float_late_plan_failure_aborts_prepared_host_without_commit() {
 #[test]
 fn actual_tab_float_uses_source_geometry_and_shows_after_commit() {
     let docking = mounted_default_docking();
+    // A press now activates the pressed Document (WinUI.Dock); start from it active so the
+    // gesture under test is the only model change.
+    activate_first_document(&docking);
     let hosts = Rc::new(RefCell::new(Vec::new()));
     let log = FakeHostLog::new();
     docking.install_floating_host_factory_for_test(fake_factory(hosts.clone(), log.clone()));

@@ -3,9 +3,7 @@
 use crate::core::base::{Point, Rect, Size};
 use crate::core::graphics::{Color, FontWeight};
 use crate::core::input::PointerEventArgs;
-use crate::core::layout::{
-    GridLength, GridTrackConstraint, HorizontalAlignment, VerticalAlignment, Visibility,
-};
+use crate::core::layout::{GridLength, GridTrackConstraint, VerticalAlignment, Visibility};
 use crate::core::theme::BrushStyle;
 use crate::core::ui::{
     ControlExt, Grid, GridExt, LayoutExt, Rectangle, ShapeExt, TextBlock, TextBlockExt,
@@ -269,10 +267,12 @@ impl RuntimeNode {
 #[derive(Clone)]
 struct GroupRuntimeHost {
     container: Rc<Grid>,
+    /// Header row above the tab view. The active frame is a sibling of this body inside the
+    /// container, so it can enclose the header like WinUI.Dock's active group border.
+    body: Rc<Grid>,
     content_header: Rc<Grid>,
     active_chrome: Rc<GroupChromeOverlay>,
     title: Rc<TextBlock>,
-    empty_hint: Rc<TextBlock>,
     pin_button: Rc<Grid>,
     close_button: Rc<Grid>,
     header_drag_handlers_bound: Rc<Cell<bool>>,
@@ -284,8 +284,6 @@ impl GroupRuntimeHost {
             .set_background(themed_brush(BrushStyle::Secondary));
         self.title
             .set_foreground(themed_brush(BrushStyle::Foreground));
-        self.empty_hint
-            .set_foreground(themed_brush(BrushStyle::Tertiary));
         self.active_chrome.refresh_theme();
 
         self.pin_button.children().clear();
@@ -313,14 +311,20 @@ struct GroupChromeOverlay {
     strip_height: f32,
     #[computed(expr = BrushStyle::Value(Color::TRANSPARENT.into()))]
     transparent_brush: BrushStyle,
+    // WinUI.Dock draws the active group's border in the accent color: theme Primary when set,
+    // otherwise the platform accent. Bound here so it applies even before the first arrange.
+    #[computed(expr = if is_active { BrushStyle::Value(accent_brush()) } else { BrushStyle::Value(Color::TRANSPARENT.into()) })]
+    frame_stroke: BrushStyle,
+    #[computed(expr = if is_active { Visibility::Visible } else { Visibility::Collapsed })]
+    frame_visibility: Visibility,
     template: template_view!(|this: Self| {
         on_update(transparent_brush) { }
         let active_frame = Rectangle {
             fill: transparent_brush
-            stroke: BrushStyle::Primary
+            stroke: frame_stroke
             stroke_width: 1.0
             corner_radius: 4.0
-            visibility: Visibility::Collapsed
+            visibility: frame_visibility
             hit_test_visible: false
         };
         Grid {
@@ -367,14 +371,10 @@ impl GroupChromeOverlay {
         if let Some(grid) = root.as_any().downcast_ref::<Grid>() {
             grid.set_rows(rows);
         }
+        // Visibility and stroke are set by `set_presentation`, outside layout.
         frame
             .as_ui_element()
             .set_attached_if_changed("Grid", "row", content_row);
-        frame.set_visibility(if self.is_active() {
-            Visibility::Visible
-        } else {
-            Visibility::Collapsed
-        });
 
         root.arrange(Rect {
             x: 0.0,
@@ -1297,6 +1297,26 @@ impl RuntimeRealization {
     }
 
     #[cfg(test)]
+    /// Visible active-group frames and their stroke brushes.
+    pub(crate) fn visible_active_frames_for_test(
+        &self,
+    ) -> Vec<Option<crate::core::graphics::Brush>> {
+        self.group_hosts
+            .values()
+            .filter_map(|host| {
+                let root = host.active_chrome.__template_root()?;
+                let frame = root.visual_children().first().cloned()?;
+                if frame.visibility() != Visibility::Visible {
+                    return None;
+                }
+                let rectangle = frame.as_any().downcast_ref::<Rectangle>()?;
+                use crate::core::ui::RectangleExt;
+                Some(rectangle.stroke())
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
     pub(crate) fn active_group_chrome_count_for_test(&self) -> usize {
         self.group_hosts
             .values()
@@ -1811,6 +1831,14 @@ impl RuntimeRealization {
     /// Applies the non-structural part of a live tab selection. The caller has already changed
     /// the retained `CustomTabView` selected index, so this method only accepts a selection when
     /// the model transformation preserves every item/group/root relationship.
+    /// The selected index of a realized group view, if the group is realized and non-empty.
+    pub(crate) fn group_selected_index(&self, group: &SnapshotGroupKey) -> Option<usize> {
+        self.groups
+            .get(group)
+            .filter(|view| !view.children().is_empty())
+            .map(|view| view.selected_index())
+    }
+
     pub(crate) fn apply_selection_fast_path(
         &mut self,
         model: &DockLayoutModel,
@@ -2128,12 +2156,13 @@ impl RuntimeRealization {
 
     fn new_group_host(&self, group: &SnapshotGroupKey) -> GroupRuntimeHost {
         let container = Grid::new();
-        container.set_rows(vec![GridLength::Auto, GridLength::Star(1.0)]);
+        container.set_rows(vec![GridLength::Star(1.0)]);
         container.set_columns(vec![GridLength::Star(1.0)]);
+        let body = Grid::new();
+        body.set_rows(vec![GridLength::Auto, GridLength::Star(1.0)]);
+        body.set_columns(vec![GridLength::Star(1.0)]);
 
         let active_chrome = GroupChromeOverlay::new();
-        active_chrome.set_attached("Grid", "row", 1i32);
-        active_chrome.set_attached("Grid", "column", 0i32);
 
         let content_header = Grid::new();
         content_header.set_rows(vec![
@@ -2164,16 +2193,6 @@ impl RuntimeRealization {
         title.set_attached("Grid", "row", 1i32);
         title.set_attached("Grid", "column", 1i32);
         content_header.children().add(title.clone());
-
-        let empty_hint = TextBlock::new();
-        empty_hint.set_text("Drop here");
-        empty_hint.set_foreground(themed_brush(BrushStyle::Tertiary));
-        empty_hint.set_horizontal_alignment(HorizontalAlignment::Center);
-        empty_hint.set_vertical_alignment(VerticalAlignment::Center);
-        empty_hint.set_hit_test_visible(false);
-        empty_hint.set_visibility(Visibility::Collapsed);
-        empty_hint.set_attached("Grid", "row", 1i32);
-        empty_hint.set_attached("Grid", "column", 0i32);
 
         let pin_button = Grid::new();
         // Keep the full button hit-testable without painting a surface over the title bar.
@@ -2243,14 +2262,32 @@ impl RuntimeRealization {
         content_header.children().add(close_button.clone());
         content_header.set_attached("Grid", "row", 0i32);
         content_header.set_attached("Grid", "column", 0i32);
-        container.children().add(empty_hint.clone());
+        // WinUI.Dock activates a Document on any press inside it, even one its content handles
+        // (`Document` registers `PointerPressed` with handledEventsToo). A press anywhere in the
+        // group activates its selected Document; activating the active one is a no-op.
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
+        let reconciling = self.reconciling.clone();
+        let pressed_group = group.clone();
+        container.register_routed_handler_handled_too::<PointerEventArgs>(
+            "on_pointer_pressed",
+            Box::new(move |event, _| {
+                if reconciling.get() || event.button != Some(crate::core::input::MouseButton::Left)
+                {
+                    return;
+                }
+                let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+                if let Some(owner) = owner {
+                    owner.handle_group_content_pressed(pressed_group.clone());
+                }
+            }),
+        );
 
         GroupRuntimeHost {
             container,
+            body,
             content_header,
             active_chrome,
             title,
-            empty_hint,
             pin_button,
             close_button,
             header_drag_handlers_bound: Rc::new(Cell::new(false)),
@@ -2313,6 +2350,7 @@ impl RuntimeRealization {
             strip_height,
         );
         planned.host.container.children().clear();
+        planned.host.body.children().clear();
         planned.host.container.set_visibility(planned.visibility);
         planned.host.title.set_text(&planned.title);
         planned
@@ -2327,33 +2365,25 @@ impl RuntimeRealization {
             .host
             .close_button
             .set_visibility(planned.close_visibility);
-        planned
-            .host
-            .empty_hint
-            .set_visibility(if planned.items.is_empty() {
-                Visibility::Visible
-            } else {
-                Visibility::Collapsed
-            });
         planned.view.set_attached_if_changed("Grid", "row", 1i32);
         planned.view.set_attached_if_changed("Grid", "column", 0i32);
         planned
             .host
-            .container
+            .body
             .children()
             .add(planned.host.content_header.clone());
         self.bind_content_header_drag(&planned.host, &planned.view);
-        planned.host.container.children().add(planned.view.clone());
+        planned.host.body.children().add(planned.view.clone());
+        planned
+            .host
+            .container
+            .children()
+            .add(planned.host.body.clone());
         planned
             .host
             .container
             .children()
             .add(planned.host.active_chrome.clone());
-        planned
-            .host
-            .container
-            .children()
-            .add(planned.host.empty_hint.clone());
         #[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
         self.install_tab_context_menus(&planned.items);
     }
@@ -2649,6 +2679,21 @@ impl RuntimeRealization {
                 owner.handle_group_selected(selected_group.clone(), index);
             }
         }));
+        // Pressing the tab that is already selected changes no selection but must still activate
+        // its Document, so the active marker can move to another group (WinUI.Dock activates on
+        // every tab press). Activation of an already active item is a no-op.
+        let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
+        let reconciling = self.reconciling.clone();
+        let pressed_group = group.clone();
+        view.set_on_tab_pressed(Some(Box::new(move |index| {
+            if reconciling.get() {
+                return;
+            }
+            let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
+            if let Some(owner) = owner {
+                owner.handle_group_selected(pressed_group.clone(), index);
+            }
+        })));
 
         let weak_owner: Weak<crate::DockingControl> = self.owner.clone();
         let reconciling = self.reconciling.clone();

@@ -587,6 +587,18 @@ impl DockingControl {
         }
     }
 
+    /// A press inside a group (tab strip, content header or page, even when handled there)
+    /// activates the group's selected Document, as WinUI.Dock does.
+    pub(crate) fn handle_group_content_pressed(&self, group: SnapshotGroupKey) {
+        let Some(index) = self
+            .runtime_realization()
+            .and_then(|realization| realization.borrow().group_selected_index(&group))
+        else {
+            return;
+        };
+        self.handle_group_selected(group, index);
+    }
+
     pub(crate) fn handle_group_close(&self, group: SnapshotGroupKey, index: usize) {
         let Some(item) = self
             .runtime_realization()

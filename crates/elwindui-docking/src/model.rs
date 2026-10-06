@@ -373,9 +373,9 @@ impl DockLayoutModel {
         }
         next.normalize();
         if was_active {
-            next.workspace.active_item = next
-                .selected_item_in_group(&return_group)
-                .or_else(|| next.selected_item_id());
+            // WinUI.Dock: the closed Document's group selection, or nothing when that group is
+            // now empty; another group's Document is never activated.
+            next.workspace.active_item = next.selected_item_in_group(&return_group);
         }
         Ok(next)
     }
@@ -1387,10 +1387,11 @@ impl DockLayoutModel {
                     .iter()
                     .find(|entry| entry.item == active)
                     .map(|entry| entry.return_state.group.clone());
+                // WinUI.Dock: closing the active Document activates its group's new selection,
+                // or nothing when that group is empty (never a Document of another group).
                 self.workspace.active_item = fallback_group
                     .as_ref()
-                    .and_then(|group| self.selected_item_in_group(group))
-                    .or_else(|| self.selected_item_id());
+                    .and_then(|group| self.selected_item_in_group(group));
             }
         }
         if self.workspace.next_generated_group_id <= self.max_generated_group_id() {

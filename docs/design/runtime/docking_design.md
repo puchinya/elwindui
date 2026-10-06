@@ -103,6 +103,11 @@ start/delta/completion after Grid mutation or rollback. The custom controls rema
 pointer threshold, capture, Grid resize, and cancellation state; Docking is an observer/persistence
 consumer.
 
+Generated groups take their tab-strip position and compact tabs from the owner's
+`set_on_group_created` hook. The runtime asks it with the group's first Document when it first plans
+that generated group and keeps the answer in a runtime-only map keyed by the generated group id,
+pruned with the realized groups.
+
 The generated `layout` update callback routes to one internal source-application method. It compares
 against `last_applied_model`, cancels transient state, attaches authored metadata, normalizes, and
 applies only the latest reentrant pending value. Structural user changes use a `ReconcilePlan`:

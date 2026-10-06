@@ -101,6 +101,9 @@ pub struct DockingControl {
     #[state(default = None)]
     layout_change_callback: Option<Rc<dyn Fn(DockLayoutModel)>>,
     #[state(default = None)]
+    group_created_callback:
+        Option<Rc<dyn Fn(&crate::DockGroupCreatedArgs) -> crate::DockGroupOptions>>,
+    #[state(default = None)]
     runtime_realization: Option<Rc<RefCell<crate::runtime::RuntimeRealization>>>,
     #[state(default = None)]
     runtime_theme_signature: Option<RuntimeThemeSignature>,
@@ -191,6 +194,23 @@ impl DockingControl {
     /// Installs the callback raised once for each committed user layout change.
     pub fn set_on_layout_change(&self, callback: Box<dyn Fn(DockLayoutModel)>) {
         self.set_layout_change_callback(Some(Rc::from(callback)));
+    }
+
+    /// Installs the hook that chooses how a group the runtime creates (by a drop, float or unpin)
+    /// is presented, like WinUI.Dock's `IDockAdapter.OnCreated`. It runs once per generated
+    /// group, the first time the runtime realizes it, with the Document that created it.
+    /// Without a hook generated groups use [`crate::DockGroupOptions::default`].
+    pub fn set_on_group_created(
+        &self,
+        callback: Box<dyn Fn(&crate::DockGroupCreatedArgs) -> crate::DockGroupOptions>,
+    ) {
+        self.set_group_created_callback(Some(Rc::from(callback)));
+    }
+
+    pub(crate) fn generated_group_options(&self, item: &DockItemId) -> crate::DockGroupOptions {
+        self.group_created_callback()
+            .map(|callback| callback(&crate::DockGroupCreatedArgs { item: item.clone() }))
+            .unwrap_or_default()
     }
 
     /// Publishes the current realized layout after a containing view has finished wiring its

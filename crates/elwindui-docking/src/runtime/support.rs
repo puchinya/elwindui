@@ -32,6 +32,36 @@ pub(crate) fn themed_brush(style: BrushStyle) -> Option<Brush> {
     }
 }
 
+/// Whether the current application foreground is light, i.e. the effective theme is dark.
+fn theme_is_dark() -> bool {
+    let foreground = themed_brush(BrushStyle::Foreground).unwrap_or_else(|| {
+        crate::core::graphics::text_backend()
+            .default_text_style()
+            .foreground
+    });
+    matches!(foreground, Brush::Solid(color) if u16::from(color.r) + u16::from(color.g) + u16::from(color.b) > 384)
+}
+
+/// The opaque base of WinUI.Dock's auto-hide popup (`SolidBackgroundFillColorBase`).
+pub(crate) fn popup_base_brush() -> Brush {
+    use crate::core::graphics::Color;
+    Brush::Solid(if theme_is_dark() {
+        Color::rgb(0x20, 0x20, 0x20)
+    } else {
+        Color::rgb(0xF3, 0xF3, 0xF3)
+    })
+}
+
+/// WinUI.Dock's translucent `DockFillDefaultBrush` (`ControlFillColorDefault`).
+pub(crate) fn dock_fill_brush() -> Brush {
+    use crate::core::graphics::Color;
+    Brush::Solid(if theme_is_dark() {
+        Color::rgba(255, 255, 255, 15)
+    } else {
+        Color::rgba(255, 255, 255, 179)
+    })
+}
+
 /// Active/accent chrome brush: the Theme's `Primary` when it resolves to a value, otherwise the
 /// platform accent (`docs/specs/docking_spec.md`). Self-drawn accent chrome must not disappear
 /// when the application leaves `Primary` to the platform default.

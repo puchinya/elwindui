@@ -18,8 +18,8 @@ Snapshot: 2026-10-04. Desired behavior is defined by the docking specification; 
 
 ## Current verification
 
-- The canonical Rust formatter/analyzer gate passes: zero errors, warnings or non-exempt weak warnings; 285 intentional cfg-only inactive-code records. Workspace build and tests pass (1137 passed, 0 failed, 3 ignored).
-- Normal non-elevated Windows host paired runs against the pinned WinUI.Dock example pass WDF-02/03/05–10/15/16 (light and dark); WDF-01/04/11–14 remain partially executed. Drag move handling streams at about 15 ms per move; the first overlay appearance settles in one layout pass (longest pointer-event gap 61–81 ms in a debug build).
+- The canonical Rust formatter/analyzer gate passes: zero errors, warnings or non-exempt weak warnings; 285 intentional cfg-only inactive-code records. Workspace build and tests pass (1141 passed, 0 failed, 3 ignored).
+- Normal non-elevated Windows host paired runs against the pinned WinUI.Dock example pass WDF-02/03/05–16 except WDF-01 (FAIL: the active group's selected-tab accent outline) and WDF-04 (NOT RUN). Drag move handling streams at about 15 ms per move; the first overlay appearance settles in one layout pass (longest pointer-event gap 61–81 ms in a debug build).
 - Quiet debug startup previously measured 1348–1410 ms from process start to the first content Rendering callback, accepted by the user. A comparable actual process-start measurement for the current build has not been taken.
 
 ## Platform boundaries

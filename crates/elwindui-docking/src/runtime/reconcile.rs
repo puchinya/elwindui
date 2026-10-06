@@ -518,6 +518,9 @@ pub struct RuntimeRealization {
     /// Runtime-only fixed extents after a splitter drag resized a fixed-size track, keyed by
     /// authored group and axis (`true` = width). Never persisted in snapshots.
     fixed_overrides: BTreeMap<(DockGroupId, bool), f32>,
+    /// Runtime-only presentation of generated groups, chosen once by the owner's
+    /// `set_on_group_created` hook from the group's first Document. Never persisted in snapshots.
+    generated_group_options: std::cell::RefCell<BTreeMap<u64, crate::DockGroupOptions>>,
     /// The dragged Document's tab header, hidden while its drag is active (the reference detaches
     /// the tab at drag start) and restored before the drag commits or cancels.
     drag_hidden_tab: Option<Rc<CustomTabViewItem>>,
@@ -610,6 +613,7 @@ impl RuntimeRealization {
             main_surface_child: None,
             preferred_sides: BTreeMap::new(),
             fixed_overrides: BTreeMap::new(),
+            generated_group_options: std::cell::RefCell::new(BTreeMap::new()),
             drag_hidden_tab: None,
             drag_shown_selection: None,
             owner,
@@ -807,6 +811,9 @@ impl RuntimeRealization {
         }
 
         groups.retain(|key, _| used_groups.contains(key));
+        self.generated_group_options
+            .borrow_mut()
+            .retain(|id, _| used_groups.contains(&SnapshotGroupKey::Generated(*id)));
         group_hosts.retain(|key, _| used_groups.contains(key));
         planned_groups.retain(|key, _| used_groups.contains(key));
         planned_splits.retain(|key, _| used_splits.contains(key));
@@ -1973,6 +1980,25 @@ impl RuntimeRealization {
         self.auto_hide_roots.clear();
     }
 
+    /// The presentation of generated group `id`, asking the owner's creation hook the first time
+    /// the group is realized (with its first Document) and reusing that answer afterwards.
+    fn generated_options(&self, id: u64, items: &[DockItemId]) -> crate::DockGroupOptions {
+        if let Some(options) = self.generated_group_options.borrow().get(&id) {
+            return *options;
+        }
+        let Some(first) = items.first() else {
+            return crate::DockGroupOptions::default();
+        };
+        let owner: Option<Rc<crate::DockingControl>> = self.owner.upgrade();
+        let options = owner
+            .map(|owner| owner.generated_group_options(first))
+            .unwrap_or_default();
+        self.generated_group_options
+            .borrow_mut()
+            .insert(id, options);
+        options
+    }
+
     pub(crate) fn drag_item(&self) -> Option<DockItemId> {
         self.drag.as_ref().map(|drag| drag.item().clone())
     }
@@ -2019,13 +2045,19 @@ impl RuntimeRealization {
                             .ok_or_else(|| DockLayoutError::UnknownItem(id.clone()))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                let generated = match &group {
+                    SnapshotGroupKey::Generated(id) => Some(self.generated_options(*id, items)),
+                    SnapshotGroupKey::Authored(_) => None,
+                };
                 let tab_position = match &group {
                     SnapshotGroupKey::Authored(id) => self.registry.group_position(id),
-                    SnapshotGroupKey::Generated(_) => TabStripPosition::Top,
+                    SnapshotGroupKey::Generated(_) => {
+                        generated.unwrap_or_default().tab_strip_position
+                    }
                 };
                 let compact_tabs = match &group {
                     SnapshotGroupKey::Authored(id) => self.registry.group_compact_tabs(id),
-                    SnapshotGroupKey::Generated(_) => false,
+                    SnapshotGroupKey::Generated(_) => generated.unwrap_or_default().compact_tabs,
                 };
                 let show_when_empty = match &group {
                     SnapshotGroupKey::Authored(id) => self.registry.group_show_when_empty(id),

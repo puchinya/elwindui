@@ -18,7 +18,7 @@ use crate::runtime::metrics::{
     AUTO_HIDE_ENTRY_HEIGHT, AUTO_HIDE_ENTRY_SPACING, AUTO_HIDE_MARKER_SIZE,
     AUTO_HIDE_PANEL_HEADER_HEIGHT, AUTO_HIDE_RESIZE_GRIP_SIZE, AUTO_HIDE_STRIP_SIZE,
 };
-use crate::runtime::{accent_brush, themed_brush};
+use crate::runtime::{accent_brush, dock_fill_brush, popup_base_brush, themed_brush};
 use elwindui_custom_controls::{ChromeIcon, chrome_icon};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -159,6 +159,10 @@ pub(crate) struct AutoHideOverlay {
     panels: [StripPanel; 4],
     pane: Rc<Grid>,
     backplate: Rc<Rectangle>,
+    /// Transparent, hit-testable layer under the open pane over the main area. Like the light
+    /// dismiss of WinUI.Dock's popup, a press outside the pane only dismisses it and never
+    /// reaches the content underneath.
+    dismiss_layer: Rc<Grid>,
     frame: Rc<Rectangle>,
     header: Rc<Grid>,
     page_host: Rc<Grid>,
@@ -187,7 +191,8 @@ impl AutoHideOverlay {
 
         let strips: [Rc<Grid>; 4] = std::array::from_fn(|index| {
             let strip = Grid::new();
-            strip.set_background(themed_brush(BrushStyle::Secondary));
+            // WinUI.Dock's `Sidebar` has no background of its own.
+            strip.set_background(Some(Color::TRANSPARENT.into()));
             strip.set_visibility(Visibility::Collapsed);
             strip.set_attached("DockSurface", "side", index as i32);
             match index {
@@ -240,13 +245,23 @@ impl AutoHideOverlay {
         ]);
         body.set_columns(vec![GridLength::Star(1.0)]);
         pane.children().add(body.clone());
-        pane.set_background(None);
+        // The reference pane is an opaque base (`SolidBackgroundFillColorBase`, the backplate)
+        // under the translucent dock fill (`DockFillDefaultBrush`) drawn here.
+        pane.set_background(Some(dock_fill_brush()));
         pane.set_visibility(Visibility::Collapsed);
         pane.set_attached("Grid", "row", 1i32);
         pane.set_attached("Grid", "column", 1i32);
 
+        let dismiss_layer = Grid::new();
+        dismiss_layer.set_background(Some(Color::TRANSPARENT.into()));
+        dismiss_layer.set_hit_test_visible(true);
+        dismiss_layer.set_visibility(Visibility::Collapsed);
+        dismiss_layer.set_attached("Grid", "row", 1i32);
+        dismiss_layer.set_attached("Grid", "column", 1i32);
+        visual.children().add(dismiss_layer.clone());
+
         let backplate = Rectangle::new();
-        backplate.set_fill(themed_brush(BrushStyle::Background));
+        backplate.set_fill(Some(popup_base_brush()));
         backplate.set_corner_radius(4.0);
         backplate.set_hit_test_visible(false);
         backplate.set_visibility(Visibility::Collapsed);
@@ -277,7 +292,7 @@ impl AutoHideOverlay {
             GridLength::Auto,
             GridLength::Fixed(12.0),
         ]);
-        header.set_background(themed_brush(BrushStyle::Secondary));
+        header.set_background(Some(dock_fill_brush()));
         header.set_attached("Grid", "row", 0i32);
         header.set_attached("Grid", "column", 0i32);
         body.children().add(header.clone());
@@ -348,6 +363,7 @@ impl AutoHideOverlay {
             panels,
             pane,
             backplate,
+            dismiss_layer,
             frame,
             header,
             page_host,
@@ -398,9 +414,9 @@ impl AutoHideOverlay {
         self.configure_pane(&item, side, surface_size);
         let previous = self.open.replace(Some(item.clone()));
         *self.open_context.borrow_mut() = Some((item.clone(), side));
-        self.set_active_marker(Some(&item));
         self.pane.set_visibility(Visibility::Visible);
         self.backplate.set_visibility(Visibility::Visible);
+        self.dismiss_layer.set_visibility(Visibility::Visible);
         self.frame.set_visibility(Visibility::Visible);
         self.resize_grip.set_visibility(Visibility::Visible);
         previous
@@ -564,13 +580,13 @@ impl AutoHideOverlay {
         *self.open_context.borrow_mut() = None;
         self.pane.set_visibility(Visibility::Collapsed);
         self.backplate.set_visibility(Visibility::Collapsed);
+        self.dismiss_layer.set_visibility(Visibility::Collapsed);
         self.frame.set_visibility(Visibility::Collapsed);
         self.pin_button.set_visibility(Visibility::Collapsed);
         self.close_button.set_visibility(Visibility::Collapsed);
         self.resize_grip.set_visibility(Visibility::Collapsed);
         self.page_host.children().clear();
         self.title.set_text("");
-        self.set_active_marker(None);
         self.resize_gesture.set(None);
         self.header_gesture.borrow_mut().take();
         previous
@@ -587,12 +603,12 @@ impl AutoHideOverlay {
         *self.open_context.borrow_mut() = None;
         self.pane.set_visibility(Visibility::Collapsed);
         self.backplate.set_visibility(Visibility::Collapsed);
+        self.dismiss_layer.set_visibility(Visibility::Collapsed);
         self.frame.set_visibility(Visibility::Collapsed);
         self.pin_button.set_visibility(Visibility::Collapsed);
         self.close_button.set_visibility(Visibility::Collapsed);
         self.resize_grip.set_visibility(Visibility::Collapsed);
         self.page_host.children().clear();
-        self.set_active_marker(None);
         self.resize_gesture.set(None);
     }
 
@@ -672,7 +688,6 @@ impl AutoHideOverlay {
             self.strips[index].set_visibility(Visibility::Collapsed);
         }
         self.markers.borrow_mut().clear();
-        let open = self.open.borrow().clone();
         for (side, item, title, _icon) in titles {
             let Some(strip) = self.strips.get(side) else {
                 continue;
@@ -682,8 +697,7 @@ impl AutoHideOverlay {
             };
             strip.set_visibility(Visibility::Visible);
             let side = DockSide::ALL[side];
-            let (entry, marker, hovered) =
-                self.make_strip_entry(&title, side, open.as_ref() == Some(&item));
+            let (entry, marker, hovered, label) = self.make_strip_entry(&title, side);
             panel.add(entry.clone());
             self.markers
                 .borrow_mut()
@@ -700,21 +714,24 @@ impl AutoHideOverlay {
                     }
                 }),
             );
+            // WinUI.Dock's strip button: the mark and title turn to the accent color only while
+            // the pointer is over (or pressing) the entry; otherwise the mark stays gray.
             let marker_enter = marker.clone();
+            let label_enter = label.clone();
             let hovered_enter = hovered.clone();
             entry.register_routed_handler::<PointerEventArgs>(
                 "on_pointer_entered",
                 Box::new(move |_, args| {
                     if !args.handled.get() {
                         hovered_enter.set(true);
-                        marker_enter.set_visibility(Visibility::Visible);
+                        marker_enter.set_fill(Some(accent_brush()));
+                        label_enter.set_foreground(Some(accent_brush()));
                     }
                 }),
             );
             let marker_exit = marker.clone();
+            let label_exit = label.clone();
             let hovered_exit = hovered.clone();
-            let open_exit = self.open.clone();
-            let exit_item = item.clone();
             entry.register_routed_handler::<PointerEventArgs>(
                 "on_pointer_exited",
                 Box::new(move |_, args| {
@@ -722,9 +739,8 @@ impl AutoHideOverlay {
                         return;
                     }
                     hovered_exit.set(false);
-                    if open_exit.borrow().as_ref() != Some(&exit_item) {
-                        marker_exit.set_visibility(Visibility::Collapsed);
-                    }
+                    marker_exit.set_fill(themed_brush(BrushStyle::Separator));
+                    label_exit.set_foreground(themed_brush(BrushStyle::Foreground));
                 }),
             );
             entry.register_routed_handler::<PointerEventArgs>(
@@ -744,8 +760,7 @@ impl AutoHideOverlay {
         &self,
         label: &str,
         side: DockSide,
-        active: bool,
-    ) -> (Rc<Grid>, Rc<Rectangle>, Rc<Cell<bool>>) {
+    ) -> (Rc<Grid>, Rc<Rectangle>, Rc<Cell<bool>>, Rc<TextBlock>) {
         let text = TextBlock::new();
         text.set_text(label);
         text.set_foreground(themed_brush(BrushStyle::Foreground));
@@ -768,17 +783,15 @@ impl AutoHideOverlay {
             text.set_visual_transform(VisualTransform::new(
                 Vector { x: 0.0, y: 0.0 },
                 1.0,
-                if side == DockSide::Left {
-                    -FRAC_PI_2
-                } else {
-                    FRAC_PI_2
-                },
+                // Both side rails read top to bottom, like WinUI.Dock's vertical strips.
+                FRAC_PI_2,
             ));
             text.set_transform_origin(UnitPoint::CENTER);
         } else {
             entry.set_width(text_width);
             entry.set_height(AUTO_HIDE_STRIP_SIZE);
         }
+        let label = text.clone();
         if matches!(side, DockSide::Left | DockSide::Right) {
             entry
                 .children()
@@ -786,42 +799,38 @@ impl AutoHideOverlay {
         } else {
             entry.children().add(text);
         }
+        // The mark sits on the strip's outer edge and is always shown, like the reference.
         let marker = Rectangle::new();
-        marker.set_fill(Some(accent_brush()));
+        marker.set_fill(themed_brush(BrushStyle::Separator));
         marker.set_hit_test_visible(false);
         match side {
             DockSide::Left => {
                 marker.set_width(AUTO_HIDE_MARKER_SIZE);
                 marker.set_height(text_width);
-                marker.set_horizontal_alignment(HorizontalAlignment::Right);
+                marker.set_horizontal_alignment(HorizontalAlignment::Left);
                 marker.set_vertical_alignment(VerticalAlignment::Top);
             }
             DockSide::Right => {
                 marker.set_width(AUTO_HIDE_MARKER_SIZE);
                 marker.set_height(text_width);
-                marker.set_horizontal_alignment(HorizontalAlignment::Left);
+                marker.set_horizontal_alignment(HorizontalAlignment::Right);
                 marker.set_vertical_alignment(VerticalAlignment::Top);
             }
             DockSide::Top => {
                 marker.set_width(text_width);
                 marker.set_height(AUTO_HIDE_MARKER_SIZE);
                 marker.set_horizontal_alignment(HorizontalAlignment::Center);
-                marker.set_vertical_alignment(VerticalAlignment::Bottom);
+                marker.set_vertical_alignment(VerticalAlignment::Top);
             }
             DockSide::Bottom => {
                 marker.set_width(text_width);
                 marker.set_height(AUTO_HIDE_MARKER_SIZE);
                 marker.set_horizontal_alignment(HorizontalAlignment::Center);
-                marker.set_vertical_alignment(VerticalAlignment::Top);
+                marker.set_vertical_alignment(VerticalAlignment::Bottom);
             }
         }
-        marker.set_visibility(if active {
-            Visibility::Visible
-        } else {
-            Visibility::Collapsed
-        });
         entry.children().add(marker.clone());
-        (entry, marker, Rc::new(Cell::new(false)))
+        (entry, marker, Rc::new(Cell::new(false)), label)
     }
 
     pub(crate) fn present_open_item(
@@ -903,6 +912,7 @@ impl AutoHideOverlay {
         let open_context = self.open_context.clone();
         let pane = self.pane.clone();
         let backplate = self.backplate.clone();
+        let dismiss_layer = self.dismiss_layer.clone();
         let frame = self.frame.clone();
         let page_host = self.page_host.clone();
         let pin_button = self.pin_button.clone();
@@ -926,6 +936,7 @@ impl AutoHideOverlay {
                     &open_context,
                     &pane,
                     &backplate,
+                    &dismiss_layer,
                     &frame,
                     &page_host,
                     &pin_button,
@@ -945,6 +956,7 @@ impl AutoHideOverlay {
         let open_context = self.open_context.clone();
         let pane = self.pane.clone();
         let backplate = self.backplate.clone();
+        let dismiss_layer = self.dismiss_layer.clone();
         let frame = self.frame.clone();
         let page_host = self.page_host.clone();
         let pin_button = self.pin_button.clone();
@@ -965,6 +977,7 @@ impl AutoHideOverlay {
                     &open_context,
                     &pane,
                     &backplate,
+                    &dismiss_layer,
                     &frame,
                     &page_host,
                     &pin_button,
@@ -987,6 +1000,7 @@ impl AutoHideOverlay {
     pub(crate) fn show_pane(&self) {
         self.pane.set_visibility(Visibility::Visible);
         self.backplate.set_visibility(Visibility::Visible);
+        self.dismiss_layer.set_visibility(Visibility::Visible);
         self.frame.set_visibility(Visibility::Visible);
         self.resize_grip.set_visibility(Visibility::Visible);
         self.pin_button.set_visibility(if self.pin_available.get() {
@@ -1002,26 +1016,11 @@ impl AutoHideOverlay {
             });
     }
 
-    fn set_active_marker(&self, active: Option<&DockItemId>) {
-        for (item, (marker, hovered)) in self.markers.borrow().iter() {
-            let visible = active == Some(item) || hovered.get();
-            marker.set_visibility(if visible {
-                Visibility::Visible
-            } else {
-                Visibility::Collapsed
-            });
-        }
-    }
-
     pub(crate) fn refresh_theme(&self) {
-        self.backplate
-            .set_fill(themed_brush(BrushStyle::Background));
+        self.backplate.set_fill(Some(popup_base_brush()));
+        self.pane.set_background(Some(dock_fill_brush()));
         self.frame.set_stroke(Some(accent_brush()));
-        for strip in &self.strips {
-            strip.set_background(themed_brush(BrushStyle::Secondary));
-        }
-        self.header
-            .set_background(themed_brush(BrushStyle::Secondary));
+        self.header.set_background(Some(dock_fill_brush()));
         self.title
             .set_foreground(themed_brush(BrushStyle::Foreground));
         self.pin_button.children().clear();
@@ -1302,6 +1301,7 @@ fn dismiss_shared(
     open_context: &Rc<RefCell<Option<(DockItemId, DockSide)>>>,
     pane: &Rc<Grid>,
     backplate: &Rc<Rectangle>,
+    dismiss_layer: &Rc<Grid>,
     frame: &Rc<Rectangle>,
     page_host: &Rc<Grid>,
     pin_button: &Rc<Grid>,
@@ -1318,6 +1318,7 @@ fn dismiss_shared(
     *open_context.borrow_mut() = None;
     pane.set_visibility(Visibility::Collapsed);
     backplate.set_visibility(Visibility::Collapsed);
+    dismiss_layer.set_visibility(Visibility::Collapsed);
     frame.set_visibility(Visibility::Collapsed);
     pin_button.set_visibility(Visibility::Collapsed);
     close_button.set_visibility(Visibility::Collapsed);
@@ -1325,7 +1326,7 @@ fn dismiss_shared(
     page_host.children().clear();
     for (marker, hovered) in markers.borrow().values() {
         hovered.set(false);
-        marker.set_visibility(Visibility::Collapsed);
+        marker.set_fill(themed_brush(BrushStyle::Separator));
     }
     resize_gesture.set(None);
     header_gesture.borrow_mut().take();

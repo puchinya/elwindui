@@ -30,7 +30,9 @@ pub(crate) use reconcile::RuntimeRealization;
 pub(crate) use reconcile::{LatestOnlyQueue, resolve_local_target_for_test};
 #[cfg(test)]
 pub(crate) use split_layout::DockSplitView;
-pub(crate) use support::{accent_brush, themed_brush, weak_self_from_visual_owner};
+pub(crate) use support::{
+    accent_brush, dock_fill_brush, popup_base_brush, themed_brush, weak_self_from_visual_owner,
+};
 #[cfg(test)]
 pub(crate) use surface_registry::SurfaceRegistry;
 pub(crate) use surface_view::DockSurfaceView;

@@ -3769,6 +3769,221 @@ fn selected_document_without_activation_has_no_active_chrome() {
 }
 
 #[test]
+fn content_header_pin_click_auto_hides_the_item_while_the_press_activates_it() {
+    let docking = mounted_bottom_documents_docking();
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    let size = Size {
+        width: 900.0,
+        height: 600.0,
+    };
+    layout_root(&root, size);
+    let header = docking
+        .realization_for_test()
+        .unwrap()
+        .borrow()
+        .group_content_header_for_test(&SnapshotGroupKey::Authored(group("documents")))
+        .unwrap();
+    let pin = header.visual_children()[1].clone();
+    let bounds = SurfaceRegistry::bounds_in_host_root(&pin).unwrap();
+    let center = Point {
+        x: bounds.x + bounds.width * 0.5,
+        y: bounds.y + bounds.height * 0.5,
+    };
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), center),
+    );
+    // The press activates the group, so its accent frame appears before the release; the
+    // frame must not take the release away from the pin button.
+    assert_eq!(docking.layout().active_item(), Some(item("first")));
+    layout_root(&root, size);
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Released(MouseButton::Left), center),
+    );
+    assert!(docking.layout().is_item_auto_hidden(&item("first")));
+}
+
+#[test]
+fn single_item_bottom_group_pin_click_auto_hides_its_item() {
+    let (doc, _) = authored_item("doc", "Doc", true);
+    let (errors, _) = authored_item("errors", "Error List", false);
+    let documents = DockGroup::new_group();
+    documents.set_id(group("documents"));
+    documents.set_children(vec![doc]);
+    let error_group = DockGroup::new_group();
+    error_group.set_id(group("errors"));
+    error_group.set_tab_strip_position(TabStripPosition::Bottom);
+    error_group.set_children(vec![errors]);
+    let split = DockSplitPanel::new_panel();
+    split.set_orientation(Orientation::Vertical);
+    split.set_children(vec![
+        documents as Rc<dyn UIElementExt>,
+        error_group as Rc<dyn UIElementExt>,
+    ]);
+    let docking = DockingControl::__new_unmounted();
+    docking.set_content(split);
+    docking.mount(application_environment());
+    assert!(docking.apply_template());
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    let size = Size {
+        width: 900.0,
+        height: 600.0,
+    };
+    layout_root(&root, size);
+    // Another group is active first, as in the demo after any earlier interaction.
+    docking.handle_group_selected(SnapshotGroupKey::Authored(group("documents")), 0);
+    layout_root(&root, size);
+    let header = docking
+        .realization_for_test()
+        .unwrap()
+        .borrow()
+        .group_content_header_for_test(&SnapshotGroupKey::Authored(group("errors")))
+        .unwrap();
+    let pin = header
+        .visual_children()
+        .into_iter()
+        .skip(1)
+        .find(|child| child.visibility() == Visibility::Visible)
+        .expect("visible pin action");
+    let bounds = SurfaceRegistry::bounds_in_host_root(&pin).unwrap();
+    let center = Point {
+        x: bounds.x + bounds.width * 0.5,
+        y: bounds.y + bounds.height * 0.5,
+    };
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), center),
+    );
+    layout_root(&root, size);
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Released(MouseButton::Left), center),
+    );
+    assert!(docking.layout().is_item_auto_hidden(&item("errors")));
+}
+
+#[test]
+fn group_created_hook_chooses_the_presentation_of_runtime_created_groups() {
+    let docking = mounted_default_docking();
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    {
+        let asked = asked.clone();
+        docking.set_on_group_created(Box::new(move |args| {
+            asked.borrow_mut().push(args.item.clone());
+            crate::DockGroupOptions {
+                tab_strip_position: TabStripPosition::Bottom,
+                compact_tabs: true,
+            }
+        }));
+    }
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    let size = Size {
+        width: 720.0,
+        height: 420.0,
+    };
+    layout_root(&root, size);
+    // Authored groups never ask the hook.
+    assert!(asked.borrow().is_empty());
+
+    let moved = docking
+        .layout()
+        .with_item_moved(
+            &item("third"),
+            DockPlacement::RootEdge {
+                side: DockSide::Left,
+                weight: 1.0,
+            },
+        )
+        .unwrap();
+    docking.set_layout(moved);
+    layout_root(&root, size);
+    assert_eq!(*asked.borrow(), vec![item("third")]);
+    let views = find_all::<CustomTabView>(docking.as_ref());
+    let generated = views
+        .iter()
+        .filter_map(|view| view.as_any().downcast_ref::<CustomTabView>())
+        .find(|view| {
+            view.children()
+                .to_vec()
+                .iter()
+                .any(|tab| tab.header() == "Third")
+        })
+        .expect("the moved item has a runtime-created group");
+    assert_eq!(generated.tab_strip_position(), TabStripPosition::Bottom);
+    assert!(generated.compact());
+
+    // The answer is kept for the group; later relayouts do not ask again.
+    docking.set_layout(
+        docking
+            .layout()
+            .with_item_activated(&item("first"))
+            .unwrap(),
+    );
+    layout_root(&root, size);
+    assert_eq!(asked.borrow().len(), 1);
+}
+
+#[test]
+fn light_dismiss_press_outside_an_open_pane_does_not_reach_the_content_below() {
+    let docking = mounted_default_docking();
+    let pinned = docking
+        .layout()
+        .with_item_moved(
+            &item("third"),
+            DockPlacement::AutoHide {
+                side: DockSide::Right,
+            },
+        )
+        .unwrap()
+        .with_item_activated(&item("third"))
+        .unwrap();
+    docking.set_layout(pinned);
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    let size = Size {
+        width: 720.0,
+        height: 420.0,
+    };
+    layout_root(&root, size);
+    assert_eq!(docking.layout().active_item(), Some(item("third")));
+
+    // Press on the documents group, outside the open right pane.
+    let dispatcher = PointerDispatcher::new();
+    let focus = FocusTracker::new();
+    let point = Point { x: 80.0, y: 200.0 };
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Pressed(MouseButton::Left), point),
+    );
+    dispatcher.handle(
+        &root,
+        &focus,
+        pointer_event(RawPointerEventKind::Released(MouseButton::Left), point),
+    );
+    // Like WinUI.Dock's light-dismiss popup, the press only dismisses the pane: the documents
+    // group underneath is not activated.
+    assert_eq!(docking.layout().active_item(), None);
+    layout_root(&root, size);
+    assert_eq!(
+        docking
+            .realization_for_test()
+            .unwrap()
+            .borrow()
+            .open_auto_hide_item_on(&RootKind::Main),
+        None
+    );
+}
+
+#[test]
 fn closing_the_active_document_activates_only_its_own_group_selection() {
     let docking = mounted_default_docking();
     // "first" and "second" share the documents group; "third" is alone in the tools group.

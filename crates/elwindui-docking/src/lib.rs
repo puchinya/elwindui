@@ -27,6 +27,7 @@ mod dock_item;
 mod dock_size;
 mod dock_split_panel;
 mod docking_control;
+mod group_options;
 mod id;
 mod model;
 mod placement;
@@ -38,6 +39,7 @@ pub use dock_item::{DockItem, DockItemExt};
 pub use dock_size::DockSize;
 pub use dock_split_panel::{DockSplitPanel, DockSplitPanelExt};
 pub use docking_control::{DockRuntimeHost, DockRuntimeHostExt, DockingControl, DockingControlExt};
+pub use group_options::{DockGroupCreatedArgs, DockGroupOptions};
 pub use id::{DockGroupId, DockItemId};
 pub use model::DockLayoutModel;
 

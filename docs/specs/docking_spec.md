@@ -36,6 +36,14 @@ retained runtime, and never invokes `set_on_layout_change`. Reentrant source upd
 An initially empty bound value is initialized from the authored default and published once through
 the property and `set_on_layout_change`; a non-empty restored value wins without an initial echo.
 
+`DockingControl::set_on_group_created` lets the application choose how a group the runtime creates
+(by a drop, float or unpin) is presented, like WinUI.Dock's `IDockAdapter.OnCreated`. The hook
+receives the Document that created the group (`DockGroupCreatedArgs`) and returns
+`DockGroupOptions` (tab-strip position and compact tabs). It runs once per generated group, the
+first time the runtime realizes it; without a hook generated groups use top tabs with equal widths.
+The answer is runtime state only and never enters `DockLayoutSnapshot`, so a restored generated group
+asks the hook again.
+
 ## Runtime interaction
 
 Each registered item has one stable runtime `CustomTabViewItem`; selection, close requests, tab
@@ -186,9 +194,11 @@ Visible strips reserve their extent in the surface layout; the surface's main ro
 inside them and is never covered by a strip.
 
 Auto-hide strip entries are title-first, content-sized side tabs with sixteen logical pixels between
-entries and a four-logical-pixel active/hover marker. Left and Right titles are rotated; Top and
-Bottom titles remain horizontal. The strip does not show a document icon. The active marker and text
-follow the active/accent theme brush.
+entries and a four-logical-pixel marker on the strip's outer edge. Like WinUI.Dock's sidebar
+buttons, the strip has no background, the marker is always shown in the separator color, and the
+marker and title turn to the accent brush only while the pointer is over or pressing the entry; an
+open or active item does not recolor them. Left and Right titles are rotated clockwise so both read
+top to bottom; Top and Bottom titles remain horizontal. The strip does not show a document icon.
 
 Docking's active/accent chrome (active frame and marker, target glyphs, drop preview, auto-hide
 marker and pane border) uses the application Theme's `Primary` brush when it resolves to a value.
@@ -203,11 +213,13 @@ close/reopen and pin/unpin for the lifetime of the owning runtime, and is cleare
 is destroyed. A pane cannot consume the full surface and make its remaining content unusable.
 
 Clicking a strip entry opens its pane and makes that item active. Clicking outside the pane and strip
-on the same surface dismisses its presentation without moving or closing the item; when the item was
+on the same surface dismisses its presentation without moving or closing the item, and like a
+light-dismiss popup the press does not reach the content underneath; when the item was
 active, the model has no active item afterward. The pane's close action closes the item under its
 `can_close` capability. Escape dismisses it when the existing input route can deliver the key. Opening another
 entry, pinning, closing, or starting a drag dismisses the prior pane through the existing runtime
-and model paths. The pane has an active border, rounded outer corner, and a forty-logical-pixel
+and model paths. The pane body is the reference's opaque popup base under its translucent dock fill, with the
+header drawn in the same fill again. The pane has an active border, rounded outer corner, and a forty-logical-pixel
 title header for its Document with pin/close actions and page content below it. The non-action
 portion of that header may start a drag for the open Document only.
 

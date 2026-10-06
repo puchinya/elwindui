@@ -194,6 +194,20 @@ struct DockingDemoSurface {
                     docking.set_on_layout_change(Box::new(move |layout| {
                         status_vm.publish_layout_status(layout);
                     }));
+                    // Like the pinned WinUI.Dock example's `IDockAdapter.OnCreated`, a group the
+                    // runtime creates for a tool window gets bottom tabs; documents keep top tabs.
+                    docking.set_on_group_created(Box::new(|args| {
+                        let id: &str = args.item.as_ref();
+                        let tool = !matches!(id, "document-a" | "document-b");
+                        elwindui_docking::DockGroupOptions {
+                            tab_strip_position: if tool {
+                                elwindui_docking::TabStripPosition::Bottom
+                            } else {
+                                elwindui_docking::TabStripPosition::Top
+                            },
+                            compact_tabs: tool,
+                        }
+                    }));
                     docking.synchronize_layout_source();
                     vm.set_latest_status("Ready — release a drag to publish one layout change".to_owned());
                 }

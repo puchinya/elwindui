@@ -269,6 +269,14 @@ thread_local! {
     static PERF_MEASURE_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+/// `ELWINDUI_PERF_TRACE` totals of `measure_text` on this thread so far: call count and
+/// cumulative milliseconds. Both stay zero while the trace is disabled.
+pub(crate) fn perf_measure_text_totals() -> (u64, f64) {
+    let count = PERF_MEASURE_COUNT.with(|c| c.get());
+    let nanos = PERF_MEASURE_NANOS.with(|t| t.get());
+    (count, nanos as f64 / 1e6)
+}
+
 impl TextBackend for WinUi3TextBackend {
     fn default_text_style(&self) -> ComputedTextStyle {
         // Read the untouched scratch `TextBlock`'s live XAML defaults rather than hardcoding

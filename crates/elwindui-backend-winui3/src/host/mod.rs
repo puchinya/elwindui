@@ -238,6 +238,10 @@ impl WinUI3RenderingState {
             }
             self.first_frame_pending.set(false);
             crate::app::trace_startup_phase("first_content_rendering");
+            if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
+                let (calls, ms) = crate::render::perf_measure_text_totals();
+                eprintln!("[perf] first_content measure_text calls={calls} cumulative={ms:.1}ms");
+            }
         }
         let runtime: Option<Rc<AnimationRuntime>> = host.animation_runtime.upgrade();
         let Some(runtime) = runtime else {

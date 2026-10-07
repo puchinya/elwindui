@@ -117,9 +117,11 @@ impl StripEntryLabel {
                 height: length,
             }
         } else {
+            // A Top/Bottom entry's cell takes the title height, as it did when the title was a
+            // direct entry child; the rail marker aligns to that cell.
             Size {
                 width: length,
-                height: AUTO_HIDE_STRIP_SIZE,
+                height: AUTO_HIDE_ENTRY_HEIGHT,
             }
         }
     }

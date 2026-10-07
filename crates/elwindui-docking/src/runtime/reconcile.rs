@@ -6,8 +6,7 @@ use crate::core::input::PointerEventArgs;
 use crate::core::layout::{GridLength, GridTrackConstraint, VerticalAlignment, Visibility};
 use crate::core::theme::BrushStyle;
 use crate::core::ui::{
-    ControlExt, Grid, GridExt, Image, ImageExt, LayoutExt, TextBlock, TextBlockExt, TextStyleOwner,
-    UIElementExt,
+    ControlExt, Grid, GridExt, LayoutExt, TextBlock, TextBlockExt, TextStyleOwner, UIElementExt,
 };
 #[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
 use crate::core::ui::{MenuExt, MenuItemExt};
@@ -391,6 +390,62 @@ mod chrome_tests {
     use crate::core::graphics::{PathCommand, VectorNode};
 
     #[test]
+    fn group_chrome_arrange_paints_the_frame_without_invalidating_measure() {
+        let overlay = GroupChromeOverlay::new();
+        let element: Rc<dyn UIElementExt> = overlay.clone();
+        let size = Size {
+            width: 300.0,
+            height: 200.0,
+        };
+        overlay.set_presentation(true, None, TabStripPosition::Top, 32.0);
+        crate::core::ui::layout_root(&element, size);
+        assert!(overlay.frame_source().borrow().is_some());
+        assert_eq!(
+            overlay.frame_rect(),
+            Some(Rect {
+                x: 0.0,
+                y: 32.0,
+                width: 300.0,
+                height: 168.0,
+            })
+        );
+
+        // Arrange draws the contour from final geometry only: repeated, resized and
+        // active-toggled Arrange passes leave the retained measurement valid.
+        let arrange = |width: f32| {
+            overlay.arrange(Rect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height: size.height,
+            })
+        };
+        for width in [300.0, 240.0, 300.0] {
+            arrange(width);
+            assert!(overlay.measured_size().is_some());
+        }
+        overlay.set_presentation(false, None, TabStripPosition::Top, 32.0);
+        arrange(300.0);
+        assert_eq!(overlay.frame_rect(), None);
+        overlay.set_presentation(true, None, TabStripPosition::Top, 32.0);
+        arrange(300.0);
+        assert!(overlay.measured_size().is_some());
+
+        // A tab-position change is presentation input; the frame follows on the next Arrange.
+        overlay.set_presentation(true, None, TabStripPosition::Bottom, 32.0);
+        arrange(300.0);
+        assert!(overlay.measured_size().is_some());
+        assert_eq!(
+            overlay.frame_rect(),
+            Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 300.0,
+                height: 168.0,
+            })
+        );
+    }
+    #[test]
     fn active_frame_contour_opens_at_the_selected_tab_on_either_edge() {
         let size = Size {
             width: 300.0,
@@ -451,6 +506,9 @@ mod chrome_tests {
 
 /// Docking-private active frame and document marker. The marker is placed from the retained tab's
 /// arranged bounds, keeping generic CustomTabView free of Docking-specific public state.
+///
+/// The frame is painted by this element itself rather than by an `Image` child: its contour
+/// depends on arranged geometry, and an `Image` source change would invalidate Measure from Arrange.
 #[elwindui::component(inherits Control)]
 struct GroupChromeOverlay {
     #[prop(default = false)]
@@ -463,17 +521,11 @@ struct GroupChromeOverlay {
     strip_height: f32,
     #[state(default = None)]
     frame_key: Option<(Size, Option<(f32, f32)>, TabStripPosition, Brush)>,
-    #[computed(expr = if is_active { Visibility::Visible } else { Visibility::Collapsed })]
-    frame_visibility: Visibility,
+    #[state(default = Rc::new(std::cell::RefCell::new(None)))]
+    frame_source: Rc<std::cell::RefCell<Option<ImageSource>>>,
     template: template_view!(|this: Self| {
-        let active_frame = Image {
-            visibility: frame_visibility
-            hit_test_visible: false
-        };
         Grid {
-            rows: [GridLength::Fixed(32.0), GridLength::Star(1.0)]
-            columns: [GridLength::Star(1.0)]
-            active_frame
+            hit_test_visible: false,
         }
     }),
 }
@@ -481,51 +533,30 @@ struct GroupChromeOverlay {
 #[elwindui::component]
 impl GroupChromeOverlay {
     #[overrides]
-    fn measure_override(&self, _available: Size) -> Size {
+    fn measure_override(&self, available: Size) -> Size {
+        // The overlay fills whatever its host arranges and asks for no space itself.
+        if let Some(root) = self.__template_root() {
+            root.measure(available);
+        }
         Size {
             width: 0.0,
             height: 0.0,
         }
     }
 
+    /// Builds the open contour from final geometry. Only paint state changes here; nothing that
+    /// Measure reads is written.
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
-        let Some(root) = self.__template_root() else {
-            return final_size;
-        };
-        let children = root.visual_children();
-        let Some(frame) = children.first().cloned() else {
-            return final_size;
-        };
-        let strip_height = self.strip_height().max(0.0);
-        let (rows, content_row) = if strip_height <= 0.0 {
-            (vec![GridLength::Star(1.0), GridLength::Fixed(0.0)], 0)
-        } else if self.tab_position() == TabStripPosition::Top {
-            (
-                vec![GridLength::Fixed(strip_height), GridLength::Star(1.0)],
-                1,
-            )
-        } else {
-            (
-                vec![GridLength::Star(1.0), GridLength::Fixed(strip_height)],
-                0,
-            )
-        };
-        if let Some(grid) = root.as_any().downcast_ref::<Grid>() {
-            grid.set_rows(rows);
+        if let Some(root) = self.__template_root() {
+            root.arrange(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: final_size.width.max(0.0),
+                height: final_size.height.max(0.0),
+            });
         }
-        // Visibility is set by `set_presentation`, outside layout.
-        frame
-            .as_ui_element()
-            .set_attached_if_changed("Grid", "row", content_row);
-
-        root.arrange(Rect {
-            x: 0.0,
-            y: 0.0,
-            width: final_size.width.max(0.0),
-            height: final_size.height.max(0.0),
-        });
-
+        let strip_height = self.strip_height().max(0.0);
         // Do not paint a border across the selected header's connection to the page.
         // An open contour works even when the page background is transparent.
         let size = Size {
@@ -537,27 +568,81 @@ impl GroupChromeOverlay {
             .filter(|_| strip_height > 0.0)
             .and_then(|tab| {
                 let node: Rc<dyn UIElementExt> = tab;
-                SurfaceRegistry::bounds_in_surface_local(&node, &root)
-                    .map(|bounds| (bounds.x, bounds.x + bounds.width))
+                let bounds = SurfaceRegistry::bounds_in_host_root(&node)?;
+                let origin = self.origin_in_host_root()?;
+                let left = bounds.x - origin.x;
+                Some((left, left + bounds.width))
             });
         let key = (size, gap, self.tab_position(), accent_brush());
         if self.is_active() && self.frame_key().as_ref() != Some(&key) {
-            if let Some(image) = frame.as_any().downcast_ref::<Image>() {
-                image.set_source(active_frame_image(
-                    size,
-                    gap,
-                    self.tab_position(),
-                    key.3.clone(),
-                ));
-            }
+            *self.frame_source().borrow_mut() =
+                active_frame_image(size, gap, self.tab_position(), key.3.clone());
             self.set_frame_key(Some(key));
+            self.invalidate_render();
         }
-
         final_size
+    }
+
+    #[overrides]
+    fn render(&self, context: &mut crate::core::graphics::RenderContext<'_>) {
+        let Some(rect) = self.frame_rect() else {
+            return;
+        };
+        if let Some(ImageSource::Vector(image)) = self.frame_source().borrow().as_ref() {
+            context.draw_vector_image(
+                image,
+                rect,
+                None,
+                crate::core::graphics::VectorImageDrawOptions {
+                    fit: crate::core::graphics::ImageFit::Contain,
+                    ..Default::default()
+                },
+            );
+        }
     }
 }
 
 impl GroupChromeOverlay {
+    /// Where the active frame paints: the page area beside the strip, or nothing while inactive.
+    fn frame_rect(&self) -> Option<Rect> {
+        if !self.is_active() {
+            return None;
+        }
+        let width = self.arranged_width()?;
+        let height = self.arranged_height()?;
+        let strip_height = self.strip_height().max(0.0);
+        let y = if self.tab_position() == TabStripPosition::Top {
+            strip_height
+        } else {
+            0.0
+        };
+        Some(Rect {
+            x: 0.0,
+            y,
+            width: width.max(0.0),
+            height: (height - strip_height).max(0.0),
+        })
+    }
+
+    /// This overlay's top-left in the hosted root space, from its own arranged offset and its
+    /// parent's bounds (the overlay is arranged before its contour is built).
+    fn origin_in_host_root(&self) -> Option<Point> {
+        let offset = self.arranged_offset()?;
+        let parent = match self.visual_parent() {
+            Some(parent) => SurfaceRegistry::bounds_in_host_root(&parent)?,
+            None => Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            },
+        };
+        Some(Point {
+            x: parent.x + offset.x,
+            y: parent.y + offset.y,
+        })
+    }
+
     fn set_presentation(
         &self,
         is_active: bool,
@@ -603,7 +688,6 @@ impl GroupChromeOverlay {
         self.invalidate_arrange();
     }
 }
-
 struct PlannedGroup {
     view: Rc<CustomTabView>,
     host: GroupRuntimeHost,
@@ -1492,13 +1576,10 @@ impl RuntimeRealization {
         self.group_hosts
             .values()
             .filter_map(|host| {
-                let root = host.active_chrome.__template_root()?;
-                let frame = root.visual_children().first().cloned()?;
-                if frame.visibility() != Visibility::Visible {
-                    return None;
-                }
-                let image = frame.as_any().downcast_ref::<Image>()?;
-                let Some(ImageSource::Vector(source)) = image.source() else {
+                host.active_chrome.frame_rect()?;
+                let Some(ImageSource::Vector(source)) =
+                    host.active_chrome.frame_source().borrow().clone()
+                else {
                     return None;
                 };
                 let crate::core::graphics::VectorNode::Path(path) = &source.root().children[0]

@@ -1,5 +1,4 @@
 use super::core;
-use super::core::base::Size;
 use super::core::graphics::IconSource;
 use super::core::input::PointerEventArgs;
 use super::core::layout::Visibility;
@@ -385,31 +384,26 @@ impl CustomTabViewItem {
 }
 
 impl CustomTabViewItem {
-    pub(crate) fn intrinsic_header_width(&self, maximum: f32, height: f32) -> f32 {
+    /// Natural header width read from the retained measurement of this item's last Measure,
+    /// clamped to `maximum`. Never measures: returns `None` while the header row has not been
+    /// measured since its last invalidation.
+    pub(crate) fn measured_intrinsic_header_width(&self, maximum: f32) -> Option<f32> {
         if let Some(width) = self.width() {
-            return width.clamp(0.0, maximum);
+            return Some(width.clamp(0.0, maximum));
         }
-        let Some(header) = self
+        let header = self
             .__template_root()
-            .and_then(|root| root.visual_children().get(1).cloned())
-        else {
-            return 0.0;
-        };
+            .and_then(|root| root.visual_children().get(1).cloned())?;
         let header = header.as_ui_element();
-        let children = header.visual_children();
+        header.measured_size()?;
         let mut width = 0.0;
-        for child in children {
-            child.measure(Size {
-                width: maximum,
-                height,
-            });
-            if !child.participates_in_layout() {
-                continue;
+        for child in header.visual_children() {
+            if child.participates_in_layout() {
+                width += child.measured_size()?.width;
             }
-            width += child.measured_size().map(|size| size.width).unwrap_or(0.0);
         }
         // The overhang is arranged outside the logical width (`header_overhang`).
-        (width - 2.0 * self.header_overhang()).clamp(0.0, maximum)
+        Some((width - 2.0 * self.header_overhang()).clamp(0.0, maximum))
     }
 
     /// Extra width the strip arranges on each side of this header beyond its logical width.
@@ -766,6 +760,7 @@ impl CustomTabViewItem {
 
 #[cfg(test)]
 mod tests {
+    use super::core::base::Size;
     use super::core::graphics::{ImageSource, VectorNode, VectorPaint};
     use super::core::theme::ResolvedValue;
     use super::*;

@@ -2468,14 +2468,8 @@ fn auto_hide_strip_markers_follow_the_four_side_orientations() {
         },
     );
     assert_eq!(overlay.marker_count_for_test(), 4);
-    overlay.refresh_theme();
-    for id in ["left", "top", "right", "bottom"] {
-        assert_eq!(
-            overlay.marker_fill_for_test(&item(id)),
-            crate::runtime::themed_brush(crate::core::theme::BrushStyle::Separator)
-        );
-    }
     let left = overlay.marker_size_for_test(&item("left")).unwrap();
+
     assert_eq!(left.width, 4.0);
     assert!(left.height > 24.0);
     let right = overlay.marker_size_for_test(&item("right")).unwrap();
@@ -2500,6 +2494,87 @@ fn auto_hide_strip_markers_follow_the_four_side_orientations() {
             std::f32::consts::FRAC_PI_2
         );
     }
+    overlay.refresh_theme();
+    for id in ["left", "top", "right", "bottom"] {
+        assert_eq!(
+            overlay.marker_fill_for_test(&item(id)),
+            crate::runtime::themed_brush(crate::core::theme::BrushStyle::Separator)
+        );
+    }
+}
+
+#[test]
+fn auto_hide_entries_measure_titles_only_in_normal_layout() {
+    struct CountingTextBackend(Rc<std::cell::Cell<usize>>);
+    impl crate::core::graphics::TextBackend for CountingTextBackend {
+        fn default_text_style(&self) -> crate::core::graphics::ComputedTextStyle {
+            crate::core::graphics::ComputedTextStyle::fallback()
+        }
+        fn measure_text(
+            &self,
+            request: &crate::core::graphics::TextMeasureRequest<'_>,
+        ) -> crate::core::graphics::TextMeasureResult {
+            self.0.set(self.0.get() + 1);
+            crate::core::graphics::DummyTextBackend.measure_text(request)
+        }
+    }
+    let calls = Rc::new(std::cell::Cell::new(0));
+    crate::core::graphics::set_text_backend(Rc::new(CountingTextBackend(calls.clone())));
+
+    let overlay = AutoHideOverlay::new();
+    let owner = std::rc::Weak::<DockingControl>::new();
+    overlay.render_strips(
+        [
+            (0, item("left"), "Left document".to_owned(), None),
+            (1, item("top"), "Top document".to_owned(), None),
+        ]
+        .into_iter(),
+        &owner,
+        RootKind::Main,
+    );
+    // Building the entries measures nothing; the rail extent comes from the layout pass.
+    assert_eq!(calls.get(), 0);
+    let visual = overlay.visual();
+    let size = Size {
+        width: 944.0,
+        height: 549.0,
+    };
+    layout_root(&visual, size);
+    let titles = find_all::<TextBlock>(visual.as_ref())
+        .into_iter()
+        .filter(|text| text.measured_size().is_some())
+        .collect::<Vec<_>>();
+    let after_first_layout = calls.get();
+    // One backend measurement per title: no construction-time pass and no second constraint.
+    assert_eq!(after_first_layout, titles.len());
+    layout_root(&visual, size);
+    assert_eq!(calls.get(), after_first_layout);
+
+    for (id, vertical) in [("left", true), ("top", false)] {
+        let marker = overlay.marker_size_for_test(&item(id)).unwrap();
+        let title = find_all::<TextBlock>(visual.as_ref())
+            .into_iter()
+            .find(|text| {
+                text.as_any()
+                    .downcast_ref::<TextBlock>()
+                    .is_some_and(|text| {
+                        *text.text.borrow()
+                            == format!("{} document", if vertical { "Left" } else { "Top" })
+                    })
+            })
+            .unwrap();
+        let length = title.measured_size().unwrap().width.max(24.0);
+        assert_eq!(
+            if vertical {
+                marker.height
+            } else {
+                marker.width
+            },
+            length
+        );
+        assert_eq!(title.arranged_width(), Some(length));
+    }
+    crate::core::graphics::clear_text_backend();
 }
 
 #[test]

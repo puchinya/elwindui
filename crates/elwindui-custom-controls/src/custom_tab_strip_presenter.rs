@@ -10,48 +10,34 @@ use std::rc::{Rc, Weak};
 const TAB_STRIP_HEIGHT: f32 = 32.0;
 const TAB_STRIP_FRAME_INSET: f32 = 0.0;
 const TAB_HEADER_MAX_WIDTH: f32 = 200.0;
+/// Natural-width ceiling of a generic compact header.
+const GENERIC_COMPACT_MAX_WIDTH: f32 = 240.0;
 
-#[derive(Clone)]
-struct MeasuredTabStripPass {
-    item_identities: Vec<Weak<CustomTabViewItem>>,
-    max_item_width: f32,
+/// Inputs that decide a tab header's natural width. The available strip width is deliberately not
+/// one of them: compact headers are measured against the fixed canonical ceiling, so a strip-width
+/// change only reallocates widths.
+#[derive(Clone, Copy, PartialEq)]
+struct TabMeasureInputs {
+    measure_width: f32,
     height: f32,
     compact: bool,
+    connected: bool,
     tab_strip_position: TabStripPosition,
     close_button_presentation: CloseButtonPresentation,
-    widths: Vec<f32>,
+}
+
+/// Natural header widths captured by the last Measure pass. Arrange reads them without measuring;
+/// Measure reuses them while every retained header subtree still holds the measurement it had when
+/// they were captured.
+struct MeasuredTabStripPass {
+    item_identities: Vec<Weak<CustomTabViewItem>>,
+    layouts: Vec<Vec<Option<Size>>>,
+    inputs: TabMeasureInputs,
+    natural_widths: Vec<f32>,
 }
 
 impl MeasuredTabStripPass {
-    fn new(
-        items: &[Rc<CustomTabViewItem>],
-        max_item_width: f32,
-        height: f32,
-        compact: bool,
-        tab_strip_position: TabStripPosition,
-        close_button_presentation: CloseButtonPresentation,
-        widths: Vec<f32>,
-    ) -> Self {
-        Self {
-            item_identities: items.iter().map(Rc::downgrade).collect(),
-            max_item_width,
-            height,
-            compact,
-            tab_strip_position,
-            close_button_presentation,
-            widths,
-        }
-    }
-
-    fn matches(
-        &self,
-        items: &[Rc<CustomTabViewItem>],
-        max_item_width: f32,
-        height: f32,
-        compact: bool,
-        tab_strip_position: TabStripPosition,
-        close_button_presentation: CloseButtonPresentation,
-    ) -> bool {
+    fn same_items(&self, items: &[Rc<CustomTabViewItem>]) -> bool {
         self.item_identities.len() == items.len()
             && self
                 .item_identities
@@ -62,27 +48,40 @@ impl MeasuredTabStripPass {
                         .upgrade()
                         .is_some_and(|cached| Rc::ptr_eq(&cached, item))
                 })
-            && self.max_item_width == max_item_width
-            && self.height == height
-            && self.compact == compact
-            && self.tab_strip_position == tab_strip_position
-            && self.close_button_presentation == close_button_presentation
-            && self.widths.len() == items.len()
-            && items
-                .iter()
-                .all(|item| Self::measurement_tree_is_valid(item.as_ui_element()))
     }
 
-    fn measurement_tree_is_valid(element: &dyn UIElementExt) -> bool {
-        !element.participates_in_layout()
-            || (element.measured_size().is_some()
-                && element
-                    .visual_children()
-                    .iter()
-                    .all(|child| Self::measurement_tree_is_valid(child.as_ui_element())))
+    fn reusable(&self, items: &[Rc<CustomTabViewItem>], inputs: TabMeasureInputs) -> bool {
+        self.inputs == inputs
+            && self.same_items(items)
+            && items.iter().zip(&self.layouts).all(|(item, layout)| {
+                measured_layout(item.as_ui_element()).as_ref() == Some(layout)
+            })
     }
 }
 
+/// Retained measured sizes of `element`'s subtree in visual order (`None` for an element that does
+/// not participate in layout), or `None` when a participating element has no measurement (it was
+/// invalidated and not measured again). A natural width is a sum of these sizes, so an unchanged
+/// snapshot keeps it valid even when a descendant was re-measured in between, and a header that
+/// collapsed or changed size since is caught although it leaves no invalid measurement behind.
+fn measured_layout(element: &dyn UIElementExt) -> Option<Vec<Option<Size>>> {
+    fn visit(element: &dyn UIElementExt, out: &mut Vec<Option<Size>>) -> bool {
+        if !element.participates_in_layout() {
+            out.push(None);
+            return true;
+        }
+        let Some(size) = element.measured_size() else {
+            return false;
+        };
+        out.push(Some(size));
+        element
+            .visual_children()
+            .iter()
+            .all(|child| visit(child.as_ui_element(), out))
+    }
+    let mut layout = Vec::new();
+    visit(element, &mut layout).then_some(layout)
+}
 #[cfg(test)]
 std::thread_local! {
     static ITEM_MEASURE_CALLS: Cell<usize> = const { Cell::new(0) };
@@ -146,7 +145,7 @@ impl CustomTabStripPresenter {
             return 0.0;
         }
         if self.compact() {
-            available.min(240.0).max(0.0)
+            available.min(GENERIC_COMPACT_MAX_WIDTH).max(0.0)
         } else if available.is_finite() {
             // Keep the current bounded strip rather than allowing offscreen headers. Whole-pixel
             // widths (native TabView rounds down too) keep header edges off fractional pixels,
@@ -172,10 +171,55 @@ impl CustomTabStripPresenter {
         }
     }
 
-    fn measured_item_width(item: &CustomTabViewItem, maximum: f32, height: f32) -> f32 {
+    /// Width a header is measured against: the canonical natural-width ceiling for compact tabs,
+    /// which no strip width can raise, or the equal slot for the other tabs.
+    fn measure_width(&self, max_width: f32) -> f32 {
+        match (self.compact(), self.connected_chrome()) {
+            (true, true) => TAB_HEADER_MAX_WIDTH,
+            (true, false) => GENERIC_COMPACT_MAX_WIDTH,
+            (false, _) => max_width,
+        }
+    }
+
+    fn measure_inputs(&self, max_width: f32, height: f32) -> TabMeasureInputs {
+        TabMeasureInputs {
+            measure_width: self.measure_width(max_width),
+            height,
+            compact: self.compact(),
+            connected: self.connected_chrome(),
+            tab_strip_position: self.tab_strip_position(),
+            close_button_presentation: self.close_button_presentation(),
+        }
+    }
+
+    fn measured_item_width(item: &CustomTabViewItem, maximum: f32) -> f32 {
         #[cfg(test)]
         INTRINSIC_WIDTH_CALLS.with(|calls| calls.set(calls.get() + 1));
-        item.intrinsic_header_width(maximum, height)
+        item.measured_intrinsic_header_width(maximum).unwrap_or(0.0)
+    }
+
+    /// Strip widths for one layout: natural widths capped by the current slot, or the equal slot
+    /// itself. A collapsed header (Docking hides a dragged tab) takes no strip width, so the
+    /// remaining headers close up like the reference.
+    fn allocated_widths(
+        items: &[Rc<CustomTabViewItem>],
+        natural_widths: &[f32],
+        compact: bool,
+        max_width: f32,
+    ) -> Vec<f32> {
+        items
+            .iter()
+            .zip(natural_widths)
+            .map(|(item, natural)| {
+                if item.visibility() != Visibility::Visible {
+                    0.0
+                } else if compact {
+                    natural.min(max_width)
+                } else {
+                    max_width
+                }
+            })
+            .collect()
     }
 
     fn fit_compact_widths(widths: &mut [f32], available_content_width: f32) {
@@ -191,31 +235,28 @@ impl CustomTabStripPresenter {
         }
     }
 
-    fn measure_item_widths(
-        &self,
+    /// Measure phase only: measures each visible header once against `inputs` and reads its
+    /// natural width from that retained measurement.
+    fn measure_natural_widths(
         items: &[Rc<CustomTabViewItem>],
-        max_width: f32,
-        height: f32,
+        inputs: TabMeasureInputs,
     ) -> Vec<f32> {
-        let compact = self.compact();
         items
             .iter()
             .map(|item| {
-                // A collapsed header (Docking hides a dragged tab) takes no strip width, so the
-                // remaining headers close up like the reference.
                 if item.visibility() != Visibility::Visible {
                     return 0.0;
                 }
                 #[cfg(test)]
                 ITEM_MEASURE_CALLS.with(|calls| calls.set(calls.get() + 1));
                 item.measure(Size {
-                    width: max_width + 2.0 * item.header_overhang(),
-                    height,
+                    width: inputs.measure_width + 2.0 * item.header_overhang(),
+                    height: inputs.height,
                 });
-                if compact {
-                    Self::measured_item_width(item, max_width, height)
+                if inputs.compact {
+                    Self::measured_item_width(item, inputs.measure_width)
                 } else {
-                    max_width
+                    inputs.measure_width
                 }
             })
             .collect()
@@ -399,61 +440,69 @@ impl CustomTabStripPresenter {
             };
         }
         let max_width = self.effective_max_width(available.width, visible_count(&items));
-        let widths = self.measure_item_widths(&items, max_width, available.height);
-        let content_width = widths.iter().sum::<f32>();
-        *self.last_measurement_pass().borrow_mut() = Some(MeasuredTabStripPass::new(
-            &items,
-            max_width,
-            available.height,
-            self.compact(),
-            self.tab_strip_position(),
-            self.close_button_presentation(),
-            widths,
-        ));
+        let inputs = self.measure_inputs(max_width, available.height);
+        let cache = self.last_measurement_pass();
+        let reusable = cache
+            .borrow()
+            .as_ref()
+            .is_some_and(|pass| pass.reusable(&items, inputs));
+        if !reusable {
+            let natural_widths = Self::measure_natural_widths(&items, inputs);
+            *cache.borrow_mut() = Some(MeasuredTabStripPass {
+                item_identities: items.iter().map(Rc::downgrade).collect(),
+                layouts: items
+                    .iter()
+                    .map(|item| measured_layout(item.as_ui_element()).unwrap_or_default())
+                    .collect(),
+                inputs,
+                natural_widths,
+            });
+        }
+        let content_width = cache.borrow().as_ref().map_or(0.0, |pass| {
+            Self::allocated_widths(&items, &pass.natural_widths, inputs.compact, max_width)
+                .iter()
+                .sum::<f32>()
+        });
         Size {
             width: content_width + TAB_STRIP_FRAME_INSET * 2.0,
             height: TAB_STRIP_HEIGHT,
         }
     }
 
+    /// Positions the headers from the last Measure's natural widths. Arrange never measures: a
+    /// header changed since then has invalidated Measure, and the next Measure refreshes it.
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
         let items = self.items();
         if items.is_empty() {
-            self.last_measurement_pass().borrow_mut().take();
             return final_size;
         }
+        let compact = self.compact();
         let max_width = self.effective_max_width(final_size.width, visible_count(&items));
-        let measured_pass = self
+        let natural_widths = self
             .last_measurement_pass()
             .borrow()
-            .clone()
-            .filter(|pass| {
-                pass.matches(
-                    &items,
-                    max_width,
-                    final_size.height,
-                    self.compact(),
-                    self.tab_strip_position(),
-                    self.close_button_presentation(),
-                )
+            .as_ref()
+            .filter(|pass| pass.same_items(&items))
+            .map(|pass| pass.natural_widths.clone())
+            .unwrap_or_else(|| {
+                let ceiling = self.measure_width(max_width);
+                items
+                    .iter()
+                    .map(|item| {
+                        if compact {
+                            item.measured_intrinsic_header_width(ceiling).unwrap_or(0.0)
+                        } else {
+                            max_width
+                        }
+                    })
+                    .collect()
             });
-        let mut widths = measured_pass
-            .map(|pass| pass.widths)
-            .unwrap_or_else(|| self.measure_item_widths(&items, max_width, final_size.height));
+        let mut widths = Self::allocated_widths(&items, &natural_widths, compact, max_width);
         let frame_inset = TAB_STRIP_FRAME_INSET;
-        if self.compact() {
+        if compact {
             Self::fit_compact_widths(&mut widths, (final_size.width - frame_inset * 2.0).max(0.0));
         }
-        *self.last_measurement_pass().borrow_mut() = Some(MeasuredTabStripPass::new(
-            &items,
-            max_width,
-            final_size.height,
-            self.compact(),
-            self.tab_strip_position(),
-            self.close_button_presentation(),
-            widths.clone(),
-        ));
         let mut x = frame_inset;
         for (item, width) in items.iter().zip(widths) {
             let overhang = item.header_overhang();
@@ -545,7 +594,8 @@ mod tests {
             width: 80.0,
             height: TAB_STRIP_HEIGHT,
         });
-        assert_eq!(ITEM_MEASURE_CALLS.with(Cell::get), 2);
+        // Arrange at a width other than the measured one allocates without measuring again.
+        assert_eq!(ITEM_MEASURE_CALLS.with(Cell::get), 1);
     }
 
     #[test]
@@ -613,38 +663,263 @@ mod tests {
         assert_eq!(INTRINSIC_WIDTH_CALLS.with(Cell::get), 1);
     }
 
-    #[test]
-    fn arrange_remeasures_when_a_header_measurement_is_invalidated() {
-        let presenter = CustomTabStripPresenter::new();
-        let item = CustomTabViewItem::new_item();
-        item.set_header("First".to_owned());
-        presenter.set_items(vec![item.clone()]);
-        presenter.set_compact(true);
-        presenter.reconcile_items();
+    struct CountingTextBackend(Rc<Cell<usize>>);
+
+    impl crate::core::graphics::TextBackend for CountingTextBackend {
+        fn default_text_style(&self) -> crate::core::graphics::ComputedTextStyle {
+            crate::core::graphics::ComputedTextStyle::fallback()
+        }
+
+        fn measure_text(
+            &self,
+            request: &crate::core::graphics::TextMeasureRequest<'_>,
+        ) -> crate::core::graphics::TextMeasureResult {
+            self.0.set(self.0.get() + 1);
+            crate::core::graphics::TextMeasureResult {
+                size: Size {
+                    width: (request.text.chars().count() as f32 * 7.0)
+                        .min(request.available.width.max(0.0)),
+                    height: 16.0,
+                },
+                baseline: 12.0,
+                line_count: 1,
+            }
+        }
+    }
+
+    /// Installs a counting text backend for the test's thread and removes it on drop.
+    struct TextMeasureProbe(Rc<Cell<usize>>);
+
+    impl TextMeasureProbe {
+        fn install() -> Self {
+            let calls = Rc::new(Cell::new(0));
+            crate::core::graphics::set_text_backend(Rc::new(CountingTextBackend(calls.clone())));
+            Self(calls)
+        }
+
+        fn calls(&self) -> usize {
+            self.0.get()
+        }
+    }
+
+    impl Drop for TextMeasureProbe {
+        fn drop(&mut self) {
+            crate::core::graphics::clear_text_backend();
+        }
+    }
+
+    fn reset_counters() {
         ITEM_MEASURE_CALLS.with(|calls| calls.set(0));
         INTRINSIC_WIDTH_CALLS.with(|calls| calls.set(0));
+    }
 
-        presenter.measure(Size {
-            width: 200.0,
+    fn measure_calls() -> (usize, usize) {
+        (
+            ITEM_MEASURE_CALLS.with(Cell::get),
+            INTRINSIC_WIDTH_CALLS.with(Cell::get),
+        )
+    }
+
+    fn strip(width: f32) -> Size {
+        Size {
+            width,
+            height: TAB_STRIP_HEIGHT,
+        }
+    }
+
+    fn arrange_strip(presenter: &CustomTabStripPresenter, width: f32) {
+        presenter.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width,
             height: TAB_STRIP_HEIGHT,
         });
+    }
+
+    /// A connected compact strip like a Docking group with `compact_tabs`.
+    fn connected_compact_strip(
+        headers: &[&str],
+    ) -> (Rc<CustomTabStripPresenter>, Vec<Rc<CustomTabViewItem>>) {
+        let presenter = CustomTabStripPresenter::new();
+        let items: Vec<_> = headers
+            .iter()
+            .map(|header| {
+                let item = CustomTabViewItem::new_item();
+                item.set_header((*header).to_owned());
+                item
+            })
+            .collect();
+        presenter.set_items(items.clone());
+        presenter.set_compact(true);
+        presenter.reconcile_items();
+        presenter.apply_connected_chrome(true);
+        (presenter, items)
+    }
+
+    #[test]
+    fn intrinsic_width_reader_uses_the_retained_measurement_only() {
+        let probe = TextMeasureProbe::install();
+        let (presenter, items) = connected_compact_strip(&["Document"]);
+        let item = &items[0];
+        assert_eq!(item.measured_intrinsic_header_width(200.0), None);
+        presenter.measure(strip(640.0));
+        let text_calls = probe.calls();
+        reset_counters();
+
+        let width = item
+            .measured_intrinsic_header_width(200.0)
+            .expect("a measured header has a retained natural width");
+        assert_eq!(item.measured_intrinsic_header_width(200.0), Some(width));
+        assert!(width > "Document".len() as f32 * 7.0);
+        assert_eq!(probe.calls(), text_calls);
+        assert_eq!(measure_calls(), (0, 0));
+        assert_eq!(item.measured_intrinsic_header_width(40.0), Some(40.0));
+    }
+
+    #[test]
+    fn presenter_arrange_never_measures() {
+        let probe = TextMeasureProbe::install();
+        let (presenter, items) = connected_compact_strip(&["One", "A longer title", "Three"]);
+        presenter.measure(strip(640.0));
+        let text_calls = probe.calls();
+        reset_counters();
+
+        for width in [640.0, 120.0, 900.0, 640.0] {
+            arrange_strip(&presenter, width);
+        }
+
+        assert_eq!(measure_calls(), (0, 0));
+        assert_eq!(probe.calls(), text_calls);
+        // The narrow pass still fit the strip; the last pass restored natural widths.
+        let total: f32 = items
+            .iter()
+            .map(|item| item.arranged_width().unwrap())
+            .sum();
+        let natural: f32 = items
+            .iter()
+            .map(|item| item.measured_intrinsic_header_width(200.0).unwrap())
+            .sum();
+        assert!((total - natural).abs() < 0.001);
+    }
+
+    #[test]
+    fn strip_width_changes_reuse_natural_widths() {
+        let probe = TextMeasureProbe::install();
+        let (presenter, items) = connected_compact_strip(&["One", "A longer title"]);
+        presenter.measure(strip(640.0));
+        let text_calls = probe.calls();
+        let natural: Vec<f32> = items
+            .iter()
+            .map(|item| item.measured_intrinsic_header_width(200.0).unwrap())
+            .collect();
+        reset_counters();
+
+        for width in [300.0, 120.0, 900.0] {
+            presenter.measure(strip(width));
+            arrange_strip(&presenter, width);
+        }
+
+        assert_eq!(measure_calls(), (0, 0));
+        assert_eq!(probe.calls(), text_calls);
+        // The last narrow-to-wide sequence ended at 900, where natural widths fit unchanged.
+        for (item, natural) in items.iter().zip(&natural) {
+            assert_eq!(item.arranged_width(), Some(*natural));
+        }
+        presenter.measure(strip(60.0));
+        arrange_strip(&presenter, 60.0);
+        // Each natural width is capped by the 60 px strip, then the sum is fit proportionally.
+        let capped: Vec<f32> = natural.iter().map(|width| width.min(60.0)).collect();
+        let sum = capped.iter().sum::<f32>();
+        for (item, capped) in items.iter().zip(&capped) {
+            let fitted = item.arranged_width().unwrap();
+            assert!((fitted - 60.0 * capped / sum).abs() < 0.001);
+        }
+        assert_eq!(measure_calls(), (0, 0));
+    }
+
+    #[test]
+    fn header_mutation_is_refreshed_by_the_next_measure_not_by_arrange() {
+        let (presenter, items) = connected_compact_strip(&["First"]);
+        let item = &items[0];
+        presenter.measure(strip(640.0));
+        arrange_strip(&presenter, 640.0);
+        let short = item.arranged_width().unwrap();
+        reset_counters();
+
         item.set_header("A substantially longer header".to_owned());
+        arrange_strip(&presenter, 640.0);
+        assert_eq!(measure_calls(), (0, 0));
 
-        presenter.arrange(Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 200.0,
-            height: TAB_STRIP_HEIGHT,
-        });
+        presenter.measure(strip(640.0));
+        assert_eq!(measure_calls(), (1, 1));
+        arrange_strip(&presenter, 640.0);
+        arrange_strip(&presenter, 640.0);
+        assert_eq!(measure_calls(), (1, 1));
+        let long = item.arranged_width().unwrap();
+        assert!(long > short);
+        assert_eq!(item.measured_intrinsic_header_width(200.0), Some(long));
+    }
 
-        presenter.arrange(Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 200.0,
-            height: TAB_STRIP_HEIGHT,
-        });
+    #[test]
+    fn activation_reserves_the_reference_marker_slot_through_measure() {
+        // WinUI.Dock collapses its ActiveIndicator while inactive, so the 4 px marker and 6 px gap
+        // join the header only while active. The width change goes through Measure invalidation.
+        let (presenter, items) = connected_compact_strip(&["Document"]);
+        let item = &items[0];
+        presenter.measure(strip(640.0));
+        arrange_strip(&presenter, 640.0);
+        let inactive = item.arranged_width().unwrap();
+        reset_counters();
 
-        assert_eq!(ITEM_MEASURE_CALLS.with(Cell::get), 2);
-        assert_eq!(INTRINSIC_WIDTH_CALLS.with(Cell::get), 2);
+        item.set_active_document_marker_visible(true);
+        arrange_strip(&presenter, 640.0);
+        assert_eq!(measure_calls(), (0, 0));
+        presenter.measure(strip(640.0));
+        arrange_strip(&presenter, 640.0);
+        assert_eq!(item.arranged_width(), Some(inactive + 10.0));
+
+        item.set_active_document_marker_visible(false);
+        presenter.measure(strip(640.0));
+        arrange_strip(&presenter, 640.0);
+        assert_eq!(item.arranged_width(), Some(inactive));
+        assert_eq!(measure_calls(), (2, 2));
+    }
+
+    #[test]
+    fn hover_actions_keep_their_reserved_slot_width() {
+        let (presenter, items) = connected_compact_strip(&["Document"]);
+        presenter.set_close_button_presentation(CloseButtonPresentation::OnPointerOver);
+        let item = &items[0];
+        item.set_document_pin_action(true, Rc::new(|| {}));
+        presenter.measure(strip(640.0));
+        arrange_strip(&presenter, 640.0);
+        let width = item.arranged_width().unwrap();
+
+        for hovered in [true, false, true] {
+            item.update_pointer_over(hovered);
+            assert_eq!(item.pointer_over(), hovered);
+            presenter.measure(strip(640.0));
+            arrange_strip(&presenter, 640.0);
+            assert_eq!(item.arranged_width(), Some(width));
+        }
+    }
+
+    #[test]
+    fn collapsed_headers_leave_the_strip_and_return_through_measure() {
+        let (presenter, items) = connected_compact_strip(&["One", "Two"]);
+        presenter.measure(strip(640.0));
+        arrange_strip(&presenter, 640.0);
+        let first = items[0].arranged_width().unwrap();
+
+        items[0].set_visibility(Visibility::Collapsed);
+        presenter.measure(strip(640.0));
+        arrange_strip(&presenter, 640.0);
+        assert_eq!(items[1].arranged_offset().unwrap().x, 0.0);
+
+        items[0].set_visibility(Visibility::Visible);
+        presenter.measure(strip(640.0));
+        arrange_strip(&presenter, 640.0);
+        assert_eq!(items[0].arranged_width(), Some(first));
+        assert_eq!(items[1].arranged_offset().unwrap().x, first);
     }
 }

@@ -71,45 +71,56 @@ struct HeaderDragGesture {
     dragging: bool,
 }
 
-/// Keeps the unrotated text rectangle intact inside a narrow side tab. A normal Grid cell
-/// would clamp the title to the rail width before its presentation rotation is applied.
+/// Title of one rail entry. Its Measure measures the title once and sizes the entry from it: the
+/// title length (at least one entry height) runs along the rail, the rail width across it. Arrange
+/// keeps the unrotated text rectangle intact inside a narrow side tab; a normal Grid cell would
+/// clamp the title to the rail width before its presentation rotation is applied.
 #[elwindui::component(inherits Control)]
-pub(crate) struct RotatedStripLabel {
+pub(crate) struct StripEntryLabel {
     #[state(default = None)]
     text: Option<Rc<TextBlock>>,
-    #[state(default = AUTO_HIDE_ENTRY_HEIGHT)]
-    label_width: f32,
-    template: template_view!(|_this: Self| {
-        Grid {
-            rows: [GridLength::Star(1.0)]
-            columns: [GridLength::Star(1.0)]
-        }
-    }),
+    #[state(default = false)]
+    vertical: bool,
+    // A stack measures the title once with the label's constraint; a Grid cell would measure it
+    // again at its resolved size.
+    template: template_view!(|_this: Self| { HorizontalLayout {} }),
 }
 
 #[elwindui::component]
-impl RotatedStripLabel {
+impl StripEntryLabel {
     #[overrides]
     fn on_apply_template(&self) {
         if let Some(root) = self.__template_root()
-            && let Some(grid) = root.as_any().downcast_ref::<Grid>()
+            && let Some(stack) = root
+                .as_any()
+                .downcast_ref::<crate::core::ui::HorizontalLayout>()
             && let Some(text) = self.text()
         {
-            grid.children().add(text);
+            stack.children().add(text);
         }
     }
 
     #[overrides]
     fn measure_override(&self, _available: Size) -> Size {
-        if let Some(text) = self.text() {
-            text.measure(Size {
-                width: self.label_width(),
+        // The template is unbounded along the title, so this measures the title once at its
+        // natural width and leaves the template measured for Arrange.
+        if let Some(root) = self.__template_root() {
+            root.measure(Size {
+                width: f32::INFINITY,
                 height: AUTO_HIDE_ENTRY_HEIGHT,
             });
         }
-        Size {
-            width: AUTO_HIDE_STRIP_SIZE,
-            height: self.label_width(),
+        let length = self.title_length();
+        if self.vertical() {
+            Size {
+                width: AUTO_HIDE_STRIP_SIZE,
+                height: length,
+            }
+        } else {
+            Size {
+                width: length,
+                height: AUTO_HIDE_STRIP_SIZE,
+            }
         }
     }
 
@@ -124,10 +135,11 @@ impl RotatedStripLabel {
             });
         }
         if let Some(text) = self.text() {
+            let length = self.title_length();
             text.arrange(crate::core::base::Rect {
-                x: (final_size.width - self.label_width()) * 0.5,
+                x: (final_size.width - length) * 0.5,
                 y: (final_size.height - AUTO_HIDE_ENTRY_HEIGHT) * 0.5,
-                width: self.label_width(),
+                width: length,
                 height: AUTO_HIDE_ENTRY_HEIGHT,
             });
         }
@@ -135,15 +147,22 @@ impl RotatedStripLabel {
     }
 }
 
-impl RotatedStripLabel {
-    fn new_label(text: Rc<TextBlock>, width: f32) -> Rc<Self> {
+impl StripEntryLabel {
+    fn new_label(text: Rc<TextBlock>, vertical: bool) -> Rc<Self> {
         let label = Self::new();
         label.set_text(Some(text));
-        label.set_label_width(width);
+        label.set_vertical(vertical);
         label
     }
-}
 
+    /// The title's unrotated width from this layout's measurement, at least one entry height.
+    fn title_length(&self) -> f32 {
+        self.text()
+            .and_then(|text| text.measured_size())
+            .map_or(0.0, |size| size.width)
+            .max(AUTO_HIDE_ENTRY_HEIGHT)
+    }
+}
 /// Only one auto-hide Document owns the open popup on a surface. Pane extent memory is deliberately
 /// runtime-only and keyed by Document plus resize axis; it never enters Snapshot V2.
 pub(crate) struct AutoHideOverlay {
@@ -688,8 +707,8 @@ impl AutoHideOverlay {
     pub(crate) fn marker_size_for_test(&self, item: &DockItemId) -> Option<Size> {
         let marker = self.markers.borrow().get(item)?.0.clone();
         Some(Size {
-            width: marker.width()?,
-            height: marker.height()?,
+            width: marker.arranged_width()?,
+            height: marker.arranged_height()?,
         })
     }
 
@@ -800,22 +819,15 @@ impl AutoHideOverlay {
         let text = TextBlock::new();
         text.set_text(label);
         text.set_foreground(themed_brush(BrushStyle::Foreground));
-        text.measure(Size {
-            width: f32::INFINITY,
-            height: AUTO_HIDE_ENTRY_HEIGHT,
-        });
-        let natural = text.measured_size().unwrap_or_default();
-        let text_width = natural.width.max(AUTO_HIDE_ENTRY_HEIGHT);
-        text.set_width(text_width);
-        text.set_height(AUTO_HIDE_ENTRY_HEIGHT);
-        text.set_horizontal_alignment(HorizontalAlignment::Center);
-        text.set_vertical_alignment(VerticalAlignment::Center);
+        // The label measures the title during normal layout and arranges it at the title length.
+        text.set_horizontal_alignment(HorizontalAlignment::Stretch);
+        text.set_vertical_alignment(VerticalAlignment::Stretch);
+        let vertical = matches!(side, DockSide::Left | DockSide::Right);
         let entry = Grid::new();
         entry.set_background(Some(Color::TRANSPARENT.into()));
         entry.set_hit_test_visible(true);
-        if matches!(side, DockSide::Left | DockSide::Right) {
+        if vertical {
             entry.set_width(AUTO_HIDE_STRIP_SIZE);
-            entry.set_height(text_width);
             text.set_visual_transform(VisualTransform::new(
                 Vector { x: 0.0, y: 0.0 },
                 1.0,
@@ -824,46 +836,29 @@ impl AutoHideOverlay {
             ));
             text.set_transform_origin(UnitPoint::CENTER);
         } else {
-            entry.set_width(text_width);
             entry.set_height(AUTO_HIDE_STRIP_SIZE);
         }
         let label = text.clone();
-        if matches!(side, DockSide::Left | DockSide::Right) {
-            entry
-                .children()
-                .add(RotatedStripLabel::new_label(text, text_width));
-        } else {
-            entry.children().add(text);
-        }
-        // The mark sits on the strip's outer edge and is always shown, like the reference.
+        entry
+            .children()
+            .add(StripEntryLabel::new_label(text, vertical));
+        // The mark sits on the strip's outer edge, spans the title length and is always shown,
+        // like the reference.
         let marker = Rectangle::new();
         marker.set_fill(themed_brush(BrushStyle::Separator));
         marker.set_hit_test_visible(false);
+        if vertical {
+            marker.set_width(AUTO_HIDE_MARKER_SIZE);
+            marker.set_vertical_alignment(VerticalAlignment::Stretch);
+        } else {
+            marker.set_height(AUTO_HIDE_MARKER_SIZE);
+            marker.set_horizontal_alignment(HorizontalAlignment::Stretch);
+        }
         match side {
-            DockSide::Left => {
-                marker.set_width(AUTO_HIDE_MARKER_SIZE);
-                marker.set_height(text_width);
-                marker.set_horizontal_alignment(HorizontalAlignment::Left);
-                marker.set_vertical_alignment(VerticalAlignment::Top);
-            }
-            DockSide::Right => {
-                marker.set_width(AUTO_HIDE_MARKER_SIZE);
-                marker.set_height(text_width);
-                marker.set_horizontal_alignment(HorizontalAlignment::Right);
-                marker.set_vertical_alignment(VerticalAlignment::Top);
-            }
-            DockSide::Top => {
-                marker.set_width(text_width);
-                marker.set_height(AUTO_HIDE_MARKER_SIZE);
-                marker.set_horizontal_alignment(HorizontalAlignment::Center);
-                marker.set_vertical_alignment(VerticalAlignment::Top);
-            }
-            DockSide::Bottom => {
-                marker.set_width(text_width);
-                marker.set_height(AUTO_HIDE_MARKER_SIZE);
-                marker.set_horizontal_alignment(HorizontalAlignment::Center);
-                marker.set_vertical_alignment(VerticalAlignment::Bottom);
-            }
+            DockSide::Left => marker.set_horizontal_alignment(HorizontalAlignment::Left),
+            DockSide::Right => marker.set_horizontal_alignment(HorizontalAlignment::Right),
+            DockSide::Top => marker.set_vertical_alignment(VerticalAlignment::Top),
+            DockSide::Bottom => marker.set_vertical_alignment(VerticalAlignment::Bottom),
         }
         entry.children().add(marker.clone());
         (entry, marker, Rc::new(Cell::new(false)), label)

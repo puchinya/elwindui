@@ -424,6 +424,11 @@ mod chrome_tests {
             assert!(overlay.measured_size().is_some());
         }
         overlay.set_presentation(false, None, TabStripPosition::Top, 32.0);
+        // The painter leaves the render tree, so no previous frame can remain painted.
+        assert_eq!(
+            overlay.painter().map(|painter| painter.visibility()),
+            Some(Visibility::Collapsed)
+        );
         arrange(300.0);
         assert_eq!(overlay.painted_frame().map(|(rect, _)| rect), None);
         overlay.set_presentation(true, None, TabStripPosition::Top, 32.0);
@@ -506,15 +511,11 @@ mod chrome_tests {
 /// Paints the active frame contour over its arranged bounds. Replacing the contour re-records paint
 /// only, unlike an `Image` source change, which would invalidate Measure from the overlay's
 /// Arrange. While its group is inactive it is collapsed and leaves the render tree.
-#[elwindui::component(inherits Control)]
+#[elwindui::component(inherits Image)]
 struct ActiveFramePainter {
     #[state(default = Rc::new(std::cell::RefCell::new(None)))]
     source: Rc<std::cell::RefCell<Option<ImageSource>>>,
-    template: template_view!(|_this: Self| {
-        Grid {
-            hit_test_visible: false,
-        }
-    }),
+    body: view! {},
 }
 
 #[elwindui::component]
@@ -574,18 +575,25 @@ struct GroupChromeOverlay {
     strip_height: f32,
     #[state(default = None)]
     frame_key: Option<(Size, Option<(f32, f32)>, TabStripPosition, Brush)>,
-    #[computed(expr = if is_active { Visibility::Visible } else { Visibility::Collapsed })]
-    frame_visibility: Visibility,
     template: template_view!(|this: Self| {
-        ActiveFramePainter {
-            visibility: frame_visibility
+        Grid {
+            rows: [GridLength::Star(1.0)]
+            columns: [GridLength::Star(1.0)]
             hit_test_visible: false
+            ActiveFramePainter {
+                hit_test_visible: false
+            }
         }
     }),
 }
 
 #[elwindui::component]
 impl GroupChromeOverlay {
+    #[overrides]
+    fn on_apply_template(&self) {
+        self.sync_painter_visibility();
+    }
+
     #[overrides]
     fn measure_override(&self, available: Size) -> Size {
         // The overlay fills whatever its host arranges and asks for no space itself.
@@ -598,7 +606,7 @@ impl GroupChromeOverlay {
         }
     }
 
-    /// Places the frame painter on the page area and builds its open contour from final geometry.
+    /// Places the painter's template on the page area and builds its open contour from final geometry.
     /// Only paint state changes here; nothing that Measure reads is written.
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
@@ -643,8 +651,23 @@ impl GroupChromeOverlay {
 
 impl GroupChromeOverlay {
     fn painter(&self) -> Option<Rc<dyn UIElementExt>> {
-        self.__template_root()
-            .filter(|root| root.as_any().is::<ActiveFramePainter>())
+        self.__template_root()?
+            .visual_children()
+            .first()
+            .cloned()
+            .filter(|painter| painter.as_any().is::<ActiveFramePainter>())
+    }
+
+    /// Collapses the painter while the group is inactive so it leaves the render tree. This runs
+    /// with presentation updates, outside layout.
+    fn sync_painter_visibility(&self) {
+        if let Some(painter) = self.painter() {
+            painter.set_visibility(if self.is_active() {
+                Visibility::Visible
+            } else {
+                Visibility::Collapsed
+            });
+        }
     }
 
     /// The page area beside the strip, where the frame paints.
@@ -668,7 +691,12 @@ impl GroupChromeOverlay {
         if !self.is_active() || painter.visibility() != Visibility::Visible {
             return None;
         }
-        let offset = painter.arranged_offset()?;
+        let root = self.__template_root()?.arranged_offset()?;
+        let inner = painter.arranged_offset()?;
+        let offset = Point {
+            x: root.x + inner.x,
+            y: root.y + inner.y,
+        };
         let painter_ref = painter.as_any().downcast_ref::<ActiveFramePainter>()?;
         let source = painter_ref.source().borrow().clone()?;
         Some((
@@ -710,6 +738,7 @@ impl GroupChromeOverlay {
         let mut changed = false;
         if self.is_active() != is_active {
             self.set_is_active(is_active);
+            self.sync_painter_visibility();
             changed = true;
         }
         let same_tab = match (self.active_tab(), active_tab.as_ref()) {

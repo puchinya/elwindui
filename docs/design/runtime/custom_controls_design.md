@@ -204,12 +204,12 @@ remains visible at the arranged width. The marker is not arranged by a group ove
 content. A
 `Rectangle` in a fixed two-pixel seam slot matches the content background and covers the selected
 header's lower stroke so the rounded top outline joins the content frame. Unselected headers keep
-their bottom separator and pointer-over background. The close helper uses a fixed 20-pixel slot and a composed
-`TextBlock` `×` glyph. `Always` and `OnPointerOver` reserve identical width; hover changes only the
-glyph's paint, so it does not invalidate the item's measured or arranged geometry. The glyph's text
-remains structurally present and is hidden with a transparent solid foreground; showing it clears
-that local foreground. `Never` collapses the slot and is allowed to invalidate normal measure/arrange
-state. No SystemIcon geometry or direct close-X drawing is duplicated here.
+their bottom separator and pointer-over background. The close helper uses a vector glyph in a
+32-by-24-pixel button with a 4-pixel leading gap for generic tabs, or a 24-by-24-pixel button for
+Docking's connected chrome. `Always` and `OnPointerOver` reserve identical width; hover changes
+the glyph's paint without changing that slot. The glyph stays structurally present with a
+transparent brush while hidden. `Never` collapses the slot and invalidates normal measure/arrange
+state. The private vector helper owns the close glyph geometry.
 
 The item binds routed pointer handlers on its header root. The close helper
 handles its own press/release first and marks the routed event handled, so a

@@ -1,13 +1,13 @@
 //! Reconciliation boundary between the value model and stable runtime item wrappers.
 
 use crate::core::base::{Point, Rect, Size};
-use crate::core::graphics::{Color, FontWeight};
+use crate::core::graphics::{Brush, Color, FontWeight, ImageSource};
 use crate::core::input::PointerEventArgs;
 use crate::core::layout::{GridLength, GridTrackConstraint, VerticalAlignment, Visibility};
 use crate::core::theme::BrushStyle;
 use crate::core::ui::{
-    ControlExt, Grid, GridExt, LayoutExt, Rectangle, ShapeExt, TextBlock, TextBlockExt,
-    TextStyleOwner, UIElementExt,
+    ControlExt, Grid, GridExt, Image, ImageExt, LayoutExt, TextBlock, TextBlockExt, TextStyleOwner,
+    UIElementExt,
 };
 #[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
 use crate::core::ui::{MenuExt, MenuItemExt};
@@ -297,6 +297,158 @@ impl GroupRuntimeHost {
     }
 }
 
+fn active_frame_image(
+    size: Size,
+    gap: Option<(f32, f32)>,
+    position: TabStripPosition,
+    brush: Brush,
+) -> Option<ImageSource> {
+    use crate::core::base::AffineTransform;
+    use crate::core::graphics::{
+        PathBuilder, StrokeStyle, VectorGroup, VectorImageBuilder, VectorNode, VectorPaint,
+        VectorPaintOrder, VectorPathNode, VectorShapeRendering, VectorStroke,
+    };
+    if !size.width.is_finite()
+        || !size.height.is_finite()
+        || size.width <= 1.0
+        || size.height <= 1.0
+    {
+        return None;
+    }
+    let radius = 4.0_f32
+        .min((size.width - 1.0) * 0.5)
+        .min((size.height - 1.0) * 0.5);
+    let left = 0.5;
+    let right = size.width - 0.5;
+    let bottom = size.height - 0.5;
+    let gap = gap.and_then(|(start, end)| {
+        let start = start.clamp(left + radius, right - radius);
+        let end = end.clamp(left + radius, right - radius);
+        (start.is_finite() && end.is_finite() && end > start).then_some((start, end))
+    });
+    let map = |x, y| Point {
+        x,
+        y: if position == TabStripPosition::Bottom {
+            size.height - y
+        } else {
+            y
+        },
+    };
+    let mut path = PathBuilder::new();
+    path.move_to(map(gap.map_or(left + radius, |(_, end)| end), 0.5))
+        .line_to(map(right - radius, 0.5))
+        .quad_to(map(right, 0.5), map(right, 0.5 + radius))
+        .line_to(map(right, bottom - radius))
+        .quad_to(map(right, bottom), map(right - radius, bottom))
+        .line_to(map(left + radius, bottom))
+        .quad_to(map(left, bottom), map(left, bottom - radius))
+        .line_to(map(left, 0.5 + radius))
+        .quad_to(map(left, 0.5), map(left + radius, 0.5));
+    if let Some((start, _)) = gap {
+        path.line_to(map(start, 0.5));
+    } else {
+        path.close();
+    }
+    let node = VectorNode::Path(VectorPathNode {
+        path: path.build().ok()?,
+        transform: AffineTransform::IDENTITY,
+        fill: None,
+        stroke: Some(VectorStroke {
+            paint: VectorPaint::Brush(brush),
+            opacity: 1.0,
+            style: StrokeStyle {
+                width: 1.0,
+                ..StrokeStyle::default()
+            },
+        }),
+        paint_order: VectorPaintOrder::default(),
+        rendering: VectorShapeRendering::GeometricPrecision,
+        visibility: true,
+    });
+    Some(ImageSource::Vector(
+        VectorImageBuilder::new(
+            size,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: size.width,
+                height: size.height,
+            },
+        )
+        .ok()?
+        .root(VectorGroup {
+            children: std::sync::Arc::from([node]),
+            ..VectorGroup::default()
+        })
+        .finish()
+        .ok()?,
+    ))
+}
+
+#[cfg(test)]
+mod chrome_tests {
+    use super::*;
+    use crate::core::graphics::{PathCommand, VectorNode};
+
+    #[test]
+    fn active_frame_contour_opens_at_the_selected_tab_on_either_edge() {
+        let size = Size {
+            width: 300.0,
+            height: 180.0,
+        };
+        for (position, y) in [
+            (TabStripPosition::Top, 0.5),
+            (TabStripPosition::Bottom, 179.5),
+        ] {
+            let Some(ImageSource::Vector(image)) =
+                active_frame_image(size, Some((20.0, 120.0)), position, accent_brush())
+            else {
+                panic!("valid frame should produce vector geometry")
+            };
+            let VectorNode::Path(node) = &image.root().children[0] else {
+                panic!("frame should be a path")
+            };
+            let commands = node.path.commands();
+            assert_eq!(
+                commands.first(),
+                Some(&PathCommand::MoveTo(Point { x: 120.0, y }))
+            );
+            assert_eq!(
+                commands.last(),
+                Some(&PathCommand::LineTo(Point { x: 20.0, y }))
+            );
+            assert!(
+                !commands
+                    .iter()
+                    .any(|command| matches!(command, PathCommand::Close))
+            );
+            assert!(node.fill.is_none());
+            assert_eq!(node.stroke.as_ref().unwrap().style.width, 1.0);
+        }
+        let Some(ImageSource::Vector(image)) =
+            active_frame_image(size, None, TabStripPosition::Bottom, accent_brush())
+        else {
+            panic!("hidden strip should still produce a frame")
+        };
+        let VectorNode::Path(node) = &image.root().children[0] else {
+            panic!("frame should be a path")
+        };
+        assert_eq!(node.path.commands().last(), Some(&PathCommand::Close));
+        assert!(
+            active_frame_image(
+                Size {
+                    width: 0.0,
+                    height: 180.0
+                },
+                None,
+                TabStripPosition::Top,
+                accent_brush()
+            )
+            .is_none()
+        );
+    }
+}
+
 /// Docking-private active frame and document marker. The marker is placed from the retained tab's
 /// arranged bounds, keeping generic CustomTabView free of Docking-specific public state.
 #[elwindui::component(inherits Control)]
@@ -309,21 +461,12 @@ struct GroupChromeOverlay {
     tab_position: TabStripPosition,
     #[prop(default = 32.0)]
     strip_height: f32,
-    #[computed(expr = BrushStyle::Value(Color::TRANSPARENT.into()))]
-    transparent_brush: BrushStyle,
-    // WinUI.Dock draws the active group's border in the accent color: theme Primary when set,
-    // otherwise the platform accent. Bound here so it applies even before the first arrange.
-    #[computed(expr = if is_active { BrushStyle::Value(accent_brush()) } else { BrushStyle::Value(Color::TRANSPARENT.into()) })]
-    frame_stroke: BrushStyle,
+    #[state(default = None)]
+    frame_key: Option<(Size, Option<(f32, f32)>, TabStripPosition, Brush)>,
     #[computed(expr = if is_active { Visibility::Visible } else { Visibility::Collapsed })]
     frame_visibility: Visibility,
     template: template_view!(|this: Self| {
-        on_update(transparent_brush) { }
-        let active_frame = Rectangle {
-            fill: transparent_brush
-            stroke: frame_stroke
-            stroke_width: 1.0
-            corner_radius: 4.0
+        let active_frame = Image {
             visibility: frame_visibility
             hit_test_visible: false
         };
@@ -371,7 +514,7 @@ impl GroupChromeOverlay {
         if let Some(grid) = root.as_any().downcast_ref::<Grid>() {
             grid.set_rows(rows);
         }
-        // Visibility and stroke are set by `set_presentation`, outside layout.
+        // Visibility is set by `set_presentation`, outside layout.
         frame
             .as_ui_element()
             .set_attached_if_changed("Grid", "row", content_row);
@@ -382,6 +525,33 @@ impl GroupChromeOverlay {
             width: final_size.width.max(0.0),
             height: final_size.height.max(0.0),
         });
+
+        // Do not paint a border across the selected header's connection to the page.
+        // An open contour works even when the page background is transparent.
+        let size = Size {
+            width: final_size.width.max(0.0),
+            height: (final_size.height - strip_height).max(0.0),
+        };
+        let gap = self
+            .active_tab()
+            .filter(|_| strip_height > 0.0)
+            .and_then(|tab| {
+                let node: Rc<dyn UIElementExt> = tab;
+                SurfaceRegistry::bounds_in_surface_local(&node, &root)
+                    .map(|bounds| (bounds.x, bounds.x + bounds.width))
+            });
+        let key = (size, gap, self.tab_position(), accent_brush());
+        if self.is_active() && self.frame_key().as_ref() != Some(&key) {
+            if let Some(image) = frame.as_any().downcast_ref::<Image>() {
+                image.set_source(active_frame_image(
+                    size,
+                    gap,
+                    self.tab_position(),
+                    key.3.clone(),
+                ));
+            }
+            self.set_frame_key(Some(key));
+        }
 
         final_size
     }
@@ -429,16 +599,8 @@ impl GroupChromeOverlay {
     }
 
     fn refresh_theme(&self) {
-        let Some(root) = self.__template_root() else {
-            return;
-        };
-        if let Some(frame) = root
-            .visual_children()
-            .first()
-            .and_then(|child| child.as_any().downcast_ref::<Rectangle>())
-        {
-            frame.set_stroke(Some(accent_brush()));
-        }
+        self.set_frame_key(None);
+        self.invalidate_arrange();
     }
 }
 
@@ -501,6 +663,7 @@ pub struct RuntimeRealization {
     group_roots: BTreeMap<SnapshotGroupKey, RootKind>,
     group_selected: BTreeMap<SnapshotGroupKey, Option<DockItemId>>,
     auto_hide_roots: BTreeMap<DockItemId, (RootKind, DockSide)>,
+    auto_hide_extents: super::auto_hide::AutoHideExtentCache,
     owners: BTreeMap<DockItemId, RuntimePresentationOwner>,
     root: Option<RuntimeNode>,
     floating: Vec<FloatingRuntime>,
@@ -587,7 +750,13 @@ impl RuntimeRealization {
         surface: Rc<DockSurfaceView>,
         owner: Weak<crate::DockingControl>,
     ) -> Result<Self, DockLayoutError> {
-        let main_surface = SurfaceRuntime::new(RootKind::Main, surface.clone(), &owner);
+        let auto_hide_extents = super::auto_hide::AutoHideExtentCache::default();
+        let main_surface = SurfaceRuntime::new(
+            RootKind::Main,
+            surface.clone(),
+            &owner,
+            auto_hide_extents.clone(),
+        );
         let surface_root = surface.content_root();
         let mut surfaces = SurfaceRegistry::default();
         let surface_node: Rc<dyn UIElementExt> = surface.clone();
@@ -600,6 +769,7 @@ impl RuntimeRealization {
             group_roots: BTreeMap::new(),
             group_selected: BTreeMap::new(),
             auto_hide_roots: BTreeMap::new(),
+            auto_hide_extents,
             owners: BTreeMap::new(),
             root: None,
             floating: Vec::new(),
@@ -898,6 +1068,12 @@ impl RuntimeRealization {
 
         self.reconciling.set(true);
         let _reconciling_guard = ReconcilingGuard(self.reconciling.clone());
+        // Update retained titles while their old trees still route invalidation to the host.
+        // A detached title cannot mark its retained render group dirty; unchanged bounds would
+        // then leave the old text commands visible after the tree is reattached.
+        for planned in planned_groups.values() {
+            planned.host.title.set_text(&planned.title);
+        }
         self.detach_existing_tree();
         self.detach_before_attach(&desired_owners);
         let mut previous_floating = std::mem::take(&mut self.floating);
@@ -932,7 +1108,12 @@ impl RuntimeRealization {
                 .position(|runtime| runtime.identity == planned.identity)
                 .map(|position| previous_floating.swap_remove(position).surface)
                 .unwrap_or_else(|| {
-                    SurfaceRuntime::new(root.clone(), planned.surface.clone(), &self.owner)
+                    SurfaceRuntime::new(
+                        root.clone(),
+                        planned.surface.clone(),
+                        &self.owner,
+                        self.auto_hide_extents.clone(),
+                    )
                 });
             surface.set_root(root.clone());
             surface.auto_hide.close();
@@ -1316,9 +1497,19 @@ impl RuntimeRealization {
                 if frame.visibility() != Visibility::Visible {
                     return None;
                 }
-                let rectangle = frame.as_any().downcast_ref::<Rectangle>()?;
-                use crate::core::ui::RectangleExt;
-                Some(rectangle.stroke())
+                let image = frame.as_any().downcast_ref::<Image>()?;
+                let Some(ImageSource::Vector(source)) = image.source() else {
+                    return None;
+                };
+                let crate::core::graphics::VectorNode::Path(path) = &source.root().children[0]
+                else {
+                    return None;
+                };
+                let crate::core::graphics::VectorPaint::Brush(brush) = &path.stroke.as_ref()?.paint
+                else {
+                    return None;
+                };
+                Some(Some(brush.clone()))
             })
             .collect()
     }
@@ -1329,6 +1520,31 @@ impl RuntimeRealization {
             .values()
             .filter(|host| host.active_chrome.is_active())
             .count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_group_seams_for_test(&self) -> Vec<Rect> {
+        self.group_hosts
+            .values()
+            .filter_map(|host| {
+                let chrome = &host.active_chrome;
+                if !chrome.is_active() {
+                    return None;
+                }
+                let (size, gap, position, _) = chrome.frame_key()?;
+                let (start, end) = gap?;
+                Some(Rect {
+                    x: start,
+                    y: if position == TabStripPosition::Top {
+                        chrome.strip_height() + 0.5
+                    } else {
+                        size.height - 0.5
+                    },
+                    width: end - start,
+                    height: 0.0,
+                })
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -1978,6 +2194,8 @@ impl RuntimeRealization {
         self.group_roots.clear();
         self.group_selected.clear();
         self.auto_hide_roots.clear();
+        self.auto_hide_extents.borrow_mut().clear();
+        self.generated_group_options.borrow_mut().clear();
     }
 
     /// The presentation of generated group `id`, asking the owner's creation hook the first time
@@ -2242,7 +2460,10 @@ impl RuntimeRealization {
         let pin_group = group.clone();
         pin_button.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
-            Box::new(move |_, args| {
+            Box::new(move |event, args| {
+                if event.button != Some(crate::core::input::MouseButton::Left) {
+                    return;
+                }
                 args.handled.set(true);
                 let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
                 if let Some(owner) = owner {
@@ -2275,7 +2496,10 @@ impl RuntimeRealization {
         let close_group = group.clone();
         close_button.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
-            Box::new(move |_, args| {
+            Box::new(move |event, args| {
+                if event.button != Some(crate::core::input::MouseButton::Left) {
+                    return;
+                }
                 args.handled.set(true);
                 let owner: Option<Rc<crate::DockingControl>> = weak_owner.upgrade();
                 if let Some(owner) = owner {
@@ -2384,7 +2608,6 @@ impl RuntimeRealization {
         planned.host.container.children().clear();
         planned.host.body.children().clear();
         planned.host.container.set_visibility(planned.visibility);
-        planned.host.title.set_text(&planned.title);
         planned
             .host
             .content_header

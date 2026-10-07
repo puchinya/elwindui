@@ -52,7 +52,7 @@ existing ownership. Other backends keep native decorations.
 Tab context menus dispatch capability-checked
 close, indexed-close, float, and pin operations through the same model transaction boundary as
 their pointer equivalents. Empty authored groups marked `show_when_empty` retain their group host
-and display a non-hit-testable drop hint; other empty groups are normalized away. Per-group
+without hint text; other empty groups are normalized away. Per-group
 `compact_tabs` defaults to compact sizing to match the pinned WinUI.Dock `TabView` and is applied to
 the retained tab view without replacing wrappers or page content; authored groups can explicitly
 request equal-width headers.
@@ -60,7 +60,7 @@ request equal-width headers.
 ## Main surface and split realization
 
 `DockSurfaceView` is the private retained root containing the main root and the surface chrome. A
-snapshot split with N children retains a pane Grid with N Star tracks and N-1 splitter controls.
+snapshot split with N children retains a pane Grid with N pane tracks and N-1 splitter controls.
 Horizontal splits use columns, one Star row, and `column_spacing = 12`; vertical splits use rows,
 one Star column, and `row_spacing = 12`. The 12-pixel Grid spacing separates adjacent pane bounds.
 `DockSplitView` retains the pane Grid and hosts the splitter controls in a full-size single-cell
@@ -245,14 +245,21 @@ inside the header before the title. Its intrinsic width includes the marker slot
 along with title and reserved action slot, so compact document labels remain visible. Docking's
 private group host adds the active-color frame over content only for an explicitly active document;
 it does not paint the document marker over the page.
+The active selected header uses that same accent for its straight and curved outline pieces.
+A retained vector contour leaves the content-frame edge open only under the selected header,
+using its arranged surface-local bounds, so the two outlines join even over transparent content.
+Its image is reused while frame geometry, selection and the accent brush remain unchanged.
 
 Docking-specific chrome stays in the retained group realization keyed by `DockGroupId`; there is no
-independent group title or group drag surface. In a Bottom group, the active item's title and
+independent group title or group drag surface. In a Bottom group, the selected item's title and
 pin/close actions live in a private content-header row above the same selected page. The header
-refers to the active stable item wrapper and routes requests through existing item callbacks. Its
+refers to the selected stable item wrapper and routes requests through existing item callbacks. Its
 non-action area may initiate a drag for that item only. The bottom tab strip remains interactive
 when multiple items are present and is collapsed/non-hit-testable when exactly one item is present.
 Neither path creates a second page presenter or changes item ownership.
+
+Reconciliation updates retained header titles before detaching their old trees, so the host is
+notified to replace the cached text commands even when the new header has identical geometry.
 
 ## Auto-hide and native floating hosts
 
@@ -273,17 +280,19 @@ active item released when it was that item). Preferred sides are runtime-only an
 runtime.
 
 The strip entries measure from their title, rotate for Left/Right, remain horizontal for Top/Bottom,
-space entries by 16 pixels, and retain a 4-pixel theme marker for active/hover state. The pane fills
+space entries by 16 pixels, and retain a 4-pixel separator marker that turns accent with its title
+only on hover or press. Open/active state does not recolor the entry. The pane fills
 the usable center region on its perpendicular axis and begins at one third of that axis unless a
 runtime extent exists. Resizing is local to the pane edge (inverted for Right/Bottom), remains
 bounded to leave usable center content, and updates the transient extent for the item and axis.
 
 `RuntimeRealization` owns the auto-hide extent cache, keyed by `DockItemId` with separate width and
 height values so a side change does not reinterpret an extent across axes. Each surface overlay
-reads/writes the same owner cache through callbacks that do not retain the owner. Ordinary model
+reads/writes the same shared cache without retaining the owner. Resize completion, close,
+light dismissal, replacement and surface teardown remember the displayed extent. Ordinary model
 updates, close/reopen, and pin/unpin keep these extents; owner runtime reset/disposal clears them.
 They never enter `DockLayoutSnapshot` or V2 persistence. Outside dismissal is observed by the common
-surface root so an overlay does not consume clicks in remaining content; Escape is handled only via
+surface root and consumes the dismissing press before it reaches underlying content; Escape is handled only via
 the existing routed input path. The 40-pixel pane header owns its Document title and pin/close
 actions; its non-action region may start a drag for that open Document only. The page wrapper stays
 stable below it.

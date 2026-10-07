@@ -174,17 +174,11 @@ pub struct CustomTabViewItem {
     chrome_background: elwindui::core::theme::BrushStyle,
     #[computed(expr = elwindui::core::theme::BrushStyle::Value(core::graphics::Color::TRANSPARENT.into()))]
     transparent_brush: elwindui::core::theme::BrushStyle,
-    #[computed(expr = if is_selected && !connected_chrome {
-        super::support::native_tab_stroke(palette_dark)
-    } else if is_selected {
-        elwindui::core::theme::BrushStyle::Separator
-    } else {
-        elwindui::core::theme::BrushStyle::Value(core::graphics::Color::TRANSPARENT.into())
-    })]
+    #[computed(expr = super::support::selected_tab_stroke(is_selected, connected_chrome, active_document_marker, palette_dark))]
     chrome_stroke: elwindui::core::theme::BrushStyle,
-    #[computed(expr = super::support::selected_tab_edge(false, tab_strip_position == TabStripPosition::Bottom, connected_chrome, palette_dark))]
+    #[computed(expr = super::support::selected_tab_edge(false, tab_strip_position == TabStripPosition::Bottom, connected_chrome, palette_dark, super::support::selected_tab_stroke(is_selected, connected_chrome, active_document_marker, palette_dark)))]
     native_left_edge: Option<core::graphics::ImageSource>,
-    #[computed(expr = super::support::selected_tab_edge(true, tab_strip_position == TabStripPosition::Bottom, connected_chrome, palette_dark))]
+    #[computed(expr = super::support::selected_tab_edge(true, tab_strip_position == TabStripPosition::Bottom, connected_chrome, palette_dark, super::support::selected_tab_stroke(is_selected, connected_chrome, active_document_marker, palette_dark)))]
     native_right_edge: Option<core::graphics::ImageSource>,
     #[computed(expr = if is_selected { 1.0 } else { 0.0 })]
     chrome_stroke_width: f32,
@@ -767,5 +761,58 @@ impl CustomTabViewItem {
             })
             .expect("CustomTabViewItem close button is not mounted");
         button
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::core::graphics::{ImageSource, VectorNode, VectorPaint};
+    use super::core::theme::ResolvedValue;
+    use super::*;
+
+    #[test]
+    fn connected_selected_outline_tracks_activation_and_resets_for_a_generic_host() {
+        let item = CustomTabViewItem::new_item();
+        item.apply_connected_chrome(true);
+        item.set_is_selected(true);
+        let root: Rc<dyn UIElementExt> = item.clone();
+        core::ui::layout_root(
+            &root,
+            Size {
+                width: 200.0,
+                height: 32.0,
+            },
+        );
+        assert_eq!(item.chrome_stroke(), BrushStyle::Separator);
+
+        item.set_active_document_marker_visible(true);
+        assert_eq!(item.chrome_stroke(), super::super::support::accent_style());
+        let ResolvedValue::Value(accent) = item
+            .chrome_stroke()
+            .resolve(&core::environment::application_environment())
+        else {
+            panic!("active outline must resolve to an accent brush");
+        };
+        for edge in [item.native_left_edge(), item.native_right_edge()] {
+            let Some(ImageSource::Vector(image)) = edge else {
+                panic!("selected outline must retain its curved vector edge");
+            };
+            let VectorNode::Path(path) = &image.root().children[1] else {
+                panic!("edge must have a stroked contour");
+            };
+            let VectorPaint::Brush(stroke) = &path.stroke.as_ref().unwrap().paint else {
+                panic!("active outline must paint with a brush");
+            };
+            assert_eq!(*stroke, accent);
+        }
+
+        item.set_active_document_marker_visible(false);
+        assert_eq!(item.chrome_stroke(), BrushStyle::Separator);
+        item.set_active_document_marker_visible(true);
+        item.apply_connected_chrome(false);
+        assert_eq!(
+            item.chrome_stroke(),
+            super::super::support::native_tab_stroke(item.palette_dark())
+        );
     }
 }

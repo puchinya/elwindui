@@ -14,7 +14,9 @@ pub struct DockGroupCreatedArgs {
 /// `DockLayoutSnapshot`, and a restored generated group asks the hook again.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DockGroupOptions {
+    /// Position of the generated group's tab strip.
     pub tab_strip_position: TabStripPosition,
+    /// Whether tabs use content-driven widths instead of equal widths.
     pub compact_tabs: bool,
 }
 

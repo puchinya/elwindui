@@ -7,7 +7,7 @@ use crate::core::layout::GridLength;
 use crate::core::theme::BrushStyle;
 use crate::core::ui::{ContentControlExt, Grid, GridExt, LayoutExt, UIElementExt};
 use crate::model::RootKind;
-use crate::runtime::auto_hide::AutoHideOverlay;
+use crate::runtime::auto_hide::{AutoHideExtentCache, AutoHideOverlay};
 use crate::runtime::overlay::{DockTargetOverlay, DropPreview, InsertionMarker};
 use crate::runtime::themed_brush;
 use std::rc::Rc;
@@ -57,8 +57,9 @@ impl SurfaceRuntime {
         root: RootKind,
         surface: Rc<DockSurfaceView>,
         owner: &std::rc::Weak<DockingControl>,
+        extents: AutoHideExtentCache,
     ) -> Self {
-        let auto_hide = AutoHideOverlay::new();
+        let auto_hide = AutoHideOverlay::with_extent_cache(extents);
         auto_hide.bind_handlers(owner, root.clone());
         let preview = DropPreview::new();
         let targets = DockTargetOverlay::new();

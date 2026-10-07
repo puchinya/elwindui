@@ -2468,6 +2468,13 @@ fn auto_hide_strip_markers_follow_the_four_side_orientations() {
         },
     );
     assert_eq!(overlay.marker_count_for_test(), 4);
+    overlay.refresh_theme();
+    for id in ["left", "top", "right", "bottom"] {
+        assert_eq!(
+            overlay.marker_fill_for_test(&item(id)),
+            crate::runtime::themed_brush(crate::core::theme::BrushStyle::Separator)
+        );
+    }
     let left = overlay.marker_size_for_test(&item("left")).unwrap();
     assert_eq!(left.width, 4.0);
     assert!(left.height > 24.0);
@@ -2536,6 +2543,94 @@ fn auto_hide_resize_grips_cover_the_whole_inner_edge() {
         };
         assert_rect_eq(Some(bounds), expected);
     }
+}
+
+#[test]
+fn auto_hide_remembers_initial_extent_on_close_and_when_another_item_opens() {
+    let mut overlay = AutoHideOverlay::new();
+    let size = Size {
+        width: 900.0,
+        height: 600.0,
+    };
+    overlay.open(item("first"), DockSide::Left, size);
+    overlay.close();
+    assert_eq!(
+        overlay.remembered_extent_for_test(&item("first"), DockSide::Left),
+        Some(300.0)
+    );
+    let larger = Size {
+        width: 1200.0,
+        height: 900.0,
+    };
+    overlay.open(item("first"), DockSide::Left, larger);
+    let visual = overlay.visual();
+    layout_root(&visual, larger);
+    assert_eq!(overlay.pane_for_test().arranged_width(), Some(300.0));
+    overlay.open(item("second"), DockSide::Top, size);
+    overlay.open(item("third"), DockSide::Bottom, larger);
+    assert_eq!(
+        overlay.remembered_extent_for_test(&item("second"), DockSide::Top),
+        Some(200.0)
+    );
+    assert_eq!(
+        overlay.remembered_extent_for_test(&item("first"), DockSide::Left),
+        Some(300.0)
+    );
+}
+
+#[test]
+fn auto_hide_extent_survives_surface_teardown_in_the_same_runtime_cache() {
+    let cache = Rc::new(RefCell::new(Default::default()));
+    {
+        let mut first_surface = AutoHideOverlay::with_extent_cache(cache.clone());
+        first_surface.open(
+            item("document"),
+            DockSide::Right,
+            Size {
+                width: 900.0,
+                height: 600.0,
+            },
+        );
+    }
+    let mut second_surface = AutoHideOverlay::with_extent_cache(cache);
+    second_surface.open(
+        item("document"),
+        DockSide::Left,
+        Size {
+            width: 1200.0,
+            height: 900.0,
+        },
+    );
+    let visual = second_surface.visual();
+    layout_root(
+        &visual,
+        Size {
+            width: 1200.0,
+            height: 900.0,
+        },
+    );
+    assert_eq!(second_surface.pane_for_test().arranged_width(), Some(300.0));
+    assert_eq!(
+        second_surface.remembered_extent_for_test(&item("document"), DockSide::Left),
+        Some(300.0)
+    );
+    let mut new_runtime = AutoHideOverlay::new();
+    new_runtime.open(
+        item("document"),
+        DockSide::Left,
+        Size {
+            width: 1200.0,
+            height: 900.0,
+        },
+    );
+    layout_root(
+        &new_runtime.visual(),
+        Size {
+            width: 1200.0,
+            height: 900.0,
+        },
+    );
+    assert_eq!(new_runtime.pane_for_test().arranged_width(), Some(400.0));
 }
 
 #[test]
@@ -3930,6 +4025,35 @@ fn group_created_hook_chooses_the_presentation_of_runtime_created_groups() {
     );
     layout_root(&root, size);
     assert_eq!(asked.borrow().len(), 1);
+
+    // A snapshot carries the generated group's identity, not its presentation answer.
+    // A fresh runtime asks its own hook and can choose a different presentation.
+    let restored = mounted_default_docking();
+    let restored_asked = Rc::new(RefCell::new(Vec::new()));
+    {
+        let restored_asked = restored_asked.clone();
+        restored.set_on_group_created(Box::new(move |args| {
+            restored_asked.borrow_mut().push(args.item.clone());
+            crate::DockGroupOptions::default()
+        }));
+    }
+    restored.set_layout(DockLayoutModel::from_snapshot(docking.layout().snapshot()).unwrap());
+    let restored_root: Rc<dyn UIElementExt> = restored.clone();
+    layout_root(&restored_root, size);
+    assert_eq!(*restored_asked.borrow(), vec![item("third")]);
+    let views = find_all::<CustomTabView>(restored.as_ref());
+    let generated = views
+        .iter()
+        .filter_map(|view| view.as_any().downcast_ref::<CustomTabView>())
+        .find(|view| {
+            view.children()
+                .to_vec()
+                .iter()
+                .any(|tab| tab.header() == "Third")
+        })
+        .expect("restored generated group");
+    assert_eq!(generated.tab_strip_position(), TabStripPosition::Top);
+    assert!(!generated.compact());
 }
 
 #[test]
@@ -4032,6 +4156,11 @@ fn active_group_frame_is_drawn_in_the_accent_color() {
         Some(crate::core::graphics::Brush::Solid(color)) => assert!(color.a > 0),
         other => panic!("active frame stroke should be a visible accent, got {other:?}"),
     }
+    let seams = realization.borrow().active_group_seams_for_test();
+    assert_eq!(seams.len(), 1);
+    assert_eq!(seams[0].y, 32.5);
+    assert_eq!(seams[0].height, 0.0);
+    assert!(seams[0].width > 0.0 && seams[0].width <= 200.0);
 }
 
 fn sized_group(name: &str) -> Rc<DockGroup> {
@@ -4909,6 +5038,69 @@ fn bottom_header_selection_updates_title_and_capabilities_without_reconciliation
         reconciles
     );
     assert!(Rc::ptr_eq(&title, &header.visual_children()[0]));
+
+    let before_right_release = docking.layout();
+    let right_release = PointerEventArgs {
+        position: Point { x: 10.0, y: 10.0 },
+        screen_position: None,
+        button: Some(MouseButton::Right),
+        modifiers: KeyModifiers::default(),
+    };
+    for action in &actions[1..=2] {
+        super::core::ui::dispatch_routed(
+            action,
+            "on_pointer_released",
+            &right_release,
+            &RoutedEventArgs::default(),
+        );
+    }
+    assert_eq!(docking.layout(), before_right_release);
+
+    // Moving the selected last tab away leaves the remaining page and its header in sync.
+    assert!(view.select_index(1));
+    let title_updates = Rc::new(RefCell::new(Vec::new()));
+    struct TitleUpdateHost(Rc<RefCell<Vec<u64>>>);
+    impl RelayoutHost for TitleUpdateHost {
+        fn request_relayout(&self, id: u64, _kind: InvalidationKind) {
+            self.0.borrow_mut().push(id);
+        }
+    }
+    root.set_invalidate_host(Some(Rc::new(TitleUpdateHost(title_updates.clone()))));
+    let next = {
+        let mut current = realization.borrow_mut();
+        current
+            .begin_drag(&docking.layout(), item("second"), Point { x: 0.0, y: 0.0 })
+            .unwrap();
+        let target = current
+            .target_for_drop(None, Point { x: 18.0, y: 150.0 })
+            .unwrap();
+        assert_eq!(target.target, DockTarget::DockLeft);
+        current.preview_drag(&target, 1.0).unwrap();
+        current.finish_drag(true).unwrap()
+    };
+    docking.set_layout(next);
+    layout_root(
+        &root,
+        Size {
+            width: 400.0,
+            height: 300.0,
+        },
+    );
+    assert_eq!(
+        title
+            .as_any()
+            .downcast_ref::<TextBlock>()
+            .unwrap()
+            .text
+            .borrow()
+            .as_str(),
+        "First"
+    );
+    assert_eq!(view.children().len(), 1);
+    assert!(
+        title_updates.borrow().contains(&title.render_group_id()),
+        "the reattached header must notify the host to replace its retained text commands"
+    );
 }
 
 #[test]
@@ -5348,6 +5540,35 @@ fn auto_hide_pane_opened_through_the_control_uses_one_third_of_the_center() {
         (width - (928.0 - 28.0) / 3.0).abs() < 1.0,
         "pane width {width} should be one third of the usable center"
     );
+
+    let body = pane.visual_children()[0].clone();
+    let header = body.visual_children()[0].clone();
+    let actions = header.visual_children();
+    let before_right_release = docking.layout();
+    let mut release = PointerEventArgs {
+        position: Point { x: 10.0, y: 10.0 },
+        screen_position: None,
+        button: Some(MouseButton::Right),
+        modifiers: KeyModifiers::default(),
+    };
+    for action in &actions[1..=2] {
+        super::core::ui::dispatch_routed(
+            action,
+            "on_pointer_released",
+            &release,
+            &RoutedEventArgs::default(),
+        );
+    }
+    assert_eq!(docking.layout(), before_right_release);
+    release.button = Some(MouseButton::Left);
+    super::core::ui::dispatch_routed(
+        &actions[2],
+        "on_pointer_released",
+        &release,
+        &RoutedEventArgs::default(),
+    );
+    assert!(docking.layout().is_item_closed(&item("hidden")));
+    assert!(!docking.layout().is_item_closed(&item("main")));
 }
 
 #[test]

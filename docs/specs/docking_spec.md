@@ -54,7 +54,8 @@ content identity. Runtime ownership changes use detach-before-attach.
 capture, cancellation, root-relative position, and optional logical screen position.
 `CustomGridSplitter` owns splitter Grid discovery, track mutation, constraints, live relayout,
 rollback, and resize notifications. Split nodes with N children realize as a retained pane Grid
-with N Star tracks and N-1 twelve-pixel `CustomGridSplitter` hit targets. Horizontal splits set
+with N pane tracks (Fixed for authored fixed extents, Star otherwise) and N-1 twelve-pixel
+`CustomGridSplitter` hit targets. Horizontal splits set
 `column_spacing = 12`; vertical splits set `row_spacing = 12`, leaving a 12-logical-pixel gap between
 adjacent pane bounds. The splitter is placed at the beginning of the following pane's track and
 translated -12 logical px on the split axis, so its 12-pixel hit target occupies the gap without a

@@ -74,28 +74,42 @@ pub(crate) fn native_tab_stroke(dark: bool) -> super::core::theme::BrushStyle {
     )
 }
 
+pub(crate) fn selected_tab_stroke(
+    selected: bool,
+    connected: bool,
+    active: bool,
+    dark: bool,
+) -> super::core::theme::BrushStyle {
+    use super::core::{graphics::Color, theme::BrushStyle};
+    if !selected {
+        BrushStyle::Value(Color::TRANSPARENT.into())
+    } else if !connected {
+        native_tab_stroke(dark)
+    } else if active {
+        accent_style()
+    } else {
+        BrushStyle::Separator
+    }
+}
+
 /// Fixed-width edge pieces keep the corner radii constant as the middle tab track stretches.
 pub(crate) fn selected_tab_edge(
     right: bool,
     bottom: bool,
     connected: bool,
     dark: bool,
+    stroke: super::core::theme::BrushStyle,
 ) -> Option<super::core::graphics::ImageSource> {
-    use super::core::theme::BrushStyle;
     native_tab_edge(
         right,
         bottom,
         connected,
         if connected {
-            BrushStyle::Background
+            super::core::theme::BrushStyle::Background
         } else {
             native_tab_background(true, dark)
         },
-        if connected {
-            BrushStyle::Separator
-        } else {
-            native_tab_stroke(dark)
-        },
+        stroke,
     )
 }
 
@@ -233,7 +247,7 @@ mod tests {
             for right in [false, true] {
                 for bottom in [false, true] {
                     let Some(ImageSource::Vector(image)) =
-                        selected_tab_edge(right, bottom, false, dark)
+                        selected_tab_edge(right, bottom, false, dark, native_tab_stroke(dark))
                     else {
                         panic!("selected tab edge must contain vector chrome");
                     };

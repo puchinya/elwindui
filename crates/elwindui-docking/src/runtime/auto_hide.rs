@@ -26,10 +26,12 @@ use std::f32::consts::FRAC_PI_2;
 use std::rc::{Rc, Weak};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum ExtentAxis {
+pub(crate) enum ExtentAxis {
     Horizontal,
     Vertical,
 }
+
+pub(crate) type AutoHideExtentCache = Rc<RefCell<BTreeMap<(DockItemId, ExtentAxis), f32>>>;
 
 enum StripPanel {
     Horizontal(Rc<HorizontalLayout>),
@@ -148,12 +150,12 @@ pub(crate) struct AutoHideOverlay {
     open: Rc<RefCell<Option<DockItemId>>>,
     open_context: Rc<RefCell<Option<(DockItemId, DockSide)>>>,
     dismissed: Rc<RefCell<Option<DockItemId>>>,
-    remembered_extents: Rc<RefCell<BTreeMap<(DockItemId, ExtentAxis), f32>>>,
+    remembered_extents: AutoHideExtentCache,
     current_extent: Rc<Cell<f32>>,
     extent_limit: Rc<Cell<f32>>,
     resize_gesture: Rc<Cell<Option<(Point, f32, DockSide)>>>,
     header_gesture: Rc<RefCell<Option<HeaderDragGesture>>>,
-    markers: Rc<RefCell<BTreeMap<DockItemId, (Rc<Rectangle>, Rc<Cell<bool>>)>>>,
+    markers: Rc<RefCell<BTreeMap<DockItemId, (Rc<Rectangle>, Rc<Cell<bool>>, Rc<TextBlock>)>>>,
     visual: Rc<Grid>,
     strips: [Rc<Grid>; 4],
     panels: [StripPanel; 4],
@@ -177,6 +179,10 @@ pub(crate) struct AutoHideOverlay {
 
 impl AutoHideOverlay {
     pub(crate) fn new() -> Self {
+        Self::with_extent_cache(AutoHideExtentCache::default())
+    }
+
+    pub(crate) fn with_extent_cache(remembered_extents: AutoHideExtentCache) -> Self {
         let visual = Grid::new();
         visual.set_rows(vec![
             GridLength::Auto,
@@ -327,7 +333,6 @@ impl AutoHideOverlay {
         let open = Rc::new(RefCell::new(None));
         let open_context = Rc::new(RefCell::new(None));
         let dismissed = Rc::new(RefCell::new(None));
-        let remembered_extents = Rc::new(RefCell::new(BTreeMap::new()));
         let current_extent = Rc::new(Cell::new(0.0));
         let extent_limit = Rc::new(Cell::new(0.0));
         let resize_gesture = Rc::new(Cell::new(None));
@@ -410,6 +415,18 @@ impl AutoHideOverlay {
         }
         if explicit {
             *self.dismissed.borrow_mut() = None;
+        }
+        if self
+            .open_context
+            .borrow()
+            .as_ref()
+            .is_some_and(|(open, open_side)| open != &item || *open_side != side)
+        {
+            remember_pane_extent(
+                &self.open_context,
+                &self.remembered_extents,
+                &self.current_extent,
+            );
         }
         self.configure_pane(&item, side, surface_size);
         let previous = self.open.replace(Some(item.clone()));
@@ -576,6 +593,11 @@ impl AutoHideOverlay {
     }
 
     pub(crate) fn close(&mut self) -> Option<DockItemId> {
+        remember_pane_extent(
+            &self.open_context,
+            &self.remembered_extents,
+            &self.current_extent,
+        );
         let previous = self.open.replace(None);
         *self.open_context.borrow_mut() = None;
         self.pane.set_visibility(Visibility::Collapsed);
@@ -598,6 +620,11 @@ impl AutoHideOverlay {
         if self.open.borrow().as_ref() != Some(item) {
             return;
         }
+        remember_pane_extent(
+            &self.open_context,
+            &self.remembered_extents,
+            &self.current_extent,
+        );
         *self.dismissed.borrow_mut() = Some(item.clone());
         self.open.borrow_mut().take();
         *self.open_context.borrow_mut() = None;
@@ -650,6 +677,14 @@ impl AutoHideOverlay {
     }
 
     #[cfg(test)]
+    pub(crate) fn marker_fill_for_test(
+        &self,
+        item: &DockItemId,
+    ) -> Option<crate::core::graphics::Brush> {
+        self.markers.borrow().get(item)?.0.fill()
+    }
+
+    #[cfg(test)]
     pub(crate) fn marker_size_for_test(&self, item: &DockItemId) -> Option<Size> {
         let marker = self.markers.borrow().get(item)?.0.clone();
         Some(Size {
@@ -699,9 +734,10 @@ impl AutoHideOverlay {
             let side = DockSide::ALL[side];
             let (entry, marker, hovered, label) = self.make_strip_entry(&title, side);
             panel.add(entry.clone());
-            self.markers
-                .borrow_mut()
-                .insert(item.clone(), (marker.clone(), hovered.clone()));
+            self.markers.borrow_mut().insert(
+                item.clone(),
+                (marker.clone(), hovered.clone(), label.clone()),
+            );
 
             let weak_owner = owner.clone();
             let entry_root = root.clone();
@@ -878,7 +914,10 @@ impl AutoHideOverlay {
         let root_context = self.root_context.clone();
         self.pin_button.register_routed_handler::<PointerEventArgs>(
             "on_pointer_released",
-            Box::new(move |_, args| {
+            Box::new(move |event, args| {
+                if event.button != Some(MouseButton::Left) {
+                    return;
+                }
                 args.handled.set(true);
                 let owner: Option<Rc<DockingControl>> = weak_owner.upgrade();
                 if let Some(owner) = owner {
@@ -891,7 +930,10 @@ impl AutoHideOverlay {
         self.close_button
             .register_routed_handler::<PointerEventArgs>(
                 "on_pointer_released",
-                Box::new(move |_, args| {
+                Box::new(move |event, args| {
+                    if event.button != Some(MouseButton::Left) {
+                        return;
+                    }
                     args.handled.set(true);
                     let Some(item) = open_context.borrow().as_ref().map(|(item, _)| item.clone())
                     else {
@@ -921,6 +963,8 @@ impl AutoHideOverlay {
         let markers = self.markers.clone();
         let resize_gesture = self.resize_gesture.clone();
         let header_gesture = self.header_gesture.clone();
+        let remembered = self.remembered_extents.clone();
+        let current = self.current_extent.clone();
         surface_root.register_routed_handler::<PointerEventArgs>(
             "on_pointer_pressed",
             Box::new(move |event, args| {
@@ -930,6 +974,7 @@ impl AutoHideOverlay {
                 {
                     return;
                 }
+                remember_pane_extent(&open_context, &remembered, &current);
                 let dismissed_item = dismiss_shared(
                     &open,
                     &dismissed,
@@ -965,12 +1010,15 @@ impl AutoHideOverlay {
         let markers = self.markers.clone();
         let resize_gesture = self.resize_gesture.clone();
         let header_gesture = self.header_gesture.clone();
+        let remembered = self.remembered_extents.clone();
+        let current = self.current_extent.clone();
         surface_root.register_routed_handler::<KeyEventArgs>(
             "on_key_down",
             Box::new(move |event, args| {
                 if args.handled.get() || event.key != Key::Escape || open.borrow().is_none() {
                     return;
                 }
+                remember_pane_extent(&open_context, &remembered, &current);
                 let dismissed_item = dismiss_shared(
                     &open,
                     &dismissed,
@@ -1033,9 +1081,29 @@ impl AutoHideOverlay {
             ChromeIcon::Close,
             themed_brush(BrushStyle::Foreground),
         ));
-        for (marker, _) in self.markers.borrow().values() {
-            marker.set_fill(Some(accent_brush()));
+        for (marker, hovered, label) in self.markers.borrow().values() {
+            marker.set_fill(if hovered.get() {
+                Some(accent_brush())
+            } else {
+                themed_brush(BrushStyle::Separator)
+            });
+            label.set_foreground(if hovered.get() {
+                Some(accent_brush())
+            } else {
+                themed_brush(BrushStyle::Foreground)
+            });
         }
+    }
+}
+
+impl Drop for AutoHideOverlay {
+    fn drop(&mut self) {
+        // A floating surface may disappear while its Document moves to another surface.
+        remember_pane_extent(
+            &self.open_context,
+            &self.remembered_extents,
+            &self.current_extent,
+        );
     }
 }
 
@@ -1295,6 +1363,18 @@ fn bind_document_header_drag(
     );
 }
 
+fn remember_pane_extent(
+    context: &RefCell<Option<(DockItemId, DockSide)>>,
+    remembered: &RefCell<BTreeMap<(DockItemId, ExtentAxis), f32>>,
+    current: &Cell<f32>,
+) {
+    if let Some((item, side)) = context.borrow().as_ref() {
+        remembered
+            .borrow_mut()
+            .insert((item.clone(), axis_for_side(*side)), current.get());
+    }
+}
+
 fn dismiss_shared(
     open: &Rc<RefCell<Option<DockItemId>>>,
     dismissed: &Rc<RefCell<Option<DockItemId>>>,
@@ -1307,7 +1387,7 @@ fn dismiss_shared(
     pin_button: &Rc<Grid>,
     close_button: &Rc<Grid>,
     resize_grip: &Rc<Grid>,
-    markers: &Rc<RefCell<BTreeMap<DockItemId, (Rc<Rectangle>, Rc<Cell<bool>>)>>>,
+    markers: &Rc<RefCell<BTreeMap<DockItemId, (Rc<Rectangle>, Rc<Cell<bool>>, Rc<TextBlock>)>>>,
     resize_gesture: &Rc<Cell<Option<(Point, f32, DockSide)>>>,
     header_gesture: &Rc<RefCell<Option<HeaderDragGesture>>>,
 ) -> Option<DockItemId> {
@@ -1324,9 +1404,10 @@ fn dismiss_shared(
     close_button.set_visibility(Visibility::Collapsed);
     resize_grip.set_visibility(Visibility::Collapsed);
     page_host.children().clear();
-    for (marker, hovered) in markers.borrow().values() {
+    for (marker, hovered, label) in markers.borrow().values() {
         hovered.set(false);
         marker.set_fill(themed_brush(BrushStyle::Separator));
+        label.set_foreground(themed_brush(BrushStyle::Foreground));
     }
     resize_gesture.set(None);
     header_gesture.borrow_mut().take();

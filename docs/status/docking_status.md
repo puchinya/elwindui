@@ -1,6 +1,6 @@
 # Docking status
 
-Snapshot: 2026-10-04. Desired behavior is defined by the docking specification; architecture is defined by the durable design documents under [design](../design/).
+Snapshot: 2026-10-07. Desired behavior is defined by the docking specification; architecture is defined by the durable design documents under [design](../design/).
 
 ## Current implementation
 
@@ -14,15 +14,16 @@ Snapshot: 2026-10-04. Desired behavior is defined by the docking specification; 
 - Docking chrome uses cached vector geometry and transparent hit-test surfaces. The demo includes documents, nested tools, floating-window controls, auto-hide, and retained DockingControl state.
 - The #279 retained-selection fast path keeps selection-only publication out of full Docking reconciliation; theme refresh is gated by the BrushStyle signature.
 - Selected-page arrangement reuse checks the participating subtree's arrangement validity, including after splitter completion. WinUI Composition reconnects recreated image visuals even when node IDs and ordering remain unchanged.
+- Active selected tabs use the accent outline and an open content-frame contour; retained header text changes notify the host before reconciliation detaches the tree. Auto-hide extents are shared across surfaces within one runtime and are remembered on resizing, dismissal, replacement and teardown.
 - WinUI.Dock behavior alignment (2026-10-04): drop targets resolve only on drawn compass cells and root-edge targets (tab-header insertion/reorder kept); other releases float a 400 x 400 window; root Dock previews half the surface; committed drops activate the moved Document; the compass centers on the whole group frame. Auto-hide pins by preferred side or the reference shape rule, pane pin docks to the same-side root edge, dismissal releases activity, and visible strips reserve layout space. Accent chrome falls back to the platform accent when Theme `Primary` is unset. CustomGridSplitter follows the CommunityToolkit Sizers state fills.
 
 ## Current verification
 
-- The canonical Rust formatter/analyzer gate passes: zero errors, warnings or non-exempt weak warnings; 285 intentional cfg-only inactive-code records. Workspace build and tests pass (1141 passed, 0 failed, 3 ignored).
-- Normal non-elevated Windows host paired runs against the pinned WinUI.Dock example pass WDF-02/03/05–16 except WDF-01 (FAIL: the active group's selected-tab accent outline) and WDF-04 (NOT RUN). Drag move handling streams at about 15 ms per move; the first overlay appearance settles in one layout pass (longest pointer-event gap 61–81 ms in a debug build).
-- Quiet debug startup previously measured 1348–1410 ms from process start to the first content Rendering callback, accepted by the user. A comparable actual process-start measurement for the current build has not been taken.
+- The canonical Rust gate passes: formatting, analyzer diagnostics (0 errors/warnings/non-exempt weak warnings; 289 intentional cfg-only inactive records), workspace check/build, and workspace tests (1145 passed, 0 failed, 3 ignored). Custom Controls passes 89 tests and Docking passes 123.
+- Fresh normal non-elevated Windows comparisons pass the dark selected-tab outline and hover states, normal/compact narrow widths, and all four auto-hide resize/reopen cases. Updated paired splitter/header acceptance and the light-theme pass (initial layout, split drop with the joined accent frame, auto-hide pane) also pass; detailed results live in the WDF matrix and Issue evidence.
+- Quiet debug startup (process start to first content Rendering, line-tables-only, startup trace only) measures 1516–1683 ms over five launches of the latest executable, within the user-accepted same-host range from 2026-10-05.
 
 ## Platform boundaries
 
-- WinUI 3 visual acceptance for #285 is partial: the WDF rows listed as NOT RUN above have not been executed.
+- WinUI 3 acceptance covers all WDF rows on the pinned example; Escape dismissal could not be exercised natively because the demo has no focused recipient.
 - AppKit visual equivalence has not been claimed. GTK4 native floating is unavailable without a usable GTK Window implementation.

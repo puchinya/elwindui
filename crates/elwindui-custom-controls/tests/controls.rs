@@ -78,13 +78,18 @@ fn close_icon_is_vector(item: &Rc<CustomTabViewItem>) -> bool {
     find_visual(&close, "IconSourceElement").is_some()
 }
 
-fn item_indicator(item: &Rc<CustomTabViewItem>) -> Rc<dyn UIElementExt> {
+/// The selected outline (edges, fill and far-edge rule) inside the item's background layer.
+fn item_outline(item: &Rc<CustomTabViewItem>) -> Rc<dyn UIElementExt> {
     item.__template_root()
         .expect("tab item template root")
         .visual_children()
         .into_iter()
-        .nth(2)
-        .expect("tab item indicator")
+        .next()
+        .expect("tab item background")
+        .visual_children()
+        .into_iter()
+        .nth(1)
+        .expect("tab item outline")
 }
 
 fn absolute_offset(node: &Rc<dyn UIElementExt>) -> Point {
@@ -182,7 +187,8 @@ fn native_and_connected_chrome_switch_without_replacing_items_or_pages() {
     );
     assert_eq!(item.close_button().arranged_width(), Some(24.0));
     assert_eq!(page.arranged_height(), Some(128.0));
-    assert_eq!(outline.arranged_height(), Some(30.0));
+    // The connected outline spans the whole strip so its feet meet the baseline rule.
+    assert_eq!(outline.arranged_height(), Some(32.0));
     assert_eq!(outline.arranged_width(), item.arranged_width());
 
     view.set_connected_chrome(false);
@@ -1448,7 +1454,7 @@ fn header_and_icon_property_changes_resync_the_template_subtree() {
 }
 
 #[test]
-fn selected_indicator_moves_without_recreating_header_items() {
+fn selected_outline_moves_without_recreating_header_items() {
     let first = CustomTabViewItem::new_item();
     let second = CustomTabViewItem::new_item();
     let view = CustomTabView::new_view();
@@ -1461,8 +1467,8 @@ fn selected_indicator_moves_without_recreating_header_items() {
             height: 120.0,
         },
     );
-    let first_indicator = item_indicator(&first);
-    let second_indicator = item_indicator(&second);
+    let first_indicator = item_outline(&first);
+    let second_indicator = item_outline(&second);
     assert_eq!(
         first_indicator.visibility(),
         elwindui_custom_controls::core::layout::Visibility::Visible
@@ -1493,7 +1499,7 @@ fn selected_indicator_moves_without_recreating_header_items() {
 }
 
 #[test]
-fn tab_item_header_and_indicator_tracks_follow_strip_position() {
+fn tab_item_header_and_outline_follow_strip_position() {
     let item = CustomTabViewItem::new_item();
     item.set_header("document".to_string());
     let second = CustomTabViewItem::new_item();
@@ -1517,14 +1523,15 @@ fn tab_item_header_and_indicator_tracks_follow_strip_position() {
         .into_iter()
         .nth(1)
         .expect("header row");
-    let indicator = item_indicator(&item);
+    let outline = item_outline(&item);
+    let outline_top = |outline: &Rc<dyn UIElementExt>| {
+        absolute_offset(outline).y - absolute_offset(&(item.clone() as Rc<dyn UIElementExt>)).y
+    };
+    // The 30 px header sits at the strip's far edge; the outline spans the whole 32 px item.
     assert_eq!(header.arranged_offset().expect("header offset").y, 0.0);
     assert_eq!(header.arranged_height(), Some(30.0));
-    assert_eq!(
-        indicator.arranged_offset().expect("indicator offset").y,
-        30.0
-    );
-    assert_eq!(indicator.arranged_height(), Some(2.0));
+    assert_eq!(outline_top(&outline), 0.0);
+    assert_eq!(outline.arranged_height(), Some(32.0));
 
     view.set_tab_position(TabStripPosition::Bottom);
     layout_root(
@@ -1534,11 +1541,8 @@ fn tab_item_header_and_indicator_tracks_follow_strip_position() {
             height: 120.0,
         },
     );
-    assert_eq!(
-        indicator.arranged_offset().expect("indicator offset").y,
-        0.0
-    );
-    assert_eq!(indicator.arranged_height(), Some(2.0));
+    assert_eq!(outline_top(&outline), 0.0);
+    assert_eq!(outline.arranged_height(), Some(32.0));
     assert_eq!(header.arranged_offset().expect("header offset").y, 2.0);
     assert_eq!(header.arranged_height(), Some(30.0));
 }

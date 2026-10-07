@@ -403,9 +403,9 @@ mod chrome_tests {
             overlay.painted_frame().map(|(rect, _)| rect),
             Some(Rect {
                 x: 0.0,
-                y: 32.0,
+                y: 31.0,
                 width: 300.0,
-                height: 168.0,
+                height: 169.0,
             })
         );
 
@@ -445,7 +445,7 @@ mod chrome_tests {
                 x: 0.0,
                 y: 0.0,
                 width: 300.0,
-                height: 168.0,
+                height: 169.0,
             })
         );
     }
@@ -507,6 +507,9 @@ mod chrome_tests {
         );
     }
 }
+
+/// Rows of the tab strip the active frame overlaps: the baseline row the selected tab's feet end on.
+const FRAME_STRIP_OVERLAP: f32 = 1.0;
 
 /// Paints the active frame contour over its arranged bounds. Replacing the contour re-records paint
 /// only, unlike an `Image` source change, which would invalidate Measure from the overlay's
@@ -670,18 +673,21 @@ impl GroupChromeOverlay {
         }
     }
 
-    /// The page area beside the strip, where the frame paints.
+    /// The page area beside the strip, where the frame paints. Its strip-side edge overlaps the
+    /// strip's last pixel row, the baseline on which the selected tab's outline ends, so the
+    /// outline and the open contour join like WinUI.Dock's.
     fn frame_bounds(&self, size: Size) -> Rect {
         let strip_height = self.strip_height().max(0.0);
+        let page_side = (strip_height - FRAME_STRIP_OVERLAP).max(0.0);
         Rect {
             x: 0.0,
             y: if self.tab_position() == TabStripPosition::Top {
-                strip_height
+                page_side
             } else {
                 0.0
             },
             width: size.width.max(0.0),
-            height: (size.height - strip_height).max(0.0),
+            height: (size.height - page_side).max(0.0),
         }
     }
 

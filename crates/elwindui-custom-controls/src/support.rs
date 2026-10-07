@@ -127,7 +127,8 @@ pub(crate) fn native_tab_edge(
         theme::ResolvedValue,
     };
     let width = if connected { 8.0 } else { 12.0 };
-    let height = if connected { 30.0 } else { 32.0 };
+    // Connected edges span the whole 32 px item so their feet end on the strip baseline.
+    let height = 32.0;
     let radius = if connected { 4.0 } else { 8.0 };
     let map = |x: f32, y: f32| Point {
         x: if right { width - x } else { x },

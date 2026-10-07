@@ -246,6 +246,9 @@ along with title and reserved action slot, so compact document labels remain vis
 private group host adds the active-color frame over content only for an explicitly active document;
 it does not paint the document marker over the page.
 The active selected header uses that same accent for its straight and curved outline pieces.
+A connected tab item is one 32-pixel row: its 30-pixel header sits at the strip's far edge while the
+selected outline spans the whole row, so the outline's feet end on the strip's baseline rule. The
+active frame overlaps that baseline row, and the outline continues straight into the frame edge.
 A retained vector contour leaves the content-frame edge open only under the selected header,
 using its arranged surface-local bounds, so the two outlines join even over transparent content.
 Its image is reused while frame geometry, selection and the accent brush remain unchanged. The

@@ -29,15 +29,11 @@ fn header_overhang(connected: bool) -> f32 {
     }
 }
 
-fn item_tracks(position: TabStripPosition, connected: bool) -> Vec<core::layout::GridLength> {
-    use core::layout::GridLength::Fixed;
-    let height = if connected { 30.0 } else { 32.0 };
-    let seam = if connected { 2.0 } else { 0.0 };
-    if position == TabStripPosition::Top {
-        vec![Fixed(height), Fixed(seam)]
-    } else {
-        vec![Fixed(seam), Fixed(height)]
-    }
+/// Rows of the item: one 32 px row. A connected (Docking) header is 30 px tall at the strip's far
+/// edge while its outline spans the whole row, so the outline's feet meet the strip's baseline rule
+/// and the active content frame on the same pixel row.
+fn item_tracks(_position: TabStripPosition, _connected: bool) -> Vec<core::layout::GridLength> {
+    vec![core::layout::GridLength::Fixed(32.0)]
 }
 
 fn header_tracks(height: f32) -> Vec<core::layout::GridLength> {
@@ -109,10 +105,8 @@ pub struct CustomTabViewItem {
     tab_strip_position: TabStripPosition,
     #[state(default = CloseButtonPresentation::Always)]
     close_button_presentation: CloseButtonPresentation,
-    #[computed(expr = if tab_strip_position == TabStripPosition::Top { 0 } else { 1 })]
+    #[computed(expr = 0)]
     header_row: i32,
-    #[computed(expr = if tab_strip_position == TabStripPosition::Top { 1 } else { 0 })]
-    indicator_row: i32,
     #[computed(expr = item_tracks(tab_strip_position, connected_chrome))]
     header_grid_rows: Vec<elwindui::core::layout::GridLength>,
     #[computed(expr = if connected_chrome { TAB_HEADER_HEIGHT } else { 32.0 })]
@@ -147,8 +141,7 @@ pub struct CustomTabViewItem {
     pin_slot_visible: bool,
     #[computed(expr = pin_slot_visible && is_pointer_over)]
     pin_glyph_visible: bool,
-    #[computed(expr = if is_selected { Visibility::Visible } else { Visibility::Collapsed })]
-    indicator_visibility: Visibility,
+
     #[computed(expr = if connected_chrome && active_document_marker { Visibility::Visible } else { Visibility::Collapsed })]
     active_document_marker_visibility: Visibility,
     #[computed(expr = if active_document_marker { crate::support::accent_style() } else { BrushStyle::Primary })]
@@ -181,12 +174,7 @@ pub struct CustomTabViewItem {
     native_right_edge: Option<core::graphics::ImageSource>,
     #[computed(expr = if is_selected { 1.0 } else { 0.0 })]
     chrome_stroke_width: f32,
-    #[computed(expr = if is_selected {
-        elwindui::core::theme::BrushStyle::Background
-    } else {
-        elwindui::core::theme::BrushStyle::Separator
-    })]
-    indicator_fill: elwindui::core::theme::BrushStyle,
+
     #[computed(expr = if is_selected { Visibility::Collapsed } else { Visibility::Visible })]
     separator_visibility: Visibility,
     template: template_view!(|this: Self| {
@@ -219,6 +207,8 @@ pub struct CustomTabViewItem {
                 Grid {
                     columns: background_columns
                     rows: [elwindui::core::layout::GridLength::Star(1.0)]
+                    height: header_height
+                    vertical_alignment: baseline_alignment
                     visibility: simple_background_visibility
                     hit_test_visible: false
                     Rectangle {
@@ -244,6 +234,7 @@ pub struct CustomTabViewItem {
             Grid {
                 Grid::row: header_row
                 height: header_height
+                vertical_alignment: baseline_alignment
                 rows: inner_header_rows
                 columns: inner_header_columns
                 Rectangle {
@@ -320,12 +311,7 @@ pub struct CustomTabViewItem {
                     hit_test_visible: false
                 }
             }
-            Rectangle {
-                Grid::row: indicator_row
-                fill: indicator_fill
-                visibility: indicator_visibility
-                hit_test_visible: false
-            }
+
         }
     }),
 }
@@ -554,19 +540,10 @@ impl CustomTabViewItem {
             root
         };
         if let Some(grid) = root.as_any().downcast_ref::<Grid>() {
-            let indicator_height = if self.connected_chrome() { 2.0 } else { 0.0 };
-            let rows = if self.tab_strip_position() == TabStripPosition::Top {
-                vec![
-                    elwindui::core::layout::GridLength::Fixed(self.header_height()),
-                    elwindui::core::layout::GridLength::Fixed(indicator_height),
-                ]
-            } else {
-                vec![
-                    elwindui::core::layout::GridLength::Fixed(indicator_height),
-                    elwindui::core::layout::GridLength::Fixed(self.header_height()),
-                ]
-            };
-            grid.set_rows(rows);
+            grid.set_rows(item_tracks(
+                self.tab_strip_position(),
+                self.connected_chrome(),
+            ));
         }
         let children = root.visual_children();
         if let Some(background) = children.first() {
@@ -591,11 +568,6 @@ impl CustomTabViewItem {
             let header = header.as_ui_element();
             header.set_attached::<i32>("Grid", "row", self.header_row());
             header.set_height(self.header_height());
-        }
-        if let Some(indicator) = children.get(2) {
-            indicator
-                .as_ui_element()
-                .set_attached::<i32>("Grid", "row", self.indicator_row());
         }
     }
 

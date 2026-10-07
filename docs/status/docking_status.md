@@ -19,7 +19,7 @@ Snapshot: 2026-10-07. Desired behavior is defined by the docking specification; 
 
 ## Current verification
 
-- The canonical Rust gate passes: formatting, analyzer diagnostics (0 errors/warnings/non-exempt weak warnings; 289 intentional cfg-only inactive records), workspace check/build, and workspace tests (1153 passed, 0 failed, 3 ignored). Custom Controls passes 95 tests and Docking passes 125.
+- The canonical Rust gate passes: formatting, analyzer diagnostics (0 errors/warnings/non-exempt weak warnings; 289 intentional cfg-only inactive records), workspace check/build, and workspace tests (1154 passed, 0 failed, 3 ignored). Custom Controls passes 96 tests and Docking passes 125.
 - Fresh normal non-elevated Windows comparisons pass the dark selected-tab outline and hover states, normal/compact narrow widths, and all four auto-hide resize/reopen cases. Updated paired splitter/header acceptance and the light-theme pass (initial layout, split drop with the joined accent frame, auto-hide pane) also pass; detailed results live in the WDF matrix and Issue evidence.
 - Quiet debug startup (process start to first content Rendering, line-tables-only, startup trace only) measures 1519–1709 ms (median 1593) over five launches of the latest executable, against 1538–2714 ms (median 1651) for the pre-remediation build on the same host. Backend `measure_text` calls up to first content rendering fell from 44 to 40 per launch (three traced launches each); the review target of a 30% reduction is not met.
 

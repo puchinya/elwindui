@@ -126,17 +126,11 @@ impl StripEntryLabel {
 
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
+        // The template is placed on the unrotated title rectangle, centered in the entry; the
+        // stack then arranges the title once at that size.
         if let Some(root) = self.__template_root() {
-            root.arrange(crate::core::base::Rect {
-                x: 0.0,
-                y: 0.0,
-                width: final_size.width,
-                height: final_size.height,
-            });
-        }
-        if let Some(text) = self.text() {
             let length = self.title_length();
-            text.arrange(crate::core::base::Rect {
+            root.arrange(crate::core::base::Rect {
                 x: (final_size.width - length) * 0.5,
                 y: (final_size.height - AUTO_HIDE_ENTRY_HEIGHT) * 0.5,
                 width: length,
@@ -819,7 +813,9 @@ impl AutoHideOverlay {
         let text = TextBlock::new();
         text.set_text(label);
         text.set_foreground(themed_brush(BrushStyle::Foreground));
-        // The label measures the title during normal layout and arranges it at the title length.
+        // The label measures the title during normal layout and arranges it at the title length,
+        // at least one entry height.
+        text.set_min_width(AUTO_HIDE_ENTRY_HEIGHT);
         text.set_horizontal_alignment(HorizontalAlignment::Stretch);
         text.set_vertical_alignment(VerticalAlignment::Stretch);
         let vertical = matches!(side, DockSide::Left | DockSide::Right);

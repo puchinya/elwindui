@@ -679,13 +679,17 @@ impl GroupChromeOverlay {
             changed = true;
         }
         if changed {
+            // Arrange rebuilds the contour for the new geometry; the paint itself (including
+            // hiding it when inactive) is re-recorded by a render invalidation.
             self.invalidate_arrange();
+            self.invalidate_render();
         }
     }
 
     fn refresh_theme(&self) {
         self.set_frame_key(None);
         self.invalidate_arrange();
+        self.invalidate_render();
     }
 }
 struct PlannedGroup {

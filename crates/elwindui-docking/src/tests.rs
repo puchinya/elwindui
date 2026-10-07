@@ -3976,6 +3976,16 @@ fn content_header_pin_click_auto_hides_the_item_while_the_press_activates_it() {
         pointer_event(RawPointerEventKind::Released(MouseButton::Left), center),
     );
     assert!(docking.layout().is_item_auto_hidden(&item("first")));
+    // The active Document left its group, so no docked group keeps an active frame.
+    layout_root(&root, size);
+    let realization = docking.realization_for_test().unwrap();
+    assert!(
+        realization
+            .borrow()
+            .visible_active_frames_for_test()
+            .is_empty()
+    );
+    assert_eq!(realization.borrow().active_group_chrome_count_for_test(), 0);
 }
 
 #[test]

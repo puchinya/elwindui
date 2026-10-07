@@ -653,12 +653,6 @@ impl GroupChromeOverlay {
         let mut changed = false;
         if self.is_active() != is_active {
             self.set_is_active(is_active);
-            // An inactive overlay leaves the render tree, so its last frame cannot linger.
-            self.set_visibility(if is_active {
-                Visibility::Visible
-            } else {
-                Visibility::Collapsed
-            });
             changed = true;
         }
         let same_tab = match (self.active_tab(), active_tab.as_ref()) {
@@ -685,8 +679,8 @@ impl GroupChromeOverlay {
             changed = true;
         }
         if changed {
-            // Arrange rebuilds the contour for the new geometry; the paint is re-recorded by a
-            // render invalidation.
+            // Arrange rebuilds the contour for the new geometry; the paint itself (including
+            // hiding it when inactive) is re-recorded by a render invalidation.
             self.invalidate_arrange();
             self.invalidate_render();
         }
@@ -2504,7 +2498,6 @@ impl RuntimeRealization {
         body.set_columns(vec![GridLength::Star(1.0)]);
 
         let active_chrome = GroupChromeOverlay::new();
-        active_chrome.set_visibility(Visibility::Collapsed);
 
         let content_header = Grid::new();
         content_header.set_rows(vec![

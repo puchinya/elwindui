@@ -102,14 +102,19 @@ passes the result to child `measure`/`arrange`. It does not write persistent ite
 from transient parent constraints can feed back when the retained tree alternates between bounded
 and unbounded measurements.
 
-The presenter retains one measured pass containing the ordered item identities, effective per-item
-width cap, height, tab mode, and resolved item widths. Arrange reuses those widths when its final
-constraints and the measured item subtree still match; after a mismatch or subtree invalidation it
-measures against the final constraints and refreshes the retained pass. This avoids remeasuring
-every tab during the common same-size measure/arrange pair and repeated same-size arrange passes
-without changing Core's unconditional `UIElement.measure` semantics or the compact/non-compact width
-rules. If compact headers' measured widths exceed their finite strip, Arrange scales those widths
-proportionally to fit the content span. Each header uses a Grid with a Star title column and
+Measure and allocation are separate. Measure measures each visible header once and retains its
+natural width: compact headers are measured against a fixed ceiling (200 pixels connected,
+240 generic) and read their natural width from the header row's retained child measurements, with no
+second measurement walk; other headers are measured at their equal slot. The retained pass records
+the ordered item identities, the measurement inputs (ceiling or slot, height, compact/connected mode,
+strip position, close-button presentation) and each header subtree's measured sizes and layout
+participation. A later Measure with the same inputs and unchanged subtrees reuses the natural widths,
+so a strip-width-only change does not remeasure compact headers; a header text, visibility or marker
+change invalidates its subtree and the next Measure refreshes it. Arrange never measures: it
+allocates from the retained natural widths (each capped by the current slot, or the equal slot) and,
+if compact widths exceed their finite strip, scales them proportionally to fit the content span.
+This keeps Core's unconditional `UIElement.measure` semantics and the compact/non-compact width
+rules. Each header uses a Grid with a Star title column and
 Auto marker/icon/action columns between fixed edge insets, so Arrange constrains the title to
 the remaining tab width instead of preserving an unbounded horizontal-stack width. Header bounds
 also clip their chrome; labels and action slots cannot paint over neighboring tabs.

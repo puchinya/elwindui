@@ -399,9 +399,8 @@ mod chrome_tests {
         };
         overlay.set_presentation(true, None, TabStripPosition::Top, 32.0);
         crate::core::ui::layout_root(&element, size);
-        assert!(overlay.frame_source().borrow().is_some());
         assert_eq!(
-            overlay.frame_rect(),
+            overlay.painted_frame().map(|(rect, _)| rect),
             Some(Rect {
                 x: 0.0,
                 y: 32.0,
@@ -426,7 +425,7 @@ mod chrome_tests {
         }
         overlay.set_presentation(false, None, TabStripPosition::Top, 32.0);
         arrange(300.0);
-        assert_eq!(overlay.frame_rect(), None);
+        assert_eq!(overlay.painted_frame().map(|(rect, _)| rect), None);
         overlay.set_presentation(true, None, TabStripPosition::Top, 32.0);
         arrange(300.0);
         assert!(overlay.measured_size().is_some());
@@ -436,7 +435,7 @@ mod chrome_tests {
         arrange(300.0);
         assert!(overlay.measured_size().is_some());
         assert_eq!(
-            overlay.frame_rect(),
+            overlay.painted_frame().map(|(rect, _)| rect),
             Some(Rect {
                 x: 0.0,
                 y: 0.0,
@@ -504,11 +503,65 @@ mod chrome_tests {
     }
 }
 
+/// Paints the active frame contour over its arranged bounds. Replacing the contour re-records paint
+/// only, unlike an `Image` source change, which would invalidate Measure from the overlay's
+/// Arrange. While its group is inactive it is collapsed and leaves the render tree.
+#[elwindui::component(inherits Control)]
+struct ActiveFramePainter {
+    #[state(default = Rc::new(std::cell::RefCell::new(None)))]
+    source: Rc<std::cell::RefCell<Option<ImageSource>>>,
+    template: template_view!(|_this: Self| {
+        Grid {
+            hit_test_visible: false,
+        }
+    }),
+}
+
+#[elwindui::component]
+impl ActiveFramePainter {
+    #[overrides]
+    fn measure_override(&self, _available: Size) -> Size {
+        Size {
+            width: 0.0,
+            height: 0.0,
+        }
+    }
+
+    #[overrides]
+    fn arrange_override(&self, final_size: Size) -> Size {
+        final_size
+    }
+
+    #[overrides]
+    fn render(&self, context: &mut crate::core::graphics::RenderContext<'_>) {
+        if let Some(ImageSource::Vector(image)) = self.source().borrow().as_ref() {
+            context.draw_vector_image(
+                image,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: self.arranged_width().unwrap_or(0.0),
+                    height: self.arranged_height().unwrap_or(0.0),
+                },
+                None,
+                crate::core::graphics::VectorImageDrawOptions {
+                    fit: crate::core::graphics::ImageFit::Contain,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+}
+
+impl ActiveFramePainter {
+    fn set_frame(&self, source: Option<ImageSource>) {
+        *self.source().borrow_mut() = source;
+        self.invalidate_render();
+    }
+}
+
 /// Docking-private active frame and document marker. The marker is placed from the retained tab's
 /// arranged bounds, keeping generic CustomTabView free of Docking-specific public state.
-///
-/// The frame is painted by this element itself rather than by an `Image` child: its contour
-/// depends on arranged geometry, and an `Image` source change would invalidate Measure from Arrange.
 #[elwindui::component(inherits Control)]
 struct GroupChromeOverlay {
     #[prop(default = false)]
@@ -521,11 +574,12 @@ struct GroupChromeOverlay {
     strip_height: f32,
     #[state(default = None)]
     frame_key: Option<(Size, Option<(f32, f32)>, TabStripPosition, Brush)>,
-    #[state(default = Rc::new(std::cell::RefCell::new(None)))]
-    frame_source: Rc<std::cell::RefCell<Option<ImageSource>>>,
+    #[computed(expr = if is_active { Visibility::Visible } else { Visibility::Collapsed })]
+    frame_visibility: Visibility,
     template: template_view!(|this: Self| {
-        Grid {
-            hit_test_visible: false,
+        ActiveFramePainter {
+            visibility: frame_visibility
+            hit_test_visible: false
         }
     }),
 }
@@ -544,24 +598,20 @@ impl GroupChromeOverlay {
         }
     }
 
-    /// Builds the open contour from final geometry. Only paint state changes here; nothing that
-    /// Measure reads is written.
+    /// Places the frame painter on the page area and builds its open contour from final geometry.
+    /// Only paint state changes here; nothing that Measure reads is written.
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
+        let rect = self.frame_bounds(final_size);
         if let Some(root) = self.__template_root() {
-            root.arrange(Rect {
-                x: 0.0,
-                y: 0.0,
-                width: final_size.width.max(0.0),
-                height: final_size.height.max(0.0),
-            });
+            root.arrange(rect);
         }
         let strip_height = self.strip_height().max(0.0);
         // Do not paint a border across the selected header's connection to the page.
         // An open contour works even when the page background is transparent.
         let size = Size {
-            width: final_size.width.max(0.0),
-            height: (final_size.height - strip_height).max(0.0),
+            width: rect.width,
+            height: rect.height,
         };
         let gap = self
             .active_tab()
@@ -575,55 +625,62 @@ impl GroupChromeOverlay {
             });
         let key = (size, gap, self.tab_position(), accent_brush());
         if self.is_active() && self.frame_key().as_ref() != Some(&key) {
-            *self.frame_source().borrow_mut() =
-                active_frame_image(size, gap, self.tab_position(), key.3.clone());
+            if let Some(painter) = self.painter()
+                && let Some(painter) = painter.as_any().downcast_ref::<ActiveFramePainter>()
+            {
+                painter.set_frame(active_frame_image(
+                    size,
+                    gap,
+                    self.tab_position(),
+                    key.3.clone(),
+                ));
+            }
             self.set_frame_key(Some(key));
-            self.invalidate_render();
         }
         final_size
-    }
-
-    #[overrides]
-    fn render(&self, context: &mut crate::core::graphics::RenderContext<'_>) {
-        let Some(rect) = self.frame_rect() else {
-            return;
-        };
-        if let Some(ImageSource::Vector(image)) = self.frame_source().borrow().as_ref() {
-            context.draw_vector_image(
-                image,
-                rect,
-                None,
-                crate::core::graphics::VectorImageDrawOptions {
-                    fit: crate::core::graphics::ImageFit::Contain,
-                    ..Default::default()
-                },
-            );
-        }
     }
 }
 
 impl GroupChromeOverlay {
-    /// Where the active frame paints: the page area beside the strip, or nothing while inactive.
-    fn frame_rect(&self) -> Option<Rect> {
-        if !self.is_active() {
-            return None;
-        }
-        let width = self.arranged_width()?;
-        let height = self.arranged_height()?;
-        let strip_height = self.strip_height().max(0.0);
-        let y = if self.tab_position() == TabStripPosition::Top {
-            strip_height
-        } else {
-            0.0
-        };
-        Some(Rect {
-            x: 0.0,
-            y,
-            width: width.max(0.0),
-            height: (height - strip_height).max(0.0),
-        })
+    fn painter(&self) -> Option<Rc<dyn UIElementExt>> {
+        self.__template_root()
+            .filter(|root| root.as_any().is::<ActiveFramePainter>())
     }
 
+    /// The page area beside the strip, where the frame paints.
+    fn frame_bounds(&self, size: Size) -> Rect {
+        let strip_height = self.strip_height().max(0.0);
+        Rect {
+            x: 0.0,
+            y: if self.tab_position() == TabStripPosition::Top {
+                strip_height
+            } else {
+                0.0
+            },
+            width: size.width.max(0.0),
+            height: (size.height - strip_height).max(0.0),
+        }
+    }
+
+    /// The painted frame's bounds and contour, or `None` while the group is inactive.
+    fn painted_frame(&self) -> Option<(Rect, ImageSource)> {
+        let painter = self.painter()?;
+        if !self.is_active() || painter.visibility() != Visibility::Visible {
+            return None;
+        }
+        let offset = painter.arranged_offset()?;
+        let painter_ref = painter.as_any().downcast_ref::<ActiveFramePainter>()?;
+        let source = painter_ref.source().borrow().clone()?;
+        Some((
+            Rect {
+                x: offset.x,
+                y: offset.y,
+                width: painter.arranged_width()?,
+                height: painter.arranged_height()?,
+            },
+            source,
+        ))
+    }
     /// This overlay's top-left in the hosted root space, from its own arranged offset and its
     /// parent's bounds (the overlay is arranged before its contour is built).
     fn origin_in_host_root(&self) -> Option<Point> {
@@ -679,17 +736,13 @@ impl GroupChromeOverlay {
             changed = true;
         }
         if changed {
-            // Arrange rebuilds the contour for the new geometry; the paint itself (including
-            // hiding it when inactive) is re-recorded by a render invalidation.
             self.invalidate_arrange();
-            self.invalidate_render();
         }
     }
 
     fn refresh_theme(&self) {
         self.set_frame_key(None);
         self.invalidate_arrange();
-        self.invalidate_render();
     }
 }
 struct PlannedGroup {
@@ -1580,10 +1633,7 @@ impl RuntimeRealization {
         self.group_hosts
             .values()
             .filter_map(|host| {
-                host.active_chrome.frame_rect()?;
-                let Some(ImageSource::Vector(source)) =
-                    host.active_chrome.frame_source().borrow().clone()
-                else {
+                let (_, ImageSource::Vector(source)) = host.active_chrome.painted_frame()? else {
                     return None;
                 };
                 let crate::core::graphics::VectorNode::Path(path) = &source.root().children[0]

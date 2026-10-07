@@ -248,7 +248,11 @@ it does not paint the document marker over the page.
 The active selected header uses that same accent for its straight and curved outline pieces.
 A retained vector contour leaves the content-frame edge open only under the selected header,
 using its arranged surface-local bounds, so the two outlines join even over transparent content.
-Its image is reused while frame geometry, selection and the accent brush remain unchanged.
+Its image is reused while frame geometry, selection and the accent brush remain unchanged. The
+private group overlay hands the contour to a private painter placed over the page area beside the
+strip: building it in Arrange from final geometry changes paint state only and never invalidates
+Measure. The painter is collapsed while the group is inactive, and the strip position, height and
+active state arrive through presentation updates outside layout.
 
 Docking-specific chrome stays in the retained group realization keyed by `DockGroupId`; there is no
 independent group title or group drag surface. In a Bottom group, the selected item's title and
@@ -279,7 +283,8 @@ item. Light dismissal notifies the owner, which commits `with_auto_hide_dismisse
 active item released when it was that item). Preferred sides are runtime-only and cleared with the
 runtime.
 
-The strip entries measure from their title, rotate for Left/Right, remain horizontal for Top/Bottom,
+The strip entries size from their title, measured once during normal layout by a private label that
+also keeps the unrotated title rectangle intact; they rotate for Left/Right, remain horizontal for Top/Bottom,
 space entries by 16 pixels, and retain a 4-pixel separator marker that turns accent with its title
 only on hover or press. Open/active state does not recolor the entry. The pane fills
 the usable center region on its perpendicular axis and begins at one third of that axis unless a

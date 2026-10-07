@@ -1,4 +1,4 @@
-use super::core::base::{Point, Rect};
+use super::core::base::{Point, Rect, Size};
 use super::core::input::{MouseButton, PointerEventArgs};
 use super::core::ui::{ControlExt, Grid, GridExt, ListExt, UIElementExt};
 use super::{
@@ -15,6 +15,7 @@ use std::rc::Rc;
 
 const TAB_STRIP_HEIGHT: f32 = 40.0;
 const TAB_DRAG_THRESHOLD: f32 = 4.0;
+const CONNECTED_LEADING_RULE: f32 = 9.0;
 
 fn strip_tracks(
     position: TabStripPosition,
@@ -79,6 +80,162 @@ pub enum TabItemPointerEvent {
     Exited,
 }
 
+/// Inputs and image of the last drawn open frame.
+type FrameImageKey = (
+    (Size, TabStripPosition, elwindui::core::graphics::Brush),
+    elwindui::core::graphics::VectorImage,
+);
+
+/// Connected content frame drawn open on the strip side: the strip's baseline rule is its edge
+/// there, so its corners on that side are square and the far corners keep the 4 px radius.
+/// The contour is built from the arranged size while recording paint, so layout never changes.
+#[elwindui::component(inherits Image)]
+struct ConnectedContentFrame {
+    #[state(default = TabStripPosition::Top)]
+    open_side: TabStripPosition,
+    // Tracked so a theme switch re-records the frame with the new separator colour.
+    #[environment(separator)]
+    separator: elwindui::core::theme::BrushStyle,
+    #[state(default = Rc::new(std::cell::RefCell::new(None)))]
+    image_cache: Rc<std::cell::RefCell<Option<FrameImageKey>>>,
+    body: view! {
+        on_update(separator) {
+            this.invalidate_render();
+        }
+    },
+}
+
+#[elwindui::component]
+impl ConnectedContentFrame {
+    #[overrides]
+    fn measure_override(&self, _available: Size) -> Size {
+        Size {
+            width: 0.0,
+            height: 0.0,
+        }
+    }
+
+    #[overrides]
+    fn arrange_override(&self, final_size: Size) -> Size {
+        final_size
+    }
+
+    #[overrides]
+    fn render(&self, context: &mut elwindui::core::graphics::RenderContext<'_>) {
+        use elwindui::core::theme::ResolvedValue;
+        let size = Size {
+            width: self.arranged_width().unwrap_or(0.0),
+            height: self.arranged_height().unwrap_or(0.0),
+        };
+        // Resolve against this element's environment so a window-level theme applies too.
+        let ResolvedValue::Value(brush) = self.separator().resolve(&self.effective_environment())
+        else {
+            return;
+        };
+        // A vector image (rebuilt only when its inputs change) keeps the backend's retained
+        // surface in step with theme changes, which a reused stroke shape does not.
+        let key = (size, self.open_side(), brush.clone());
+        let cache = self.image_cache();
+        let mut cache = cache.borrow_mut();
+        if cache.as_ref().map(|(cached, _)| cached) != Some(&key) {
+            *cache = open_frame_image(size, self.open_side(), brush).map(|image| (key, image));
+        }
+        if let Some((_, image)) = cache.as_ref() {
+            context.draw_vector_image(
+                image,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: size.width,
+                    height: size.height,
+                },
+                None,
+                elwindui::core::graphics::VectorImageDrawOptions {
+                    fit: elwindui::core::graphics::ImageFit::Contain,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+}
+
+/// The open frame contour as a vector image of `size`.
+fn open_frame_image(
+    size: Size,
+    open_side: TabStripPosition,
+    brush: elwindui::core::graphics::Brush,
+) -> Option<elwindui::core::graphics::VectorImage> {
+    use elwindui::core::base::AffineTransform;
+    use elwindui::core::graphics::{
+        StrokeStyle, VectorGroup, VectorImageBuilder, VectorNode, VectorPaint, VectorPaintOrder,
+        VectorPathNode, VectorShapeRendering, VectorStroke,
+    };
+    let node = VectorNode::Path(VectorPathNode {
+        path: open_frame_path(size, open_side)?,
+        transform: AffineTransform::IDENTITY,
+        fill: None,
+        stroke: Some(VectorStroke {
+            paint: VectorPaint::Brush(brush),
+            opacity: 1.0,
+            style: StrokeStyle {
+                width: 1.0,
+                ..StrokeStyle::default()
+            },
+        }),
+        paint_order: VectorPaintOrder::default(),
+        rendering: VectorShapeRendering::GeometricPrecision,
+        visibility: true,
+    });
+    VectorImageBuilder::new(
+        size,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: size.width,
+            height: size.height,
+        },
+    )
+    .ok()?
+    .root(VectorGroup {
+        children: std::sync::Arc::from([node]),
+        ..VectorGroup::default()
+    })
+    .finish()
+    .ok()
+}
+/// Left, far and right edges of a content frame whose strip-side edge is drawn by the strip.
+fn open_frame_path(
+    size: Size,
+    open_side: TabStripPosition,
+) -> Option<elwindui::core::graphics::Path> {
+    use elwindui::core::graphics::PathBuilder;
+    if !size.width.is_finite()
+        || !size.height.is_finite()
+        || size.width <= 1.0
+        || size.height <= 1.0
+    {
+        return None;
+    }
+    let radius = 4.0_f32.min((size.width - 1.0) * 0.5).min(size.height - 1.0);
+    let (left, right, far) = (0.5, size.width - 0.5, size.height - 0.5);
+    let map = |x: f32, y: f32| Point {
+        x,
+        y: if open_side == TabStripPosition::Bottom {
+            size.height - y
+        } else {
+            y
+        },
+    };
+    let mut path = PathBuilder::new();
+    path.move_to(map(left, 0.0))
+        .line_to(map(left, far - radius))
+        .quad_to(map(left, far), map(left + radius, far))
+        .line_to(map(right - radius, far))
+        .quad_to(map(right, far), map(right, far - radius))
+        .line_to(map(right, 0.0));
+    path.build().ok()
+}
+
 /// A templated tab strip and selected-content host.
 #[elwindui::component(inherits Control)]
 #[content(children)]
@@ -98,9 +255,10 @@ pub struct CustomTabView {
     compact: bool,
     #[state(default = false)]
     connected_chrome_internal: bool,
-    // Connected (Docking) strips start with a 6 px rule; the generic strip keeps the native
-    // TabView 8 px leading inset, matching its 8 px top inset.
-    #[computed(expr = if connected_chrome_internal { 6.0 } else { 8.0 })]
+    // Connected (Docking) strips start with a rule that puts the first tab's outline 13 px inside
+    // the frame edge like WinUI.Dock (its 6 px rule plus the tab container margin); the generic
+    // strip keeps the native TabView 8 px leading inset, matching its 8 px top inset.
+    #[computed(expr = if connected_chrome_internal { CONNECTED_LEADING_RULE } else { 8.0 })]
     leading_rule_width: f32,
     #[computed(expr = header_host_tracks(tab_strip_position, connected_chrome_internal))]
     strip_host_rows: Vec<elwindui::core::layout::GridLength>,
@@ -223,6 +381,10 @@ pub struct CustomTabView {
             tab_strip_host
             content_frame
             content_presenter
+            // Drawn above the page like a WinUI Border, so an opaque page cannot cover its edges.
+            ConnectedContentFrame {
+                hit_test_visible: false
+            }
         }
     }),
 }
@@ -500,6 +662,11 @@ impl CustomTabView {
             .and_then(|presenter| presenter.upgrade());
         if let Some(presenter) = presenter {
             presenter.refresh_presentation();
+        }
+        if let Some(root) = self.__template_root()
+            && let Some(frame) = root.visual_children().get(3)
+        {
+            frame.invalidate_render();
         }
         self.invalidate_measure();
     }
@@ -801,11 +968,50 @@ impl CustomTabView {
         } else {
             elwindui::core::layout::Visibility::Visible
         };
+        self.sync_content_frame(
+            strip_visibility == elwindui::core::layout::Visibility::Visible,
+            grid,
+        );
         let strip: Option<Rc<CustomTabStripPresenter>> = self
             .strip_presenter()
             .and_then(|presenter| presenter.upgrade());
         if let Some(strip) = strip {
             strip.set_visibility(strip_visibility);
+        }
+    }
+
+    /// A connected strip supplies the frame's strip-side edge, like WinUI.Dock's
+    /// `BorderThickness="1,0,1,1"` content border: its baseline rule continues into square frame
+    /// corners and only the selected tab opens it. Without a visible strip, and for the generic
+    /// TabView, the content keeps its closed rounded frame.
+    fn sync_content_frame(&self, strip_visible: bool, grid: &Grid) {
+        let children = grid.visual_children();
+        let (Some(closed), Some(open)) = (children.get(1), children.get(3)) else {
+            return;
+        };
+        let open_frame = self.connected_chrome_internal() && strip_visible;
+        closed.set_visibility(if open_frame {
+            elwindui::core::layout::Visibility::Collapsed
+        } else {
+            elwindui::core::layout::Visibility::Visible
+        });
+        open.set_visibility(if open_frame {
+            elwindui::core::layout::Visibility::Visible
+        } else {
+            elwindui::core::layout::Visibility::Collapsed
+        });
+        let content_row = if self.tab_strip_position() == TabStripPosition::Top {
+            1
+        } else {
+            0
+        };
+        open.as_ui_element()
+            .set_attached_if_changed("Grid", "row", content_row);
+        if let Some(frame) = open.as_any().downcast_ref::<ConnectedContentFrame>()
+            && frame.open_side() != self.tab_strip_position()
+        {
+            frame.set_open_side(self.tab_strip_position());
+            open.invalidate_render();
         }
     }
 
@@ -1093,11 +1299,71 @@ fn concrete_element<T: 'static>(element: Rc<dyn UIElementExt>) -> Rc<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::base::Size;
     use crate::core::ui::{ContentControlExt, UIElement, UIElementExt, layout_root};
     use std::cell::Cell;
     use std::rc::Rc;
 
+    #[test]
+    fn connected_strip_draws_the_content_frame_open_on_its_side() {
+        use crate::core::graphics::PathCommand;
+        use crate::core::layout::Visibility;
+        let view = CustomTabView::new_view();
+        view.set_children(vec![
+            CustomTabViewItem::new_item(),
+            CustomTabViewItem::new_item(),
+        ]);
+        let root: Rc<dyn UIElementExt> = view.clone();
+        let size = Size {
+            width: 300.0,
+            height: 200.0,
+        };
+        layout_root(&root, size);
+        let frames = view.__template_root().unwrap().visual_children();
+        let (closed, open) = (frames[1].clone(), frames[3].clone());
+        assert_eq!(closed.visibility(), Visibility::Visible);
+        assert_eq!(open.visibility(), Visibility::Collapsed);
+
+        view.set_connected_chrome(true);
+        layout_root(&root, size);
+        assert_eq!(closed.visibility(), Visibility::Collapsed);
+        assert_eq!(open.visibility(), Visibility::Visible);
+        assert_eq!(open.arranged_height(), Some(168.0));
+        assert_eq!(open.arranged_width(), Some(300.0));
+        assert_eq!(open.arranged_offset().map(|offset| offset.x), Some(0.0));
+
+        // Sides start on the strip edge with square corners; only the far corners are rounded.
+        for (side, near, far) in [
+            (TabStripPosition::Top, 0.0, 167.5),
+            (TabStripPosition::Bottom, 168.0, 0.5),
+        ] {
+            let path = open_frame_path(
+                Size {
+                    width: 300.0,
+                    height: 168.0,
+                },
+                side,
+            )
+            .unwrap();
+            let commands = path.commands();
+            assert_eq!(
+                commands.first(),
+                Some(&PathCommand::MoveTo(Point { x: 0.5, y: near }))
+            );
+            assert_eq!(
+                commands.last(),
+                Some(&PathCommand::LineTo(Point { x: 299.5, y: near }))
+            );
+            assert!(commands.iter().any(|command| matches!(
+                command,
+                PathCommand::LineTo(Point { x, y }) if *x == 295.5 && *y == far
+            )));
+            assert!(
+                !commands
+                    .iter()
+                    .any(|command| matches!(command, PathCommand::Close))
+            );
+        }
+    }
     #[test]
     fn docking_pin_press_consumes_selection_and_drag_and_invokes_once_on_release() {
         use crate::core::input::{RawPointerEvent, RawPointerEventKind};

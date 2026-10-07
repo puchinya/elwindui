@@ -247,8 +247,12 @@ private group host adds the active-color frame over content only for an explicit
 it does not paint the document marker over the page.
 The active selected header uses that same accent for its straight and curved outline pieces.
 A connected tab item is one 32-pixel row: its 30-pixel header sits at the strip's far edge while the
-selected outline spans the whole row, so the outline's feet end on the strip's baseline rule. The
-active frame overlaps that baseline row, and the outline continues straight into the frame edge.
+selected outline spans the whole row, so the outline's feet end on the strip's baseline rule. As in
+WinUI.Dock's content border (`BorderThickness="1,0,1,1"`, `CornerRadius="0,0,4,4"`), the strip's
+baseline is the frame's strip-side edge: the connected content frame draws only its sides and far
+edge, its strip-side corners are square, and a 9-pixel leading rule places the first tab outline
+13 pixels inside the frame edge. The active frame overlaps that baseline row with the same square
+corners, so the outline continues straight into the frame edge and no second line runs inside it.
 A retained vector contour leaves the content-frame edge open only under the selected header,
 using its arranged surface-local bounds, so the two outlines join even over transparent content.
 Its image is reused while frame geometry, selection and the accent brush remain unchanged. The

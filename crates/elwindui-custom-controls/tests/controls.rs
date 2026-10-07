@@ -477,12 +477,12 @@ fn tab_strip_uses_reference_leading_baseline_and_header_inset() {
         .expect("tab strip host is a Grid");
     assert_eq!(
         tab_strip_host.columns.borrow().as_slice(),
-        &[GridLength::Fixed(6.0), GridLength::Star(1.0),]
+        &[GridLength::Fixed(9.0), GridLength::Star(1.0),]
     );
 
     let item_visual: Rc<dyn UIElementExt> = item.clone();
     let item_offset = absolute_offset(&item_visual);
-    assert!((item_offset.x - 6.0).abs() < 0.01);
+    assert!((item_offset.x - 9.0).abs() < 0.01);
 }
 
 #[test]
@@ -1258,49 +1258,49 @@ fn tab_insertion_uses_retained_unequal_header_midpoints_and_boundaries() {
     );
 
     assert_eq!(
-        view.tab_insertion_index_at(Point { x: 44.0, y: 16.0 }),
-        Some(0)
-    );
-    assert_eq!(
-        view.tab_insertion_index_at(Point { x: 46.0, y: 16.0 }),
-        Some(0)
-    );
-    assert_eq!(
         view.tab_insertion_index_at(Point { x: 47.0, y: 16.0 }),
-        Some(1)
+        Some(0)
     );
     assert_eq!(
-        view.tab_insertion_index_at(Point { x: 154.0, y: 16.0 }),
+        view.tab_insertion_index_at(Point { x: 49.0, y: 16.0 }),
+        Some(0)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 50.0, y: 16.0 }),
         Some(1)
     );
     assert_eq!(
         view.tab_insertion_index_at(Point { x: 157.0, y: 16.0 }),
-        Some(2)
+        Some(1)
     );
     assert_eq!(
-        view.tab_insertion_index_at(Point { x: 264.0, y: 16.0 }),
+        view.tab_insertion_index_at(Point { x: 160.0, y: 16.0 }),
         Some(2)
     );
     assert_eq!(
         view.tab_insertion_index_at(Point { x: 267.0, y: 16.0 }),
+        Some(2)
+    );
+    assert_eq!(
+        view.tab_insertion_index_at(Point { x: 270.0, y: 16.0 }),
         Some(3)
     );
     assert_eq!(
         view.tab_insertion_index_at(Point { x: 150.0, y: 60.0 }),
         None
     );
-    assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(6.0));
+    assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(9.0));
     assert_eq!(
         view.tab_insertion_boundary(1).map(|rect| rect.x),
-        Some(86.0)
+        Some(89.0)
     );
     assert_eq!(
         view.tab_insertion_boundary(2).map(|rect| rect.x),
-        Some(226.0)
+        Some(229.0)
     );
     assert_eq!(
         view.tab_insertion_boundary(3).map(|rect| rect.x),
-        Some(306.0)
+        Some(309.0)
     );
 }
 
@@ -1342,7 +1342,7 @@ fn compact_and_empty_tab_strips_share_the_retained_geometry_path() {
         view.tab_insertion_index_at(Point { x: 20.0, y: 14.0 }),
         Some(0)
     );
-    assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(6.0));
+    assert_eq!(view.tab_insertion_boundary(0).map(|rect| rect.x), Some(9.0));
 }
 
 #[test]

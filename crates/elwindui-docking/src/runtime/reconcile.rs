@@ -300,6 +300,7 @@ fn active_frame_image(
     size: Size,
     gap: Option<(f32, f32)>,
     position: TabStripPosition,
+    strip: bool,
     brush: Brush,
 ) -> Option<ImageSource> {
     use crate::core::base::AffineTransform;
@@ -320,9 +321,12 @@ fn active_frame_image(
     let left = 0.5;
     let right = size.width - 0.5;
     let bottom = size.height - 0.5;
+    // With a tab strip the strip-side corners are square: the strip's baseline is that edge,
+    // like WinUI.Dock's content border (`BorderThickness="1,0,1,1"`, `CornerRadius="0,0,4,4"`).
+    let strip_radius = if strip { 0.0 } else { radius };
     let gap = gap.and_then(|(start, end)| {
-        let start = start.clamp(left + radius, right - radius);
-        let end = end.clamp(left + radius, right - radius);
+        let start = start.clamp(left + strip_radius, right - strip_radius);
+        let end = end.clamp(left + strip_radius, right - strip_radius);
         (start.is_finite() && end.is_finite() && end > start).then_some((start, end))
     });
     let map = |x, y| Point {
@@ -334,15 +338,15 @@ fn active_frame_image(
         },
     };
     let mut path = PathBuilder::new();
-    path.move_to(map(gap.map_or(left + radius, |(_, end)| end), 0.5))
-        .line_to(map(right - radius, 0.5))
-        .quad_to(map(right, 0.5), map(right, 0.5 + radius))
+    path.move_to(map(gap.map_or(left + strip_radius, |(_, end)| end), 0.5))
+        .line_to(map(right - strip_radius, 0.5))
+        .quad_to(map(right, 0.5), map(right, 0.5 + strip_radius))
         .line_to(map(right, bottom - radius))
         .quad_to(map(right, bottom), map(right - radius, bottom))
         .line_to(map(left + radius, bottom))
         .quad_to(map(left, bottom), map(left, bottom - radius))
-        .line_to(map(left, 0.5 + radius))
-        .quad_to(map(left, 0.5), map(left + radius, 0.5));
+        .line_to(map(left, 0.5 + strip_radius))
+        .quad_to(map(left, 0.5), map(left + strip_radius, 0.5));
     if let Some((start, _)) = gap {
         path.line_to(map(start, 0.5));
     } else {
@@ -460,7 +464,7 @@ mod chrome_tests {
             (TabStripPosition::Bottom, 179.5),
         ] {
             let Some(ImageSource::Vector(image)) =
-                active_frame_image(size, Some((20.0, 120.0)), position, accent_brush())
+                active_frame_image(size, Some((20.0, 120.0)), position, true, accent_brush())
             else {
                 panic!("valid frame should produce vector geometry")
             };
@@ -471,6 +475,11 @@ mod chrome_tests {
             assert_eq!(
                 commands.first(),
                 Some(&PathCommand::MoveTo(Point { x: 120.0, y }))
+            );
+            // Strip-side corners are square: the edge runs straight to the frame's side.
+            assert_eq!(
+                commands.get(1),
+                Some(&PathCommand::LineTo(Point { x: 299.5, y }))
             );
             assert_eq!(
                 commands.last(),
@@ -485,7 +494,7 @@ mod chrome_tests {
             assert_eq!(node.stroke.as_ref().unwrap().style.width, 1.0);
         }
         let Some(ImageSource::Vector(image)) =
-            active_frame_image(size, None, TabStripPosition::Bottom, accent_brush())
+            active_frame_image(size, None, TabStripPosition::Bottom, false, accent_brush())
         else {
             panic!("hidden strip should still produce a frame")
         };
@@ -501,6 +510,7 @@ mod chrome_tests {
                 },
                 None,
                 TabStripPosition::Top,
+                false,
                 accent_brush()
             )
             .is_none()
@@ -643,6 +653,7 @@ impl GroupChromeOverlay {
                     size,
                     gap,
                     self.tab_position(),
+                    strip_height > 0.0,
                     key.3.clone(),
                 ));
             }

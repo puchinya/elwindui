@@ -68,6 +68,13 @@ notification rather than replacing items or retaining stale colors. Collapsed
 presentation subtrees do not invalidate a measured strip pass merely because
 their unmeasured descendants have no metrics; making them visible still
 invalidates measurement through the normal visibility setter.
+With connected (Docking) chrome and a visible strip, the content frame is open on the strip side:
+the strip's baseline rule is that edge, as in WinUI.Dock's content border
+(`BorderThickness="1,0,1,1"`, `CornerRadius="0,0,4,4"`). A private `Image`-derived frame drawn above
+the page paints the sides and the far edge with square strip-side corners; its vector contour is
+rebuilt during paint only when its size, side or separator brush changes, and the
+`#[environment(separator)]` field re-records it on theme changes. A collapsed strip and the generic
+TabView keep the closed rounded frame.
 The content presenter retains the last arranged content size as well as selected
 identity. A viewport/style change with the same selection rearranges the selected
 page once; it does not revisit unchanged hidden pages. Selection-only updates

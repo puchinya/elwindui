@@ -96,6 +96,8 @@ struct ConnectedContentFrame {
     // Tracked so a theme switch re-records the frame with the new separator colour.
     #[environment(separator)]
     separator: elwindui::core::theme::BrushStyle,
+    #[state(default = false)]
+    active: bool,
     #[state(default = Rc::new(std::cell::RefCell::new(None)))]
     image_cache: Rc<std::cell::RefCell<Option<FrameImageKey>>>,
     body: view! {
@@ -128,8 +130,12 @@ impl ConnectedContentFrame {
             height: self.arranged_height().unwrap_or(0.0),
         };
         // Resolve against this element's environment so a window-level theme applies too.
-        let ResolvedValue::Value(brush) = self.separator().resolve(&self.effective_environment())
-        else {
+        let style = if self.active() {
+            super::support::accent_style()
+        } else {
+            self.separator()
+        };
+        let ResolvedValue::Value(brush) = style.resolve(&self.effective_environment()) else {
             return;
         };
         // A vector image (rebuilt only when its inputs change) keeps the backend's retained
@@ -255,6 +261,12 @@ pub struct CustomTabView {
     compact: bool,
     #[state(default = false)]
     connected_chrome_internal: bool,
+    // Docking's active group: like WinUI.Dock's `IsActive` state, every connected strip and
+    // frame line takes the accent instead of the separator.
+    #[state(default = false)]
+    active_chrome_internal: bool,
+    #[state(default = None)]
+    content_header_element: Option<Rc<dyn UIElementExt>>,
     // Connected (Docking) strips start with a rule that puts the first tab's outline 13 px inside
     // the frame edge like WinUI.Dock (its 6 px rule plus the tab container margin); the generic
     // strip keeps the native TabView 8 px leading inset, matching its 8 px top inset.
@@ -290,7 +302,10 @@ pub struct CustomTabView {
     tab_strip_row: i32,
     #[computed(expr = if tab_strip_position == TabStripPosition::Top { 1 } else { 0 })]
     content_row: i32,
-    #[computed(expr = strip_tracks(tab_strip_position, if connected_chrome_internal { 32.0 } else { TAB_STRIP_HEIGHT }))]
+    #[state(default = Vec::new())]
+    template_items: Vec<Rc<CustomTabViewItem>>,
+    // A lone bottom tab hides its strip (as `sync_grid_rows` does), so a re-applied binding keeps it.
+    #[computed(expr = strip_tracks(tab_strip_position, if tab_strip_position == TabStripPosition::Bottom && template_items.len() == 1 { 0.0 } else if connected_chrome_internal { 32.0 } else { TAB_STRIP_HEIGHT }))]
     grid_rows: Vec<elwindui::core::layout::GridLength>,
     #[computed(expr = if tab_strip_position == TabStripPosition::Top {
         elwindui::core::layout::VerticalAlignment::Bottom
@@ -298,8 +313,6 @@ pub struct CustomTabView {
         elwindui::core::layout::VerticalAlignment::Top
     })]
     baseline_alignment: elwindui::core::layout::VerticalAlignment,
-    #[state(default = Vec::new())]
-    template_items: Vec<Rc<CustomTabViewItem>>,
     #[state(default = None)]
     last_presented_selected_index: Option<usize>,
     // The item that received a forwarded press keeps the rest of that gesture, even if the
@@ -322,7 +335,7 @@ pub struct CustomTabView {
     transparent_brush: elwindui::core::theme::BrushStyle,
     #[computed(expr = if connected_chrome_internal { transparent_brush.clone() } else { super::support::native_tab_background(true, palette_dark) })]
     content_background: elwindui::core::theme::BrushStyle,
-    #[computed(expr = if connected_chrome_internal { elwindui::core::theme::BrushStyle::Separator } else { super::support::native_tab_stroke(palette_dark) })]
+    #[computed(expr = if !connected_chrome_internal { super::support::native_tab_stroke(palette_dark) } else if active_chrome_internal { super::support::accent_style() } else { elwindui::core::theme::BrushStyle::Separator })]
     frame_stroke: elwindui::core::theme::BrushStyle,
     template: template_view!(|this: Self| {
         on_update(children, template_items, selected_index, tab_strip_position, compact, close_button_presentation, palette_foreground) {
@@ -365,7 +378,21 @@ pub struct CustomTabView {
         let content_presenter = CustomTabContentPresenter {
             items: content_items
             selected_index: selected_index
+            Grid::row: 1
+        };
+        // Docking's content header sits inside the frame above the page, like WinUI.Dock's
+        // `ContentOptions` inside each tab's content.
+        let content_area = Grid {
             Grid::row: content_row
+            rows: [
+                elwindui::core::layout::GridLength::Auto,
+                elwindui::core::layout::GridLength::Star(1.0),
+            ]
+            columns: [elwindui::core::layout::GridLength::Star(1.0)]
+            Grid {
+                columns: [elwindui::core::layout::GridLength::Star(1.0)]
+            }
+            content_presenter
         };
         let content_frame = Rectangle {
             Grid::row: content_row
@@ -380,7 +407,7 @@ pub struct CustomTabView {
             columns: [elwindui::core::layout::GridLength::Star(1.0)]
             tab_strip_host
             content_frame
-            content_presenter
+            content_area
             // Drawn above the page like a WinUI Border, so an opaque page cannot cover its edges.
             ConnectedContentFrame {
                 hit_test_visible: false
@@ -416,6 +443,71 @@ impl CustomTabView {
         }
         self.sync_presentation(&children);
     }
+
+    /// Framework integration for Docking's active group: connected strip and frame lines take the
+    /// accent. This is not a DSL property.
+    #[doc(hidden)]
+    pub fn set_active_chrome(&self, active: bool) {
+        if self.active_chrome_internal() == active {
+            return;
+        }
+        self.set_active_chrome_internal(active);
+        if let Some(root) = self.__template_root()
+            && let Some(frame) = root.visual_children().get(3)
+            && let Some(painter) = frame.as_any().downcast_ref::<ConnectedContentFrame>()
+        {
+            painter.set_active(active);
+            frame.invalidate_render();
+        }
+    }
+
+    /// Whether Docking presents this view as its active group.
+    #[doc(hidden)]
+    pub fn active_chrome(&self) -> bool {
+        self.active_chrome_internal()
+    }
+
+    /// The brush style of this view's strip and frame lines.
+    #[doc(hidden)]
+    pub fn frame_stroke_style(&self) -> elwindui::core::theme::BrushStyle {
+        self.frame_stroke()
+    }
+
+    /// Framework integration for Docking's content header, placed inside the content frame above
+    /// the page. This is not a DSL property.
+    #[doc(hidden)]
+    pub fn set_content_header(&self, header: Option<Rc<dyn UIElementExt>>) {
+        self.set_content_header_element(header);
+        self.place_content_header();
+    }
+
+    fn place_content_header(&self) {
+        let header = self.content_header_element();
+        let Some(root) = self.__template_root() else {
+            return;
+        };
+        let Some(area) = root.visual_children().get(2).cloned() else {
+            return;
+        };
+        let Some(host) = area.visual_children().first().cloned() else {
+            return;
+        };
+        let Some(host) = host.as_any().downcast_ref::<Grid>() else {
+            return;
+        };
+        let current = host.visual_children().first().cloned();
+        let unchanged = match (&current, &header) {
+            (Some(current), Some(header)) => Rc::ptr_eq(current, header),
+            (None, None) => true,
+            _ => false,
+        };
+        if !unchanged {
+            super::core::ui::LayoutExt::children(host).clear();
+            if let Some(header) = header {
+                super::core::ui::LayoutExt::children(host).add(header);
+            }
+        }
+    }
 }
 
 #[elwindui::component]
@@ -426,6 +518,14 @@ impl CustomTabView {
         self.set_clip_to_bounds(Some(true));
         self.cache_presenters();
         self.reconcile_children();
+        self.place_content_header();
+        if self.active_chrome_internal()
+            && let Some(root) = self.__template_root()
+            && let Some(frame) = root.visual_children().get(3)
+            && let Some(painter) = frame.as_any().downcast_ref::<ConnectedContentFrame>()
+        {
+            painter.set_active(true);
+        }
     }
 }
 
@@ -833,9 +933,10 @@ impl CustomTabView {
         if let Some(presenter) = content_presenter {
             presenter.set_items(children.to_vec());
             presenter.set_selected_index(selected);
+            // The page row of the content area, below the optional content header.
             presenter
                 .as_ui_element()
-                .set_attached::<i32>("Grid", "row", self.content_row());
+                .set_attached::<i32>("Grid", "row", 1);
             presenter.reconcile_contents();
         }
         for (index, item) in children.iter().enumerate() {
@@ -859,6 +960,9 @@ impl CustomTabView {
             && self.last_presented_compact_tabs() == Some(compact)
             && self.last_presented_close_button_presentation() == Some(close);
         if presentation_unchanged {
+            // The strip row and frame also follow the item count (a lone bottom tab hides its
+            // strip), which this signature does not cover; the sync writes only changed values.
+            self.sync_grid_rows();
             return;
         }
         #[cfg(test)]
@@ -891,7 +995,7 @@ impl CustomTabView {
                 presenter.set_selected_index(selected);
                 presenter
                     .as_ui_element()
-                    .set_attached::<i32>("Grid", "row", self.content_row());
+                    .set_attached::<i32>("Grid", "row", 1);
             }
         }
         if strip_presenter.is_none() {
@@ -1007,6 +1111,10 @@ impl CustomTabView {
         };
         open.as_ui_element()
             .set_attached_if_changed("Grid", "row", content_row);
+        if let Some(area) = children.get(2) {
+            area.as_ui_element()
+                .set_attached_if_changed("Grid", "row", content_row);
+        }
         if let Some(frame) = open.as_any().downcast_ref::<ConnectedContentFrame>()
             && frame.open_side() != self.tab_strip_position()
         {

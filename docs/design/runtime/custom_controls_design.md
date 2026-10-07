@@ -74,7 +74,10 @@ the strip's baseline rule is that edge, as in WinUI.Dock's content border
 the page paints the sides and the far edge with square strip-side corners; its vector contour is
 rebuilt during paint only when its size, side or separator brush changes, and the
 `#[environment(separator)]` field re-records it on theme changes. A collapsed strip and the generic
-TabView keep the closed rounded frame.
+TabView keep the closed rounded frame. Docking marks its active group with the doc-hidden
+`set_active_chrome`, which switches the connected strip rules and both frames to the accent, and
+places its content header with the doc-hidden `set_content_header` in an Auto row of the content
+area above the page, inside the frame.
 The content presenter retains the last arranged content size as well as selected
 identity. A viewport/style change with the same selection rearranges the selected
 page once; it does not revisit unchanged hidden pages. Selection-only updates

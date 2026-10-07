@@ -92,7 +92,7 @@ authoritative-state re-realization semantics remain in force.
 ## Callback and source flow
 
 The docking demo's dark comparison palette uses black window/menu space, #0f0f0f page fill,
-#1f1f1f content-header fill, and a translucent white default stroke (alpha 18), matching the pinned
+#1f1f1f secondary fill, and a translucent white default stroke (alpha 18), matching the pinned
 reference capture and its WinUI control stroke resource. The menu's File/Help labels are vertically
 centered in 40 pixels with a 14-pixel leading inset; fixture tools remain available at the trailing
 edge. These demo resources do not change application theme APIs or Docking ownership.
@@ -184,8 +184,9 @@ target follows the floating path (subject to `can_float`). The model transaction
 drop also activates the moved Document. Each group view reports every tab press through the
 doc-hidden `CustomTabView::set_on_tab_pressed`, so pressing an already-selected tab still activates
 it; each group container also registers a handled-events-too `on_pointer_pressed` handler that
-activates the selected Document for presses its content consumes. Each group container holds a body Grid (content header row
-above the tab view) and, as its sibling, the active-frame overlay, so the frame spans the header.
+activates the selected Document for presses its content consumes. Each group container holds its
+tab view; a bottom-tab group's content header is handed to the view's content area above the page
+(`CustomTabView::set_content_header`), inside the content frame like WinUI.Dock's `ContentOptions`.
 
 `DockTargetOverlay` has two retained visual layers per surface. The root-target layer stays in
 surface coordinates and owns the four edge targets. The group-compass layer uses the target group's
@@ -242,24 +243,17 @@ separate: reconciliation drives active chrome only from `DockLayoutModel::active
 falls back to the selected tab. With no active item, the selected header keeps its normal outline
 but has no active marker or group frame. An active `CustomTabViewItem` owns its 4-by-16 marker
 inside the header before the title. Its intrinsic width includes the marker slot only while active,
-along with title and reserved action slot, so compact document labels remain visible. Docking's
-private group host adds the active-color frame over content only for an explicitly active document;
-it does not paint the document marker over the page.
-The active selected header uses that same accent for its straight and curved outline pieces.
-A connected tab item is one 32-pixel row: its 30-pixel header sits at the strip's far edge while the
-selected outline spans the whole row, so the outline's feet end on the strip's baseline rule. As in
-WinUI.Dock's content border (`BorderThickness="1,0,1,1"`, `CornerRadius="0,0,4,4"`), the strip's
-baseline is the frame's strip-side edge: the connected content frame draws only its sides and far
-edge, its strip-side corners are square, and a 9-pixel leading rule places the first tab outline
-13 pixels inside the frame edge. The active frame overlaps that baseline row with the same square
-corners, so the outline continues straight into the frame edge and no second line runs inside it.
-A retained vector contour leaves the content-frame edge open only under the selected header,
-using its arranged surface-local bounds, so the two outlines join even over transparent content.
-Its image is reused while frame geometry, selection and the accent brush remain unchanged. The
-private group overlay hands the contour to a private painter placed over the page area beside the
-strip: building it in Arrange from final geometry changes paint state only and never invalidates
-Measure. The painter is collapsed while the group is inactive, and the strip position, height and
-active state arrive through presentation updates outside layout.
+along with title and reserved action slot, so compact document labels remain visible.
+Like WinUI.Dock, whose TabView shares one BorderBrush that its `IsActive` state switches to the
+accent, an active group is presented by `CustomTabView::set_active_chrome`: the leading and baseline
+rules, the content frame and the active selected header's outline all take the accent; nothing is
+painted over the page. A connected tab item is one 32-pixel row: its 30-pixel header sits at the
+strip's far edge while the selected outline spans the whole row, so the outline's feet end on the
+strip's baseline rule. As in WinUI.Dock's content border (`BorderThickness="1,0,1,1"`,
+`CornerRadius="0,0,4,4"`), the strip's baseline is the frame's strip-side edge: the connected content
+frame draws only its sides and far edge with square strip-side corners, the selected header covers
+the baseline under itself, and a 9-pixel leading rule places the first tab outline 13 pixels inside
+the frame edge. The outline therefore continues straight into the frame edge with no second line.
 
 Docking-specific chrome stays in the retained group realization keyed by `DockGroupId`; there is no
 independent group title or group drag surface. In a Bottom group, the selected item's title and
@@ -278,7 +272,9 @@ Bottom content headers use the pinned 8-pixel horizontal and 6-pixel vertical
 insets, with adjacent 24-pixel actions and an 8-pixel title/action gap. The title
 is 14-pixel semibold and wraps within the remaining track. Header height is at
 least 40 pixels and grows for a wrapped title, so narrow groups do not move the
-actions over text. Title and actions remain vertically centered.
+actions over text. Title and actions remain vertically centered. Like WinUI.Dock's
+`ContentOptions`, the header uses the dock fill (`DockFillDefaultBrush`) with a 1-pixel separator
+along its bottom edge that stays neutral while the group is active.
 
 `AutoHideOverlay` owns four custom strip Grids, title-first side entries, one overlay pane, resize
 grip, and pin/close affordances. It attaches the stable wrapper to the pane, so auto-hide never

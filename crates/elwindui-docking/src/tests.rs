@@ -4241,11 +4241,6 @@ fn active_group_frame_is_drawn_in_the_accent_color() {
         Some(crate::core::graphics::Brush::Solid(color)) => assert!(color.a > 0),
         other => panic!("active frame stroke should be a visible accent, got {other:?}"),
     }
-    let seams = realization.borrow().active_group_seams_for_test();
-    assert_eq!(seams.len(), 1);
-    assert_eq!(seams[0].y, 32.5);
-    assert_eq!(seams[0].height, 0.0);
-    assert!(seams[0].width > 0.0 && seams[0].width <= 200.0);
 }
 
 fn sized_group(name: &str) -> Rc<DockGroup> {
@@ -6986,4 +6981,60 @@ fn docking_unmount_clears_floating_hosts_surfaces_and_weak_owner_callbacks() {
     drop(docking);
     assert!(weak_docking.upgrade().is_none());
     assert!(weak_surface.upgrade().is_none());
+}
+
+#[test]
+fn active_single_bottom_group_keeps_its_strip_collapsed_and_frame_full_height() {
+    let (doc, _) = authored_item("doc", "Doc", true);
+    let (errors, _) = authored_item("errors", "Error List", false);
+    let documents = DockGroup::new_group();
+    documents.set_id(group("documents"));
+    documents.set_children(vec![doc]);
+    let error_group = DockGroup::new_group();
+    error_group.set_id(group("errors"));
+    error_group.set_tab_strip_position(TabStripPosition::Bottom);
+    error_group.set_children(vec![errors]);
+    let split = DockSplitPanel::new_panel();
+    split.set_orientation(Orientation::Vertical);
+    split.set_children(vec![
+        documents as Rc<dyn UIElementExt>,
+        error_group as Rc<dyn UIElementExt>,
+    ]);
+    let docking = DockingControl::__new_unmounted();
+    docking.set_content(split);
+    docking.mount(application_environment());
+    assert!(docking.apply_template());
+    let root: Rc<dyn UIElementExt> = docking.clone();
+    let size = Size {
+        width: 900.0,
+        height: 600.0,
+    };
+    layout_root(&root, size);
+    docking.handle_group_content_pressed(SnapshotGroupKey::Authored(group("errors")));
+    layout_root(&root, size);
+    // Activation re-applies the view's presentation; the lone bottom tab's strip stays collapsed,
+    // so the active frame spans the whole group like WinUI.Dock's single-view border.
+    let view = find_all::<CustomTabView>(root.as_ref())
+        .into_iter()
+        .find(|view| {
+            view.as_any()
+                .downcast_ref::<CustomTabView>()
+                .is_some_and(|view| view.tab_strip_position() == TabStripPosition::Bottom)
+        })
+        .unwrap();
+    let typed = view.as_any().downcast_ref::<CustomTabView>().unwrap();
+    assert!(typed.active_chrome());
+    let grid = view.visual_children()[0].clone();
+    assert_eq!(
+        *grid
+            .as_any()
+            .downcast_ref::<crate::core::ui::Grid>()
+            .unwrap()
+            .rows
+            .borrow(),
+        vec![GridLength::Star(1.0), GridLength::Fixed(0.0)]
+    );
+    let frame = grid.visual_children()[1].clone();
+    assert_eq!(frame.visibility(), Visibility::Visible);
+    assert_eq!(frame.arranged_height(), view.arranged_height());
 }

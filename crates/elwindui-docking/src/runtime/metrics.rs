@@ -3,7 +3,6 @@
 
 pub(crate) const CONTENT_HEADER_HEIGHT: f32 = 40.0;
 pub(crate) const TITLE_BUTTON_SIZE: f32 = 24.0;
-pub(crate) const TAB_STRIP_HEIGHT: f32 = 32.0;
 
 pub(crate) const SPLITTER_HIT_SIZE: f32 = 12.0;
 /// Root-edge targets sit flush against the surface edges, like the reference's edge-aligned

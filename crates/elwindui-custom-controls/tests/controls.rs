@@ -2595,9 +2595,10 @@ fn selected_content_is_arranged_below_top_strip_and_unselected_is_zero_clipped()
     let content_presenter = first_content
         .visual_parent()
         .expect("selected content presenter");
+    // The presenter sits below the strip in the content area (an empty header slot above it).
     assert_eq!(
-        content_presenter.arranged_offset(),
-        Some(Point { x: 0.0, y: 40.0 })
+        absolute_offset(&content_presenter),
+        Point { x: 0.0, y: 40.0 }
     );
     assert_eq!(
         first_content.arranged_offset(),
@@ -2612,8 +2613,8 @@ fn selected_content_is_arranged_below_top_strip_and_unselected_is_zero_clipped()
     view.set_tab_strip_position(TabStripPosition::Bottom);
     layout_root(&root, size);
     assert_eq!(
-        content_presenter.arranged_offset(),
-        Some(Point { x: 0.0, y: 0.0 })
+        absolute_offset(&content_presenter),
+        Point { x: 0.0, y: 0.0 }
     );
     assert_eq!(first_content.arranged_height(), Some(80.0));
 }

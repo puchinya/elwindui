@@ -1,12 +1,12 @@
 //! Reconciliation boundary between the value model and stable runtime item wrappers.
 
 use crate::core::base::{Point, Rect, Size};
-use crate::core::graphics::{Brush, Color, FontWeight, ImageSource};
+use crate::core::graphics::{Color, FontWeight};
 use crate::core::input::PointerEventArgs;
 use crate::core::layout::{GridLength, GridTrackConstraint, VerticalAlignment, Visibility};
 use crate::core::theme::BrushStyle;
 use crate::core::ui::{
-    ControlExt, Grid, GridExt, LayoutExt, TextBlock, TextBlockExt, TextStyleOwner, UIElementExt,
+    Grid, GridExt, LayoutExt, ShapeExt, TextBlock, TextBlockExt, TextStyleOwner, UIElementExt,
 };
 #[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
 use crate::core::ui::{MenuExt, MenuItemExt};
@@ -33,15 +33,14 @@ use super::floating_window::FloatingHostFactory;
 use super::floating_window::{FloatingHostId, FloatingHostRegistry, PreparedFloatingHostSync};
 use super::group_view::replace_group_items;
 use super::metrics::{
-    CONTENT_HEADER_HEIGHT, SPLITTER_HIT_SIZE, TAB_INSERTION_MARKER_WIDTH, TAB_STRIP_HEIGHT,
-    TITLE_BUTTON_SIZE,
+    CONTENT_HEADER_HEIGHT, SPLITTER_HIT_SIZE, TAB_INSERTION_MARKER_WIDTH, TITLE_BUTTON_SIZE,
 };
 use super::overlay::{group_target_rect, root_target_rect};
 use super::split_layout::DockSplitView;
 use super::split_view::SplitterSession;
 use super::surface_registry::SurfaceRegistry;
 use super::surface_view::{DockSurfaceView, SurfaceRuntime};
-use super::{accent_brush, themed_brush};
+use super::themed_brush;
 use elwindui_custom_controls::{ChromeIcon, chrome_icon};
 
 /// Stable registration-to-presentation map for one authored docking surface.
@@ -266,11 +265,15 @@ impl RuntimeNode {
 #[derive(Clone)]
 struct GroupRuntimeHost {
     container: Rc<Grid>,
-    /// Header row above the tab view. The active frame is a sibling of this body inside the
-    /// container, so it can enclose the header like WinUI.Dock's active group border.
-    body: Rc<Grid>,
+    /// Content header of a bottom-tab group, placed inside the tab view's content frame like
+    /// WinUI.Dock's `ContentOptions`, so the frame encloses it.
     content_header: Rc<Grid>,
-    active_chrome: Rc<GroupChromeOverlay>,
+    /// `content_header` plus its 1-pixel bottom separator, as WinUI.Dock's `ContentOptions` border
+    /// (`BorderThickness="0,0,0,1"` in `DockStrokeDefaultBrush`).
+    content_header_host: Rc<Grid>,
+    content_header_rule: Rc<crate::core::ui::Rectangle>,
+    /// The tab carrying the active-document marker, cleared when activity moves.
+    active_tab: Rc<std::cell::RefCell<Option<Rc<CustomTabViewItem>>>>,
     title: Rc<TextBlock>,
     pin_button: Rc<Grid>,
     close_button: Rc<Grid>,
@@ -278,12 +281,39 @@ struct GroupRuntimeHost {
 }
 
 impl GroupRuntimeHost {
+    /// Presents the group's activity like WinUI.Dock's `IsActive` state: the tab view's strip and
+    /// frame lines take the accent, and the active tab shows its marker.
+    fn present_active(
+        &self,
+        view: &CustomTabView,
+        is_active: bool,
+        active_tab: Option<Rc<CustomTabViewItem>>,
+    ) {
+        let mut current = self.active_tab.borrow_mut();
+        let same_tab = match (current.as_ref(), active_tab.as_ref()) {
+            (Some(current), Some(next)) => Rc::ptr_eq(current, next),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_tab {
+            if let Some(previous) = current.take() {
+                previous.set_active_document_marker_visible(false);
+            }
+            *current = active_tab.clone();
+        }
+        if let Some(tab) = active_tab.as_ref() {
+            tab.set_active_document_marker_visible(is_active);
+        }
+        view.set_active_chrome(is_active);
+    }
+
     fn refresh_theme(&self) {
         self.content_header
-            .set_background(themed_brush(BrushStyle::Secondary));
+            .set_background(Some(super::dock_fill_brush()));
+        self.content_header_rule
+            .set_fill(themed_brush(BrushStyle::Separator));
         self.title
             .set_foreground(themed_brush(BrushStyle::Foreground));
-        self.active_chrome.refresh_theme();
 
         self.pin_button.children().clear();
         self.pin_button
@@ -296,501 +326,6 @@ impl GroupRuntimeHost {
     }
 }
 
-fn active_frame_image(
-    size: Size,
-    gap: Option<(f32, f32)>,
-    position: TabStripPosition,
-    strip: bool,
-    brush: Brush,
-) -> Option<ImageSource> {
-    use crate::core::base::AffineTransform;
-    use crate::core::graphics::{
-        PathBuilder, StrokeStyle, VectorGroup, VectorImageBuilder, VectorNode, VectorPaint,
-        VectorPaintOrder, VectorPathNode, VectorShapeRendering, VectorStroke,
-    };
-    if !size.width.is_finite()
-        || !size.height.is_finite()
-        || size.width <= 1.0
-        || size.height <= 1.0
-    {
-        return None;
-    }
-    let radius = 4.0_f32
-        .min((size.width - 1.0) * 0.5)
-        .min((size.height - 1.0) * 0.5);
-    let left = 0.5;
-    let right = size.width - 0.5;
-    let bottom = size.height - 0.5;
-    // With a tab strip the strip-side corners are square: the strip's baseline is that edge,
-    // like WinUI.Dock's content border (`BorderThickness="1,0,1,1"`, `CornerRadius="0,0,4,4"`).
-    let strip_radius = if strip { 0.0 } else { radius };
-    let gap = gap.and_then(|(start, end)| {
-        let start = start.clamp(left + strip_radius, right - strip_radius);
-        let end = end.clamp(left + strip_radius, right - strip_radius);
-        (start.is_finite() && end.is_finite() && end > start).then_some((start, end))
-    });
-    let map = |x, y| Point {
-        x,
-        y: if position == TabStripPosition::Bottom {
-            size.height - y
-        } else {
-            y
-        },
-    };
-    let mut path = PathBuilder::new();
-    path.move_to(map(gap.map_or(left + strip_radius, |(_, end)| end), 0.5))
-        .line_to(map(right - strip_radius, 0.5))
-        .quad_to(map(right, 0.5), map(right, 0.5 + strip_radius))
-        .line_to(map(right, bottom - radius))
-        .quad_to(map(right, bottom), map(right - radius, bottom))
-        .line_to(map(left + radius, bottom))
-        .quad_to(map(left, bottom), map(left, bottom - radius))
-        .line_to(map(left, 0.5 + strip_radius))
-        .quad_to(map(left, 0.5), map(left + strip_radius, 0.5));
-    if let Some((start, _)) = gap {
-        path.line_to(map(start, 0.5));
-    } else {
-        path.close();
-    }
-    let node = VectorNode::Path(VectorPathNode {
-        path: path.build().ok()?,
-        transform: AffineTransform::IDENTITY,
-        fill: None,
-        stroke: Some(VectorStroke {
-            paint: VectorPaint::Brush(brush),
-            opacity: 1.0,
-            style: StrokeStyle {
-                width: 1.0,
-                ..StrokeStyle::default()
-            },
-        }),
-        paint_order: VectorPaintOrder::default(),
-        rendering: VectorShapeRendering::GeometricPrecision,
-        visibility: true,
-    });
-    Some(ImageSource::Vector(
-        VectorImageBuilder::new(
-            size,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: size.width,
-                height: size.height,
-            },
-        )
-        .ok()?
-        .root(VectorGroup {
-            children: std::sync::Arc::from([node]),
-            ..VectorGroup::default()
-        })
-        .finish()
-        .ok()?,
-    ))
-}
-
-#[cfg(test)]
-mod chrome_tests {
-    use super::*;
-    use crate::core::graphics::{PathCommand, VectorNode};
-
-    #[test]
-    fn group_chrome_arrange_paints_the_frame_without_invalidating_measure() {
-        let overlay = GroupChromeOverlay::new();
-        let element: Rc<dyn UIElementExt> = overlay.clone();
-        let size = Size {
-            width: 300.0,
-            height: 200.0,
-        };
-        overlay.set_presentation(true, None, TabStripPosition::Top, 32.0);
-        crate::core::ui::layout_root(&element, size);
-        assert_eq!(
-            overlay.painted_frame().map(|(rect, _)| rect),
-            Some(Rect {
-                x: 0.0,
-                y: 31.0,
-                width: 300.0,
-                height: 169.0,
-            })
-        );
-
-        // Arrange draws the contour from final geometry only: repeated, resized and
-        // active-toggled Arrange passes leave the retained measurement valid.
-        let arrange = |width: f32| {
-            overlay.arrange(Rect {
-                x: 0.0,
-                y: 0.0,
-                width,
-                height: size.height,
-            })
-        };
-        for width in [300.0, 240.0, 300.0] {
-            arrange(width);
-            assert!(overlay.measured_size().is_some());
-        }
-        overlay.set_presentation(false, None, TabStripPosition::Top, 32.0);
-        // The painter leaves the render tree, so no previous frame can remain painted.
-        assert_eq!(
-            overlay.painter().map(|painter| painter.visibility()),
-            Some(Visibility::Collapsed)
-        );
-        arrange(300.0);
-        assert_eq!(overlay.painted_frame().map(|(rect, _)| rect), None);
-        overlay.set_presentation(true, None, TabStripPosition::Top, 32.0);
-        arrange(300.0);
-        assert!(overlay.measured_size().is_some());
-
-        // A tab-position change is presentation input; the frame follows on the next Arrange.
-        overlay.set_presentation(true, None, TabStripPosition::Bottom, 32.0);
-        arrange(300.0);
-        assert!(overlay.measured_size().is_some());
-        assert_eq!(
-            overlay.painted_frame().map(|(rect, _)| rect),
-            Some(Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 300.0,
-                height: 169.0,
-            })
-        );
-    }
-    #[test]
-    fn active_frame_contour_opens_at_the_selected_tab_on_either_edge() {
-        let size = Size {
-            width: 300.0,
-            height: 180.0,
-        };
-        for (position, y) in [
-            (TabStripPosition::Top, 0.5),
-            (TabStripPosition::Bottom, 179.5),
-        ] {
-            let Some(ImageSource::Vector(image)) =
-                active_frame_image(size, Some((20.0, 120.0)), position, true, accent_brush())
-            else {
-                panic!("valid frame should produce vector geometry")
-            };
-            let VectorNode::Path(node) = &image.root().children[0] else {
-                panic!("frame should be a path")
-            };
-            let commands = node.path.commands();
-            assert_eq!(
-                commands.first(),
-                Some(&PathCommand::MoveTo(Point { x: 120.0, y }))
-            );
-            // Strip-side corners are square: the edge runs straight to the frame's side.
-            assert_eq!(
-                commands.get(1),
-                Some(&PathCommand::LineTo(Point { x: 299.5, y }))
-            );
-            assert_eq!(
-                commands.last(),
-                Some(&PathCommand::LineTo(Point { x: 20.0, y }))
-            );
-            assert!(
-                !commands
-                    .iter()
-                    .any(|command| matches!(command, PathCommand::Close))
-            );
-            assert!(node.fill.is_none());
-            assert_eq!(node.stroke.as_ref().unwrap().style.width, 1.0);
-        }
-        let Some(ImageSource::Vector(image)) =
-            active_frame_image(size, None, TabStripPosition::Bottom, false, accent_brush())
-        else {
-            panic!("hidden strip should still produce a frame")
-        };
-        let VectorNode::Path(node) = &image.root().children[0] else {
-            panic!("frame should be a path")
-        };
-        assert_eq!(node.path.commands().last(), Some(&PathCommand::Close));
-        assert!(
-            active_frame_image(
-                Size {
-                    width: 0.0,
-                    height: 180.0
-                },
-                None,
-                TabStripPosition::Top,
-                false,
-                accent_brush()
-            )
-            .is_none()
-        );
-    }
-}
-
-/// Rows of the tab strip the active frame overlaps: the baseline row the selected tab's feet end on.
-const FRAME_STRIP_OVERLAP: f32 = 1.0;
-
-/// Paints the active frame contour over its arranged bounds. Replacing the contour re-records paint
-/// only, unlike an `Image` source change, which would invalidate Measure from the overlay's
-/// Arrange. While its group is inactive it is collapsed and leaves the render tree.
-#[elwindui::component(inherits Image)]
-struct ActiveFramePainter {
-    #[state(default = Rc::new(std::cell::RefCell::new(None)))]
-    source: Rc<std::cell::RefCell<Option<ImageSource>>>,
-    body: view! {},
-}
-
-#[elwindui::component]
-impl ActiveFramePainter {
-    #[overrides]
-    fn measure_override(&self, _available: Size) -> Size {
-        Size {
-            width: 0.0,
-            height: 0.0,
-        }
-    }
-
-    #[overrides]
-    fn arrange_override(&self, final_size: Size) -> Size {
-        final_size
-    }
-
-    #[overrides]
-    fn render(&self, context: &mut crate::core::graphics::RenderContext<'_>) {
-        if let Some(ImageSource::Vector(image)) = self.source().borrow().as_ref() {
-            context.draw_vector_image(
-                image,
-                Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: self.arranged_width().unwrap_or(0.0),
-                    height: self.arranged_height().unwrap_or(0.0),
-                },
-                None,
-                crate::core::graphics::VectorImageDrawOptions {
-                    fit: crate::core::graphics::ImageFit::Contain,
-                    ..Default::default()
-                },
-            );
-        }
-    }
-}
-
-impl ActiveFramePainter {
-    fn set_frame(&self, source: Option<ImageSource>) {
-        *self.source().borrow_mut() = source;
-        self.invalidate_render();
-    }
-}
-
-/// Docking-private active frame and document marker. The marker is placed from the retained tab's
-/// arranged bounds, keeping generic CustomTabView free of Docking-specific public state.
-#[elwindui::component(inherits Control)]
-struct GroupChromeOverlay {
-    #[prop(default = false)]
-    is_active: bool,
-    #[prop(default = None)]
-    active_tab: Option<Rc<CustomTabViewItem>>,
-    #[prop(default = TabStripPosition::Top)]
-    tab_position: TabStripPosition,
-    #[prop(default = 32.0)]
-    strip_height: f32,
-    #[state(default = None)]
-    frame_key: Option<(Size, Option<(f32, f32)>, TabStripPosition, Brush)>,
-    template: template_view!(|this: Self| {
-        Grid {
-            rows: [GridLength::Star(1.0)]
-            columns: [GridLength::Star(1.0)]
-            hit_test_visible: false
-            ActiveFramePainter {
-                hit_test_visible: false
-            }
-        }
-    }),
-}
-
-#[elwindui::component]
-impl GroupChromeOverlay {
-    #[overrides]
-    fn on_apply_template(&self) {
-        self.sync_painter_visibility();
-    }
-
-    #[overrides]
-    fn measure_override(&self, available: Size) -> Size {
-        // The overlay fills whatever its host arranges and asks for no space itself.
-        if let Some(root) = self.__template_root() {
-            root.measure(available);
-        }
-        Size {
-            width: 0.0,
-            height: 0.0,
-        }
-    }
-
-    /// Places the painter's template on the page area and builds its open contour from final geometry.
-    /// Only paint state changes here; nothing that Measure reads is written.
-    #[overrides]
-    fn arrange_override(&self, final_size: Size) -> Size {
-        let rect = self.frame_bounds(final_size);
-        if let Some(root) = self.__template_root() {
-            root.arrange(rect);
-        }
-        let strip_height = self.strip_height().max(0.0);
-        // Do not paint a border across the selected header's connection to the page.
-        // An open contour works even when the page background is transparent.
-        let size = Size {
-            width: rect.width,
-            height: rect.height,
-        };
-        let gap = self
-            .active_tab()
-            .filter(|_| strip_height > 0.0)
-            .and_then(|tab| {
-                let node: Rc<dyn UIElementExt> = tab;
-                let bounds = SurfaceRegistry::bounds_in_host_root(&node)?;
-                let origin = self.origin_in_host_root()?;
-                let left = bounds.x - origin.x;
-                Some((left, left + bounds.width))
-            });
-        let key = (size, gap, self.tab_position(), accent_brush());
-        if self.is_active() && self.frame_key().as_ref() != Some(&key) {
-            if let Some(painter) = self.painter()
-                && let Some(painter) = painter.as_any().downcast_ref::<ActiveFramePainter>()
-            {
-                painter.set_frame(active_frame_image(
-                    size,
-                    gap,
-                    self.tab_position(),
-                    strip_height > 0.0,
-                    key.3.clone(),
-                ));
-            }
-            self.set_frame_key(Some(key));
-        }
-        final_size
-    }
-}
-
-impl GroupChromeOverlay {
-    fn painter(&self) -> Option<Rc<dyn UIElementExt>> {
-        self.__template_root()?
-            .visual_children()
-            .first()
-            .cloned()
-            .filter(|painter| painter.as_any().is::<ActiveFramePainter>())
-    }
-
-    /// Collapses the painter while the group is inactive so it leaves the render tree. This runs
-    /// with presentation updates, outside layout.
-    fn sync_painter_visibility(&self) {
-        if let Some(painter) = self.painter() {
-            painter.set_visibility(if self.is_active() {
-                Visibility::Visible
-            } else {
-                Visibility::Collapsed
-            });
-        }
-    }
-
-    /// The page area beside the strip, where the frame paints. Its strip-side edge overlaps the
-    /// strip's last pixel row, the baseline on which the selected tab's outline ends, so the
-    /// outline and the open contour join like WinUI.Dock's.
-    fn frame_bounds(&self, size: Size) -> Rect {
-        let strip_height = self.strip_height().max(0.0);
-        let page_side = (strip_height - FRAME_STRIP_OVERLAP).max(0.0);
-        Rect {
-            x: 0.0,
-            y: if self.tab_position() == TabStripPosition::Top {
-                page_side
-            } else {
-                0.0
-            },
-            width: size.width.max(0.0),
-            height: (size.height - page_side).max(0.0),
-        }
-    }
-
-    /// The painted frame's bounds and contour, or `None` while the group is inactive.
-    fn painted_frame(&self) -> Option<(Rect, ImageSource)> {
-        let painter = self.painter()?;
-        if !self.is_active() || painter.visibility() != Visibility::Visible {
-            return None;
-        }
-        let root = self.__template_root()?.arranged_offset()?;
-        let inner = painter.arranged_offset()?;
-        let offset = Point {
-            x: root.x + inner.x,
-            y: root.y + inner.y,
-        };
-        let painter_ref = painter.as_any().downcast_ref::<ActiveFramePainter>()?;
-        let source = painter_ref.source().borrow().clone()?;
-        Some((
-            Rect {
-                x: offset.x,
-                y: offset.y,
-                width: painter.arranged_width()?,
-                height: painter.arranged_height()?,
-            },
-            source,
-        ))
-    }
-    /// This overlay's top-left in the hosted root space, from its own arranged offset and its
-    /// parent's bounds (the overlay is arranged before its contour is built).
-    fn origin_in_host_root(&self) -> Option<Point> {
-        let offset = self.arranged_offset()?;
-        let parent = match self.visual_parent() {
-            Some(parent) => SurfaceRegistry::bounds_in_host_root(&parent)?,
-            None => Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                height: 0.0,
-            },
-        };
-        Some(Point {
-            x: parent.x + offset.x,
-            y: parent.y + offset.y,
-        })
-    }
-
-    fn set_presentation(
-        &self,
-        is_active: bool,
-        active_tab: Option<Rc<CustomTabViewItem>>,
-        tab_position: TabStripPosition,
-        strip_height: f32,
-    ) {
-        let mut changed = false;
-        if self.is_active() != is_active {
-            self.set_is_active(is_active);
-            self.sync_painter_visibility();
-            changed = true;
-        }
-        let same_tab = match (self.active_tab(), active_tab.as_ref()) {
-            (Some(current), Some(next)) => Rc::ptr_eq(&current, next),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same_tab {
-            if let Some(previous) = self.active_tab() {
-                previous.set_active_document_marker_visible(false);
-            }
-            self.set_active_tab(active_tab.clone());
-            changed = true;
-        }
-        if let Some(tab) = active_tab.as_ref() {
-            tab.set_active_document_marker_visible(is_active);
-        }
-        if self.tab_position() != tab_position {
-            self.set_tab_position(tab_position);
-            changed = true;
-        }
-        if self.strip_height() != strip_height {
-            self.set_strip_height(strip_height);
-            changed = true;
-        }
-        if changed {
-            self.invalidate_arrange();
-        }
-    }
-
-    fn refresh_theme(&self) {
-        self.set_frame_key(None);
-        self.invalidate_arrange();
-    }
-}
 struct PlannedGroup {
     view: Rc<CustomTabView>,
     host: GroupRuntimeHost,
@@ -1672,62 +1207,24 @@ impl RuntimeRealization {
     }
 
     #[cfg(test)]
-    /// Visible active-group frames and their stroke brushes.
+    /// Frame stroke brushes of the groups presented as active.
     pub(crate) fn visible_active_frames_for_test(
         &self,
     ) -> Vec<Option<crate::core::graphics::Brush>> {
-        self.group_hosts
+        self.groups
             .values()
-            .filter_map(|host| {
-                let (_, ImageSource::Vector(source)) = host.active_chrome.painted_frame()? else {
-                    return None;
-                };
-                let crate::core::graphics::VectorNode::Path(path) = &source.root().children[0]
-                else {
-                    return None;
-                };
-                let crate::core::graphics::VectorPaint::Brush(brush) = &path.stroke.as_ref()?.paint
-                else {
-                    return None;
-                };
-                Some(Some(brush.clone()))
-            })
+            .filter(|view| view.active_chrome())
+            .map(|view| themed_brush(view.frame_stroke_style()))
             .collect()
     }
 
     #[cfg(test)]
     pub(crate) fn active_group_chrome_count_for_test(&self) -> usize {
-        self.group_hosts
+        self.groups
             .values()
-            .filter(|host| host.active_chrome.is_active())
+            .filter(|view| view.active_chrome())
             .count()
     }
-
-    #[cfg(test)]
-    pub(crate) fn active_group_seams_for_test(&self) -> Vec<Rect> {
-        self.group_hosts
-            .values()
-            .filter_map(|host| {
-                let chrome = &host.active_chrome;
-                if !chrome.is_active() {
-                    return None;
-                }
-                let (size, gap, position, _) = chrome.frame_key()?;
-                let (start, end) = gap?;
-                Some(Rect {
-                    x: start,
-                    y: if position == TabStripPosition::Top {
-                        chrome.strip_height() + 0.5
-                    } else {
-                        size.height - 0.5
-                    },
-                    width: end - start,
-                    height: 0.0,
-                })
-            })
-            .collect()
-    }
-
     #[cfg(test)]
     pub(crate) fn active_drag_for_test(&self) -> bool {
         self.drag.is_some()
@@ -2316,22 +1813,9 @@ impl RuntimeRealization {
                 .as_ref()
                 .filter(|_| active_index.is_some())
                 .and_then(|active| self.registry.wrapper(active));
-            let tab_position = view
-                .map(|view| view.tab_strip_position())
-                .unwrap_or(TabStripPosition::Top);
-            let strip_height = if tab_position == TabStripPosition::Bottom
-                && items.is_some_and(|items| items.len() == 1)
-            {
-                0.0
-            } else {
-                TAB_STRIP_HEIGHT
-            };
-            host.active_chrome.set_presentation(
-                active_tab.is_some(),
-                active_tab,
-                tab_position,
-                strip_height,
-            );
+            if let Some(view) = view {
+                host.present_active(view, active_tab.is_some(), active_tab);
+            }
         }
     }
 
@@ -2589,11 +2073,6 @@ impl RuntimeRealization {
         let container = Grid::new();
         container.set_rows(vec![GridLength::Star(1.0)]);
         container.set_columns(vec![GridLength::Star(1.0)]);
-        let body = Grid::new();
-        body.set_rows(vec![GridLength::Auto, GridLength::Star(1.0)]);
-        body.set_columns(vec![GridLength::Star(1.0)]);
-
-        let active_chrome = GroupChromeOverlay::new();
 
         let content_header = Grid::new();
         content_header.set_rows(vec![
@@ -2612,7 +2091,8 @@ impl RuntimeRealization {
             GridLength::Fixed(8.0),
         ]);
         content_header.set_min_height(CONTENT_HEADER_HEIGHT);
-        content_header.set_background(themed_brush(BrushStyle::Secondary));
+        // WinUI.Dock's `ContentOptions` uses the dock fill (`DockFillDefaultBrush`).
+        content_header.set_background(Some(super::dock_fill_brush()));
         content_header.set_visibility(Visibility::Collapsed);
 
         let title = TextBlock::new();
@@ -2719,11 +2199,26 @@ impl RuntimeRealization {
             }),
         );
 
+        let content_header_host = Grid::new();
+        content_header_host.set_columns(vec![GridLength::Star(1.0)]);
+        content_header_host.set_rows(vec![GridLength::Auto]);
+        content_header_host.set_visibility(Visibility::Collapsed);
+        content_header_host.children().add(content_header.clone());
+        let content_header_rule = crate::core::ui::Rectangle::new();
+        content_header_rule.set_height(1.0);
+        content_header_rule.set_vertical_alignment(VerticalAlignment::Bottom);
+        content_header_rule.set_fill(themed_brush(BrushStyle::Separator));
+        content_header_rule.set_hit_test_visible(false);
+        content_header_host
+            .children()
+            .add(content_header_rule.clone());
+
         GroupRuntimeHost {
             container,
-            body,
             content_header,
-            active_chrome,
+            content_header_host,
+            content_header_rule,
+            active_tab: Rc::new(std::cell::RefCell::new(None)),
             title,
             pin_button,
             close_button,
@@ -2774,24 +2269,18 @@ impl RuntimeRealization {
                 planned.view.select_index(index);
             }
         }
-        let strip_height =
-            if planned.tab_position == TabStripPosition::Bottom && planned.items.len() == 1 {
-                0.0
-            } else {
-                TAB_STRIP_HEIGHT
-            };
-        planned.host.active_chrome.set_presentation(
-            planned.is_active,
-            planned.active_tab.clone(),
-            planned.tab_position,
-            strip_height,
-        );
+        planned
+            .host
+            .present_active(&planned.view, planned.is_active, planned.active_tab.clone());
         planned.host.container.children().clear();
-        planned.host.body.children().clear();
         planned.host.container.set_visibility(planned.visibility);
         planned
             .host
             .content_header
+            .set_visibility(planned.title_visibility);
+        planned
+            .host
+            .content_header_host
             .set_visibility(planned.title_visibility);
         planned
             .host
@@ -2801,25 +2290,13 @@ impl RuntimeRealization {
             .host
             .close_button
             .set_visibility(planned.close_visibility);
-        planned.view.set_attached_if_changed("Grid", "row", 1i32);
+        planned.view.set_attached_if_changed("Grid", "row", 0i32);
         planned.view.set_attached_if_changed("Grid", "column", 0i32);
         planned
-            .host
-            .body
-            .children()
-            .add(planned.host.content_header.clone());
+            .view
+            .set_content_header(Some(planned.host.content_header_host.clone()));
         self.bind_content_header_drag(&planned.host, &planned.view);
-        planned.host.body.children().add(planned.view.clone());
-        planned
-            .host
-            .container
-            .children()
-            .add(planned.host.body.clone());
-        planned
-            .host
-            .container
-            .children()
-            .add(planned.host.active_chrome.clone());
+        planned.host.container.children().add(planned.view.clone());
         #[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
         self.install_tab_context_menus(&planned.items);
     }

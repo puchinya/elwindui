@@ -25,5 +25,5 @@ Snapshot: 2026-10-07. Desired behavior is defined by the docking specification; 
 
 ## Platform boundaries
 
-- WinUI 3 acceptance covers all WDF rows on the pinned example; Escape dismissal could not be exercised natively because the demo has no focused recipient.
+- WinUI 3 acceptance covers all WDF rows on the pinned example, including Escape dismissal from a focused field inside an open auto-hide pane.
 - AppKit visual equivalence has not been claimed. GTK4 native floating is unavailable without a usable GTK Window implementation.

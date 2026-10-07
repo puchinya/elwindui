@@ -242,7 +242,12 @@ struct DockingDemoSurface {
             elwindui_docking::DockItem {
                 id: solution_explorer
                 title: "Solution Explorer"
-                TextBlock { text: "Solution Explorer" foreground: theme_foreground }
+                // A focusable field, so keyboard input such as Escape can reach the auto-hide pane.
+                VerticalLayout {
+                    spacing: 8.0
+                    TextBlock { text: "Solution Explorer" foreground: theme_foreground }
+                    TextBox { placeholder: "Search" }
+                }
             }
             elwindui_docking::DockItem {
                 id: git_changes

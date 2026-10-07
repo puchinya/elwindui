@@ -37,6 +37,10 @@ impl SplitterSession {
         })
     }
 
+    pub(crate) fn address(&self) -> &SplitAddress {
+        &self.address
+    }
+
     pub(crate) fn cancel(&mut self) {
         self.captured = false;
     }

@@ -287,6 +287,14 @@ fn main() {
         "Microsoft.UI.Xaml.Controls.RadioButton".to_owned(),
         "Microsoft.UI.Xaml.Controls.ToggleSwitch".to_owned(),
         "Microsoft.UI.Xaml.Controls.Primitives.ToggleButton".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Primitives.Thumb".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Grid".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Primitives.DragStartedEventArgs".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Primitives.DragStartedEventHandler".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Primitives.DragDeltaEventArgs".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Primitives.DragDeltaEventHandler".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Primitives.DragCompletedEventArgs".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Primitives.DragCompletedEventHandler".to_owned(),
         // `Dropdown`. `ComboBox.Items` is an `IObservableVector<IInspectable>` populated with
         // plain `HSTRING`s (via `PropertyValue::CreateString`), the same way `win2d.rs`'s existing
         // `IReference<..>` usage already boxes primitives for a WinRT collection.

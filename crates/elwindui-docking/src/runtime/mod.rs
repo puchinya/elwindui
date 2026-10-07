@@ -8,6 +8,7 @@ mod group_view;
 pub(crate) mod metrics;
 mod overlay;
 mod reconcile;
+mod split_layout;
 mod split_view;
 mod support;
 mod surface_registry;
@@ -27,7 +28,11 @@ pub(crate) use overlay::{DockTargetOverlay, DropPreview};
 pub(crate) use reconcile::RuntimeRealization;
 #[cfg(test)]
 pub(crate) use reconcile::{LatestOnlyQueue, resolve_local_target_for_test};
-pub(crate) use support::{themed_brush, weak_self_from_visual_owner};
+#[cfg(test)]
+pub(crate) use split_layout::DockSplitView;
+pub(crate) use support::{
+    accent_brush, dock_fill_brush, popup_base_brush, themed_brush, weak_self_from_visual_owner,
+};
 #[cfg(test)]
 pub(crate) use surface_registry::SurfaceRegistry;
 pub(crate) use surface_view::DockSurfaceView;

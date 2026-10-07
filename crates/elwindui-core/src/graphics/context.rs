@@ -310,6 +310,7 @@ impl<'a> RenderContext<'a> {
             style: style.clone(),
             foreground: Some(style.foreground.clone()),
             alignment,
+            wrapping: super::TextWrapping::NoWrap,
         });
     }
 
@@ -327,12 +328,33 @@ impl<'a> RenderContext<'a> {
         foreground: Option<&Brush>,
         alignment: TextAlignment,
     ) {
+        self.draw_text_with_foreground_and_wrapping(
+            text,
+            rect,
+            style,
+            foreground,
+            alignment,
+            super::TextWrapping::NoWrap,
+        );
+    }
+
+    /// Records explicit text wrapping identically to the measurement request.
+    pub fn draw_text_with_foreground_and_wrapping(
+        &mut self,
+        text: &str,
+        rect: Rect,
+        style: &ComputedTextStyle,
+        foreground: Option<&Brush>,
+        alignment: TextAlignment,
+        wrapping: super::TextWrapping,
+    ) {
         self.commands.push(RenderCommand::Text {
             content: text.into(),
             rect,
             style: style.clone(),
             foreground: foreground.cloned(),
             alignment,
+            wrapping,
         });
     }
 

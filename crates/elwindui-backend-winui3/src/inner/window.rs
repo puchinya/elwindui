@@ -37,6 +37,14 @@ fn apply_window_viewport(
     if let Some(wrapper) = menu_wrapper.borrow().as_ref() {
         let _ = wrapper.SetWidth(width);
         let _ = wrapper.SetHeight(height);
+        if let Ok(children) = wrapper.Children() {
+            if let Ok(first) = children.GetAt(0) {
+                if let Ok(header) = first.cast::<bindings::Microsoft::UI::Xaml::FrameworkElement>()
+                {
+                    let _ = header.SetWidth(width);
+                }
+            }
+        }
     }
     let content_height = (height - top_inset.get()).max(0.0);
     let _ = content_host.set_viewport(TreeHostViewport {
@@ -112,6 +120,9 @@ pub(crate) struct InnerWindow {
     top_inset: Rc<Cell<f64>>,
     retained: Cell<bool>,
     always_on_top: Cell<bool>,
+    floating_title: RefCell<Option<bindings::Microsoft::UI::Xaml::Controls::TextBlock>>,
+    floating_title_window: RefCell<Option<Rc<bindings::Microsoft::UI::Windowing::AppWindow>>>,
+    floating_title_subscriptions: RefCell<Vec<elwindui_core::reactive::Subscription>>,
     /// Issue #162 §3.19-§3.23: the common Window close callback a native close affordance
     /// (`AppWindow.Closing`, below) routes through — `Weak<GeneratedWindow>`-capturing, never
     /// `Rc` (acyclic ownership). Wrapped in its own `Rc` so `try_register_closing_handler` can
@@ -137,6 +148,7 @@ pub(crate) struct InnerWindow {
 
 impl InnerWindow {
     pub(crate) fn new(owner: Weak<dyn elwindui_core::ui::WindowExt>) -> Self {
+        crate::app::trace_startup_phase("window_create_begin");
         let xaml = XamlWindow::new().expect("Window::new");
         let content_host = Rc::new(TreeHost::new());
         let _ = xaml.SetContent(&content_host.as_element());
@@ -194,6 +206,9 @@ impl InnerWindow {
             top_inset,
             retained: Cell::new(false),
             always_on_top: Cell::new(false),
+            floating_title: RefCell::new(None),
+            floating_title_window: RefCell::new(None),
+            floating_title_subscriptions: RefCell::new(Vec::new()),
             close_request_handler: Rc::new(RefCell::new(None)),
             callback_owner,
             closing_registered: Cell::new(false),
@@ -205,6 +220,7 @@ impl InnerWindow {
         // guaranteed to be (see `closing_registered`'s own doc comment) — `show()` retries.
         inner.try_register_closing_handler();
         inner.try_register_bounds_changed_handler();
+        crate::app::trace_startup_phase("window_create_complete");
         inner
     }
 
@@ -356,12 +372,14 @@ impl InnerWindow {
     /// UIElement>` (layouts/shapes/text mixed freely with native controls, at any nesting depth)
     /// gets reflected into real XAML elements.
     pub(crate) fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElementExt>) {
+        crate::app::trace_startup_phase("window_content_begin");
         // Issue #225: apply a currently-valid Window viewport (if any) before the tree bootstrap
         // that `set_tree` performs synchronously below — a `Window` shown before its content is
         // replaced already has real `Bounds`, and the new tree should not have to wait for the
         // next `SizeChanged` to get one.
         self.sync_content_host_to_window_bounds();
         self.content_host.set_tree(content);
+        crate::app::trace_startup_phase("window_content_complete");
     }
 
     pub(crate) fn set_transparent(&self, transparent: bool) {
@@ -387,6 +405,165 @@ impl InnerWindow {
 
     pub(crate) fn set_title(&self, title: &str) {
         let _ = self.xaml.SetTitle(&HSTRING::from(title));
+        if let Some(text) = self.floating_title.borrow().as_ref() {
+            let _ = text.SetText(&HSTRING::from(title));
+        }
+    }
+
+    /// Docking integration: a native drag surface above the body, with no OS caption.
+    /// The drag callbacks only move the AppWindow; no Core document gesture is involved.
+    pub(crate) fn configure_floating_title(&self) -> windows::core::Result<()> {
+        use crate::ffi::invoke_ui_event_callback;
+        use bindings::Microsoft::UI::Windowing::OverlappedPresenter;
+        use bindings::Microsoft::UI::Xaml::Controls::Primitives::{
+            DragCompletedEventHandler, DragDeltaEventHandler, DragStartedEventHandler, Thumb,
+        };
+        use bindings::Microsoft::UI::Xaml::Controls::{Grid, TextBlock};
+        use bindings::Microsoft::UI::Xaml::Media::SolidColorBrush;
+        use bindings::Microsoft::UI::Xaml::{HorizontalAlignment, VerticalAlignment};
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+        if self.floating_title.borrow().is_some() {
+            return Ok(());
+        }
+        let app_window = self.xaml.AppWindow()?;
+        let presenter = app_window.Presenter()?.cast::<OverlappedPresenter>()?;
+        presenter.SetBorderAndTitleBar(true, false)?;
+        let title = Grid::new()?;
+        title.SetHeight(32.0)?;
+        let thumb = Thumb::new()?;
+        thumb.SetBackground(&SolidColorBrush::CreateInstanceWithColor(
+            windows::UI::Color {
+                A: 0,
+                R: 0,
+                G: 0,
+                B: 0,
+            },
+        )?)?;
+        let text = TextBlock::new()?;
+        text.SetText(&self.xaml.Title()?)?;
+        text.SetFontSize(16.0)?;
+        text.SetFontWeight(bindings::winui_text::FontWeight { Weight: 700 })?;
+        text.SetHorizontalAlignment(HorizontalAlignment::Center)?;
+        text.SetVerticalAlignment(VerticalAlignment::Center)?;
+        text.SetIsHitTestVisible(false)?;
+        title.Children()?.Append(&thumb)?;
+        title.Children()?.Append(&text)?;
+
+        // AppWindow does not provide IWeakReferenceSource on the acceptance host. Keep its
+        // handle in a window-owned Rc; callbacks weakly borrow that holder instead of asking
+        // the native object for an unsupported weak-reference interface.
+        let app_window: Rc<bindings::Microsoft::UI::Windowing::AppWindow> = Rc::new(app_window);
+        let offset = Rc::new(Cell::new(None::<PointInt32>));
+        let weak_window = Rc::downgrade(&app_window);
+        let press_offset = offset.clone();
+        let started_id = self.callback_owner.register_event(Rc::new(move || {
+            press_offset.set(None);
+            let window: Option<Rc<bindings::Microsoft::UI::Windowing::AppWindow>> =
+                weak_window.upgrade();
+            if let Some(window) = window {
+                let mut cursor = POINT::default();
+                // SAFETY: `cursor` is valid writable stack storage for the synchronous call.
+                if unsafe { GetCursorPos(&mut cursor) }.is_ok() {
+                    let position: windows::core::Result<PointInt32> = window.Position();
+                    if let Ok(position) = position {
+                        press_offset.set(Some(PointInt32 {
+                            X: cursor.x - position.X,
+                            Y: cursor.y - position.Y,
+                        }));
+                    }
+                }
+            }
+        }));
+        thumb.DragStarted(&DragStartedEventHandler::new(move |_, _| {
+            invoke_ui_event_callback(started_id);
+            Ok(())
+        }))?;
+        let weak_window = Rc::downgrade(&app_window);
+        let move_offset = offset.clone();
+        let moved_id = self.callback_owner.register_event(Rc::new(move || {
+            let window: Option<Rc<bindings::Microsoft::UI::Windowing::AppWindow>> =
+                weak_window.upgrade();
+            if let (Some(window), Some(offset)) = (window, move_offset.get()) {
+                let mut cursor = POINT::default();
+                // SAFETY: same synchronous writable output contract as the start callback.
+                if unsafe { GetCursorPos(&mut cursor) }.is_ok() {
+                    let _: windows::core::Result<()> = window.Move(PointInt32 {
+                        X: cursor.x - offset.X,
+                        Y: cursor.y - offset.Y,
+                    });
+                }
+            }
+        }));
+        thumb.DragDelta(&DragDeltaEventHandler::new(move |_, _| {
+            invoke_ui_event_callback(moved_id);
+            Ok(())
+        }))?;
+        let completed_id = self.callback_owner.register_event(Rc::new(move || {
+            offset.set(None);
+        }));
+        thumb.DragCompleted(&DragCompletedEventHandler::new(move |_, _| {
+            invoke_ui_event_callback(completed_id);
+            Ok(())
+        }))?;
+        let outer = Canvas::new()?;
+        outer.Children()?.Append(&title)?;
+        outer.Children()?.Append(&self.content_host.as_element())?;
+        Canvas::SetTop(&self.content_host.as_element(), 32.0)?;
+        self.xaml.SetContent(&outer)?;
+        self.top_inset.set(32.0);
+        *self.menu_wrapper.borrow_mut() = Some(outer);
+        *self.floating_title.borrow_mut() = Some(text);
+        *self.floating_title_window.borrow_mut() = Some(app_window);
+        let weak_title = title.downgrade()?;
+        let weak_text = self
+            .floating_title
+            .borrow()
+            .as_ref()
+            .expect("installed title")
+            .downgrade()?;
+        let paint = Rc::new(move || {
+            use elwindui_core::{
+                environment::application_environment,
+                theme::{BrushStyle, ResolvedValue},
+            };
+            let environment = application_environment();
+            if let Some(title) = weak_title.upgrade() {
+                if let ResolvedValue::Value(elwindui_core::graphics::Brush::Solid(color)) =
+                    BrushStyle::WindowBackground.resolve(&environment)
+                {
+                    if let Ok(brush) = crate::render::solid_color_brush(color) {
+                        let _ = title.SetBackground(&brush);
+                    }
+                } else if let Ok(property) =
+                    crate::bindings::Microsoft::UI::Xaml::Controls::Panel::BackgroundProperty()
+                {
+                    let _ = title.ClearValue(&property);
+                }
+            }
+            if let Some(text) = weak_text.upgrade() {
+                if let ResolvedValue::Value(elwindui_core::graphics::Brush::Solid(color)) =
+                    BrushStyle::Foreground.resolve(&environment)
+                {
+                    if let Ok(brush) = crate::render::solid_color_brush(color) {
+                        let _ = text.SetForeground(&brush);
+                    }
+                } else if let Ok(property) =
+                    crate::bindings::Microsoft::UI::Xaml::Controls::TextBlock::ForegroundProperty()
+                {
+                    let _ = text.ClearValue(&property);
+                }
+            }
+        });
+        paint();
+        *self.floating_title_subscriptions.borrow_mut() =
+            elwindui_core::theme::subscribe_semantic_brushes(
+                &elwindui_core::environment::application_environment(),
+                paint,
+            );
+        self.sync_content_host_to_window_bounds();
+        Ok(())
     }
 
     /// `Microsoft.UI.Xaml.Controls.MenuBar` is placed as a real element *above* the content host,
@@ -429,6 +606,7 @@ impl InnerWindow {
     /// until native close is observed (Issue #254). `retained` is set only after retention
     /// actually succeeds.
     pub(crate) fn show(&self) {
+        crate::app::trace_startup_phase("window_show_begin");
         self.apply_always_on_top();
         // Issue #162 §3.22: `AppWindow` is guaranteed to exist by this point (this same method's
         // own `apply_always_on_top`/`app_window()` calls above already rely on that) — retry here
@@ -449,6 +627,7 @@ impl InnerWindow {
         // viewport. `Window.SizeChanged` (registered once, in `new()`) remains the mechanism for
         // every subsequent resize, and covers the case where `Bounds` is not valid yet even here.
         self.sync_content_host_to_window_bounds();
+        crate::app::trace_startup_phase("window_show_complete");
     }
 
     pub(crate) fn activate(&self) {
@@ -470,6 +649,8 @@ impl InnerWindow {
     /// retain-list cleanup / possible-app-exit path a user clicking the close box already does —
     /// deliberately reusing that reactive path rather than duplicating its bookkeeping.
     pub(crate) fn close(&self) {
+        self.floating_title_subscriptions.borrow_mut().clear();
+        self.floating_title_window.borrow_mut().take();
         // Issue #162 §3.22: guards the registered `AppWindow.Closing` handler against treating
         // this framework-initiated close as a second, independent user request (see
         // `framework_initiated_close`'s own doc comment). Cleared unconditionally afterward —

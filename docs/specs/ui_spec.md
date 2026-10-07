@@ -115,6 +115,7 @@ ElwindUI のすべてのビジュアル要素（`UIElement`）は、**Measure（
 - **整列（Alignment）の適用**:
   - `horizontal_alignment` (`Left`, `Center`, `Right`, `Stretch`) および `vertical_alignment` (`Top`, `Center`, `Bottom`, `Stretch`) を評価し、`final_rect` 内での配置座標を確定する。
   - `margin` によるオフセットを最終位置へ加算する。
+  - 明示的な `width` / `height` は要素自身の配置サイズを制約するが、親から渡された `final_rect` は縮めない。各軸の alignment はその矩形内で要素を配置するため、明示サイズと `Center` / `Right` / `Bottom` を組み合わせても余白に合わせて位置が決まる。明示サイズと `Stretch` を同じ軸に指定した場合、要素は明示サイズを保ち、先頭側 (`Left` / `Top`) に配置される。
 
 #### 3. Render パス（描画出力）
 
@@ -144,6 +145,7 @@ ElwindUI のイベント伝播はルーティングイベントモデルを採�
 
 ルーティングイベントは引数として `RoutedEventArgs` を受け取る。
 - **`handled` フラグ**: いずれかのハンドラが `args.set_handled(true)` を呼び出すと、その時点で上位ノードへのイベント伝播が打ち切られる。
+- **処理済みイベントも受け取るハンドラ**: `register_routed_handler_handled_too` で登録したハンドラは、WinUI3 の `AddHandler(..., handledEventsToo: true)` と同様に、下位のハンドラが `handled` を設定した後も呼ばれる。通常のハンドラは処理済みのイベントでは呼ばれず、伝播はこの種類のハンドラに届くためだけに続く。
 - コントロールが固有の標準動作（例: `Button` が Enter キーでクリックを発火する処理）を完了した場合、通常 `handled = true` を設定して親要素への重複伝播を防止する。
 
 #### 3. Input Dispatch & Hit Testing
@@ -460,6 +462,8 @@ A `#[elwindui::component(inherits Window)]`-declared component ("host compositio
 |---|---|---|---|
 | `rows` | `Vec<GridLength>` | OneTime | 行サイズ定義（`Auto`, `Fixed(f32)`, `Star(f32)`） |
 | `columns` | `Vec<GridLength>` | OneTime | 列サイズ定義（`Auto`, `Fixed(f32)`, `Star(f32)`） |
+| `row_spacing` | `Option<f32>` | OneTime | 隣接する行トラックの間隔（未指定時 `0.0`、先頭・末尾には加算しない） |
+| `column_spacing` | `Option<f32>` | OneTime | 隣接する列トラックの間隔（未指定時 `0.0`、先頭・末尾には加算しない） |
 | `row_constraints` | `Vec<GridTrackConstraint>` | OneTime | 行ごとの最小・最大サイズ制約 |
 | `column_constraints` | `Vec<GridTrackConstraint>` | OneTime | 列ごとの最小・最大サイズ制約 |
 
@@ -478,6 +482,13 @@ Gridの直下にある子要素は以下の添付プロパティを指定でき�
 Measure/Arrange の Fixed・Auto・Star 解決に適用され、Star は制約を満たすまで残余領域を
 反復的に比例配分する。最小値の合計が利用可能領域を超える場合はオーバーフローを許容し、
 最大値に達した Star が残る場合は余剰領域を未使用のままにする。
+
+Spacing は隣接トラック間の空白として Measure/Arrange に含まれ、各軸で `track_count - 1`
+個だけ加算される。Track sizing に渡す利用可能サイズから spacing 合計を差し引き、Grid の
+DesiredSize にはその合計を加える。Arrange では spacing を除いた領域でトラックを解決し、
+各トラック後の子要素位置に spacing を加える。`resolved_row_sizes()` と
+`resolved_column_sizes()` は spacing を含めず、実トラックのサイズだけを返す。値が負または
+非有限の場合は `0.0` として扱う。
 
 Grid は直近の成功した Arrange による実サイズを `resolved_row_sizes()` と
 `resolved_column_sizes()` で読み取り専用に公開する。Arrange 前は空で、明示定義がない場合も
@@ -531,6 +542,9 @@ Grid {
 |---|---|---|---|
 | `text` | `String` | OneWay | 表示テキスト |
 | `text_alignment` | `Option<TextAlignment>` | OneWay | テキスト配置（`Left`, `Center`, `Right`, `Justified`） |
+| `text_wrapping` | `TextWrapping` | OneWay | 既定値 `NoWrap`。`Wrap` / `WrapWholeWords` は利用可能幅で折り返す |
+
+折り返し設定は文字の測定と描画で一致させる。変更は測定を無効化し、無制約の幅では自然幅を測定する。
 
 `TextBlock` は `#[text_style]` を持ち、共通フォント属性（`font_family`, `font_size`, `font_weight`, `font_style`, `font_stretch`, `character_spacing`, `foreground`）が使用可能である。
 

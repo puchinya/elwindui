@@ -10,12 +10,14 @@ pub struct DockSplitPanel {
     orientation: Orientation,
     #[prop(default = 1.0)]
     weight: f32,
+    #[prop(default = crate::DockSize::default())]
+    dock_size: crate::DockSize,
     #[prop(default = Vec::new())]
     children: Vec<Rc<dyn UIElementExt>>,
     #[state(default = None)]
     registration_callback: Option<Rc<dyn Fn()>>,
     template: template_view!(|this: Self| {
-        on_update(children, orientation, weight) {
+        on_update(children, orientation, weight, dock_size) {
             this.notify_registration_changed();
         }
         Grid {}
@@ -39,6 +41,11 @@ impl DockSplitPanel {
     /// Returns the authored default weight of this panel.
     pub fn weight_value(&self) -> f32 {
         self.weight()
+    }
+
+    /// Returns this panel's authored size inside its parent split.
+    pub fn dock_size_value(&self) -> crate::DockSize {
+        self.dock_size()
     }
 
     pub(crate) fn authored_children(&self) -> Vec<Rc<dyn UIElementExt>> {

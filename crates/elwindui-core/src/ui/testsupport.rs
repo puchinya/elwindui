@@ -834,6 +834,40 @@ impl MeasureProbe {
     }
 }
 
+/// A wrapping-text stand-in: its desired height grows with the number of `line_height` lines a
+/// `natural_width` run needs at the available width, so tests can observe whether a Grid measured
+/// it at its resolved column width or unconstrained.
+#[elwindui_macros::class(struct_only = crate::ui::NativeControlExt, inherits = crate::ui::UIElement)]
+pub(crate) struct WrapProbe {
+    natural_width: f32,
+    line_height: f32,
+}
+
+#[elwindui_macros::class]
+impl WrapProbe {
+    #[overrides]
+    fn measure_override(&self, available: Size) -> Size {
+        if !available.width.is_finite() || available.width >= self.natural_width {
+            return Size {
+                width: self.natural_width,
+                height: self.line_height,
+            };
+        }
+        let lines = (self.natural_width / available.width.max(1.0)).ceil();
+        Size {
+            width: available.width,
+            height: lines * self.line_height,
+        }
+    }
+    fn construct(natural_width: f32, line_height: f32) -> Self {
+        Self {
+            base: UIElement::construct(),
+            natural_width,
+            line_height,
+        }
+    }
+}
+
 #[elwindui_macros::class(struct_only = crate::ui::MenuItemExt)]
 pub(crate) struct FakeMenuItem {
     text: RefCell<String>,

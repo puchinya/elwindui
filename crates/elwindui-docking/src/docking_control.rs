@@ -2,11 +2,11 @@ use crate::core::base::Point;
 use crate::core::input::PointerEventArgs;
 use crate::core::ui::Grid;
 use crate::core::ui::{ContentControlExt, UIElementExt};
-use crate::model::{DefaultDockDefinition, DockLayoutModel, InternalDockGroupPlacement, Node};
+use crate::model::{DefaultDockDefinition, DockLayoutModel, Node};
 use crate::model::{RootKind, SplitAddress};
 use crate::runtime::DragSourceGeometry;
 use crate::runtime::FloatingHostId;
-use crate::runtime::metrics::{FLOATING_MIN_HEIGHT, FLOATING_MIN_WIDTH};
+use crate::runtime::metrics::{FLOATING_DEFAULT_EXTENT, FLOATING_MIN_HEIGHT, FLOATING_MIN_WIDTH};
 use crate::snapshot::SnapshotGroupKey;
 use crate::{DockItemId, DockLayoutError, DockPlacement};
 use elwindui_custom_controls::{
@@ -101,6 +101,9 @@ pub struct DockingControl {
     #[state(default = None)]
     layout_change_callback: Option<Rc<dyn Fn(DockLayoutModel)>>,
     #[state(default = None)]
+    group_created_callback:
+        Option<Rc<dyn Fn(&crate::DockGroupCreatedArgs) -> crate::DockGroupOptions>>,
+    #[state(default = None)]
     runtime_realization: Option<Rc<RefCell<crate::runtime::RuntimeRealization>>>,
     #[state(default = None)]
     runtime_theme_signature: Option<RuntimeThemeSignature>,
@@ -191,6 +194,23 @@ impl DockingControl {
     /// Installs the callback raised once for each committed user layout change.
     pub fn set_on_layout_change(&self, callback: Box<dyn Fn(DockLayoutModel)>) {
         self.set_layout_change_callback(Some(Rc::from(callback)));
+    }
+
+    /// Installs the hook that chooses how a group the runtime creates (by a drop, float or unpin)
+    /// is presented, like WinUI.Dock's `IDockAdapter.OnCreated`. It runs once per generated
+    /// group, the first time the runtime realizes it, with the Document that created it.
+    /// Without a hook generated groups use [`crate::DockGroupOptions::default`].
+    pub fn set_on_group_created(
+        &self,
+        callback: Box<dyn Fn(&crate::DockGroupCreatedArgs) -> crate::DockGroupOptions>,
+    ) {
+        self.set_group_created_callback(Some(Rc::from(callback)));
+    }
+
+    pub(crate) fn generated_group_options(&self, item: &DockItemId) -> crate::DockGroupOptions {
+        self.group_created_callback()
+            .map(|callback| callback(&crate::DockGroupCreatedArgs { item: item.clone() }))
+            .unwrap_or_default()
     }
 
     /// Publishes the current realized layout after a containing view has finished wiring its
@@ -577,7 +597,7 @@ impl DockingControl {
             let fast_path = self.runtime_realization().is_some_and(|realization| {
                 realization
                     .borrow_mut()
-                    .apply_selection_fast_path(&current, &group, index, &item)
+                    .apply_selection_fast_path(&next, &group, index, &item)
             });
             if fast_path {
                 self.commit_user_selection(next);
@@ -585,6 +605,18 @@ impl DockingControl {
                 let _ = self.commit_user_model(next);
             }
         }
+    }
+
+    /// A press inside a group (tab strip, content header or page, even when handled there)
+    /// activates the group's selected Document, as WinUI.Dock does.
+    pub(crate) fn handle_group_content_pressed(&self, group: SnapshotGroupKey) {
+        let Some(index) = self
+            .runtime_realization()
+            .and_then(|realization| realization.borrow().group_selected_index(&group))
+        else {
+            return;
+        };
+        self.handle_group_selected(group, index);
     }
 
     pub(crate) fn handle_group_close(&self, group: SnapshotGroupKey, index: usize) {
@@ -609,7 +641,7 @@ impl DockingControl {
         }
     }
 
-    pub(crate) fn handle_group_title_close(&self, group: SnapshotGroupKey) {
+    pub(crate) fn handle_selected_item_close(&self, group: SnapshotGroupKey) {
         let Some(index) = self
             .runtime_realization()
             .and_then(|realization| realization.borrow().selected_group_index(&group))
@@ -617,28 +649,6 @@ impl DockingControl {
             return;
         };
         self.handle_group_close(group, index);
-    }
-
-    pub(crate) fn handle_group_float(&self, group: SnapshotGroupKey) {
-        let Some(realization) = self.runtime_realization() else {
-            return;
-        };
-        if !realization.borrow().can_float_group(&group) {
-            return;
-        }
-        let Some(bounds) = realization.borrow().context_group_floating_bounds(&group) else {
-            return;
-        };
-        let model = self.layout();
-        let Ok(next) = model.with_group_moved_internal(
-            &group.clone().into(),
-            InternalDockGroupPlacement::Floating { bounds },
-        ) else {
-            return;
-        };
-        if next != model {
-            let _ = self.commit_user_model(next);
-        }
     }
 
     pub(crate) fn handle_tab_context_action(&self, item: DockItemId, action: DockTabContextAction) {
@@ -721,119 +731,34 @@ impl DockingControl {
         let Ok(next) = current.with_item_activated(&item) else {
             return;
         };
-        if next == current {
-            if let Some(realization) = self.runtime_realization() {
-                let mut realization = realization.borrow_mut();
-                realization.open_auto_hide_on(root, item.clone());
-                realization.present_auto_hide(&item);
-            }
-            return;
+        if next != current {
+            let _ = self.commit_user_model(next);
         }
-        let _ = self.commit_user_model(next);
+        // A strip click is an explicit open: it must also lift a previous light dismissal, which
+        // otherwise suppresses replaying the committed model's open flag.
+        if let Some(realization) = self.runtime_realization() {
+            let mut realization = realization.borrow_mut();
+            realization.open_auto_hide_on(root, item.clone());
+            realization.present_auto_hide(&item);
+        }
     }
 
-    pub(crate) fn handle_group_pin(&self, group: SnapshotGroupKey) {
-        let Some(realization) = self.runtime_realization() else {
-            return;
-        };
-        let Some(item) = realization.borrow().selected_group_item(&group) else {
+    pub(crate) fn handle_auto_hide_dismissed(&self, item: DockItemId) {
+        let current = self.layout();
+        let next = current.with_auto_hide_dismissed(&item);
+        if next != current {
+            let _ = self.commit_user_model(next);
+        }
+    }
+
+    pub(crate) fn handle_selected_item_pin(&self, group: SnapshotGroupKey) {
+        let Some(item) = self
+            .runtime_realization()
+            .and_then(|realization| realization.borrow().selected_group_item(&group))
+        else {
             return;
         };
         self.commit_pin_gesture(item);
-    }
-
-    pub(crate) fn handle_group_drag_started(
-        &self,
-        group: SnapshotGroupKey,
-        event: PointerEventArgs,
-    ) {
-        if let Some(realization) = self.runtime_realization() {
-            let _ =
-                realization
-                    .borrow_mut()
-                    .begin_group_drag(&self.layout(), group, event.position);
-        }
-    }
-
-    pub(crate) fn handle_group_drag_moved(&self, group: SnapshotGroupKey, event: PointerEventArgs) {
-        if let Some(realization) = self.runtime_realization() {
-            let mut realization = realization.borrow_mut();
-            if !realization.can_dock_group(&group) {
-                realization.clear_drag_target();
-                return;
-            }
-            let Some(target) = realization.target_for_drop(event.screen_position, event.position)
-            else {
-                realization.clear_drag_target();
-                return;
-            };
-            let _ = realization.preview_drag(&target, 1.0);
-        }
-    }
-
-    pub(crate) fn handle_group_drag_completed(
-        &self,
-        group: SnapshotGroupKey,
-        event: PointerEventArgs,
-        canceled: bool,
-    ) {
-        let Some(realization) = self.runtime_realization() else {
-            return;
-        };
-        if canceled {
-            realization.borrow_mut().finish_drag(false);
-            return;
-        }
-
-        let target = realization
-            .borrow()
-            .target_for_drop(event.screen_position, event.position);
-        if let Some(target) = target {
-            if !realization.borrow().can_dock_group(&group) {
-                realization.borrow_mut().finish_drag(false);
-                return;
-            }
-            let next = {
-                let mut current = realization.borrow_mut();
-                let _ = current.preview_drag(&target, 1.0);
-                current.finish_drag(true)
-            };
-            if let Some(next) = next
-                && next != self.layout()
-            {
-                let _ = self.commit_user_model(next);
-            }
-            return;
-        }
-
-        let Some(screen) = event.screen_position else {
-            realization.borrow_mut().finish_drag(false);
-            return;
-        };
-        let group = realization.borrow().drag_group();
-        let geometry = realization.borrow().drag_source_geometry();
-        let (Some(group), Some(geometry)) = (group, geometry) else {
-            realization.borrow_mut().finish_drag(false);
-            return;
-        };
-        if !realization.borrow().can_float_group(&group) {
-            realization.borrow_mut().finish_drag(false);
-            return;
-        }
-        let Some(bounds) = floating_bounds(&geometry, screen) else {
-            realization.borrow_mut().finish_drag(false);
-            return;
-        };
-        let next = {
-            let mut current = realization.borrow_mut();
-            let Ok(next) = current.group_floating_candidate(bounds) else {
-                current.finish_drag(false);
-                return;
-            };
-            next
-        };
-        let result = self.commit_user_model(next);
-        realization.borrow_mut().finish_drag(result.is_ok());
     }
 
     pub(crate) fn handle_tab_drag_started(
@@ -847,11 +772,7 @@ impl DockingControl {
         else {
             return;
         };
-        if let Some(realization) = self.runtime_realization() {
-            let _ = realization
-                .borrow_mut()
-                .begin_drag(&self.layout(), item, args.position);
-        }
+        self.handle_document_drag_started(item, args.position);
     }
 
     pub(crate) fn handle_tab_drag_moved(
@@ -859,17 +780,7 @@ impl DockingControl {
         group: SnapshotGroupKey,
         args: TabDragMovedEventArgs,
     ) {
-        if let Some(realization) = self.runtime_realization() {
-            let mut realization = realization.borrow_mut();
-            let Some(target) = realization.target_for_drop(args.screen_position, args.position)
-            else {
-                realization.clear_drag_target();
-                return;
-            };
-            // The realization owns the target/adornment state. No model reconciliation occurs in
-            // this path; CustomTabView remains the sole threshold/capture state machine.
-            let _ = realization.preview_drag(&target, 1.0);
-        }
+        self.update_document_drag_target(args.screen_position, args.position);
         let _ = group;
     }
 
@@ -878,23 +789,105 @@ impl DockingControl {
         _group: SnapshotGroupKey,
         args: TabDragCompletedEventArgs,
     ) {
+        self.complete_document_drag(args.position, args.screen_position, args.canceled);
+    }
+
+    pub(crate) fn handle_auto_hide_drag_started(&self, item: DockItemId, event: PointerEventArgs) {
         let Some(realization) = self.runtime_realization() else {
             return;
         };
-        if args.canceled {
+        let mut realization = realization.borrow_mut();
+        if realization
+            .begin_drag(&self.layout(), item.clone(), event.position)
+            .is_ok()
+        {
+            realization.dismiss_auto_hide_for_drag(&item);
+        }
+    }
+
+    pub(crate) fn handle_auto_hide_drag_moved(&self, _item: DockItemId, event: PointerEventArgs) {
+        self.update_document_drag_target(event.screen_position, event.position);
+    }
+
+    pub(crate) fn handle_auto_hide_drag_completed(
+        &self,
+        _item: DockItemId,
+        event: PointerEventArgs,
+        canceled: bool,
+    ) {
+        self.complete_document_drag(event.position, event.screen_position, canceled);
+    }
+
+    fn handle_document_drag_started(&self, item: DockItemId, position: Point) {
+        if let Some(realization) = self.runtime_realization() {
+            let result = realization
+                .borrow_mut()
+                .begin_drag(&self.layout(), item, position);
+            if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
+                eprintln!("[docking] drag_begin={result:?}");
+            }
+        }
+    }
+
+    fn update_document_drag_target(&self, screen_position: Option<Point>, position: Point) {
+        if let Some(realization) = self.runtime_realization() {
+            let mut realization = realization.borrow_mut();
+            let resolution = realization.resolve_drop(screen_position, position);
+            if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
+                eprintln!(
+                    "[docking] drag_move position={position:?} screen={screen_position:?} hovered={:?} target={:?}",
+                    resolution.as_ref().and_then(|r| r.hovered_group),
+                    resolution
+                        .as_ref()
+                        .and_then(|r| r.target.as_ref())
+                        .map(|t| t.target)
+                );
+            }
+            let Some(resolution) = resolution else {
+                realization.clear_drag_target();
+                return;
+            };
+            if let Some(target) = &resolution.target {
+                let _ = realization.preview_drag(target, 1.0);
+            }
+            realization.show_drag_targets(
+                &resolution.root,
+                resolution.hovered_group,
+                resolution.target.as_ref().map(|target| target.target),
+            );
+        }
+    }
+
+    fn complete_document_drag(
+        &self,
+        position: Point,
+        screen_position: Option<Point>,
+        canceled: bool,
+    ) {
+        let Some(realization) = self.runtime_realization() else {
+            return;
+        };
+        if canceled {
             realization.borrow_mut().finish_drag(false);
             return;
         }
-
-        let target = {
-            realization
-                .borrow()
-                .target_for_drop(args.screen_position, args.position)
-        };
+        let target = realization
+            .borrow()
+            .target_for_drop(screen_position, position);
         if let Some(target) = target {
             let next = {
                 let mut current = realization.borrow_mut();
                 let _ = current.preview_drag(&target, 1.0);
+                let root_side = match target.target {
+                    crate::DockTarget::DockLeft => Some(crate::DockSide::Left),
+                    crate::DockTarget::DockTop => Some(crate::DockSide::Top),
+                    crate::DockTarget::DockRight => Some(crate::DockSide::Right),
+                    crate::DockTarget::DockBottom => Some(crate::DockSide::Bottom),
+                    _ => None,
+                };
+                if let (Some(side), Some(item)) = (root_side, current.drag_item()) {
+                    current.set_preferred_side(item, side);
+                }
                 current.finish_drag(true)
             };
             if let Some(next) = next
@@ -904,8 +897,7 @@ impl DockingControl {
             }
             return;
         }
-
-        let Some(screen) = args.screen_position else {
+        let Some(screen) = screen_position else {
             realization.borrow_mut().finish_drag(false);
             return;
         };
@@ -923,7 +915,6 @@ impl DockingControl {
             realization.borrow_mut().finish_drag(false);
             return;
         }
-
         let next = {
             let mut current = realization.borrow_mut();
             let Ok(next) = current.floating_candidate(bounds) else {
@@ -933,7 +924,25 @@ impl DockingControl {
             next
         };
         let result = self.commit_user_model(next);
+        if std::env::var_os("ELWINDUI_PERF_TRACE").is_some() {
+            eprintln!("[docking] floating_commit={result:?}");
+        }
         realization.borrow_mut().finish_drag(result.is_ok());
+    }
+
+    pub(crate) fn handle_auto_hide_close(&self, item: DockItemId) {
+        let Some(realization) = self.runtime_realization() else {
+            return;
+        };
+        let next = realization
+            .borrow_mut()
+            .request_close(&self.layout(), &item)
+            .ok();
+        if let Some(next) = next
+            && next != self.layout()
+        {
+            let _ = self.commit_user_model(next);
+        }
     }
 
     pub(crate) fn handle_splitter_started(
@@ -1126,9 +1135,26 @@ impl DockingControl {
             return;
         }
         let next = if model.is_item_auto_hidden(&item) {
-            model.with_item_unpinned(&item)
+            // Unpinning docks the item to the root edge of its strip's side and activates it,
+            // remembering that side for the next pin (`docking_spec.md`).
+            let Some((root, side)) = realization.borrow().auto_hide_location(&item) else {
+                return;
+            };
+            realization
+                .borrow_mut()
+                .set_preferred_side(item.clone(), side);
+            model
+                .with_item_moved_internal(
+                    &item,
+                    crate::model::InternalDockPlacement::RootEdge {
+                        root,
+                        side,
+                        weight: 1.0,
+                    },
+                )
+                .and_then(|moved| moved.with_item_activated(&item))
         } else {
-            let Some(side) = realization.borrow().nearest_pin_side(&item) else {
+            let Some(side) = realization.borrow().pin_side(&item) else {
                 return;
             };
             realization.borrow_mut().request_pin(&model, &item, side)
@@ -1155,11 +1181,14 @@ fn floating_bounds(source: &DragSourceGeometry, screen_position: Point) -> Optio
     {
         return None;
     }
-    let width = source.source_bounds_host.width.max(FLOATING_MIN_WIDTH);
-    let height = source.source_bounds_host.height.max(FLOATING_MIN_HEIGHT);
+    let width = FLOATING_DEFAULT_EXTENT.max(FLOATING_MIN_WIDTH);
+    let height = FLOATING_DEFAULT_EXTENT.max(FLOATING_MIN_HEIGHT);
+    // Keep the grabbed point inside the new window even when the source group was larger.
+    let offset_x = source.pointer_offset.x.clamp(0.0, width);
+    let offset_y = source.pointer_offset.y.clamp(0.0, height);
     let bounds = crate::Rect {
-        x: screen_position.x - source.pointer_offset.x,
-        y: screen_position.y - source.pointer_offset.y,
+        x: screen_position.x - offset_x,
+        y: screen_position.y - offset_y,
         width,
         height,
     };

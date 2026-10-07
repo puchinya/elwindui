@@ -82,6 +82,7 @@ unsafe extern "C" {
 /// which only exists once `Microsoft.UI.Xaml.Application::Start` has actually started running —
 /// same requirement the old pure-Rust callback had), then runs the user's `startup`.
 extern "C" fn startup_trampoline() {
+    trace_startup_phase("application_callback");
     let queue = bindings::Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread()
         .expect("Microsoft.UI.Dispatching.DispatcherQueue::GetForCurrentThread");
     elwindui_core::task::set_current(LocalExecutor::new(WinUI3Dispatcher { queue }));
@@ -91,6 +92,23 @@ extern "C" fn startup_trampoline() {
             startup();
         }
     });
+}
+
+pub(crate) fn trace_startup_phase(stage: &str) {
+    if !startup_trace_enabled() {
+        return;
+    }
+    if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        eprintln!(
+            "[perf] startup_phase stage={stage} unix_ms={}",
+            now.as_millis()
+        );
+    }
+}
+
+pub(crate) fn startup_trace_enabled() -> bool {
+    std::env::var_os("ELWINDUI_STARTUP_TRACE").is_some()
+        || std::env::var_os("ELWINDUI_PERF_TRACE").is_some()
 }
 
 /// Issue #254: becomes the application-layer strong lifetime authority for `owner` (the final

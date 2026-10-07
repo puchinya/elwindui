@@ -262,53 +262,65 @@ pub(crate) struct WinUi3TextBackend;
 
 thread_local! {
     static SCRATCH_TEXT_BLOCK: TextBlock = TextBlock::new().expect("TextBlock::new");
+    // Never mutate this object: measurement's scratch has explicit local values and cannot
+    // supply platform defaults after the first request.
+    static DEFAULT_STYLE_TEXT_BLOCK: TextBlock = TextBlock::new().expect("TextBlock::new");
     static PERF_MEASURE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static PERF_MEASURE_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+/// `ELWINDUI_PERF_TRACE` totals of `measure_text` on this thread so far: call count and
+/// cumulative milliseconds. Both stay zero while the trace is disabled.
+pub(crate) fn perf_measure_text_totals() -> (u64, f64) {
+    let count = PERF_MEASURE_COUNT.with(|c| c.get());
+    let nanos = PERF_MEASURE_NANOS.with(|t| t.get());
+    (count, nanos as f64 / 1e6)
+}
+
 impl TextBackend for WinUi3TextBackend {
     fn default_text_style(&self) -> ComputedTextStyle {
-        // Read a freshly-created scratch `TextBlock`'s own XAML defaults rather than hardcoding
+        // Read the untouched scratch `TextBlock`'s live XAML defaults rather than hardcoding
         // `14.0`/`"Segoe UI"` (指示書 §16/§31) — whatever the platform's own theme/language
         // resolution picked is used verbatim.
-        let scratch = TextBlock::new().expect("TextBlock::new");
-        let fallback = ComputedTextStyle::fallback();
-        let foreground = scratch
-            .Foreground()
-            .ok()
-            .and_then(|brush| brush.cast::<SolidColorBrush>().ok())
-            .and_then(|brush| brush.Color().ok())
-            .map(|color| {
-                Brush::Solid(Color {
-                    a: color.A,
-                    r: color.R,
-                    g: color.G,
-                    b: color.B,
+        DEFAULT_STYLE_TEXT_BLOCK.with(|scratch| {
+            let fallback = ComputedTextStyle::fallback();
+            let foreground = scratch
+                .Foreground()
+                .ok()
+                .and_then(|brush| brush.cast::<SolidColorBrush>().ok())
+                .and_then(|brush| brush.Color().ok())
+                .map(|color| {
+                    Brush::Solid(Color {
+                        a: color.A,
+                        r: color.R,
+                        g: color.G,
+                        b: color.B,
+                    })
                 })
-            })
-            .unwrap_or_else(|| fallback.foreground.clone());
-        ComputedTextStyle {
-            // Keep the dedicated sentinel: every later application asks WinUI for
-            // `XamlAutoFontFamily()` again instead of pinning today's resolved family name.
-            font_family: FontFamily::system(),
-            font_size: scratch.FontSize().unwrap_or(fallback.font_size as f64) as f32,
-            font_weight: scratch
-                .FontWeight()
-                .map(|weight| FontWeight(weight.Weight))
-                .unwrap_or(fallback.font_weight),
-            font_style: scratch
-                .FontStyle()
-                .map(core_font_style)
-                .unwrap_or(fallback.font_style),
-            font_stretch: scratch
-                .FontStretch()
-                .map(core_font_stretch)
-                .unwrap_or(fallback.font_stretch),
-            character_spacing: scratch
-                .CharacterSpacing()
-                .unwrap_or(fallback.character_spacing),
-            foreground,
-        }
+                .unwrap_or_else(|| fallback.foreground.clone());
+            ComputedTextStyle {
+                // Keep the dedicated sentinel: every later application asks WinUI for
+                // `XamlAutoFontFamily()` again instead of pinning today's resolved family name.
+                font_family: FontFamily::system(),
+                font_size: scratch.FontSize().unwrap_or(fallback.font_size as f64) as f32,
+                font_weight: scratch
+                    .FontWeight()
+                    .map(|weight| FontWeight(weight.Weight))
+                    .unwrap_or(fallback.font_weight),
+                font_style: scratch
+                    .FontStyle()
+                    .map(core_font_style)
+                    .unwrap_or(fallback.font_style),
+                font_stretch: scratch
+                    .FontStretch()
+                    .map(core_font_stretch)
+                    .unwrap_or(fallback.font_stretch),
+                character_spacing: scratch
+                    .CharacterSpacing()
+                    .unwrap_or(fallback.character_spacing),
+                foreground,
+            }
+        })
     }
 
     fn measure_text(&self, req: &TextMeasureRequest<'_>) -> TextMeasureResult {

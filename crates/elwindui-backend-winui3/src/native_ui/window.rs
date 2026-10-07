@@ -123,6 +123,12 @@ impl Window {
     pub fn set_bounds(&self, bounds: Rect) {
         self.inner.set_bounds(bounds);
     }
+
+    /// Framework-only floating host appearance; regular Window authoring is unchanged.
+    #[doc(hidden)]
+    pub fn configure_floating_title(&self) -> windows::core::Result<()> {
+        self.inner.configure_floating_title()
+    }
 }
 
 impl elwindui_core::ui::WindowLifecycleHost for Window {

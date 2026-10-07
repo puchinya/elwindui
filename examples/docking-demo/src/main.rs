@@ -7,10 +7,10 @@ use elwindui::core::graphics::{Brush, Color};
 use elwindui::core::theme::{BrushStyle, Theme};
 use elwindui::core::ui::WindowExt;
 
+// `primary` is left unset so Docking accent chrome follows the platform accent
+// (`docs/specs/docking_spec.md`), as in the WinUI.Dock reference.
 #[elwindui::theme]
 struct VisualStudioTheme {
-    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(0, 120, 215))))]
-    primary: BrushStyle,
     #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(243, 243, 243))))]
     secondary: BrushStyle,
     #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(250, 250, 250))))]
@@ -35,23 +35,21 @@ struct VisualStudioTheme {
 
 #[elwindui::theme]
 struct DarkDockingTheme {
-    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(0, 120, 215))))]
-    primary: BrushStyle,
-    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(45, 45, 48))))]
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(31, 31, 31))))]
     secondary: BrushStyle,
-    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(37, 37, 38))))]
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(24, 24, 24))))]
     tertiary: BrushStyle,
     #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(241, 241, 241))))]
     foreground: BrushStyle,
-    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(30, 30, 30))))]
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(15, 15, 15))))]
     background: BrushStyle,
-    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(30, 30, 30))))]
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::BLACK)))]
     window_background: BrushStyle,
     #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(0, 120, 215))))]
     tint: BrushStyle,
     #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgba(0, 120, 215, 90))))]
     selection: BrushStyle,
-    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(80, 80, 80))))]
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgba(255, 255, 255, 18))))]
     separator: BrushStyle,
     #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(180, 180, 180))))]
     placeholder: BrushStyle,
@@ -74,6 +72,10 @@ mod docking_demo_view_model {
         active_status: String,
         #[observable(default = String::from("Floating windows: 0"))]
         floating_status: String,
+        #[observable(default = false)]
+        tools_expanded: bool,
+        #[observable(default = elwindui::core::layout::Visibility::Collapsed)]
+        tools_visibility: elwindui::core::layout::Visibility,
     }
 
     impl DockingDemoViewModel {
@@ -128,10 +130,19 @@ mod docking_demo_view_model {
                 latest_status = "Snapshot restore rejected".to_owned();
             }
         }
+
+        fn toggle_tools(&self) {
+            tools_expanded = !tools_expanded;
+            tools_visibility = if tools_expanded {
+                elwindui::core::layout::Visibility::Visible
+            } else {
+                elwindui::core::layout::Visibility::Collapsed
+            };
+        }
     }
 }
 
-#[elwindui::component(inherits VerticalLayout)]
+#[elwindui::component(inherits Grid)]
 struct DockingDemoSurface {
     #[bindable]
     vm: std::rc::Rc<DockingDemoViewModel>,
@@ -161,6 +172,11 @@ struct DockingDemoSurface {
     error_tools: elwindui_docking::DockGroupId,
     #[computed(expr = elwindui_docking::DockGroupId::from("output-tools"))]
     output_tools: elwindui_docking::DockGroupId,
+    // Fixed tool sizes authored like the WinUI.Dock example (`docs/specs/docking_spec.md`).
+    #[computed(expr = elwindui_docking::DockSize::width(200.0))]
+    solution_tools_size: elwindui_docking::DockSize,
+    #[computed(expr = elwindui_docking::DockSize::height(200.0))]
+    bottom_tools_size: elwindui_docking::DockSize,
     #[computed(expr = elwindui::core::layout::Orientation::Horizontal)]
     horizontal: elwindui::core::layout::Orientation,
     #[computed(expr = elwindui::core::layout::Orientation::Vertical)]
@@ -178,14 +194,31 @@ struct DockingDemoSurface {
                     docking.set_on_layout_change(Box::new(move |layout| {
                         status_vm.publish_layout_status(layout);
                     }));
+                    // Like the pinned WinUI.Dock example's `IDockAdapter.OnCreated`, a group the
+                    // runtime creates for a tool window gets bottom tabs; documents keep top tabs.
+                    docking.set_on_group_created(Box::new(|args| {
+                        let id: &str = args.item.as_ref();
+                        let tool = !matches!(id, "document-a" | "document-b");
+                        elwindui_docking::DockGroupOptions {
+                            tab_strip_position: if tool {
+                                elwindui_docking::TabStripPosition::Bottom
+                            } else {
+                                elwindui_docking::TabStripPosition::Top
+                            },
+                            compact_tabs: tool,
+                        }
+                    }));
                     docking.synchronize_layout_source();
                     vm.set_latest_status("Ready — release a drag to publish one layout change".to_owned());
                 }
             }
         }
         let documents = elwindui_docking::DockGroup {
+            compact_tabs: false
             id: documents
-            weight: 2.1
+            // Like the pinned WinUI.Dock example, only the main document group stays when empty.
+            show_when_empty: true
+            weight: 3.65
             elwindui_docking::DockItem {
                 id: document_a
                 title: "Document A"
@@ -204,12 +237,17 @@ struct DockingDemoSurface {
             id: solution_tools
             tab_strip_position: elwindui_docking::TabStripPosition::Bottom
             compact_tabs: true
-            show_when_empty: true
             weight: 1.0
+            dock_size: solution_tools_size
             elwindui_docking::DockItem {
                 id: solution_explorer
                 title: "Solution Explorer"
-                TextBlock { text: "Solution Explorer" foreground: theme_foreground }
+                // A focusable field, so keyboard input such as Escape can reach the auto-hide pane.
+                VerticalLayout {
+                    spacing: 8.0
+                    TextBlock { text: "Solution Explorer" foreground: theme_foreground }
+                    TextBox { placeholder: "Search" }
+                }
             }
             elwindui_docking::DockItem {
                 id: git_changes
@@ -222,7 +260,6 @@ struct DockingDemoSurface {
         let error = elwindui_docking::DockGroup {
             id: error_tools
             tab_strip_position: elwindui_docking::TabStripPosition::Bottom
-            show_when_empty: true
             weight: 1.0
             elwindui_docking::DockItem {
                 id: error_list
@@ -251,7 +288,7 @@ struct DockingDemoSurface {
 
         let top = elwindui_docking::DockSplitPanel {
             orientation: horizontal
-            weight: 2.1
+            weight: 1.1
             documents
             solution
         };
@@ -259,6 +296,7 @@ struct DockingDemoSurface {
         let bottom = elwindui_docking::DockSplitPanel {
             orientation: horizontal
             weight: 1.0
+            dock_size: bottom_tools_size
             error
             output
         };
@@ -273,14 +311,44 @@ struct DockingDemoSurface {
             layout <=> vm.layout
             root
         };
-        let menu = HorizontalLayout {
-            height: 32.0
-            spacing: 18.0
-            background: BrushStyle::Secondary
-            TextBlock { text: "File" foreground: theme_foreground }
-            TextBlock { text: "Edit" foreground: theme_foreground }
-            TextBlock { text: "View" foreground: theme_foreground }
-            TextBlock { text: "Help" foreground: theme_foreground }
+        let menu = Grid {
+            Grid::row: 0
+            height: 40.0
+            rows: [elwindui::core::layout::GridLength::Star(1.0)]
+            columns: [
+                elwindui::core::layout::GridLength::Fixed(14.0),
+                elwindui::core::layout::GridLength::Fixed(48.0),
+                elwindui::core::layout::GridLength::Fixed(48.0),
+                elwindui::core::layout::GridLength::Star(1.0),
+                elwindui::core::layout::GridLength::Auto,
+            ]
+            background: BrushStyle::WindowBackground
+            TextBlock {
+                Grid::column: 1
+                text: "File"
+                foreground: theme_foreground
+                vertical_alignment: elwindui::core::layout::VerticalAlignment::Center
+            }
+            TextBlock {
+                Grid::column: 2
+                text: "Help"
+                foreground: theme_foreground
+                vertical_alignment: elwindui::core::layout::VerticalAlignment::Center
+            }
+            Button {
+                Grid::column: 4
+                text: "Tools"
+                foreground: theme_foreground
+                tooltip: "Show docking demo controls"
+                on_click: vm.toggle_tools
+            }
+        };
+        let tools = HorizontalLayout {
+            Grid::row: 1
+            height: 30.0
+            spacing: 12.0
+            background: BrushStyle::Tertiary
+            visibility: vm.tools_visibility
             Button {
                 text: "Clear layout"
                 foreground: theme_foreground
@@ -315,17 +383,6 @@ struct DockingDemoSurface {
                 foreground: theme_foreground
                 on_click: || { DarkDockingTheme.apply(&application_environment()); }
             }
-        };
-        let docking_host = Grid {
-            height: 574.0
-            rows: [elwindui::core::layout::GridLength::Star(1.0)]
-            columns: [elwindui::core::layout::GridLength::Star(1.0)]
-            docking
-        };
-        let status = HorizontalLayout {
-            height: 26.0
-            spacing: 18.0
-            background: BrushStyle::Tertiary
             TextBlock {
                 text: vm.active_status
                 foreground: theme_foreground
@@ -336,13 +393,25 @@ struct DockingDemoSurface {
             }
             TextBlock { text: vm.latest_status foreground: theme_foreground }
         };
-
-        spacing: 0.0
+        let docking_host = Grid {
+            Grid::row: 2
+            margin: 8.0
+            rows: [elwindui::core::layout::GridLength::Star(1.0)]
+            columns: [elwindui::core::layout::GridLength::Star(1.0)]
+            docking
+        };
+        rows: [elwindui::core::layout::GridLength::Star(1.0)]
+        columns: [elwindui::core::layout::GridLength::Star(1.0)]
         background: BrushStyle::WindowBackground
-        VerticalLayout {
-            spacing: 0.0
+        Grid {
+            rows: [
+                elwindui::core::layout::GridLength::Auto,
+                elwindui::core::layout::GridLength::Auto,
+                elwindui::core::layout::GridLength::Star(1.0),
+            ]
+            columns: [elwindui::core::layout::GridLength::Star(1.0)]
             menu
-            status
+            tools
             docking_host
         }
     },
@@ -368,7 +437,7 @@ impl DockingDemoWindow {}
 
 #[elwindui::main]
 fn main() {
-    VisualStudioTheme.apply(&application_environment());
+    DarkDockingTheme.apply(&application_environment());
     let vm = DockingDemoViewModel::new();
     let window = elwindui::new!(DockingDemoWindow(vm: vm));
     window.show();

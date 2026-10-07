@@ -33,6 +33,7 @@ windows = { version = "0.62", features = [
     "UI_Composition",
     "UI_Input",
     "UI_Text",
+    "UI_ViewManagement",
 ] }
 windows-core = "0.62"
 windows-collections = "0.3"

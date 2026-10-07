@@ -40,6 +40,7 @@ pub use path::{
 };
 pub use render_tree::{RenderGroup, RenderTree};
 pub use stroke::{LineCap, LineJoin, StrokeError, StrokeStyle};
+pub(crate) use text::text_backend_generation;
 pub use text::{
     CascadedTextStyle, ComputedTextStyle, DummyTextBackend, FontFamily, FontStretch, FontStyle,
     FontWeight, TextBackend, TextMeasureRequest, TextMeasureResult, TextStyleProperty,

@@ -127,6 +127,7 @@ impl AppKitHandle for Retained<NSButton> {
                 &materialized,
                 style.foreground.as_ref(),
                 elwindui_core::ui::TextAlignment::Left,
+                elwindui_core::graphics::TextWrapping::NoWrap,
             );
             self.setAttributedTitle(&attributed);
         } else {

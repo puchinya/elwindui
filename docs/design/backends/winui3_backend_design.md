@@ -4,6 +4,17 @@ Related specifications: [`../../specs/ui_spec.md`](../../specs/ui_spec.md), [`..
 
 ## Projection and startup
 
+Docking's Windows floating host uses an OverlappedPresenter with a native resizing border
+and hidden system caption. A retained native Grid reserves a 32px title area above the body;
+its transparent Thumb moves AppWindow using a physical cursor-to-window offset, while the
+centered 16px bold title TextBlock is not hit-testable. These events do not enter Core's
+document drag coordinator. Drag callbacks weakly borrow a window-owned Rust Rc holding the
+AppWindow handle; this avoids requiring native AppWindow weak-reference support. Theme
+callbacks use native XAML weak references. The existing window callback registry owns event
+registrations, and close clears the AppWindow holder and title-theme subscriptions.
+The 32px logical inset is the single viewport/client-coordinate offset, and title width is
+updated with the native viewport. Existing window close interception continues to own vetoes.
+
 `build.rs` generates WinUI 3 / Win2D bindings and a separate `Windows.UI.Xaml.Interop` projection. Windows App SDK bootstrap and STA COM initialization occur on the UI thread before application startup.
 
 Application hosting intentionally uses the small C++/WinRT `ApplicationT<App, IXamlMetadataProvider>` shim in `cpp/app_host.cpp`. The shim installs `XamlControlsResources` and calls one exported Rust startup callback. Window creation, controls, layout, rendering, events, and task execution remain in Rust.
@@ -76,7 +87,21 @@ Win2D handles retained primitive replay for paths, images, gradients, brushes, c
 
 Native XAML children and Win2D/Composition islands are reconciled from the same active visual tree. A non-selected hosted subtree keeps UI/native control state but releases render resources.
 
+When a Composition node recreates its visual (for example, a vector image whose
+destination changes), the island reconnects its child visuals even if stable node
+IDs and their order are unchanged. The attached visual must match the retained
+node's current resource after a move or resize.
+
 ## Theme and text
+
+Opt-in `ELWINDUI_PERF_TRACE` startup milestones record Unix milliseconds for bootstrap entry,
+application callback entry, completed window activation/layout, and the first XAML rendering
+callback with realized content. The first-frame probe reuses the host-owned Rendering registration,
+is armed only for diagnostics, and disarms after reporting; teardown revokes it as usual. These
+milestones distinguish application startup from driver discovery overhead, and rendering callback
+readiness from a screenshot that confirms displayed pixels.
+`ELWINDUI_STARTUP_TRACE` enables just these milestones without verbose per-property performance
+logging. Acceptance timing uses this mode with no concurrent build/check/test workload.
 
 Theme adapters set or clear dependency properties, apply `RequestedTheme`, and observe `ActualThemeChanged`. Text measurement uses a scratch XAML `TextBlock` with the same conversions used by rendered text. `PlatformDefault` uses ClearValue-equivalent behavior.
 

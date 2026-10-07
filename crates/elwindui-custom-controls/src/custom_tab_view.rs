@@ -1,4 +1,4 @@
-use super::core::base::{Point, Rect};
+use super::core::base::{Point, Rect, Size};
 use super::core::input::{MouseButton, PointerEventArgs};
 use super::core::ui::{ControlExt, Grid, GridExt, ListExt, UIElementExt};
 use super::{
@@ -13,9 +13,34 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-const TAB_STRIP_HEIGHT: f32 = 32.0;
-const COMPACT_TAB_STRIP_HEIGHT: f32 = 28.0;
+const TAB_STRIP_HEIGHT: f32 = 40.0;
 const TAB_DRAG_THRESHOLD: f32 = 4.0;
+const CONNECTED_LEADING_RULE: f32 = 9.0;
+
+fn strip_tracks(
+    position: TabStripPosition,
+    height: f32,
+) -> Vec<elwindui::core::layout::GridLength> {
+    use elwindui::core::layout::GridLength::{Fixed, Star};
+    if position == TabStripPosition::Top {
+        vec![Fixed(height), Star(1.0)]
+    } else {
+        vec![Star(1.0), Fixed(height)]
+    }
+}
+
+fn header_host_tracks(
+    position: TabStripPosition,
+    connected: bool,
+) -> Vec<elwindui::core::layout::GridLength> {
+    use elwindui::core::layout::GridLength::Fixed;
+    let inset = if connected { 0.0 } else { 8.0 };
+    if position == TabStripPosition::Top {
+        vec![Fixed(inset), Fixed(32.0)]
+    } else {
+        vec![Fixed(32.0), Fixed(inset)]
+    }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -55,10 +80,176 @@ pub enum TabItemPointerEvent {
     Exited,
 }
 
+/// Inputs and image of the last drawn open frame.
+type FrameImageKey = (
+    (Size, TabStripPosition, elwindui::core::graphics::Brush),
+    elwindui::core::graphics::VectorImage,
+);
+
+/// Connected content frame drawn open on the strip side: the strip's baseline rule is its edge
+/// there, so its corners on that side are square and the far corners keep the 4 px radius.
+/// The contour is built from the arranged size while recording paint, so layout never changes.
+#[elwindui::component(inherits Image)]
+struct ConnectedContentFrame {
+    #[state(default = TabStripPosition::Top)]
+    open_side: TabStripPosition,
+    // Tracked so a theme switch re-records the frame with the new separator colour.
+    #[environment(separator)]
+    separator: elwindui::core::theme::BrushStyle,
+    #[state(default = false)]
+    active: bool,
+    #[state(default = Rc::new(std::cell::RefCell::new(None)))]
+    image_cache: Rc<std::cell::RefCell<Option<FrameImageKey>>>,
+    body: view! {
+        on_update(separator) {
+            this.invalidate_render();
+        }
+    },
+}
+
+#[elwindui::component]
+impl ConnectedContentFrame {
+    #[overrides]
+    fn measure_override(&self, _available: Size) -> Size {
+        Size {
+            width: 0.0,
+            height: 0.0,
+        }
+    }
+
+    #[overrides]
+    fn arrange_override(&self, final_size: Size) -> Size {
+        final_size
+    }
+
+    #[overrides]
+    fn render(&self, context: &mut elwindui::core::graphics::RenderContext<'_>) {
+        use elwindui::core::theme::ResolvedValue;
+        let size = Size {
+            width: self.arranged_width().unwrap_or(0.0),
+            height: self.arranged_height().unwrap_or(0.0),
+        };
+        // Resolve against this element's environment so a window-level theme applies too.
+        let style = if self.active() {
+            super::support::accent_style()
+        } else {
+            self.separator()
+        };
+        let ResolvedValue::Value(brush) = style.resolve(&self.effective_environment()) else {
+            return;
+        };
+        // A vector image (rebuilt only when its inputs change) keeps the backend's retained
+        // surface in step with theme changes, which a reused stroke shape does not.
+        let key = (size, self.open_side(), brush.clone());
+        let cache = self.image_cache();
+        let mut cache = cache.borrow_mut();
+        if cache.as_ref().map(|(cached, _)| cached) != Some(&key) {
+            *cache = open_frame_image(size, self.open_side(), brush).map(|image| (key, image));
+        }
+        if let Some((_, image)) = cache.as_ref() {
+            context.draw_vector_image(
+                image,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: size.width,
+                    height: size.height,
+                },
+                None,
+                elwindui::core::graphics::VectorImageDrawOptions {
+                    fit: elwindui::core::graphics::ImageFit::Contain,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+}
+
+/// The open frame contour as a vector image of `size`.
+fn open_frame_image(
+    size: Size,
+    open_side: TabStripPosition,
+    brush: elwindui::core::graphics::Brush,
+) -> Option<elwindui::core::graphics::VectorImage> {
+    use elwindui::core::base::AffineTransform;
+    use elwindui::core::graphics::{
+        StrokeStyle, VectorGroup, VectorImageBuilder, VectorNode, VectorPaint, VectorPaintOrder,
+        VectorPathNode, VectorShapeRendering, VectorStroke,
+    };
+    let node = VectorNode::Path(VectorPathNode {
+        path: open_frame_path(size, open_side)?,
+        transform: AffineTransform::IDENTITY,
+        fill: None,
+        stroke: Some(VectorStroke {
+            paint: VectorPaint::Brush(brush),
+            opacity: 1.0,
+            style: StrokeStyle {
+                width: 1.0,
+                ..StrokeStyle::default()
+            },
+        }),
+        paint_order: VectorPaintOrder::default(),
+        rendering: VectorShapeRendering::GeometricPrecision,
+        visibility: true,
+    });
+    VectorImageBuilder::new(
+        size,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: size.width,
+            height: size.height,
+        },
+    )
+    .ok()?
+    .root(VectorGroup {
+        children: std::sync::Arc::from([node]),
+        ..VectorGroup::default()
+    })
+    .finish()
+    .ok()
+}
+/// Left, far and right edges of a content frame whose strip-side edge is drawn by the strip.
+fn open_frame_path(
+    size: Size,
+    open_side: TabStripPosition,
+) -> Option<elwindui::core::graphics::Path> {
+    use elwindui::core::graphics::PathBuilder;
+    if !size.width.is_finite()
+        || !size.height.is_finite()
+        || size.width <= 1.0
+        || size.height <= 1.0
+    {
+        return None;
+    }
+    let radius = 4.0_f32.min((size.width - 1.0) * 0.5).min(size.height - 1.0);
+    let (left, right, far) = (0.5, size.width - 0.5, size.height - 0.5);
+    let map = |x: f32, y: f32| Point {
+        x,
+        y: if open_side == TabStripPosition::Bottom {
+            size.height - y
+        } else {
+            y
+        },
+    };
+    let mut path = PathBuilder::new();
+    path.move_to(map(left, 0.0))
+        .line_to(map(left, far - radius))
+        .quad_to(map(left, far), map(left + radius, far))
+        .line_to(map(right - radius, far))
+        .quad_to(map(right, far), map(right, far - radius))
+        .line_to(map(right, 0.0));
+    path.build().ok()
+}
+
 /// A templated tab strip and selected-content host.
 #[elwindui::component(inherits Control)]
 #[content(children)]
 pub struct CustomTabView {
+    #[environment(foreground)]
+    palette_foreground: elwindui::core::theme::BrushStyle,
+    #[state(default = false)]
+    palette_dark: bool,
     #[prop(default = Vec::new())]
     children: Vec<Rc<CustomTabViewItem>>,
     #[prop(default = 0)]
@@ -68,10 +259,29 @@ pub struct CustomTabView {
     tab_strip_position: TabStripPosition,
     #[prop(default = false)]
     compact: bool,
+    #[state(default = false)]
+    connected_chrome_internal: bool,
+    // Docking's active group: like WinUI.Dock's `IsActive` state, every connected strip and
+    // frame line takes the accent instead of the separator.
+    #[state(default = false)]
+    active_chrome_internal: bool,
+    #[state(default = None)]
+    content_header_element: Option<Rc<dyn UIElementExt>>,
+    // Connected (Docking) strips start with a rule that puts the first tab's outline 13 px inside
+    // the frame edge like WinUI.Dock (its 6 px rule plus the tab container margin); the generic
+    // strip keeps the native TabView 8 px leading inset, matching its 8 px top inset.
+    #[computed(expr = if connected_chrome_internal { CONNECTED_LEADING_RULE } else { 8.0 })]
+    leading_rule_width: f32,
+    #[computed(expr = header_host_tracks(tab_strip_position, connected_chrome_internal))]
+    strip_host_rows: Vec<elwindui::core::layout::GridLength>,
+    #[computed(expr = if tab_strip_position == TabStripPosition::Top { 1 } else { 0 })]
+    strip_item_row: i32,
     #[prop(default = CloseButtonPresentation::Always)]
     close_button_presentation: CloseButtonPresentation,
     #[state(default = None)]
     selected_index_callback: Option<Rc<dyn Fn(usize)>>,
+    #[state(default = None)]
+    tab_pressed_callback: Option<Rc<dyn Fn(usize)>>,
     #[state(default = None)]
     close_requested_callback: Option<Rc<dyn Fn(usize)>>,
     #[state(default = None)]
@@ -92,22 +302,23 @@ pub struct CustomTabView {
     tab_strip_row: i32,
     #[computed(expr = if tab_strip_position == TabStripPosition::Top { 1 } else { 0 })]
     content_row: i32,
-    #[computed(expr = if tab_strip_position == TabStripPosition::Top {
-        vec![
-            elwindui::core::layout::GridLength::Fixed(TAB_STRIP_HEIGHT),
-            elwindui::core::layout::GridLength::Star(1.0),
-        ]
-    } else {
-        vec![
-            elwindui::core::layout::GridLength::Star(1.0),
-            elwindui::core::layout::GridLength::Fixed(TAB_STRIP_HEIGHT),
-        ]
-    })]
-    grid_rows: Vec<elwindui::core::layout::GridLength>,
     #[state(default = Vec::new())]
     template_items: Vec<Rc<CustomTabViewItem>>,
+    // A lone bottom tab hides its strip (as `sync_grid_rows` does), so a re-applied binding keeps it.
+    #[computed(expr = strip_tracks(tab_strip_position, if tab_strip_position == TabStripPosition::Bottom && template_items.len() == 1 { 0.0 } else if connected_chrome_internal { 32.0 } else { TAB_STRIP_HEIGHT }))]
+    grid_rows: Vec<elwindui::core::layout::GridLength>,
+    #[computed(expr = if tab_strip_position == TabStripPosition::Top {
+        elwindui::core::layout::VerticalAlignment::Bottom
+    } else {
+        elwindui::core::layout::VerticalAlignment::Top
+    })]
+    baseline_alignment: elwindui::core::layout::VerticalAlignment,
     #[state(default = None)]
     last_presented_selected_index: Option<usize>,
+    // The item that received a forwarded press keeps the rest of that gesture, even if the
+    // presented selection changes while it is active (Docking shows a neighbour during a drag).
+    #[state(default = None)]
+    forwarded_gesture_index: Option<usize>,
     #[state(default = None)]
     last_presented_tab_strip_position: Option<TabStripPosition>,
     #[state(default = None)]
@@ -118,51 +329,234 @@ pub struct CustomTabView {
     tab_items: Vec<Rc<CustomTabViewItem>>,
     #[computed(expr = template_items.clone())]
     content_items: Vec<Rc<CustomTabViewItem>>,
+    #[computed(expr = elwindui::core::theme::BrushStyle::Value(
+        elwindui::core::graphics::Color::TRANSPARENT.into()
+    ))]
+    transparent_brush: elwindui::core::theme::BrushStyle,
+    #[computed(expr = if connected_chrome_internal { transparent_brush.clone() } else { super::support::native_tab_background(true, palette_dark) })]
+    content_background: elwindui::core::theme::BrushStyle,
+    #[computed(expr = if !connected_chrome_internal { super::support::native_tab_stroke(palette_dark) } else if active_chrome_internal { super::support::accent_style() } else { elwindui::core::theme::BrushStyle::Separator })]
+    frame_stroke: elwindui::core::theme::BrushStyle,
     template: template_view!(|this: Self| {
-        on_update(children, template_items, selected_index, tab_strip_position, compact, close_button_presentation) {
+        on_update(children, template_items, selected_index, tab_strip_position, compact, close_button_presentation, palette_foreground) {
+            this.sync_palette();
             this.reconcile_children();
         }
-        let tab_strip = CustomTabStripPresenter {
-            items: tab_items
-            selected_index: selected_index
-            tab_strip_position: tab_strip_position
-            compact: compact
-            close_button_presentation: close_button_presentation
+        let tab_strip_host = Grid {
             Grid::row: tab_strip_row
+            rows: strip_host_rows
+            columns: [
+                elwindui::core::layout::GridLength::Fixed(leading_rule_width),
+                elwindui::core::layout::GridLength::Star(1.0),
+            ]
+            Rectangle {
+                Grid::row: strip_item_row
+                Grid::column: 0
+                height: 1.0
+                fill: frame_stroke
+                vertical_alignment: baseline_alignment
+                hit_test_visible: false
+            }
+            Rectangle {
+                Grid::row: strip_item_row
+                Grid::column: 1
+                height: 1.0
+                fill: frame_stroke
+                vertical_alignment: baseline_alignment
+                hit_test_visible: false
+            }
+            CustomTabStripPresenter {
+                Grid::row: strip_item_row
+                items: tab_items
+                selected_index: selected_index
+                tab_strip_position: tab_strip_position
+                compact: compact
+                close_button_presentation: close_button_presentation
+                Grid::column: 1
+            }
         };
         let content_presenter = CustomTabContentPresenter {
             items: content_items
             selected_index: selected_index
+            Grid::row: 1
+        };
+        // Docking's content header sits inside the frame above the page, like WinUI.Dock's
+        // `ContentOptions` inside each tab's content.
+        let content_area = Grid {
             Grid::row: content_row
+            rows: [
+                elwindui::core::layout::GridLength::Auto,
+                elwindui::core::layout::GridLength::Star(1.0),
+            ]
+            columns: [elwindui::core::layout::GridLength::Star(1.0)]
+            Grid {
+                columns: [elwindui::core::layout::GridLength::Star(1.0)]
+            }
+            content_presenter
+        };
+        let content_frame = Rectangle {
+            Grid::row: content_row
+            fill: content_background
+            stroke: frame_stroke
+            stroke_width: 1.0
+            corner_radius: 4.0
+            hit_test_visible: false
         };
         Grid {
             rows: grid_rows
             columns: [elwindui::core::layout::GridLength::Star(1.0)]
-            tab_strip
-            content_presenter
+            tab_strip_host
+            content_frame
+            content_area
+            // Drawn above the page like a WinUI Border, so an opaque page cannot cover its edges.
+            ConnectedContentFrame {
+                hit_test_visible: false
+            }
         }
     }),
+}
+
+impl CustomTabView {
+    fn sync_palette(&self) {
+        let dark = super::support::native_tab_dark(self.palette_foreground());
+        if self.palette_dark() != dark {
+            self.set_palette_dark(dark);
+        }
+    }
+    /// Framework integration for connected document chrome. This is not a DSL property.
+    #[doc(hidden)]
+    pub fn set_connected_chrome(&self, connected: bool) {
+        if self.connected_chrome_internal() == connected {
+            return;
+        }
+        // Invalidate the presentation signature, retaining item/page ownership.
+        self.set_connected_chrome_internal(connected);
+        self.set_last_presented_tab_strip_position(None);
+        let children = self.children_values();
+        for item in &children {
+            item.apply_connected_chrome(connected);
+        }
+        let strip: Option<Rc<CustomTabStripPresenter>> =
+            self.strip_presenter().and_then(|strip| strip.upgrade());
+        if let Some(strip) = strip {
+            strip.apply_connected_chrome(connected);
+        }
+        self.sync_presentation(&children);
+    }
+
+    /// Framework integration for Docking's active group: connected strip and frame lines take the
+    /// accent. This is not a DSL property.
+    #[doc(hidden)]
+    pub fn set_active_chrome(&self, active: bool) {
+        if self.active_chrome_internal() == active {
+            return;
+        }
+        self.set_active_chrome_internal(active);
+        if let Some(root) = self.__template_root()
+            && let Some(frame) = root.visual_children().get(3)
+            && let Some(painter) = frame.as_any().downcast_ref::<ConnectedContentFrame>()
+        {
+            painter.set_active(active);
+            frame.invalidate_render();
+        }
+    }
+
+    /// Whether Docking presents this view as its active group.
+    #[doc(hidden)]
+    pub fn active_chrome(&self) -> bool {
+        self.active_chrome_internal()
+    }
+
+    /// The brush style of this view's strip and frame lines.
+    #[doc(hidden)]
+    pub fn frame_stroke_style(&self) -> elwindui::core::theme::BrushStyle {
+        self.frame_stroke()
+    }
+
+    /// Framework integration for Docking's content header, placed inside the content frame above
+    /// the page. This is not a DSL property.
+    #[doc(hidden)]
+    pub fn set_content_header(&self, header: Option<Rc<dyn UIElementExt>>) {
+        self.set_content_header_element(header);
+        self.place_content_header();
+    }
+
+    fn place_content_header(&self) {
+        let header = self.content_header_element();
+        let Some(root) = self.__template_root() else {
+            return;
+        };
+        let Some(area) = root.visual_children().get(2).cloned() else {
+            return;
+        };
+        let Some(host) = area.visual_children().first().cloned() else {
+            return;
+        };
+        let Some(host) = host.as_any().downcast_ref::<Grid>() else {
+            return;
+        };
+        let current = host.visual_children().first().cloned();
+        let unchanged = match (&current, &header) {
+            (Some(current), Some(header)) => Rc::ptr_eq(current, header),
+            (None, None) => true,
+            _ => false,
+        };
+        if !unchanged {
+            super::core::ui::LayoutExt::children(host).clear();
+            if let Some(header) = header {
+                super::core::ui::LayoutExt::children(host).add(header);
+            }
+        }
+    }
 }
 
 #[elwindui::component]
 impl CustomTabView {
     #[overrides]
     fn on_apply_template(&self) {
+        self.sync_palette();
         self.set_clip_to_bounds(Some(true));
         self.cache_presenters();
         self.reconcile_children();
+        self.place_content_header();
+        if self.active_chrome_internal()
+            && let Some(root) = self.__template_root()
+            && let Some(frame) = root.visual_children().get(3)
+            && let Some(painter) = frame.as_any().downcast_ref::<ConnectedContentFrame>()
+        {
+            painter.set_active(true);
+        }
     }
 }
 
 /// A templated splitter that reports logical-axis drag deltas.
 
 impl CustomTabView {
+    fn strip_offset(&self, strip: &Rc<CustomTabStripPresenter>) -> Option<Point> {
+        let mut node: Rc<dyn UIElementExt> = strip.clone();
+        let mut offset = Point { x: 0.0, y: 0.0 };
+        for _ in 0..32 {
+            if node
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|view| std::ptr::eq(view, self))
+            {
+                return Some(offset);
+            }
+            let local = node.arranged_offset()?;
+            offset.x += local.x;
+            offset.y += local.y;
+            node = node.visual_parent()?;
+        }
+        None
+    }
+
     /// Resolves a group-local point against the retained tab-strip header geometry.
     #[doc(hidden)]
     pub fn tab_insertion_index_at(&self, point: Point) -> Option<usize> {
         let (strip, _) = self.presenters();
         let strip = strip?;
-        let offset = strip.arranged_offset()?;
+        let offset = self.strip_offset(&strip)?;
         strip.tab_insertion_index_at(Point {
             x: point.x - offset.x,
             y: point.y - offset.y,
@@ -174,7 +568,7 @@ impl CustomTabView {
     pub fn tab_insertion_boundary(&self, index: usize) -> Option<Rect> {
         let (strip, _) = self.presenters();
         let strip = strip?;
-        let offset = strip.arranged_offset()?;
+        let offset = self.strip_offset(&strip)?;
         let boundary = strip.tab_insertion_boundary(index)?;
         Some(Rect {
             x: offset.x + boundary.x,
@@ -263,6 +657,14 @@ impl CustomTabView {
         self.set_on_selected_index_change(Box::new(callback));
     }
 
+    /// Docking integration: called for every left press on a header, including a press on the
+    /// header that is already selected (which emits no selection change). Docking activates the
+    /// pressed Document on it, as the WinUI.Dock reference does on tab pointer press.
+    #[doc(hidden)]
+    pub fn set_on_tab_pressed(&self, callback: Option<Box<dyn Fn(usize)>>) {
+        self.set_tab_pressed_callback(callback.map(Rc::from));
+    }
+
     /// Removes the selected-index callback.
     pub fn clear_on_selected_index_changed(&self) {
         self.set_selected_index_callback(None);
@@ -308,6 +710,40 @@ impl CustomTabView {
         self.set_tab_drag_completed_callback(Some(Rc::from(callback)));
     }
 
+    /// Forwards a pointer event from another part of this document's presentation through the
+    /// same selection, threshold, and drag callbacks used by its tab header.
+    #[doc(hidden)]
+    pub fn forward_item_pointer_event(&self, index: usize, event: TabItemPointerEvent) {
+        let Some(item) = self.children_values().get(index).cloned() else {
+            return;
+        };
+        self.handle_item_pointer(&item, event);
+    }
+
+    /// Forwards a pointer event from a selected-document surface through its tab header gesture.
+    #[doc(hidden)]
+    pub fn forward_selected_item_pointer_event(&self, event: TabItemPointerEvent) {
+        let index = match &event {
+            TabItemPointerEvent::Pressed(_) => {
+                let index = self.selected_index();
+                self.set_forwarded_gesture_index(Some(index));
+                index
+            }
+            TabItemPointerEvent::Moved(_) => self
+                .forwarded_gesture_index()
+                .unwrap_or_else(|| self.selected_index()),
+            TabItemPointerEvent::Released(_) | TabItemPointerEvent::Canceled(_) => {
+                let index = self
+                    .forwarded_gesture_index()
+                    .unwrap_or_else(|| self.selected_index());
+                self.set_forwarded_gesture_index(None);
+                index
+            }
+            TabItemPointerEvent::Entered | TabItemPointerEvent::Exited => self.selected_index(),
+        };
+        self.forward_item_pointer_event(index, event);
+    }
+
     /// Reapplies runtime-owned tab chrome that is resolved from the application theme.
     pub fn refresh_theme(&self) {
         let children = self.children_values();
@@ -326,6 +762,11 @@ impl CustomTabView {
             .and_then(|presenter| presenter.upgrade());
         if let Some(presenter) = presenter {
             presenter.refresh_presentation();
+        }
+        if let Some(root) = self.__template_root()
+            && let Some(frame) = root.visual_children().get(3)
+        {
+            frame.invalidate_render();
         }
         self.invalidate_measure();
     }
@@ -478,6 +919,7 @@ impl CustomTabView {
         self.sync_grid_rows();
         let (strip_presenter, content_presenter) = self.presenters();
         if let Some(presenter) = strip_presenter {
+            presenter.apply_connected_chrome(self.connected_chrome_internal());
             presenter.set_items(children.to_vec());
             presenter.set_selected_index(selected);
             presenter.set_tab_strip_position(position);
@@ -485,25 +927,21 @@ impl CustomTabView {
             presenter.set_close_button_presentation(close);
             presenter
                 .as_ui_element()
-                .set_attached::<i32>("Grid", "row", self.tab_strip_row());
+                .set_attached::<i32>("Grid", "row", self.strip_item_row());
             presenter.reconcile_items();
         }
         if let Some(presenter) = content_presenter {
             presenter.set_items(children.to_vec());
             presenter.set_selected_index(selected);
+            // The page row of the content area, below the optional content header.
             presenter
                 .as_ui_element()
-                .set_attached::<i32>("Grid", "row", self.content_row());
+                .set_attached::<i32>("Grid", "row", 1);
             presenter.reconcile_contents();
         }
         for (index, item) in children.iter().enumerate() {
-            item.set_presentation(
-                index == selected,
-                item.pointer_over(),
-                position,
-                close,
-                compact,
-            );
+            item.apply_connected_chrome(self.connected_chrome_internal());
+            item.set_presentation(index == selected, item.pointer_over(), position, close);
         }
         self.set_last_presented_selected_index(Some(selected));
         self.set_last_presented_tab_strip_position(Some(position));
@@ -522,6 +960,9 @@ impl CustomTabView {
             && self.last_presented_compact_tabs() == Some(compact)
             && self.last_presented_close_button_presentation() == Some(close);
         if presentation_unchanged {
+            // The strip row and frame also follow the item count (a lone bottom tab hides its
+            // strip), which this signature does not cover; the sync writes only changed values.
+            self.sync_grid_rows();
             return;
         }
         #[cfg(test)]
@@ -548,13 +989,13 @@ impl CustomTabView {
                 presenter.set_close_button_presentation(close);
                 presenter
                     .as_ui_element()
-                    .set_attached::<i32>("Grid", "row", self.tab_strip_row());
+                    .set_attached::<i32>("Grid", "row", self.strip_item_row());
             }
             if let Some(presenter) = content_presenter.as_ref() {
                 presenter.set_selected_index(selected);
                 presenter
                     .as_ui_element()
-                    .set_attached::<i32>("Grid", "row", self.content_row());
+                    .set_attached::<i32>("Grid", "row", 1);
             }
         }
         if strip_presenter.is_none() {
@@ -566,19 +1007,12 @@ impl CustomTabView {
                             item.pointer_over(),
                             position,
                             close,
-                            compact,
                         );
                     }
                 }
             } else {
                 for (index, item) in children.iter().enumerate() {
-                    item.set_presentation(
-                        index == selected,
-                        item.pointer_over(),
-                        position,
-                        close,
-                        compact,
-                    );
+                    item.set_presentation(index == selected, item.pointer_over(), position, close);
                 }
             }
         }
@@ -609,8 +1043,8 @@ impl CustomTabView {
         let Some(grid) = root.as_any().downcast_ref::<Grid>() else {
             return;
         };
-        let strip_height = if self.compact() {
-            COMPACT_TAB_STRIP_HEIGHT
+        let strip_height = if self.connected_chrome_internal() {
+            32.0
         } else {
             TAB_STRIP_HEIGHT
         };
@@ -619,6 +1053,11 @@ impl CustomTabView {
                 elwindui::core::layout::GridLength::Fixed(strip_height),
                 elwindui::core::layout::GridLength::Star(1.0),
             ]
+        } else if self.children_values().len() == 1 {
+            vec![
+                elwindui::core::layout::GridLength::Star(1.0),
+                elwindui::core::layout::GridLength::Fixed(0.0),
+            ]
         } else {
             vec![
                 elwindui::core::layout::GridLength::Star(1.0),
@@ -626,6 +1065,62 @@ impl CustomTabView {
             ]
         };
         grid.set_rows(rows);
+        let strip_visibility = if self.tab_strip_position() == TabStripPosition::Bottom
+            && self.children_values().len() == 1
+        {
+            elwindui::core::layout::Visibility::Collapsed
+        } else {
+            elwindui::core::layout::Visibility::Visible
+        };
+        self.sync_content_frame(
+            strip_visibility == elwindui::core::layout::Visibility::Visible,
+            grid,
+        );
+        let strip: Option<Rc<CustomTabStripPresenter>> = self
+            .strip_presenter()
+            .and_then(|presenter| presenter.upgrade());
+        if let Some(strip) = strip {
+            strip.set_visibility(strip_visibility);
+        }
+    }
+
+    /// A connected strip supplies the frame's strip-side edge, like WinUI.Dock's
+    /// `BorderThickness="1,0,1,1"` content border: its baseline rule continues into square frame
+    /// corners and only the selected tab opens it. Without a visible strip, and for the generic
+    /// TabView, the content keeps its closed rounded frame.
+    fn sync_content_frame(&self, strip_visible: bool, grid: &Grid) {
+        let children = grid.visual_children();
+        let (Some(closed), Some(open)) = (children.get(1), children.get(3)) else {
+            return;
+        };
+        let open_frame = self.connected_chrome_internal() && strip_visible;
+        closed.set_visibility(if open_frame {
+            elwindui::core::layout::Visibility::Collapsed
+        } else {
+            elwindui::core::layout::Visibility::Visible
+        });
+        open.set_visibility(if open_frame {
+            elwindui::core::layout::Visibility::Visible
+        } else {
+            elwindui::core::layout::Visibility::Collapsed
+        });
+        let content_row = if self.tab_strip_position() == TabStripPosition::Top {
+            1
+        } else {
+            0
+        };
+        open.as_ui_element()
+            .set_attached_if_changed("Grid", "row", content_row);
+        if let Some(area) = children.get(2) {
+            area.as_ui_element()
+                .set_attached_if_changed("Grid", "row", content_row);
+        }
+        if let Some(frame) = open.as_any().downcast_ref::<ConnectedContentFrame>()
+            && frame.open_side() != self.tab_strip_position()
+        {
+            frame.set_open_side(self.tab_strip_position());
+            open.invalidate_render();
+        }
     }
 
     fn validate_children(&self, children: &[Rc<CustomTabViewItem>]) {
@@ -715,6 +1210,9 @@ impl CustomTabView {
         }));
         if let Some(index) = self.index_of(item) {
             let _ = self.select_index(index);
+            if let Some(callback) = self.tab_pressed_callback() {
+                callback(index);
+            }
         }
     }
 
@@ -909,10 +1407,167 @@ fn concrete_element<T: 'static>(element: Rc<dyn UIElementExt>) -> Rc<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::base::Size;
     use crate::core::ui::{ContentControlExt, UIElement, UIElementExt, layout_root};
     use std::cell::Cell;
     use std::rc::Rc;
+
+    #[test]
+    fn connected_strip_draws_the_content_frame_open_on_its_side() {
+        use crate::core::graphics::PathCommand;
+        use crate::core::layout::Visibility;
+        let view = CustomTabView::new_view();
+        view.set_children(vec![
+            CustomTabViewItem::new_item(),
+            CustomTabViewItem::new_item(),
+        ]);
+        let root: Rc<dyn UIElementExt> = view.clone();
+        let size = Size {
+            width: 300.0,
+            height: 200.0,
+        };
+        layout_root(&root, size);
+        let frames = view.__template_root().unwrap().visual_children();
+        let (closed, open) = (frames[1].clone(), frames[3].clone());
+        assert_eq!(closed.visibility(), Visibility::Visible);
+        assert_eq!(open.visibility(), Visibility::Collapsed);
+
+        view.set_connected_chrome(true);
+        layout_root(&root, size);
+        assert_eq!(closed.visibility(), Visibility::Collapsed);
+        assert_eq!(open.visibility(), Visibility::Visible);
+        assert_eq!(open.arranged_height(), Some(168.0));
+        assert_eq!(open.arranged_width(), Some(300.0));
+        assert_eq!(open.arranged_offset().map(|offset| offset.x), Some(0.0));
+
+        // Sides start on the strip edge with square corners; only the far corners are rounded.
+        for (side, near, far) in [
+            (TabStripPosition::Top, 0.0, 167.5),
+            (TabStripPosition::Bottom, 168.0, 0.5),
+        ] {
+            let path = open_frame_path(
+                Size {
+                    width: 300.0,
+                    height: 168.0,
+                },
+                side,
+            )
+            .unwrap();
+            let commands = path.commands();
+            assert_eq!(
+                commands.first(),
+                Some(&PathCommand::MoveTo(Point { x: 0.5, y: near }))
+            );
+            assert_eq!(
+                commands.last(),
+                Some(&PathCommand::LineTo(Point { x: 299.5, y: near }))
+            );
+            assert!(commands.iter().any(|command| matches!(
+                command,
+                PathCommand::LineTo(Point { x, y }) if *x == 295.5 && *y == far
+            )));
+            assert!(
+                !commands
+                    .iter()
+                    .any(|command| matches!(command, PathCommand::Close))
+            );
+        }
+    }
+    #[test]
+    fn docking_pin_press_consumes_selection_and_drag_and_invokes_once_on_release() {
+        use crate::core::input::{RawPointerEvent, RawPointerEventKind};
+        use crate::{ChromeIcon, CustomTabCloseButton, CustomTabCloseButtonExt};
+        let view = CustomTabView::new_view();
+        view.set_connected_chrome(true);
+        let first = CustomTabViewItem::new_item();
+        let second = CustomTabViewItem::new_item();
+        let pin_count = Rc::new(Cell::new(0));
+        let pins = pin_count.clone();
+        second.set_document_pin_action(true, Rc::new(move || pins.set(pins.get() + 1)));
+        view.replace_children(vec![first, second.clone()]);
+        let drag_count = Rc::new(Cell::new(0));
+        let drags = drag_count.clone();
+        view.set_on_tab_drag_started(Box::new(move |_| drags.set(drags.get() + 1)));
+        let root: Rc<dyn UIElementExt> = view.clone();
+        layout_root(
+            &root,
+            Size {
+                width: 400.0,
+                height: 160.0,
+            },
+        );
+        let pin = crate::core::visual_tree::find_all::<CustomTabCloseButton>(second.as_ref())
+            .into_iter()
+            .find(|node| {
+                node.as_any()
+                    .downcast_ref::<CustomTabCloseButton>()
+                    .is_some_and(|button| button.glyph_kind() == ChromeIcon::Pin)
+            })
+            .expect("pin action");
+        let button = pin
+            .as_any()
+            .downcast_ref::<CustomTabCloseButton>()
+            .expect("pin button");
+        assert!(
+            button.slot_visible(),
+            "enabled pin must reserve its action slot"
+        );
+        assert_eq!(pin.arranged_width(), Some(24.0));
+        assert_eq!(pin.arranged_height(), Some(24.0));
+        let mut point = Point { x: 12.0, y: 12.0 };
+        let mut current = Some(pin.clone());
+        while let Some(node) = current {
+            let offset = node.arranged_offset().expect("arranged action");
+            point.x += offset.x;
+            point.y += offset.y;
+            current = node.visual_parent();
+        }
+        let mut hit = crate::core::ui::hit_test(&root, point);
+        let mut hit_pin = false;
+        while let Some(node) = hit {
+            hit_pin |= Rc::ptr_eq(&node, &pin);
+            hit = node.visual_parent();
+        }
+        assert!(hit_pin, "pin point {point:?} must hit its action subtree");
+        let dispatcher = crate::core::input::PointerDispatcher::new();
+        let focus = crate::core::focus::FocusTracker::new();
+        for (index, kind) in [
+            RawPointerEventKind::Moved,
+            RawPointerEventKind::Pressed(MouseButton::Left),
+            RawPointerEventKind::Moved,
+            RawPointerEventKind::Released(MouseButton::Left),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let position = Point {
+                x: point.x + if index >= 2 { 6.0 } else { 0.0 },
+                y: point.y,
+            };
+            dispatcher.handle(
+                &root,
+                &focus,
+                RawPointerEvent {
+                    kind,
+                    position,
+                    screen_position: Some(position),
+                    modifiers: Default::default(),
+                    timestamp_ms: index as f64,
+                },
+            );
+            // The native host performs this pass after hover reveals its glyph. Keep the
+            // reserved action geometry valid before the next independently dispatched input.
+            layout_root(
+                &root,
+                Size {
+                    width: 400.0,
+                    height: 160.0,
+                },
+            );
+        }
+        assert_eq!(pin_count.get(), 1);
+        assert_eq!(view.selected_index(), 0);
+        assert_eq!(drag_count.get(), 0);
+    }
 
     #[elwindui_macros::class(inherits = elwindui_core::ui::UIElement)]
     struct SelectionPageProbe {

@@ -424,6 +424,7 @@ impl RenderCommand {
                 style,
                 foreground,
                 alignment,
+                wrapping,
             } => {
                 geometry.write_u64(content.len() as u64);
                 for byte in content.as_bytes() {
@@ -432,6 +433,7 @@ impl RenderCommand {
                 hash_rect(&mut geometry, *rect);
                 geometry.write_f32(style.font_size);
                 geometry.write_u8(*alignment as u8);
+                geometry.write_u8(*wrapping as u8);
                 if let Some(foreground) = foreground {
                     paint.write_bool(true);
                     hash_brush(&mut paint, foreground);
@@ -620,6 +622,7 @@ impl RenderCommand {
                     style: st1,
                     foreground: fg1,
                     alignment: a1,
+                    wrapping: w1,
                 },
                 RenderCommand::Text {
                     content: c2,
@@ -627,11 +630,13 @@ impl RenderCommand {
                     style: st2,
                     foreground: fg2,
                     alignment: a2,
+                    wrapping: w2,
                 },
             ) => {
                 c1 == c2
                     && r1 == r2
                     && a1 == a2
+                    && w1 == w2
                     && text_styles_visually_eq(st1, st2)
                     && brushes_opt_visually_eq(fg1.as_ref(), fg2.as_ref())
             }

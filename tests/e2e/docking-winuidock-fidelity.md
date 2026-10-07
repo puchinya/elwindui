@@ -1,0 +1,54 @@
+# WinUI.Dock visual and interaction fidelity
+
+Issue [#285](https://github.com/puchinya/elwindui/issues/285) compares ElwindUI Docking with the
+pinned `qian-o/WinUI.Dock@7949f84a8da28f8e4af13ce582bd5a99fd97b5e3` reference. Run this matrix on a
+real Windows host using the existing Windows UI driver and the tester procedure in
+[`winui3-e2e.md`](../../docs/agents/winui3-e2e.md). Each row has one result: `PASS`, `FAIL`,
+`NOT RUN`, or `BLOCKED`. A driver result alone is not product evidence.
+
+The Issue #285 approved amendment removes all group-level drag, tear-out, and cross-dock
+operations. Every drag in this matrix starts from one individual Document. Bottom content-header
+actions and drag apply only to the selected Document. Moving a floating window uses its native
+window title bar.
+
+## Fixture and evidence
+
+The latest paired splitter/content/title regression probe passed on a normal non-elevated
+Windows host (session 5, DPI 96, 960×640). Candidate SHA-256:
+`AF3734912860AEFF983C34881C4C7BF889250485AE5291AE95A34A99DC92A7A0`.
+Candidate row-down/back and column movement took 4007/4000/4000 ms; reference
+4000/4000/4006 ms, all with 250 delivered steps. Contents and tab contours remain
+visible after release, selection, and 1040×720→960×640 resizing. Terminal-to-Top
+also preserves the remaining Output header/content match. Evidence:
+[#285 paired regression images](https://github.com/puchinya/elwindui/issues/285#issuecomment-6027952733).
+Run `94dc6c646dfe/20261007T000735Z-splitter-header-current` records both executable
+identities, the dirty diff hash, native geometry, screenshots and normal cleanup.
+Later remediation only restricts pin/close pointer release to the left mouse button.
+
+Use the docking demo and its authored capability fixtures. Capture fresh ElwindUI and pinned
+reference screenshots at equivalent scale for visual rows. Record numeric geometry, visible state,
+and the observed transition; do not require raster-identical text rendering. Store immutable run
+evidence under `.agent-state/issues/285/e2e/<head-short>/<run-id>/` and attach useful comparison
+screenshots to Issue #285. Record exact HEAD, host/driver versions, screenshot paths, and cleanup in
+the run manifest.
+
+## Results
+
+| ID | State and action | PASS requires | Result / evidence |
+|---|---|---|---|
+| WDF-01 | Top tabs: select a Document, hover a capable tab, then leave it. | Selected tab joins the active content frame; pin/close appear on hover and disappear on exit; group has no separate title bar. | PASS — hover reveals the close action and leaving hides it in both apps; in the active group the selected tab outline is accent and joins the accent frame, which stays open under the selected tab for top and bottom strips (run `.agent-state/issues/285/e2e/dock-compare/20261007T091039Z-wdf01`). |
+| WDF-02 | Bottom multi-tab group: select another Document and inspect its content header and tabs. | Header title/actions belong to the selected Document; actions are not duplicated in tabs; the selected Document remains the only drag source. | PASS — candidate pointer selection (`94dc6c646dfe/20261006T233959Z-bottom-widths`) and reference UIA SelectionItemPattern (`20261006T234830Z-right-pane-uia`) show Git Changes title/actions in the content header with no duplicated bottom-tab actions. The reference pointer click unexpectedly removed Git Changes; that reference interaction anomaly is preserved in the earlier run and was not copied into the candidate. |
+| WDF-03 | Bottom single-tab group: inspect the tab strip, frame, header, and page. | Tab strip is collapsed/noninteractive; content header and full content frame remain visible and usable. | PASS — Error List single-tab group: strip collapsed, header and frame visible, non-closable pin packed at the trailing edge (run `20261004T155144Z-icons`; reference `20261004T090659Z`). |
+| WDF-04 | Compare compact and non-compact strips with short and long titles. | Normal widths equalize up to 200 logical px; compact widths follow content up to the same computed cap; heights match. | PASS — native 960→400→960 captures retain two normal main tabs and two compact tool tabs in both apps (candidate `20261006T233959Z-bottom-widths`, fresh reference `20261006T234830Z-right-pane-uia`). Main slots equalize and cap at 200; compact slots follow title width under their shared cap; strips remain 32 logical px high. At 400 px, the main group's approximately 156 px available width clips the existing titles within their tabs, and the fixed 200 px tool group retains unequal compact widths. Both native windows reached exactly 400×640 at DPI 96. |
+| WDF-05 | Drag one Document tab over an off-center nested target group, then move between its header and compass regions. | Compass follows that group's arranged frame center (including a bottom-tab content header) and stays visible over the group body; targets resolve only on drawn cells, header insertion stays available; no group-level drag is available. | PASS — compass follows the hovered group frame (including bottom-tab header) and Center drops join that group in both apps (run `20261004T124556Z-wdf` S2). |
+| WDF-06 | Inspect the group compass during an individual Document drag. | Connected 124 logical px cross contains five directional 36 logical px target glyphs with Center/Split semantics. | PASS — connected 124 px cross with five 36 px glyphs in both apps (comparison images 02/11 on Issue #285). |
+| WDF-07 | Inspect surface-edge targets and nearby group targets during an individual Document drag. | Root target visuals remain surface-relative and distinct from group Split targets. | PASS — flush surface-edge root targets with half-document/square glyphs distinct from the group compass (run `20261004T235902Z-dragsrc`). |
+| WDF-08 | Resolve Center, Split, and root Dock targets. | Preview uses resolver geometry (half surface for root Dock), 4 logical px border, rounded corner, 0.4 opacity, and does not intercept input; releasing off every drawn target floats a 400 x 400 window. | PASS — Center, SplitRight and root DockLeft previews (half surface) resolve only on drawn targets; results match the reference (runs `20261004T124556Z-wdf`, `20261004T235902Z-dragsrc`). |
+| WDF-09 | Resize a horizontal split with a real pointer. | 12 logical px gutter; live geometry tracks movement and release does not jump. | PASS — fresh paired run `94dc6c646dfe/20261007T000735Z-splitter-header-current`: candidate row down/back 4007/4000 ms, reference 4000/4000 ms, each 250 steps. The 12 px gutter, pane content and tab contours survive release, selection and window resize; also reruns DNP-19. |
+| WDF-10 | Resize a vertical split with a real pointer. | 12 logical px gutter; live geometry tracks movement and release does not jump. | PASS — same fresh paired run: candidate column movement 4000 ms, reference 4006 ms, each 250 steps. The 12 px gutter and pane content persist after release and resizing; also reruns DNP-18. |
+| WDF-11 | Inspect and activate auto-hide items on Left, Top, Right, and Bottom. | Titles are content-sized; left/right rotate, top/bottom remain horizontal; entries have 16 logical px spacing and a 4 logical px active/hover marker. | PASS — Left (Output docked left then pinned), Top (Terminal docked top then pinned), Right and Bottom (Error List) strips match the reference: content-sized titles, both side rails read top to bottom, no strip background, a gray outer-edge mark that turns accent only on hover (runs `20261006T184918Z-rails`, `20261006T155854Z-x1`). |
+| WDF-12 | Open Left and Right auto-hide items, resize, close, and reopen each. | Initial width is one third of usable center area; resize remains on the chosen side, trailing-edge direction is inverted, and each item's extent is remembered. | PASS — fresh paired Left (`94dc6c646dfe/20261006T235720Z-left-current`) and Right (`20261007T000600Z-right-close-current`, reference resize `20261006T235148Z-right-resize`) captures show initial approximately 300 px panes, outer anchors fixed, inner-edge resize by 100 px candidate / 99 px reference, and the same resized width after outside dismissal/reopen. Candidate SHA-256 `0AE210F9AA38658C14781863E429F04C458AFFBFE8A79A28A467A158597B1FBF`; delivered movements 1200–1205 ms, 75 steps. |
+| WDF-13 | Open Top and Bottom auto-hide items, resize, close, and reopen each. | Initial height is one third of usable center area; resize remains on the chosen side, Bottom direction is inverted, and each item's extent is remembered. | PASS — paired `94dc6c646dfe/20261007T000254Z-top-bottom-retry` shows initial outer extent approximately 173 px; candidate Top bottom edge grows by 100 px with top fixed, Bottom top edge moves upward by 100 px with bottom fixed. Reference ContentSizer moves 98 px on each side; both retain the changed extent after dismissal/reopen. Actual movements 1203–1212 ms, 75 steps. Top root drop uses (480,113), outside the overlapping header insertion band. |
+| WDF-14 | Dismiss an open auto-hide pane by clicking outside and Escape; then exercise pin and close. | Dismissal closes the pane without moving the item and releases its active state; pane pin docks to the same-side root edge as the active item; close follows `can_close`. | PASS — fresh four-side resize runs show outside dismissal and reopen without losing items. Paired `94dc6c646dfe/20261007T000600Z-right-close-current` closes Solution Explorer through the pane action, removes its rail, and preserves Git Changes. Consumed outside presses and protected close are also asserted by deterministic tests. Pane pin docks to the same-side root edge (runs `20261004T140907Z-pane`, `20261004T141248Z-pane`). Escape is conditional N/A for the observed native state: neither app has a focused recipient, and neither dismissed. Escape: with focus in the demo's Solution Explorer search box inside the open right pane, Escape dismisses the pane and the item stays in its strip (run `.agent-state/issues/285/e2e/dock-compare/20261007T093642Z-escape`). |
+| WDF-15 | Start an individual Document drag on a floating surface and inspect its compass/preview; move the floating window by its native title bar. | Compass/preview follow the floating target group; native title-bar movement updates window bounds without creating a group drag source. | PASS — floating surface shows only the group compass and a Center drop joins the floating group in both apps (run `20261004T140645Z-size` W15). |
+| WDF-16 | Inspect tab, target, preview, and auto-hide chrome in light and dark themes. | Theme resources update all listed chrome and preserve target geometry, action visibility, and interaction states. | PASS — light and dark theme chrome after a runtime theme switch matches the reference (runs `20261004T162856Z-light`, `20261004T162502Z-light`; images 10–12 on Issue #285). |

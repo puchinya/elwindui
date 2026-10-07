@@ -1,10 +1,12 @@
-use super::core::base::Point;
+use super::core::base::{Point, Size};
 use super::core::graphics::{Brush, Color};
 use super::core::input::{Key, KeyEventArgs, MouseButton, PointerEventArgs, RoutedEventArgs};
 use super::core::layout::{
     GridLength, GridTrackConstraint, HorizontalAlignment, VerticalAlignment,
 };
+use super::core::theme::BrushStyle;
 use super::core::ui::{ControlExt, Grid, GridExt, Rectangle, ShapeExt, UIElementExt};
+use super::support::native_tab_dark;
 use super::{
     GridResizeBehavior, GridResizeDirection, GridSplitterInputKind,
     GridSplitterResizeCompletedEventArgs, GridSplitterResizeDeltaEventArgs,
@@ -192,6 +194,8 @@ pub struct CustomGridSplitter {
     #[state(default = None)]
     resize_completed_callback: Option<Rc<dyn Fn(GridSplitterResizeCompletedEventArgs)>>,
     #[state(default = None)]
+    resize_target_grid: Option<Weak<Grid>>,
+    #[state(default = None)]
     resize_session: Option<ResizeSession>,
     #[state(default = false)]
     pointer_over: bool,
@@ -215,11 +219,21 @@ pub struct CustomGridSplitter {
         on_update(resize_direction) {
             this.sync_visual(true);
         }
-        Rectangle {
-            width: 6.0
-            height: 6.0
-            fill: "#7a7f87"
-            corner_radius: 2.0
+        Grid {
+            rows: [GridLength::Star(1.0)]
+            columns: [GridLength::Star(1.0)]
+            Rectangle {
+                fill: "#00000000"
+                corner_radius: 4.0
+                hit_test_visible: false
+            }
+            Rectangle {
+                width: 6.0
+                height: 6.0
+                fill: "#7a7f87"
+                corner_radius: 2.0
+                hit_test_visible: false
+            }
         }
     }),
 }
@@ -229,6 +243,20 @@ impl CustomGridSplitter {
     #[overrides]
     fn hit_test_content(&self) -> bool {
         true
+    }
+
+    /// Desired size is the grip's; the state background only fills whatever hit target the
+    /// parent arranges, so it never inflates the splitter's natural size.
+    #[overrides]
+    fn measure_override(&self, available: Size) -> Size {
+        let Some(root) = self.visual_children().into_iter().next() else {
+            return Size::default();
+        };
+        root.measure(available);
+        root.visual_children()
+            .get(1)
+            .and_then(|grip| grip.measured_size())
+            .unwrap_or_default()
     }
 
     #[overrides]
@@ -257,73 +285,93 @@ impl CustomGridSplitter {
         self.set_resize_completed_callback(Some(Rc::from(callback)));
     }
 
-    fn visual_fill(&self) -> Brush {
-        let color = if self.pressed() {
-            Color::rgb(96, 205, 255)
+    /// Routes this splitter's resize session to a retained grid when its visual parent is an
+    /// overlay layer. The grid remains weakly held so the overlay cannot extend the split tree's
+    /// lifetime.
+    #[doc(hidden)]
+    pub fn set_resize_grid_owner(&self, grid: Option<&Rc<Grid>>) {
+        self.set_resize_target_grid(grid.map(Rc::downgrade));
+    }
+
+    /// Background and grip colors of the WinUI 3 CommunityToolkit Sizers `GridSplitter`: a
+    /// transparent surface at rest, the subtle secondary fill on pointer-over/focus, the subtle
+    /// tertiary fill while pressed (matching native reference captures), and a control-strong-fill
+    /// grip in every state.
+    fn visual_fills(&self) -> (Brush, Brush) {
+        let dark = native_tab_dark(BrushStyle::Foreground);
+        let background = if self.pressed() {
+            if dark {
+                Color::rgba(255, 255, 255, 0x0a)
+            } else {
+                Color::rgba(0, 0, 0, 0x06)
+            }
         } else if self.pointer_over() || self.focused() {
-            Color::rgb(141, 200, 255)
+            if dark {
+                Color::rgba(255, 255, 255, 0x0f)
+            } else {
+                Color::rgba(0, 0, 0, 0x09)
+            }
         } else {
-            Color::rgb(122, 127, 135)
+            Color::TRANSPARENT
         };
-        Brush::Solid(color)
+        let grip = if dark {
+            Color::rgba(255, 255, 255, 0x8b)
+        } else {
+            Color::rgba(0, 0, 0, 0x72)
+        };
+        (Brush::Solid(background), Brush::Solid(grip))
     }
 
     fn sync_visual(&self, invalidate_layout: bool) {
         let Some(root) = self.visual_children().into_iter().next() else {
             return;
         };
-        let Some(rectangle) = root.as_any().downcast_ref::<Rectangle>() else {
+        let parts = root.visual_children();
+        let (Some(background), Some(grip)) = (parts.first(), parts.get(1)) else {
+            return;
+        };
+        let (Some(background), Some(rectangle)) = (
+            background.as_any().downcast_ref::<Rectangle>(),
+            grip.as_any().downcast_ref::<Rectangle>(),
+        ) else {
             return;
         };
         let element = rectangle.as_ui_element();
         if invalidate_layout {
-            match self.resize_direction() {
-                GridResizeDirection::Columns => {
-                    element.width.set(Some(6.0));
-                    element.presentation_width.set(Some(6.0));
-                    element.height.set(None);
-                    element.presentation_height.set(None);
-                    element.min_width.set(None);
-                    element.presentation_min_width.set(None);
-                    element.min_height.set(Some(6.0));
-                    element.presentation_min_height.set(Some(6.0));
-                    element
-                        .horizontal_alignment
-                        .set(HorizontalAlignment::Stretch);
-                    element.vertical_alignment.set(VerticalAlignment::Stretch);
-                }
-                GridResizeDirection::Rows => {
-                    element.width.set(None);
-                    element.presentation_width.set(None);
-                    element.height.set(Some(6.0));
-                    element.presentation_height.set(Some(6.0));
-                    element.min_width.set(Some(6.0));
-                    element.presentation_min_width.set(Some(6.0));
-                    element.min_height.set(None);
-                    element.presentation_min_height.set(None);
-                    element
-                        .horizontal_alignment
-                        .set(HorizontalAlignment::Stretch);
-                    element.vertical_alignment.set(VerticalAlignment::Stretch);
-                }
-                GridResizeDirection::Auto => {
-                    element.width.set(Some(6.0));
-                    element.presentation_width.set(Some(6.0));
-                    element.height.set(Some(6.0));
-                    element.presentation_height.set(Some(6.0));
-                    element.min_width.set(None);
-                    element.presentation_min_width.set(None);
-                    element.min_height.set(None);
-                    element.presentation_min_height.set(None);
-                    element
-                        .horizontal_alignment
-                        .set(HorizontalAlignment::Center);
-                    element.vertical_alignment.set(VerticalAlignment::Center);
-                }
+            let (width, height) = match self.resize_direction() {
+                GridResizeDirection::Columns => (Some(4.0), Some(24.0)),
+                GridResizeDirection::Rows => (Some(24.0), Some(4.0)),
+                GridResizeDirection::Auto => (Some(6.0), Some(6.0)),
+            };
+            let horizontal_alignment = HorizontalAlignment::Center;
+            let vertical_alignment = VerticalAlignment::Center;
+            let changed = element.width.get() != width
+                || element.presentation_width.get() != width
+                || element.height.get() != height
+                || element.presentation_height.get() != height
+                || element.min_width.get().is_some()
+                || element.presentation_min_width.get().is_some()
+                || element.min_height.get().is_some()
+                || element.presentation_min_height.get().is_some()
+                || element.horizontal_alignment.get() != horizontal_alignment
+                || element.vertical_alignment.get() != vertical_alignment;
+            if changed {
+                element.width.set(width);
+                element.presentation_width.set(width);
+                element.height.set(height);
+                element.presentation_height.set(height);
+                element.min_width.set(None);
+                element.presentation_min_width.set(None);
+                element.min_height.set(None);
+                element.presentation_min_height.set(None);
+                element.horizontal_alignment.set(horizontal_alignment);
+                element.vertical_alignment.set(vertical_alignment);
+                self.invalidate_measure();
             }
-            self.invalidate_measure();
         }
-        rectangle.set_fill_render_only(Some(self.visual_fill()));
+        let (background_fill, grip_fill) = self.visual_fills();
+        background.set_fill_render_only(Some(background_fill));
+        rectangle.set_fill_render_only(Some(grip_fill));
     }
 
     fn target_control(&self) -> Option<Rc<dyn UIElementExt>> {
@@ -367,7 +415,11 @@ impl CustomGridSplitter {
         screen_position: Option<Point>,
     ) -> Option<ResizeSession> {
         let target = self.target_control()?;
-        let grid = target.visual_parent()?;
+        let grid = self
+            .resize_target_grid()
+            .and_then(|grid| grid.upgrade())
+            .map(|grid| grid as Rc<dyn UIElementExt>)
+            .or_else(|| target.visual_parent())?;
         grid.as_any().downcast_ref::<Grid>()?;
         let direction = self.resolve_direction(&target)?;
         let placement = match direction {

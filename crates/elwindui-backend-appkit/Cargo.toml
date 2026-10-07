@@ -89,7 +89,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSStringDrawing",
     "NSParagraphStyle",
     "NSFontDescriptor",
-    "NSColor", "NSAppearance",
+    "NSColor", "NSAppearance", "NSColorSpace",
 ] }
 objc2-quartz-core = { version = "0.3.2", features = ["CALayer", "CAShapeLayer", "CATextLayer", "CAGradientLayer", "CATransaction"] }
 objc2-core-graphics = { version = "0.3.2", features = ["CGPath", "CGColor", "CGColorSpace", "CGGeometry", "CGAffineTransform", "CGGradient", "CGImage", "CGDataProvider", "CGBitmapContext", "CGContext"] }

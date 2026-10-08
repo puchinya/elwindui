@@ -231,8 +231,12 @@ Animation acceptance uses one bounded capture sequence:
 9. verify the deterministic final logical state separately when it is mechanically observable.
 
 The runner must not implement animation sampling as an AI-to-single-screenshot loop that returns
-to the tester before every next frame. `capture-sequence` is a planned future capability and must
-not be documented as an existing command until implemented.
+to the tester before every next frame. The WinUI 3 driver implements this as `capture-sequence`:
+one invocation runs a bounded JSON step list (resolve buttons/elements, verify the button in a
+fresh capture, make the target foreground, click, plain sleeps, in-memory window captures, cached
+UIA reads), stamping every step with UTC and one monotonic stopwatch, so frames can be taken a few
+hundred milliseconds apart without per-command process startup. It is the driver's second bounded
+in-process input exception after `touch-cancel`. The AppKit driver has no equivalent yet.
 
 ## 11. Enforceable execution budgets
 

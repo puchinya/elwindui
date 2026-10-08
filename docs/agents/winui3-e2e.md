@@ -98,6 +98,14 @@ For PC-11 only, start the complete bounded `touch-cancel --hold-ms <bounded>` in
 background PowerShell process, wait until the trace proves press acceptance and native capture,
 then terminate the product normally. Reap the driver process on PASS, FAIL, and BLOCKED paths.
 
+## Timed animation capture
+
+When acceptance needs frames or element positions a few hundred milliseconds apart (for example
+the layout reflow cases in `tests/e2e/layout-reflow-animation.md`), use the driver's
+`capture-sequence` command instead of separate `capture-window`/`search` calls, whose process
+startup alone takes 2–3 s each. Resolve buttons and elements in the same step list before the
+first click, and use plain `sleep` steps for timing. See the driver README for the step format.
+
 ## Host-context execution
 
 Run every driver invocation outside any agent sandbox, as a normal non-elevated user, on an

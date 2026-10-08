@@ -305,7 +305,7 @@ finally {
     Remove-Item -LiteralPath $NestedArgvOut -ErrorAction SilentlyContinue
 }
 
-# T10 -- touch-cancel is the sole bounded direct-injection exception. Usage validation must fail
+# T10 -- touch-cancel is one of two bounded direct-injection exceptions (see T11). Usage validation must fail
 # before any HWND/session/injection work, and every invocation must retain the driver's one-object
 # JSON protocol even when the native API is unavailable on the test host.
 $r = Invoke-Driver @('touch-cancel', '--from-x', '10', '--from-y', '20')
@@ -385,6 +385,46 @@ Assert ($r.Json.failure_exception_cleanup_device_destroy_success -eq $false) 'to
 Assert ($r.Json.failure_exception_has_cleanup_error -eq $true) 'touch backend cleanup -- failed sequence records managed destroy exception'
 Assert ($r.Json.failure_exception_has_cleanup_error_code -eq $false) 'touch backend cleanup -- failed sequence has no fabricated destroy error code'
 Remove-Item Env:ELWINDUI_DRIVER_CONTRACT_PROBE -ErrorAction SilentlyContinue
+
+# T11 -- capture-sequence is the second bounded in-process exception (timed click/capture/UIA steps). Usage
+# and target validation must fail closed before any input, capture, or output directory creation.
+$SeqDir = Join-Path ([System.IO.Path]::GetTempPath()) ("seq-contract-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $SeqDir | Out-Null
+try {
+    $okSteps = Join-Path $SeqDir 'ok.json'
+    '[{"op":"sleep","ms":1}]' | Set-Content -LiteralPath $okSteps -Encoding utf8
+    $badOp = Join-Path $SeqDir 'bad-op.json'
+    '[{"op":"teleport"}]' | Set-Content -LiteralPath $badOp -Encoding utf8
+    $badSleep = Join-Path $SeqDir 'bad-sleep.json'
+    '[{"op":"sleep","ms":60001}]' | Set-Content -LiteralPath $badSleep -Encoding utf8
+    $notJson = Join-Path $SeqDir 'not-json.json'
+    'not json' | Set-Content -LiteralPath $notJson -Encoding utf8
+
+    $r = Invoke-Driver @('capture-sequence', '--steps', $okSteps, '--output-dir', (Join-Path $SeqDir 'out0'))
+    Assert-OneJsonObject $r 'capture-sequence (missing hwnd)'
+    Assert ($r.Json.category -eq 'usage_error') 'capture-sequence (missing hwnd) -- category:usage_error'
+
+    $r = Invoke-Driver @('capture-sequence', '--hwnd', '1', '--output-dir', (Join-Path $SeqDir 'out1'))
+    Assert-OneJsonObject $r 'capture-sequence (missing steps)'
+    Assert ($r.Json.category -eq 'usage_error') 'capture-sequence (missing steps) -- category:usage_error'
+
+    $r = Invoke-Driver @('capture-sequence', '--hwnd', '1', '--steps', $notJson, '--output-dir', (Join-Path $SeqDir 'out2'))
+    Assert ($r.Json.category -eq 'usage_error') 'capture-sequence (steps not JSON) -- category:usage_error'
+
+    $r = Invoke-Driver @('capture-sequence', '--hwnd', '1', '--steps', $badOp, '--output-dir', (Join-Path $SeqDir 'out3'))
+    Assert ($r.Json.category -eq 'usage_error') 'capture-sequence (unknown op) -- category:usage_error'
+
+    $r = Invoke-Driver @('capture-sequence', '--hwnd', '1', '--steps', $badSleep, '--output-dir', (Join-Path $SeqDir 'out4'))
+    Assert ($r.Json.category -eq 'usage_error') 'capture-sequence (sleep above bound) -- category:usage_error'
+
+    $r = Invoke-Driver @('capture-sequence', '--hwnd', '1', '--steps', $okSteps, '--output-dir', (Join-Path $SeqDir 'out5'))
+    Assert-OneJsonObject $r 'capture-sequence (no such window)'
+    Assert ($r.Json.category -eq 'target_error') 'capture-sequence (no such window) -- category:target_error'
+    Assert (-not (Test-Path (Join-Path $SeqDir 'out5'))) 'capture-sequence (no such window) -- no output directory is created'
+}
+finally {
+    Remove-Item -LiteralPath $SeqDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 if ($script:FailureCount -gt 0) {
     Write-Output "`n$script:FailureCount assertion(s) failed."

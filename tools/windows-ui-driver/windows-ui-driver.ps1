@@ -30,7 +30,7 @@ param(
         'doctor', 'launch', 'list-windows', 'focus-window',
         'inspect', 'search', 'invoke', 'get-value', 'set-value', 'get-property', 'set-focus', 'wait-for',
         'capture-window', 'point-click', 'drag', 'touch-cancel', 'send-keys',
-        'move-window', 'resize-window', 'terminate'
+        'move-window', 'resize-window', 'terminate', 'capture-sequence'
     )]
     [string]$Command,
 
@@ -1455,6 +1455,183 @@ function Cmd-Terminate {
 }
 
 # ---------------------------------------------------------------------------
+# capture-sequence -- the second bounded in-process exception (after touch-cancel). Timed acceptance
+# evidence needs a click, screen captures, and UIA reads a few hundred milliseconds apart, which
+# per-command process startup (2-3 s each) cannot provide. One invocation executes a fixed JSON
+# step list in order; waits are plain sleeps; every step is stamped with UTC and the elapsed
+# milliseconds of one Stopwatch. Coordinates are resolved before the timed steps (`locate-*`), the
+# click requires a verified foreground target, and captures stay in memory until the end.
+# ---------------------------------------------------------------------------
+
+function Initialize-SequenceInterop {
+    if (-not ("ElwindUI.SequenceInput" -as [type])) {
+        Add-Type -Namespace ElwindUI -Name SequenceInput -MemberDefinition @"
+[DllImport("user32.dll")]
+public static extern IntPtr SetProcessDpiAwarenessContext(IntPtr value);
+[DllImport("user32.dll")]
+[return: MarshalAs(UnmanagedType.Bool)]
+public static extern bool SetCursorPos(int x, int y);
+[DllImport("user32.dll")]
+public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+public static void LeftClick(int x, int y) {
+    SetCursorPos(x, y);
+    mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
+    mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
+}
+"@
+    }
+    # Per-monitor-v2 awareness so window rects, UIA bounds, cursor and capture share physical px.
+    [void][ElwindUI.SequenceInput]::SetProcessDpiAwarenessContext([IntPtr](-4))
+    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing.Common
+}
+
+function Get-SequenceWindowRect {
+    param([IntPtr]$Handle)
+    $r = New-Object ElwindUI.Win32Driver+RECT
+    [void][ElwindUI.Win32Driver]::GetWindowRect($Handle, [ref]$r)
+    return $r
+}
+
+function New-SequenceCapture {
+    param($Rect)
+    $w = $Rect.Right - $Rect.Left; $h = $Rect.Bottom - $Rect.Top
+    $bmp = [System.Drawing.Bitmap]::new($w, $h)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($Rect.Left, $Rect.Top, 0, 0, [System.Drawing.Size]::new($w, $h))
+    $g.Dispose()
+    return $bmp
+}
+
+function Get-SequenceBounds {
+    param($Element)
+    if ($null -eq $Element) { return $null }
+    try {
+        $b = $Element.Current.BoundingRectangle
+        if ($b.IsEmpty) { return $null }
+        return [ordered]@{ x = [int]$b.X; y = [int]$b.Y; width = [int]$b.Width; height = [int]$b.Height; name = $Element.Current.Name }
+    }
+    catch { return $null }
+}
+
+function Cmd-CaptureSequence {
+    if (-not (Get-Arg 'hwnd')) { Emit-UsageError 'missing required argument --hwnd' }
+    $stepsPath = Require-Arg 'steps'
+    $outDir = Require-Arg 'output-dir'
+    if (-not (Test-Path -LiteralPath $stepsPath)) { Emit-UsageError "--steps file not found: $stepsPath" }
+    try { $steps = @(Get-Content -Raw -LiteralPath $stepsPath | ConvertFrom-Json -ErrorAction Stop) }
+    catch { Emit-UsageError "--steps is not valid JSON: $($_.Exception.Message)" }
+    if ($steps.Count -lt 1 -or $steps.Count -gt 200) { Emit-UsageError '--steps must contain 1..200 steps' }
+    $validOps = @('locate-button', 'locate-id', 'cache', 'foreground', 'click', 'sleep', 'capture', 'read')
+    foreach ($s in $steps) {
+        if ($validOps -notcontains $s.op) { Emit-UsageError "unknown step op: $($s.op)" }
+        if ($s.op -eq 'sleep' -and (-not ($s.ms -is [long] -or $s.ms -is [int]) -or $s.ms -lt 0 -or $s.ms -gt 60000)) { Emit-UsageError 'sleep.ms must be an integer in 0..60000' }
+    }
+    if ((@($steps | Where-Object { $_.op -eq 'capture' })).Count -gt 50) { Emit-UsageError 'at most 50 capture steps' }
+
+    $hwnd = ConvertTo-Hwnd (Get-Arg 'hwnd')
+    if (-not [ElwindUI.Win32Driver]::IsWindow($hwnd)) {
+        Emit-Result @{ success = $false; category = 'target_error'; error = "no window for hwnd $([int64]$hwnd)" }
+    }
+    if (-not (Test-InteractiveInputDesktop)) {
+        Emit-Result @{ success = $false; category = 'environment_blocker'; error = 'no_interactive_desktop: the input desktop is not available (session locked or secure desktop)' }
+    }
+    Initialize-SequenceInterop
+    if (Test-Path -LiteralPath $outDir) { Emit-UsageError "--output-dir already exists (evidence is never overwritten): $outDir" }
+    New-Item -ItemType Directory -Path $outDir | Out-Null
+
+    $AE = [System.Windows.Automation.AutomationElement]
+    $root = $AE::FromHandle($hwnd)
+    $points = @{}
+    $cache = @{}
+    $frames = [System.Collections.Generic.List[object]]::new()
+    $records = [System.Collections.Generic.List[object]]::new()
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $fail = $null
+
+    for ($i = 0; $i -lt $steps.Count -and -not $fail; $i++) {
+        $s = $steps[$i]
+        $rec = [ordered]@{ index = $i; op = $s.op; utc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ'); t_start_ms = [math]::Round($sw.Elapsed.TotalMilliseconds, 1) }
+        switch ($s.op) {
+            'locate-button' {
+                $cond = [System.Windows.Automation.AndCondition]::new(
+                    [System.Windows.Automation.PropertyCondition]::new($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button),
+                    [System.Windows.Automation.PropertyCondition]::new($AE::NameProperty, [string]$s.name))
+                $el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+                $b = Get-SequenceBounds $el
+                if ($null -eq $b) { $fail = @{ category = 'target_error'; error = "button not found: $($s.name)" }; break }
+                # Image confirmation: the UIA rect, mapped into a fresh capture, must show a button
+                # border along its top edge and dark label pixels inside.
+                $wr = Get-SequenceWindowRect $hwnd
+                $bmp = New-SequenceCapture $wr
+                $ix = $b.x - $wr.Left; $iy = $b.y - $wr.Top
+                $edge = 0; for ($x = $ix + 4; $x -lt $ix + $b.width - 4; $x++) { $p = $bmp.GetPixel($x, $iy); if ((($p.R + $p.G + $p.B) / 3) -lt 245) { $edge++ } }
+                $dark = 0; for ($y = $iy + 4; $y -lt $iy + $b.height - 4; $y++) { for ($x = $ix + 4; $x -lt $ix + $b.width - 4; $x++) { $p = $bmp.GetPixel($x, $y); if ((($p.R + $p.G + $p.B) / 3) -lt 110) { $dark++ } } }
+                $bmp.Dispose()
+                $rec.bounds = $b; $rec.top_edge_px = $edge; $rec.label_dark_px = $dark
+                if ($edge -lt [int]($b.width * 0.5) -or $dark -lt 30) { $fail = @{ category = 'target_error'; error = "image check did not confirm button '$($s.name)' at its UIA rect" }; break }
+                $points[[string]$s.as] = @{ x = [int]($b.x + $b.width / 2); y = [int]($b.y + $b.height / 2) }
+                $rec.as = $s.as; $rec.point = $points[[string]$s.as]
+            }
+            'locate-id' {
+                $el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.PropertyCondition]::new($AE::AutomationIdProperty, [string]$s.id))
+                $b = Get-SequenceBounds $el
+                if ($null -eq $b) { $fail = @{ category = 'target_error'; error = "element not found: $($s.id)" }; break }
+                $points[[string]$s.as] = @{ x = [int]($b.x + $b.width / 2); y = [int]($b.y + $b.height / 2) }
+                $rec.as = $s.as; $rec.bounds = $b; $rec.point = $points[[string]$s.as]
+            }
+            'cache' {
+                foreach ($id in @($s.ids)) {
+                    $cache[[string]$id] = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.PropertyCondition]::new($AE::AutomationIdProperty, [string]$id))
+                }
+                $rec.ids = @($s.ids); $rec.found = @(@($s.ids) | Where-Object { $null -ne $cache[[string]$_] })
+            }
+            'foreground' {
+                [void][ElwindUI.Win32Driver]::SetForegroundWindow($hwnd)
+                Start-Sleep -Milliseconds 200
+                $fg = [ElwindUI.Win32Driver]::GetForegroundWindow()
+                $rec.foreground = ([int64]$fg -eq [int64]$hwnd)
+                if (-not $rec.foreground) { $fail = @{ category = 'environment_blocker'; error = 'foreground_not_target: the target window could not be made foreground; real input would go elsewhere' }; break }
+            }
+            'click' {
+                if ([int64][ElwindUI.Win32Driver]::GetForegroundWindow() -ne [int64]$hwnd) { $fail = @{ category = 'environment_blocker'; error = 'foreground_not_target at click time' }; break }
+                if ($s.at) {
+                    if (-not $points.ContainsKey([string]$s.at)) { $fail = @{ category = 'usage_error'; error = "click.at refers to an unknown point: $($s.at)" }; break }
+                    $pt = $points[[string]$s.at]
+                }
+                else { $pt = @{ x = [int]$s.x; y = [int]$s.y } }
+                [ElwindUI.SequenceInput]::LeftClick($pt.x, $pt.y)
+                $rec.point = $pt; $rec.label = $s.label
+            }
+            'sleep' { Start-Sleep -Milliseconds ([int]$s.ms); $rec.ms = [int]$s.ms }
+            'capture' {
+                $wr = Get-SequenceWindowRect $hwnd
+                $frames.Add(@{ name = [string]$s.name; bmp = (New-SequenceCapture $wr) })
+                $rec.name = [string]$s.name; $rec.window = [ordered]@{ left = $wr.Left; top = $wr.Top; right = $wr.Right; bottom = $wr.Bottom }
+            }
+            'read' {
+                $vals = [ordered]@{}
+                foreach ($id in @($s.ids)) { $vals[[string]$id] = Get-SequenceBounds $cache[[string]$id] }
+                $rec.name = [string]$s.name; $rec.values = $vals
+            }
+        }
+        $rec.t_end_ms = [math]::Round($sw.Elapsed.TotalMilliseconds, 1)
+        $records.Add($rec)
+    }
+    $sw.Stop()
+
+    $files = @()
+    foreach ($f in $frames) {
+        $path = Join-Path $outDir ($f.name + '.png')
+        $f.bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); $f.bmp.Dispose()
+        $files += $path
+    }
+    $result = @{ success = ($null -eq $fail); hwnd = [int64]$hwnd; output_dir = $outDir; steps = @($records); files = $files }
+    if ($fail) { $result['category'] = $fail.category; $result['error'] = $fail.error }
+    ($result | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $outDir 'sequence-result.json') -Encoding utf8
+    Emit-Result $result
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -1483,5 +1660,6 @@ switch ($Command) {
     'move-window' { Cmd-MoveWindow }
     'resize-window' { Cmd-ResizeWindow }
     'terminate' { Cmd-Terminate }
+    'capture-sequence' { Cmd-CaptureSequence }
     default { Emit-UsageError "unknown command: $Command" }
 }

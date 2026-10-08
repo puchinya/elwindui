@@ -8,9 +8,9 @@
 //! Issue #290 adds stable-ID position markers below the dynamic self-drawn panel and the dynamic
 //! NativeControl. Inserting or removing either region moves its marker by layout reflow, so a
 //! native UI driver can read intermediate, exit, reinsertion, reversal, and Reduce Motion
-//! positions from the marker's semantic bounds. A separate verification-only spacer before the
-//! TextBox moves it by 130 DIP over a fixed 12 s linear transaction, so a driver can click a point
-//! inside the TextBox's shown bounds but outside its target bounds.
+//! positions from the marker's semantic bounds. A separate verification-only region at the end
+//! inserts a 120 DIP spacer before a tall probe TextBox over a fixed 12 s linear transaction, so a
+//! driver can click a point inside the probe's shown bounds but outside its target bounds.
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
@@ -33,6 +33,8 @@ mod animation_demo_view_model {
         show_reflow_spacer: bool,
         #[observable(default = false)]
         reduce_motion: bool,
+        #[observable(default = "Unfocused".to_string())]
+        probe_focus: String,
         #[computed(expr = reduce_motion.to_string())]
         reduce_motion_label: String,
         #[observable(default = "Unfocused".to_string())]
@@ -75,6 +77,14 @@ mod animation_demo_view_model {
                 },
             );
             status = "Reflow spacer toggled".to_string();
+        }
+
+        fn probe_got_focus(&self) {
+            probe_focus = "Focused".to_string();
+        }
+
+        fn probe_lost_focus(&self) {
+            probe_focus = "Unfocused".to_string();
         }
 
         fn native_got_focus(&self) {
@@ -126,7 +136,7 @@ struct AnimationDemoWindow {
     body: view! {
         title: "ElwindUI Animation Demo"
         width: 620.0
-        height: 600.0
+        height: 880.0
         content: VerticalLayout {
             margin: 18.0
             spacing: 10.0
@@ -184,12 +194,6 @@ struct AnimationDemoWindow {
                 text: "Reflow marker below the self-drawn panel"
                 accessibility_identifier: "animation-reflow-panel-marker"
             }
-            if vm.show_reflow_spacer {
-                Rectangle {
-                    height: 120.0
-                    fill: "#e6e6e6"
-                }
-            }
             if vm.show_native {
                 #[transition(Transition::asymmetric(
                     Transition::opacity().combined(Transition::offset(elwindui::core::base::Vector { x: 28.0, y: 0.0 })),
@@ -214,6 +218,26 @@ struct AnimationDemoWindow {
             TextBlock { text: "Reduce motion:" }
             TextBlock { text: vm.reduce_motion_label }
             TextBlock { text: vm.status }
+            // Verification-only (LR-04): the spacer moves the tall probe by 130 DIP, more than
+            // enough to leave a band that is inside the probe's shown bounds but outside its
+            // target bounds for the whole 12 s transaction.
+            if vm.show_reflow_spacer {
+                Rectangle {
+                    height: 120.0
+                    fill: "#e6e6e6"
+                }
+            }
+            TextBox {
+                height: 160.0
+                placeholder: "Reflow pointer probe"
+                accessibility_identifier: "animation-reflow-probe-textbox"
+                on_got_focus: vm.probe_got_focus
+                on_lost_focus: vm.probe_lost_focus
+            }
+            TextBlock {
+                text: vm.probe_focus
+                accessibility_identifier: "animation-reflow-probe-focus-state"
+            }
         }
     },
 }

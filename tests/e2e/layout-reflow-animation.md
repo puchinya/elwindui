@@ -36,6 +36,9 @@ travels. Self-drawn content and a NativeControl move the same way. Reduce Motion
 | `animation-native-focus-state` | shows `Focused` / `Unfocused` for the TextBox |
 
 Positions are read from the semantic bounds (`y`) reported by the platform accessibility tree.
+On WinUI 3, take the timed frames and reads of LR-01 and LR-03 with the driver's
+`capture-sequence` command (one invocation: click, then capture + UIA read every few hundred
+milliseconds), because separate driver commands take 2–3 s each.
 "Intermediate" means strictly between the start and final `y` with at least 3 px clearance from
 both. "Stable" means two reads at least 1 s apart that differ by at most 1 px.
 

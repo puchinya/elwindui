@@ -92,7 +92,9 @@ no reentrant invalidation while the RenderTree is borrowed. The frame wake is
 requested once after reconcile; later ticks publish through Render
 invalidation. Completion writes zero and removes the channel. A tick that
 observes `reduce_motion` or a dropped element cancels the channel and writes
-zero.
+zero. Because those Render-only passes do not rebuild the semantic snapshot by
+themselves, a tick that advanced any reflow requests one accessibility update
+for the tree through the existing `request_accessibility_update` route.
 
 One Core composer, `effective_local_presentation_transform`, returns
 `T(layout_reflow_translation) * local_transform(base + transition)`. Render

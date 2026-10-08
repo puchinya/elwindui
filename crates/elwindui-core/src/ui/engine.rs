@@ -2593,6 +2593,47 @@ mod layout_reflow_tests {
         assert_eq!(fx.host.runtime.layout_reflow_count(), 0);
     }
 
+    struct CountingAccessibilityHost(Cell<usize>);
+
+    impl crate::accessibility::AccessibilityHost for CountingAccessibilityHost {
+        fn request_accessibility_update(&self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    #[test]
+    fn rf08_each_reflow_tick_refreshes_semantic_bounds_once() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c", "d"]);
+        let (a, c, d) = (fx.item(0), fx.item(2), fx.item(3));
+        let accessibility = Rc::new(CountingAccessibilityHost(Cell::new(0)));
+        fx.root.set_accessibility_host(Some(
+            accessibility.clone() as Rc<dyn crate::accessibility::AccessibilityHost>
+        ));
+        with_animation(linear(100), || assert!(fx.children.remove(&a)));
+        fx.relayout();
+        assert_eq!(fx.host.runtime.layout_reflow_count(), 3);
+        let before = accessibility.0.get();
+        fx.tick_ms(50);
+        assert_eq!(
+            accessibility.0.get(),
+            before + 1,
+            "one refresh for three reflows"
+        );
+        assert!(reflow_of(&c).y > 0.0 && reflow_of(&d).y > 0.0);
+        fx.tick_ms(100);
+        assert_eq!(
+            accessibility.0.get(),
+            before + 2,
+            "the final position is refreshed too"
+        );
+        fx.tick_ms(150);
+        assert_eq!(
+            accessibility.0.get(),
+            before + 2,
+            "no refresh without reflow"
+        );
+    }
+
     #[test]
     fn rf15_property_animation_moves_siblings_without_a_reflow_channel() {
         let mut fx = ReflowFixture::new(&["a", "b", "c"]);

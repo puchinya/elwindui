@@ -638,7 +638,11 @@ impl AnimationRuntime {
 
         let current = std::mem::take(&mut *self.channels.borrow_mut());
         let mut keep = Vec::new();
+        let mut reflowed: Option<Weak<dyn crate::ui::UIElementExt>> = None;
         for (key, mut active) in current {
+            if key.1 == RuntimeChannel::LayoutReflow && reflowed.is_none() {
+                reflowed = self.layout_reflow_targets.borrow().get(&key.0).cloned();
+            }
             let elapsed = now.saturating_sub(active.started_at);
             let (value, velocity) =
                 active
@@ -664,15 +668,23 @@ impl AnimationRuntime {
         }
         // A callback may have installed a replacement under the same key or cancelled the channel.
         // Only a channel whose generation is still current goes back; a replacement always wins.
-        let generations = self.generations.borrow();
-        let mut channels = self.channels.borrow_mut();
-        for (key, active) in keep {
-            if generations.get(&key) == Some(&active.generation) {
-                channels.entry(key).or_insert(active);
+        let active = {
+            let generations = self.generations.borrow();
+            let mut channels = self.channels.borrow_mut();
+            for (key, active) in keep {
+                if generations.get(&key) == Some(&active.generation) {
+                    channels.entry(key).or_insert(active);
+                }
             }
-        }
-        let active = !channels.is_empty();
+            !channels.is_empty()
+        };
         *self.frame_requested.borrow_mut() = active;
+        // Reflow moves presentation geometry on Render-only passes, which do not refresh semantic
+        // bounds by themselves. One refresh per tick covers every reflowing element of this
+        // runtime's tree, since they share one accessibility host.
+        if let Some(element) = reflowed.and_then(|element| element.upgrade()) {
+            crate::ui::UIElementExt::request_accessibility_update(element.as_ref());
+        }
         active
     }
 

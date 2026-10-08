@@ -4,6 +4,11 @@
 //! presentation, dynamic insertion/removal, a NativeControl removal while focused, and the
 //! `ReduceMotionEnvironment` snap path. AppKit is the host used for local runtime evidence;
 //! WinUI 3 uses the same Core declarations when run on Windows.
+//!
+//! Issue #290 adds stable-ID position markers below the dynamic self-drawn panel and the dynamic
+//! NativeControl. Inserting or removing either region moves its marker by layout reflow, so a
+//! native UI driver can read intermediate, exit, reinsertion, reversal, and Reduce Motion
+//! positions from the marker's semantic bounds.
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
@@ -35,7 +40,8 @@ mod animation_demo_view_model {
     impl AnimationDemoViewModel {
         fn toggle_panel(&self) {
             elwindui::core::ui::with_animation(
-                Animation::ease_in_out(Duration::from_millis(260)),
+                // Long enough for a native UI driver to sample the reflowing marker below the panel.
+                Animation::ease_in_out(Duration::from_millis(4000)),
                 || {
                     show_panel = !show_panel;
                 },
@@ -104,7 +110,7 @@ struct AnimationDemoWindow {
     body: view! {
         title: "ElwindUI Animation Demo"
         width: 620.0
-        height: 420.0
+        height: 520.0
         content: VerticalLayout {
             margin: 18.0
             spacing: 10.0
@@ -151,6 +157,10 @@ struct AnimationDemoWindow {
                 #[transition(Transition::opacity().combined(Transition::scale(0.92)))]
                 TextBlock { text: "Dynamic self-drawn child: insertion and removal are animated" }
             }
+            TextBlock {
+                text: "Reflow marker below the self-drawn panel"
+                accessibility_identifier: "animation-reflow-panel-marker"
+            }
             if vm.show_native {
                 #[transition(Transition::asymmetric(
                     Transition::opacity().combined(Transition::offset(elwindui::core::base::Vector { x: 28.0, y: 0.0 })),
@@ -162,6 +172,10 @@ struct AnimationDemoWindow {
                     on_got_focus: vm.native_got_focus
                     on_lost_focus: vm.native_lost_focus
                 }
+            }
+            TextBlock {
+                text: "Reflow marker below the native TextBox"
+                accessibility_identifier: "animation-reflow-native-marker"
             }
             TextBlock { text: "Native focus:" }
             TextBlock {

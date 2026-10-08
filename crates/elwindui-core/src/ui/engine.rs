@@ -6,6 +6,7 @@
 //! import block in `mod.rs` so that split stayed a pure code move.
 
 use super::*;
+use crate::base::Vector;
 
 /// WinUI3's `FrameworkElement.MeasureCore`-style constraint step, used by `UIElement::measure`: an
 /// explicit `width`/`height` overrides that axis outright, then both axes are clamped to
@@ -101,11 +102,7 @@ pub(crate) fn build_render_group<H: Clone + 'static>(
     let id = elem.render_group_id();
     let mut group = RenderGroup::new(id, offset, clip);
     group.size = size;
-    group.transform = local_transform(
-        elem.presentation_visual_transform(),
-        elem.transform_origin(),
-        size,
-    );
+    group.transform = effective_local_presentation_transform(elem.as_ref(), size);
     group.opacity = elem.presentation_opacity();
     group.input_enabled = elem.participates_in_layout() && elem.hit_test_visible();
     record_group_commands::<H>(elem, &mut group);
@@ -157,6 +154,114 @@ pub fn layout_root(root: &Rc<dyn UIElementExt>, available: Size) {
         },
     };
     root.arrange(allotted);
+    // The target layout now reflects every structural change recorded so far, so the next
+    // reconcile may compare it against the retained RenderTree and consume the reflow intent.
+    if let Some(host) = animation_frame_host(root.as_ui_element()) {
+        host.animation_runtime().arm_layout_reflow_intent();
+    }
+}
+
+/// Per-reconcile layout reflow state: the host runtime, the consumed armed intent (if any), and
+/// whether this pass started or retargeted a reflow that needs a frame.
+pub(crate) struct LayoutReflowPass {
+    runtime: Rc<AnimationRuntime>,
+    intent: Option<LayoutReflowIntent>,
+    started: Cell<bool>,
+}
+
+/// Starts, retargets, or snaps the layout reflow of a surviving child whose retained group was
+/// last rendered at `old` and whose new target is `new`, both in the parent's local layout space.
+/// Publishes the starting translation synchronously into the element; never invalidates, because
+/// the caller holds the RenderTree mutably.
+fn apply_layout_reflow(
+    child: &Rc<dyn UIElementExt>,
+    old: Point,
+    new: Point,
+    pass: &LayoutReflowPass,
+) {
+    let Some(intent) = pass.intent else {
+        return;
+    };
+    if old == new || !child.participates_in_layout() {
+        return;
+    }
+    let base = child.as_ui_element();
+    let id = child.render_group_id();
+    let finite = old.x.is_finite() && old.y.is_finite() && new.x.is_finite() && new.y.is_finite();
+    if !finite {
+        eprintln!(
+            "[animation] layout reflow snapped for group {id}: non-finite layout origin \
+             {old:?} -> {new:?}"
+        );
+    }
+    let animation = match intent {
+        LayoutReflowIntent::Animate(animation)
+            if finite
+                && !child
+                    .effective_environment()
+                    .get::<crate::environment::ReduceMotionEnvironment>() =>
+        {
+            animation
+        }
+        _ => {
+            pass.runtime.cancel_layout_reflow(id);
+            base.layout_reflow_translation.set(Vector::default());
+            return;
+        }
+    };
+    let delta = Vector {
+        x: old.x - new.x,
+        y: old.y - new.y,
+    };
+    let weak: Weak<dyn UIElementExt> = Rc::downgrade(child);
+    let callback_target = weak.clone();
+    let runtime = Rc::downgrade(&pass.runtime);
+    let callback = Box::new(move |value: AnimatedValue, finished: bool| {
+        let element: Option<Rc<dyn UIElementExt>> = callback_target.upgrade();
+        let Some(element) = element else {
+            if let Some(runtime) = runtime.upgrade() {
+                runtime.cancel_layout_reflow(id);
+            }
+            return;
+        };
+        let Some(runtime) = runtime.upgrade() else {
+            return;
+        };
+        if !runtime.has_layout_reflow(id) {
+            // Cancelled earlier in this tick (snap, teardown, reduced motion): never write back.
+            return;
+        }
+        let reduce_motion = element
+            .effective_environment()
+            .get::<crate::environment::ReduceMotionEnvironment>();
+        if reduce_motion && !finished {
+            runtime.cancel_layout_reflow(id);
+        }
+        let translation = match value {
+            AnimatedValue::Transform(value) if !finished && !reduce_motion => value.translation,
+            _ => Vector::default(),
+        };
+        let base = element.as_ui_element();
+        base.layout_reflow_translation.set(translation);
+        request_relayout(base, InvalidationKind::Render);
+    });
+    match pass.runtime.rebase_layout_reflow(
+        id,
+        base.layout_reflow_translation.get(),
+        delta,
+        animation,
+        Some(weak),
+        callback,
+    ) {
+        Some(start) => {
+            base.layout_reflow_translation.set(start);
+            pass.started.set(true);
+        }
+        None => {
+            eprintln!("[animation] layout reflow snapped for group {id}: non-finite translation");
+            base.layout_reflow_translation.set(Vector::default());
+        }
+    }
 }
 
 /// Reconciles an already-built `RenderGroup` against `elem`'s current layout/children, threading
@@ -169,6 +274,7 @@ pub(crate) fn reconcile_render_group<H: Clone + 'static>(
     path: &mut Vec<usize>,
     group_paths: &mut HashMap<u64, Vec<usize>>,
     visual_index: &mut HashMap<u64, Weak<dyn UIElementExt>>,
+    reflow: Option<&LayoutReflowPass>,
 ) {
     let size = Size {
         width: elem.arranged_width().unwrap_or(0.0),
@@ -180,11 +286,7 @@ pub(crate) fn reconcile_render_group<H: Clone + 'static>(
         width: size.width,
         height: size.height,
     });
-    let transform = local_transform(
-        elem.presentation_visual_transform(),
-        elem.transform_origin(),
-        size,
-    );
+    let transform = effective_local_presentation_transform(elem.as_ref(), size);
     let opacity = elem.presentation_opacity();
     let input_enabled = elem.participates_in_layout() && elem.hit_test_visible();
     if group.offset != offset
@@ -222,6 +324,10 @@ pub(crate) fn reconcile_render_group<H: Clone + 'static>(
         // `group.children.len()` plays there.
         path.push(children.len());
         let child_group = if let Some(mut existing) = old_by_id.remove(&id) {
+            // The matched retained group is the only source of the previously rendered position.
+            if let (Some(reflow), Some(new_offset)) = (reflow, child.arranged_offset()) {
+                apply_layout_reflow(&child, existing.offset, new_offset, reflow);
+            }
             reconcile_render_group::<H>(
                 &child,
                 &mut existing,
@@ -229,6 +335,7 @@ pub(crate) fn reconcile_render_group<H: Clone + 'static>(
                 path,
                 group_paths,
                 visual_index,
+                reflow,
             );
             existing
         } else {
@@ -253,6 +360,11 @@ pub(crate) fn reconcile_render_group<H: Clone + 'static>(
 impl RenderTree {
     /// Creates the initial retained tree from a layout-complete content root.
     pub fn new<H: Clone + 'static>(root: &Rc<dyn UIElementExt>) -> Self {
+        // A freshly built tree has no retained geometry to animate from: initial mount and host
+        // re-creation never reflow, and a stale intent must not leak into the next reconcile.
+        if let Some(host) = animation_frame_host(root.as_ui_element()) {
+            host.animation_runtime().discard_layout_reflow_intent();
+        }
         let offset = root.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
         let mut group_paths = HashMap::new();
         let mut visual_index = HashMap::new();
@@ -288,6 +400,16 @@ impl RenderTree {
         let offset = root.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
         self.group_paths.clear();
         self.visual_index.clear();
+        let frame_host = animation_frame_host(root.as_ui_element());
+        let reflow = frame_host.as_ref().map(|host| {
+            let runtime = host.animation_runtime();
+            let intent = runtime.take_armed_layout_reflow_intent();
+            LayoutReflowPass {
+                runtime,
+                intent,
+                started: Cell::new(false),
+            }
+        });
         if root.participates_in_render() {
             reconcile_render_group::<H>(
                 root,
@@ -296,6 +418,7 @@ impl RenderTree {
                 &mut Vec::new(),
                 &mut self.group_paths,
                 &mut self.visual_index,
+                reflow.as_ref(),
             );
         } else {
             // Mirrors `new`'s own non-participating fallback above: the root's `RenderGroup`
@@ -306,6 +429,13 @@ impl RenderTree {
             self.root = RenderGroup::new(self.root.id, offset, None);
             self.group_paths.insert(self.root.id, Vec::new());
             self.visual_index.insert(self.root.id, Rc::downgrade(root));
+        }
+        // Started reflows already published their first translation above; later ticks need a
+        // frame. The host schedules it asynchronously, so no RenderTree borrow is re-entered.
+        if let (Some(host), Some(reflow)) = (frame_host, reflow) {
+            if reflow.started.get() && reflow.runtime.take_frame_request() {
+                host.request_animation_frame();
+            }
         }
         true
     }
@@ -421,11 +551,7 @@ fn hit_test_at(
             height: child.arranged_height().unwrap_or(0.0),
         };
         let child_layout = AffineTransform::translation(offset.x, offset.y);
-        let child_local = local_transform(
-            child.presentation_visual_transform(),
-            child.transform_origin(),
-            child_size,
-        );
+        let child_local = effective_local_presentation_transform(child.as_ref(), child_size);
         let child_to_root = local_to_root.concat(&child_layout.concat(&child_local));
         if let Some(hit) = hit_test_at(child, child_to_root, at, &child_clips) {
             return Some(hit);
@@ -453,9 +579,8 @@ pub fn hit_test(root: &Rc<dyn UIElementExt>, at: Point) -> Option<Rc<dyn UIEleme
         height: root.arranged_height().unwrap_or(0.0),
     };
     let root_to_parent = AffineTransform::translation(root_offset.x, root_offset.y);
-    let root_transform = root_to_parent.concat(&local_transform(
-        root.presentation_visual_transform(),
-        root.transform_origin(),
+    let root_transform = root_to_parent.concat(&effective_local_presentation_transform(
+        root.as_ref(),
         root_size,
     ));
     hit_test_at(root, root_transform, at, &[])
@@ -1906,5 +2031,582 @@ mod tests {
 
         assert_eq!(*tapped.borrow(), 0);
         assert_eq!(*right_tapped.borrow(), 1);
+    }
+}
+
+#[cfg(test)]
+mod layout_reflow_tests {
+    use super::*;
+    use crate::environment::{EnvironmentContext, ReduceMotionEnvironment};
+    use crate::ui::testsupport::*;
+    use std::time::Duration;
+
+    fn linear(ms: u64) -> Animation {
+        Animation::linear(Duration::from_millis(ms))
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1.0e-3,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn rf01_animated_removal_moves_the_survivor_from_its_old_rendered_position() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (b, c) = (fx.item(1), fx.item(2));
+        let before = visible_y(&c);
+        assert_eq!(before, 40.0);
+
+        with_animation(linear(100), || assert!(fx.children.remove(&b)));
+        fx.relayout();
+
+        assert!(b.visual_parent().is_none(), "B leaves layout immediately");
+        assert_eq!(c.arranged_offset().map(|offset| offset.y), Some(20.0));
+        assert_eq!(visible_y(&c), before, "first projected frame must not jump");
+        assert_close(fx.group(&c).transform.dy, 20.0);
+        assert_eq!(fx.host.frame_requests.get(), 1);
+
+        assert!(fx.tick_ms(50));
+        fx.relayout();
+        let middle = visible_y(&c);
+        assert!(middle > 20.0 && middle < 40.0, "middle frame {middle}");
+        assert_close(fx.group(&c).transform.dy, middle - 20.0);
+
+        assert!(!fx.tick_ms(100));
+        fx.relayout();
+        assert_eq!(reflow_of(&c), Vector::default());
+        assert_eq!(visible_y(&c), 20.0);
+        assert_eq!(fx.host.runtime.layout_reflow_count(), 0);
+        assert_eq!(fx.group(&c).transform, AffineTransform::IDENTITY);
+    }
+
+    #[test]
+    fn rf02_exiting_child_keeps_its_position_without_input_while_the_survivor_moves() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (b, c) = (fx.item(1), fx.item(2));
+        let unmounts = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&unmounts);
+        b.add_unmount_hook(Box::new(move || observed.set(observed.get() + 1)));
+        let c_id = c.render_group_id();
+
+        with_animation(linear(100), || {
+            assert!(start_exit_transition(
+                &b,
+                &Transition::opacity().combined(Transition::scale(0.5)),
+                linear(100),
+            ));
+            assert!(fx.children.remove(&b));
+        });
+        fx.relayout();
+
+        assert_eq!(b.visual_participation(), VisualParticipation::Exiting);
+        assert_eq!(b.arranged_offset().map(|offset| offset.y), Some(20.0));
+        assert!(!fx.group(&b).input_enabled);
+        assert_eq!(reflow_of(&b), Vector::default(), "exiting never reflows");
+        assert_eq!(visible_y(&c), 40.0);
+        let hit = hit_test(&fx.root, Point { x: 5.0, y: 25.0 });
+        assert!(hit.is_none_or(|hit| !Rc::ptr_eq(&hit, &b)));
+
+        fx.tick_ms(50);
+        fx.relayout();
+        assert!(visible_y(&c) < 40.0);
+        fx.tick_ms(100);
+        fx.relayout();
+        fx.tick_ms(150);
+        assert_eq!(unmounts.get(), 1, "exit completes exactly once");
+        assert_eq!(c.render_group_id(), c_id);
+        assert_eq!(visible_y(&c), 20.0);
+    }
+
+    #[test]
+    fn rf03_inserted_child_uses_only_its_transition_and_pushes_existing_siblings() {
+        let mut fx = ReflowFixture::new(&["a", "b"]);
+        let (a, b) = (fx.item(0), fx.item(1));
+        let x = reflow_leaf("x");
+        with_animation(linear(100), || {
+            fx.children.insert(0, Rc::clone(&x));
+            start_enter_transition(&x, &Transition::opacity(), linear(100));
+        });
+        fx.relayout();
+
+        assert!(!fx.host.runtime.has_layout_reflow(x.render_group_id()));
+        assert_eq!(reflow_of(&x), Vector::default());
+        assert_eq!(reflow_of(&a).y, -20.0);
+        assert_eq!(reflow_of(&b).y, -20.0);
+        assert_eq!(visible_y(&a), 0.0);
+        assert_eq!(visible_y(&b), 20.0);
+        assert_eq!(fx.host.runtime.layout_reflow_count(), 2);
+    }
+
+    #[test]
+    fn rf04_reorder_interpolates_every_surviving_identity_and_skips_replacements() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (a, b, c) = (fx.item(0), fx.item(1), fx.item(2));
+        with_animation(linear(100), || {
+            assert!(fx.children.remove(&c));
+            fx.children.insert(0, Rc::clone(&c));
+        });
+        fx.relayout();
+        assert_eq!(reflow_of(&c).y, 40.0);
+        assert_eq!(reflow_of(&a).y, -20.0);
+        assert_eq!(reflow_of(&b).y, -20.0);
+        for (item, old) in [(&c, 40.0), (&a, 0.0), (&b, 20.0)] {
+            assert_eq!(visible_y(item), old);
+        }
+        fx.tick_ms(100);
+        fx.relayout();
+
+        let replacement = reflow_leaf("b2");
+        with_animation(linear(100), || {
+            fx.children.remove_at(2);
+            fx.children.insert(0, Rc::clone(&replacement));
+        });
+        fx.relayout();
+        assert_eq!(reflow_of(&replacement), Vector::default());
+        assert!(
+            !fx.host
+                .runtime
+                .has_layout_reflow(replacement.render_group_id())
+        );
+        assert_eq!(reflow_of(&c).y, -20.0);
+        assert_eq!(reflow_of(&a).y, -20.0);
+    }
+
+    #[test]
+    fn rf05_visibility_changes_reflow_only_the_surrounding_siblings() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (b, c) = (fx.item(1), fx.item(2));
+        with_animation(linear(100), || b.set_visibility(Visibility::Collapsed));
+        fx.relayout();
+        assert!(!b.participates_in_layout());
+        assert!(!fx.tree.group_paths.contains_key(&b.render_group_id()));
+        assert_eq!(reflow_of(&c).y, 20.0);
+        assert_eq!(visible_y(&c), 40.0);
+        fx.tick_ms(100);
+        fx.relayout();
+        assert_eq!(visible_y(&c), 20.0);
+
+        with_animation(linear(100), || b.set_visibility(Visibility::Visible));
+        fx.relayout();
+        assert_eq!(
+            reflow_of(&b),
+            Vector::default(),
+            "reappearing element snaps"
+        );
+        assert!(!fx.host.runtime.has_layout_reflow(b.render_group_id()));
+        assert_eq!(visible_y(&b), 20.0);
+        assert_eq!(reflow_of(&c).y, -20.0);
+        assert_eq!(visible_y(&c), 20.0);
+    }
+
+    #[test]
+    fn rf06_retarget_rebases_continuously_and_keeps_spring_velocity() {
+        let spring = Animation::spring(Duration::from_millis(300), 0.5);
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (a, b, c) = (fx.item(0), fx.item(1), fx.item(2));
+        with_animation(spring, || assert!(fx.children.remove(&b)));
+        fx.relayout();
+        fx.tick_ms(60);
+        fx.relayout();
+        let (expected_current, velocity) = spring.sample(20.0, 0.0, 0.0, Duration::from_millis(60));
+        let current = reflow_of(&c);
+        assert_close(current.y, expected_current);
+        assert!(velocity.abs() > 1.0, "spring must be moving at t1");
+        let old_layout = c.arranged_offset().unwrap();
+
+        with_animation(spring, || assert!(fx.children.remove(&a)));
+        fx.relayout();
+        let new_layout = c.arranged_offset().unwrap();
+        let rebased = reflow_of(&c);
+        assert_eq!(new_layout.y, 0.0);
+        assert_close(old_layout.y + current.y, new_layout.y + rebased.y);
+        assert_close(old_layout.x + current.x, new_layout.x + rebased.x);
+        assert_close(fx.group(&c).transform.dy, rebased.y);
+
+        fx.tick_ms(80);
+        let (expected_next, _) = spring.sample(rebased.y, 0.0, velocity, Duration::from_millis(20));
+        assert_close(reflow_of(&c).y, expected_next);
+    }
+
+    #[test]
+    fn rf06_contract_example_rebases_to_sixty() {
+        let runtime = AnimationRuntime::new();
+        let start = runtime
+            .rebase_layout_reflow(
+                7,
+                Vector { x: 0.0, y: 30.0 },
+                Vector {
+                    x: 0.0,
+                    y: 50.0 - 20.0,
+                },
+                linear(100),
+                None,
+                Box::new(|_, _| {}),
+            )
+            .expect("finite");
+        assert_eq!(start, Vector { x: 0.0, y: 60.0 });
+        assert_eq!(50.0 + 30.0, 20.0 + start.y);
+    }
+
+    #[test]
+    fn rf07_reflow_translates_in_parent_axes_before_user_and_transition_transforms() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (b, c) = (fx.item(1), fx.item(2));
+        let user =
+            VisualTransform::new(Vector { x: 3.0, y: 4.0 }, 2.0, std::f32::consts::FRAC_PI_2);
+        c.as_ui_element().set_visual_transform(user);
+        let transition = VisualTransform::new(Vector { x: 0.0, y: 5.0 }, 0.5, 0.0);
+        c.as_ui_element()
+            .transition_visual_transform
+            .set(transition);
+        with_animation(linear(100), || assert!(fx.children.remove(&b)));
+        fx.relayout();
+
+        let local = local_transform(
+            c.presentation_visual_transform(),
+            c.transform_origin(),
+            size(100.0, 20.0),
+        );
+        let group = fx.group(&c).transform;
+        for point in [Point { x: 0.0, y: 0.0 }, Point { x: 10.0, y: 7.0 }] {
+            let with = group.transform_point(point);
+            let without = local.transform_point(point);
+            assert_close(with.x - without.x, 0.0);
+            assert_close(with.y - without.y, 20.0);
+        }
+        assert_eq!(c.as_ui_element().presentation_visual_transform.get(), user);
+        assert_eq!(
+            c.as_ui_element().transition_visual_transform.get(),
+            transition
+        );
+    }
+
+    #[test]
+    fn rf08_hit_testing_and_clip_follow_the_presentation_position() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (b, c) = (fx.item(1), fx.item(2));
+        fx.root.as_ui_element().set_clip_to_bounds(Some(true));
+        with_animation(linear(100), || assert!(fx.children.remove(&b)));
+        fx.relayout();
+        // C is laid out at y=20..40 but still shown at y=40..60.
+        let hit = hit_test(&fx.root, Point { x: 5.0, y: 45.0 });
+        assert!(hit.is_some_and(|hit| Rc::ptr_eq(&hit, &c)));
+        let stale = hit_test(&fx.root, Point { x: 5.0, y: 25.0 });
+        assert!(stale.is_none_or(|hit| !Rc::ptr_eq(&hit, &c)));
+
+        fx.root.as_ui_element().set_height(50.0);
+        fx.relayout();
+        assert_eq!(visible_y(&c), 40.0);
+        let clipped = hit_test(&fx.root, Point { x: 5.0, y: 55.0 });
+        assert!(
+            clipped.is_none(),
+            "clip is tested in the parent's local space"
+        );
+        let inside = hit_test(&fx.root, Point { x: 5.0, y: 45.0 });
+        assert!(inside.is_some_and(|hit| Rc::ptr_eq(&hit, &c)));
+    }
+
+    fn assert_snapped(fx: &ReflowFixture, c: &Rc<dyn UIElementExt>) {
+        assert_eq!(reflow_of(c), Vector::default());
+        assert_eq!(visible_y(c), 20.0);
+        assert_eq!(fx.host.runtime.layout_reflow_count(), 0);
+        assert_eq!(fx.host.frame_requests.get(), 0);
+        assert!(!fx.host.runtime.take_frame_request());
+    }
+
+    #[test]
+    fn rf09_disabled_immediate_untransacted_and_reduced_motion_mutations_snap() {
+        let disabled = Transaction {
+            animation: Some(linear(100)),
+            disables_animations: true,
+        };
+        type Case = Box<dyn Fn(&ReflowFixture, &Rc<dyn UIElementExt>)>;
+        let cases: Vec<Case> = vec![
+            Box::new(move |fx, b| with_transaction(disabled, || assert!(fx.children.remove(b)))),
+            Box::new(|fx, b| with_animation(linear(0), || assert!(fx.children.remove(b)))),
+            Box::new(|fx, b| assert!(fx.children.remove(b))),
+            Box::new(|fx, b| {
+                let env = EnvironmentContext::root();
+                env.set::<ReduceMotionEnvironment>(true);
+                fx.root.set_environment_context(env);
+                with_animation(linear(100), || assert!(fx.children.remove(b)));
+            }),
+        ];
+        for case in cases {
+            let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+            let (b, c) = (fx.item(1), fx.item(2));
+            case(&fx, &b);
+            fx.relayout();
+            assert_snapped(&fx, &c);
+        }
+    }
+
+    #[test]
+    fn rf10_reduce_motion_mid_flight_cancels_reflow_but_not_unrelated_channels() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (a, b, c) = (fx.item(0), fx.item(1), fx.item(2));
+        let env = EnvironmentContext::root();
+        fx.root.set_environment_context(env.clone());
+        with_animation(linear(100), || {
+            assert!(fx.children.remove(&b));
+            a.as_ui_element().set_opacity(0.0);
+        });
+        fx.relayout();
+        fx.tick_ms(50);
+        assert_close(reflow_of(&c).y, 10.0);
+
+        env.set::<ReduceMotionEnvironment>(true);
+        assert!(
+            fx.tick_ms(60),
+            "the unrelated opacity channel keeps running"
+        );
+        assert_eq!(reflow_of(&c), Vector::default());
+        assert_eq!(fx.host.runtime.layout_reflow_count(), 0);
+        fx.tick_ms(100);
+        assert_eq!(
+            reflow_of(&c),
+            Vector::default(),
+            "no stale completion write-back"
+        );
+        assert!(fx.host.runtime.is_idle());
+    }
+
+    #[test]
+    fn rf10_unanimated_structural_change_cancels_the_running_reflow() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (a, b, c) = (fx.item(0), fx.item(1), fx.item(2));
+        with_animation(linear(100), || assert!(fx.children.remove(&b)));
+        fx.relayout();
+        fx.tick_ms(50);
+        assert!(reflow_of(&c).y > 0.0);
+
+        assert!(fx.children.remove(&a));
+        fx.relayout();
+        assert_eq!(reflow_of(&c), Vector::default());
+        assert_eq!(visible_y(&c), 0.0);
+        assert!(!fx.tick_ms(100));
+        assert_eq!(reflow_of(&c), Vector::default());
+    }
+
+    #[test]
+    fn rf12_last_intent_wins_and_the_baseline_is_the_last_rendered_group() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c", "d"]);
+        let (a, b, c, d) = (fx.item(0), fx.item(1), fx.item(2), fx.item(3));
+        // Several mutations and an extra layout before the next reconcile animate once, from the
+        // retained render positions to the final target.
+        with_animation(linear(100), || {
+            assert!(fx.children.remove(&a));
+            fx.children.insert(1, reflow_leaf("x"));
+        });
+        layout_root(&fx.root, size(100.0, 200.0));
+        with_animation(linear(100), || assert!(fx.children.remove(&b)));
+        fx.relayout();
+        assert_eq!(c.arranged_offset().unwrap().y, 20.0);
+        assert_eq!(visible_y(&c), 40.0);
+        assert_eq!(visible_y(&d), 60.0);
+        assert_eq!(fx.host.frame_requests.get(), 1);
+
+        // A nested disabling transaction recorded last turns the whole pending change into a snap.
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (a, b, c) = (fx.item(0), fx.item(1), fx.item(2));
+        with_animation(linear(100), || {
+            assert!(fx.children.remove(&a));
+            with_transaction(
+                Transaction {
+                    animation: None,
+                    disables_animations: true,
+                },
+                || assert!(fx.children.remove(&b)),
+            );
+        });
+        fx.relayout();
+        assert_eq!(reflow_of(&c), Vector::default());
+        assert_eq!(fx.host.runtime.layout_reflow_count(), 0);
+    }
+
+    #[test]
+    fn rf12_intent_waits_for_a_completed_layout() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (b, c) = (fx.item(1), fx.item(2));
+        with_animation(linear(100), || assert!(fx.children.remove(&b)));
+        // A render-only pass (no layout_root) must not consume the intent.
+        assert!(fx.tree.reconcile::<FakeHandle>(&fx.root));
+        assert!(fx.host.runtime.pending_layout_reflow_intent().is_some());
+        fx.relayout();
+        assert!(fx.host.runtime.pending_layout_reflow_intent().is_none());
+        assert_eq!(visible_y(&c), 40.0);
+        assert_eq!(reflow_of(&c).y, 20.0);
+    }
+
+    struct BorrowCheckingRelayoutHost {
+        tree: Rc<RefCell<Option<RenderTree>>>,
+        requests: Cell<usize>,
+        conflicts: Cell<usize>,
+    }
+
+    impl RelayoutHost for BorrowCheckingRelayoutHost {
+        fn request_relayout(&self, _dirty_group_id: u64, _kind: InvalidationKind) {
+            self.requests.set(self.requests.get() + 1);
+            if self.tree.try_borrow_mut().is_err() {
+                self.conflicts.set(self.conflicts.get() + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn rf13_reconcile_never_reenters_invalidation_and_tick_callbacks_may_mutate() {
+        let fx = ReflowFixture::new(&["a", "b", "c", "d"]);
+        let (a, b, c, d) = (fx.item(0), fx.item(1), fx.item(2), fx.item(3));
+        let ReflowFixture {
+            root,
+            children,
+            host,
+            tree,
+            ..
+        } = fx;
+        let tree = Rc::new(RefCell::new(Some(tree)));
+        let relayout = Rc::new(BorrowCheckingRelayoutHost {
+            tree: Rc::clone(&tree),
+            requests: Cell::new(0),
+            conflicts: Cell::new(0),
+        });
+        root.set_invalidate_host(Some(relayout.clone() as Rc<dyn RelayoutHost>));
+        let pass = |root: &Rc<dyn UIElementExt>| {
+            layout_root(root, size(100.0, 200.0));
+            let mut guard = tree.borrow_mut();
+            assert!(guard.as_mut().unwrap().reconcile::<FakeHandle>(root));
+        };
+
+        with_animation(linear(100), || assert!(children.remove(&b)));
+        pass(&root);
+        assert_eq!(relayout.conflicts.get(), 0);
+        assert_eq!(reflow_of(&c).y, 20.0);
+
+        // A tick callback cancels C's reflow and mutates the tree under an animation.
+        let mutated = Rc::new(Cell::new(false));
+        let flag = Rc::clone(&mutated);
+        let runtime = Rc::clone(&host.runtime);
+        let children_in_callback = children.clone();
+        let a_in_callback = Rc::clone(&a);
+        let c_id = c.render_group_id();
+        host.runtime.animate(
+            a.render_group_id(),
+            AnimationChannel::Opacity,
+            AnimatedValue::Scalar(1.0),
+            AnimatedValue::Scalar(0.5),
+            linear(100),
+            Box::new(move |_| {
+                if !flag.replace(true) {
+                    runtime.cancel_layout_reflow(c_id);
+                    with_animation(linear(100), || {
+                        assert!(children_in_callback.remove(&a_in_callback));
+                    });
+                }
+            }),
+        );
+        host.runtime.tick(Duration::from_millis(50));
+        assert!(mutated.get());
+        assert_eq!(
+            host.runtime.layout_reflow_count(),
+            1,
+            "only D's reflow survives the in-callback cancel"
+        );
+        assert_eq!(
+            reflow_of(&c),
+            Vector::default(),
+            "a cancelled reflow resets and its pending callback never writes back"
+        );
+        pass(&root);
+        assert_eq!(relayout.conflicts.get(), 0);
+        assert_eq!(
+            reflow_of(&c).y,
+            20.0,
+            "fresh reflow after the callback mutation"
+        );
+        assert_eq!(host.runtime.layout_reflow_count(), 2);
+        host.runtime.tick(Duration::from_millis(200));
+        assert_eq!(host.runtime.layout_reflow_count(), 0);
+        assert_eq!(reflow_of(&c), Vector::default());
+        assert_eq!(reflow_of(&d), Vector::default());
+        assert!(relayout.requests.get() > 0);
+    }
+
+    #[test]
+    fn rf14_mount_unhosted_teardown_and_remount_never_leak_or_animate() {
+        // Unhosted: no runtime, no intent, nothing animates.
+        let layout = VerticalLayout::new();
+        let children = layout.children().clone();
+        let (a, b) = (reflow_leaf("a"), reflow_leaf("b"));
+        children.add(Rc::clone(&a));
+        children.add(Rc::clone(&b));
+        let root: Rc<dyn UIElementExt> = layout;
+        let mut tree = layout_tree::<FakeHandle>(&root, size(100.0, 200.0));
+        with_animation(linear(100), || assert!(children.remove(&a)));
+        layout_root(&root, size(100.0, 200.0));
+        tree.reconcile::<FakeHandle>(&root);
+        assert_eq!(reflow_of(&b), Vector::default());
+
+        // Initial mount after an animated mutation never reflows.
+        let host = install_animation_host(&root);
+        with_animation(linear(100), || children.insert(0, Rc::clone(&a)));
+        let tree = layout_tree::<FakeHandle>(&root, size(100.0, 200.0));
+        assert!(host.runtime.pending_layout_reflow_intent().is_none());
+        assert_eq!(reflow_of(&b), Vector::default());
+        drop(tree);
+
+        // Host teardown during a reflow resets the translation and drops the channel.
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (b, c) = (fx.item(1), fx.item(2));
+        with_animation(linear(100), || assert!(fx.children.remove(&b)));
+        fx.relayout();
+        assert!(reflow_of(&c).y > 0.0);
+        let runtime = Rc::clone(&fx.host.runtime);
+        fx.root.set_animation_frame_host(None);
+        assert_eq!(reflow_of(&c), Vector::default());
+        assert_eq!(runtime.layout_reflow_count(), 0);
+        assert!(runtime.pending_layout_reflow_intent().is_none());
+        assert!(!runtime.tick(Duration::from_millis(50)));
+
+        // Re-mount on a fresh host: the first build never reflows.
+        fx.host = install_animation_host(&fx.root);
+        fx.tree = RenderTree::new::<FakeHandle>(&fx.root);
+        fx.relayout();
+        assert_eq!(reflow_of(&c), Vector::default());
+
+        // A dropped element does not stay alive through its reflow channel.
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (b, c) = (fx.item(1), fx.item(2));
+        with_animation(linear(100), || assert!(fx.children.remove(&b)));
+        fx.relayout();
+        let weak = Rc::downgrade(&c);
+        assert!(fx.children.remove(&c));
+        fx.relayout();
+        fx.items.clear();
+        drop(c);
+        assert!(
+            weak.upgrade().is_none(),
+            "reflow state holds only a weak element"
+        );
+        fx.tick_ms(50);
+        assert_eq!(fx.host.runtime.layout_reflow_count(), 0);
+    }
+
+    #[test]
+    fn rf15_property_animation_moves_siblings_without_a_reflow_channel() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (b, c) = (fx.item(1), fx.item(2));
+        b.as_ui_element().set_height(20.0);
+        fx.relayout();
+        with_animation(linear(100), || b.as_ui_element().set_height(60.0));
+        assert!(fx.host.runtime.pending_layout_reflow_intent().is_none());
+        fx.relayout();
+        fx.tick_ms(50);
+        fx.relayout();
+        let middle = c.arranged_offset().unwrap().y;
+        assert!(middle > 40.0 && middle < 80.0, "layout moves C: {middle}");
+        assert_eq!(reflow_of(&c), Vector::default());
+        assert_eq!(fx.host.runtime.layout_reflow_count(), 0);
     }
 }

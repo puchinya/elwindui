@@ -1368,3 +1368,99 @@ mod tests {
         assert_eq!(BridgeHandWrittenTrait::hand_value(&*concrete), 1);
     }
 }
+
+/// Deterministic `AnimationFrameHost`: never syncs to the wall clock, so tests drive the runtime
+/// with explicit `tick` timestamps, and counts frame wake requests.
+pub(crate) struct FakeAnimationFrameHost {
+    pub(crate) runtime: Rc<AnimationRuntime>,
+    pub(crate) frame_requests: Cell<usize>,
+}
+
+impl AnimationFrameHost for FakeAnimationFrameHost {
+    fn animation_runtime(&self) -> Rc<AnimationRuntime> {
+        Rc::clone(&self.runtime)
+    }
+    fn request_animation_frame(&self) {
+        self.frame_requests.set(self.frame_requests.get() + 1);
+    }
+}
+
+pub(crate) fn install_animation_host(root: &Rc<dyn UIElementExt>) -> Rc<FakeAnimationFrameHost> {
+    let host = Rc::new(FakeAnimationFrameHost {
+        runtime: AnimationRuntime::new(),
+        frame_requests: Cell::new(0),
+    });
+    root.set_animation_frame_host(Some(host.clone() as Rc<dyn AnimationFrameHost>));
+    host
+}
+
+/// A hosted `VerticalLayout` of fixed 100x20 leaves with zero spacing, already laid out and
+/// retained, for layout reflow tests. `relayout` mirrors a host pass: `layout_root` then
+/// `RenderTree::reconcile`.
+pub(crate) struct ReflowFixture {
+    pub(crate) root: Rc<dyn UIElementExt>,
+    pub(crate) children: UIElementCollection,
+    pub(crate) items: Vec<Rc<dyn UIElementExt>>,
+    pub(crate) host: Rc<FakeAnimationFrameHost>,
+    pub(crate) tree: RenderTree,
+}
+
+pub(crate) fn reflow_leaf(name: &'static str) -> Rc<dyn UIElementExt> {
+    native(name, size(100.0, 20.0))
+}
+
+impl ReflowFixture {
+    pub(crate) fn new(names: &[&'static str]) -> Self {
+        let layout = VerticalLayout::new();
+        let children = layout.children().clone();
+        let items: Vec<_> = names.iter().map(|name| reflow_leaf(name)).collect();
+        for item in &items {
+            children.add(Rc::clone(item));
+        }
+        let root: Rc<dyn UIElementExt> = layout;
+        let host = install_animation_host(&root);
+        let tree = layout_tree::<FakeHandle>(&root, size(100.0, 200.0));
+        Self {
+            root,
+            children,
+            items,
+            host,
+            tree,
+        }
+    }
+
+    pub(crate) fn item(&self, index: usize) -> Rc<dyn UIElementExt> {
+        Rc::clone(&self.items[index])
+    }
+
+    pub(crate) fn relayout(&mut self) {
+        layout_root(&self.root, size(100.0, 200.0));
+        assert!(self.tree.reconcile::<FakeHandle>(&self.root));
+    }
+
+    pub(crate) fn tick_ms(&self, ms: u64) -> bool {
+        self.host.runtime.tick(std::time::Duration::from_millis(ms))
+    }
+
+    pub(crate) fn group(&self, elem: &Rc<dyn UIElementExt>) -> &RenderGroup {
+        let path = self
+            .tree
+            .group_paths
+            .get(&elem.render_group_id())
+            .expect("element must have a retained group");
+        let mut group = &self.tree.root;
+        for index in path {
+            group = &group.children[*index];
+        }
+        group
+    }
+}
+
+pub(crate) fn reflow_of(elem: &Rc<dyn UIElementExt>) -> crate::base::Vector {
+    elem.as_ui_element().layout_reflow_translation.get()
+}
+
+/// The vertical position this element is shown at inside its parent: target layout plus reflow.
+pub(crate) fn visible_y(elem: &Rc<dyn UIElementExt>) -> f32 {
+    elem.arranged_offset().expect("arranged").y + reflow_of(elem).y
+}

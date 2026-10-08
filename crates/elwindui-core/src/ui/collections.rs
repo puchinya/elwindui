@@ -42,7 +42,8 @@ impl UIElementVisualCollection {
         }
         self.storage.borrow_mut().push(child.clone());
         self.order.borrow_mut().push(child.clone());
-        if self.owner_rc().is_some() {
+        if let Some(owner) = self.owner_rc() {
+            record_layout_reflow_intent(owner.as_ui_element());
             child.run_mount_hooks();
         }
     }
@@ -68,7 +69,8 @@ impl UIElementVisualCollection {
             })
             .unwrap_or_else(|| self.order.borrow().len());
         self.order.borrow_mut().insert(order_index, child.clone());
-        if self.owner_rc().is_some() {
+        if let Some(owner) = self.owner_rc() {
+            record_layout_reflow_intent(owner.as_ui_element());
             child.run_mount_hooks();
         }
     }
@@ -108,6 +110,7 @@ impl UIElementVisualCollection {
             .borrow_mut()
             .retain(|candidate| !Rc::ptr_eq(candidate, &removed));
         if let Some(owner) = self.owner_rc() {
+            record_layout_reflow_intent(owner.as_ui_element());
             owner.invalidate_measure();
         }
         true
@@ -119,12 +122,14 @@ impl UIElementVisualCollection {
             .borrow_mut()
             .retain(|candidate| !Rc::ptr_eq(candidate, &child));
         if let Some(owner) = self.owner_rc() {
+            record_layout_reflow_intent(owner.as_ui_element());
             owner.invalidate_measure();
         }
         child
     }
     pub fn clear(&self) {
         let children = std::mem::take(&mut *self.storage.borrow_mut());
+        let removed_active = !children.is_empty();
         for child in children {
             *child.as_ui_element().visual_parent.borrow_mut() = None;
         }
@@ -134,6 +139,9 @@ impl UIElementVisualCollection {
         }
         self.order.borrow_mut().clear();
         if let Some(owner) = self.owner_rc() {
+            if removed_active {
+                record_layout_reflow_intent(owner.as_ui_element());
+            }
             owner.invalidate_measure();
         }
     }
@@ -167,6 +175,7 @@ impl UIElementVisualCollection {
         };
         self.exiting.borrow_mut().push(removed);
         if let Some(owner) = self.owner_rc() {
+            record_layout_reflow_intent(owner.as_ui_element());
             owner.invalidate_measure();
             owner.invalidate_render();
         }
@@ -1040,5 +1049,72 @@ mod tests {
             panic!("an empty replacement has no item to render")
         });
         assert_eq!(host.commits.get(), 2);
+    }
+
+    #[test]
+    fn rf11_reflow_intent_is_recorded_once_per_effective_structural_mutation() {
+        let fx = ReflowFixture::new(&["a", "b", "c"]);
+        let b = fx.item(1);
+        let records = || fx.host.runtime.layout_reflow_intent_records();
+        let animation = crate::ui::Animation::linear(std::time::Duration::from_millis(100));
+
+        crate::ui::with_animation(animation, || {
+            let start = records();
+            assert!(crate::ui::begin_exit(&b));
+            assert_eq!(
+                records(),
+                start + 1,
+                "begin_exit moves B out of layout once"
+            );
+            assert!(!crate::ui::begin_exit(&b));
+            assert!(fx.children.remove(&b), "logical removal still succeeds");
+            assert_eq!(
+                records(),
+                start + 1,
+                "duplicate exit/logical removal adds nothing"
+            );
+
+            let stranger = reflow_leaf("stranger");
+            assert!(!fx.children.remove(&stranger));
+            assert!(!fx.root.as_ui_element().visual_collection.remove(&stranger));
+            assert_eq!(records(), start + 1, "a failed remove is a no-op");
+
+            assert!(crate::ui::finish_exit(&b));
+            assert_eq!(records(), start + 1, "exit completion is cleanup");
+        });
+
+        // A hosted container whose own children are torn down records nothing.
+        let container = crate::ui::VerticalLayout::new();
+        container.children().add(reflow_leaf("inner"));
+        let container: Rc<dyn UIElementExt> = container;
+        fx.children.add(Rc::clone(&container));
+        let before = records();
+        crate::ui::with_animation(animation, || crate::ui::unmount_subtree(&container));
+        assert_eq!(
+            records(),
+            before,
+            "owner unmount never records reflow intent"
+        );
+
+        // A dynamic slot's insert is structural; its clear is teardown.
+        let slot = DynamicChildSlot::<dyn UIElementExt>::default();
+        let dynamic = crate::ui::VerticalLayout::new();
+        dynamic.children().add(reflow_leaf("dynamic-inner"));
+        let dynamic: Rc<dyn UIElementExt> = dynamic;
+        let before = records();
+        crate::ui::with_animation(animation, || {
+            slot.replace_children(&fx.children, 3, vec![Rc::clone(&dynamic)])
+        });
+        assert_eq!(records(), before + 1);
+        crate::ui::with_animation(animation, || slot.clear());
+        assert_eq!(records(), before + 1, "DynamicChildSlot::clear is teardown");
+
+        // Clearing an empty collection changes nothing.
+        let empty = crate::ui::VerticalLayout::new();
+        let empty: Rc<dyn UIElementExt> = empty;
+        fx.children.add(Rc::clone(&empty));
+        let before = records();
+        empty.as_ui_element().visual_collection.clear();
+        assert_eq!(records(), before);
     }
 }

@@ -389,11 +389,7 @@ fn bounds_in_root(node: &Rc<dyn UIElementExt>) -> Rect {
         };
         let offset = item.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
         let layout = AffineTransform::translation(offset.x, offset.y);
-        let local = crate::ui::local_transform(
-            item.presentation_visual_transform(),
-            item.transform_origin(),
-            size,
-        );
+        let local = crate::ui::effective_local_presentation_transform(item.as_ref(), size);
         transform = transform.concat(&layout.concat(&local));
     }
 
@@ -617,5 +613,24 @@ mod tests {
         assert_eq!(snapshot.roots[0].id, content.accessibility_id());
         assert_eq!(snapshot.roots[0].semantics.role, AccessibilityRole::Button);
         assert_eq!(snapshot.roots[0].semantics.label.as_deref(), Some("Save"));
+    }
+
+    #[test]
+    fn rf08_semantic_bounds_follow_the_layout_reflow_presentation() {
+        use crate::ui::testsupport::{ReflowFixture, reflow_of};
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (b, c) = (fx.item(1), fx.item(2));
+        crate::ui::with_animation(
+            crate::ui::Animation::linear(std::time::Duration::from_millis(100)),
+            || assert!(fx.children.remove(&b)),
+        );
+        fx.relayout();
+        assert_eq!(reflow_of(&c).y, 20.0);
+        let bounds = bounds_in_root(&c);
+        assert_eq!(bounds.y, 40.0, "shown, not target, position");
+        assert_eq!(bounds.height, 20.0);
+        fx.tick_ms(100);
+        fx.relayout();
+        assert_eq!(bounds_in_root(&c).y, 20.0);
     }
 }

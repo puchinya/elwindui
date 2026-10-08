@@ -628,6 +628,10 @@ impl AnimationRuntime {
     /// Backends call this when a host stops presenting its tree (unregistration, or
     /// `set_active(false)` and the following `set_active(true)`), so an inactive host never keeps
     /// stale reflow displacement or frames. No invalidation is sent. Idempotent.
+    ///
+    /// An unconsumed frame request is cleared when no public channel remains live (including a
+    /// channel detached by an in-progress `tick`, recognized through its generation); otherwise it
+    /// is preserved. This never creates a frame request.
     #[doc(hidden)]
     pub fn discard_layout_reflows(&self) {
         self.pending_layout_reflow.set(None);
@@ -647,6 +651,14 @@ impl AnimationRuntime {
                     .layout_reflow_translation
                     .set(Vector::default());
             }
+        }
+        let has_public_channel = self
+            .generations
+            .borrow()
+            .keys()
+            .any(|key| matches!(key.1, RuntimeChannel::Public(_)));
+        if !has_public_channel {
+            *self.frame_requested.borrow_mut() = false;
         }
     }
 
@@ -1454,5 +1466,190 @@ mod tests {
         assert!(runtime.tick(Duration::from_millis(10)));
         assert_eq!(calls.get(), 1);
         assert!(runtime.take_frame_request());
+    }
+
+    fn reflow_on(
+        runtime: &Rc<AnimationRuntime>,
+        owner: u64,
+        target: Option<&Rc<dyn crate::ui::UIElementExt>>,
+        calls: &Rc<Cell<usize>>,
+    ) {
+        let calls = Rc::clone(calls);
+        let start = runtime
+            .rebase_layout_reflow(
+                owner,
+                Vector::default(),
+                Vector { x: 0.0, y: 20.0 },
+                Animation::linear(Duration::from_millis(100)),
+                target.map(Rc::downgrade),
+                Box::new(move |_, _| calls.set(calls.get() + 1)),
+            )
+            .unwrap();
+        if let Some(target) = target {
+            target.as_ui_element().layout_reflow_translation.set(start);
+        }
+    }
+
+    #[test]
+    fn r2_t01_discard_clears_an_unconsumed_reflow_only_frame_request() {
+        let runtime = AnimationRuntime::new();
+        let leaf = crate::ui::testsupport::reflow_leaf("leaf");
+        let calls = Rc::new(Cell::new(0));
+        reflow_on(&runtime, 1, Some(&leaf), &calls);
+        assert_eq!(
+            leaf.as_ui_element().layout_reflow_translation.get(),
+            Vector { x: 0.0, y: 20.0 }
+        );
+        runtime.discard_layout_reflows();
+        assert!(!runtime.take_frame_request());
+        assert!(runtime.is_idle());
+        assert_eq!(runtime.layout_reflow_count(), 0);
+        assert!(runtime.pending_layout_reflow_intent().is_none());
+        assert!(!runtime.has_layout_reflow_accessibility_root());
+        assert_eq!(
+            leaf.as_ui_element().layout_reflow_translation.get(),
+            Vector::default()
+        );
+        assert!(!runtime.tick(Duration::from_millis(50)));
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn r2_t02_discard_after_a_consumed_request_never_requests_again() {
+        let runtime = AnimationRuntime::new();
+        let calls = Rc::new(Cell::new(0));
+        reflow_on(&runtime, 1, None, &calls);
+        assert!(runtime.take_frame_request());
+        runtime.discard_layout_reflows();
+        assert!(!runtime.take_frame_request());
+        runtime.discard_layout_reflows();
+        assert!(!runtime.take_frame_request());
+        assert!(runtime.is_idle());
+    }
+
+    #[test]
+    fn r2_t03_discard_keeps_a_public_channel_and_its_frame_request() {
+        let runtime = AnimationRuntime::new();
+        let values = Rc::new(RefCell::new(Vec::new()));
+        let observed = Rc::clone(&values);
+        runtime.animate_with_completion(
+            2,
+            AnimationChannel::Opacity,
+            AnimatedValue::Scalar(0.0),
+            AnimatedValue::Scalar(1.0),
+            Animation::linear(Duration::from_millis(100)),
+            Box::new(move |value, finished| observed.borrow_mut().push((value, finished))),
+        );
+        let calls = Rc::new(Cell::new(0));
+        reflow_on(&runtime, 1, None, &calls);
+        runtime.discard_layout_reflows();
+        assert!(runtime.take_frame_request(), "the public request survives");
+        assert!(!runtime.is_idle());
+        assert_eq!(runtime.layout_reflow_count(), 0);
+        assert!(runtime.tick(Duration::from_millis(50)));
+        assert!(runtime.take_frame_request());
+        assert!(!runtime.tick(Duration::from_millis(100)));
+        assert_eq!(
+            values.borrow().as_slice(),
+            &[
+                (AnimatedValue::Scalar(0.5), false),
+                (AnimatedValue::Scalar(1.0), true)
+            ]
+        );
+        assert_eq!(calls.get(), 0, "the discarded reflow never runs");
+    }
+
+    #[test]
+    fn r2_t04_discard_inside_a_public_tick_callback_sees_the_detached_public_channel() {
+        let runtime = AnimationRuntime::new();
+        let reflow_calls = Rc::new(Cell::new(0));
+        reflow_on(&runtime, 1, None, &reflow_calls);
+        let weak = Rc::downgrade(&runtime);
+        let inner_calls = Rc::new(Cell::new(0));
+        let inner = Rc::clone(&inner_calls);
+        let observed_request = Rc::new(Cell::new(None));
+        let observed = Rc::clone(&observed_request);
+        let public_calls = Rc::new(Cell::new(0));
+        let public = Rc::clone(&public_calls);
+        runtime.animate(
+            2,
+            AnimationChannel::Opacity,
+            AnimatedValue::Scalar(0.0),
+            AnimatedValue::Scalar(1.0),
+            Animation::linear(Duration::from_millis(100)),
+            Box::new(move |_| {
+                public.set(public.get() + 1);
+                if observed.get().is_some() {
+                    return;
+                }
+                let runtime = weak.upgrade().unwrap();
+                // A reflow started from this callback raises the request while the public channel
+                // itself is detached; only its generation shows it is still live.
+                reflow_on(&runtime, 3, None, &inner);
+                runtime.discard_layout_reflows();
+                observed.set(Some(runtime.take_frame_request()));
+            }),
+        );
+        let before = reflow_calls.get();
+        assert!(runtime.tick(Duration::from_millis(10)));
+        assert_eq!(
+            observed_request.get(),
+            Some(true),
+            "a live in-flight public channel keeps the request"
+        );
+        assert!(reflow_calls.get() <= before + 1, "no extra stale delivery");
+        let after_first = reflow_calls.get();
+        assert_eq!(runtime.layout_reflow_count(), 0);
+        assert!(
+            runtime.take_frame_request(),
+            "the public channel still needs frames"
+        );
+        assert!(runtime.tick(Duration::from_millis(20)));
+        assert_eq!(public_calls.get(), 2, "the public channel keeps running");
+        assert_eq!(
+            reflow_calls.get(),
+            after_first,
+            "discarded reflow never resumes"
+        );
+        assert_eq!(inner_calls.get(), 0);
+    }
+
+    #[test]
+    fn r2_t05_reflow_callback_discarding_its_own_host_leaves_nothing_behind() {
+        let runtime = AnimationRuntime::new();
+        let weak = Rc::downgrade(&runtime);
+        let calls = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&calls);
+        let leaf = crate::ui::testsupport::reflow_leaf("leaf");
+        let start = runtime
+            .rebase_layout_reflow(
+                1,
+                Vector::default(),
+                Vector { x: 0.0, y: 20.0 },
+                Animation::linear(Duration::from_millis(100)),
+                Some(Rc::downgrade(&leaf)),
+                Box::new(move |_, _| {
+                    observed.set(observed.get() + 1);
+                    weak.upgrade().unwrap().discard_layout_reflows();
+                }),
+            )
+            .unwrap();
+        leaf.as_ui_element().layout_reflow_translation.set(start);
+        let other_calls = Rc::new(Cell::new(0));
+        reflow_on(&runtime, 2, None, &other_calls);
+        assert!(!runtime.tick(Duration::from_millis(10)));
+        assert!(calls.get() == 1);
+        assert!(other_calls.get() <= 1);
+        assert_eq!(runtime.layout_reflow_count(), 0);
+        assert!(!runtime.take_frame_request());
+        assert!(runtime.is_idle());
+        assert_eq!(
+            leaf.as_ui_element().layout_reflow_translation.get(),
+            Vector::default()
+        );
+        let other_after = other_calls.get();
+        assert!(!runtime.tick(Duration::from_millis(20)));
+        assert_eq!(calls.get(), 1, "no resurrection");
+        assert_eq!(other_calls.get(), other_after);
     }
 }

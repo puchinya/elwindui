@@ -80,31 +80,61 @@ stable so the TextBox is back for LR-04.
 
 ### LR-04 Pointer input follows the shown NativeControl position
 
-Discriminating geometry is mandatory: the click point must be inside the probe TextBox's shown
-bounds and outside its target bounds at the same moment. A point inside both proves nothing and
-is never PASS. The probe is 160 DIP tall and moves 130 DIP, so such a point exists for the whole
-transaction even with slow driver sampling.
+Discriminating geometry is mandatory: at the moment of a real click, the point must be inside the
+probe TextBox's shown rect and outside its target rect, and the probe must gain focus. A point
+inside both rects proves nothing and is never PASS. The probe is 160 DIP tall and moves 130 DIP
+down over a fixed 12 s linear transaction.
 
-1. With the spacer hidden and everything stable, read the probe bounds (`start`, height `h`)
-   and confirm `animation-reflow-probe-focus-state` reads `Unfocused`.
-2. Compute the target after insertion: `final.y = start.y + 130` (same `x`, width, `h`). Choose
-   the click point `cx = start.x + start.width / 2`, `cy = final.y - 6`.
-3. Invoke `Toggle reflow spacer` and real-click (`cx`, `cy`) immediately afterwards (timestamp
-   `tc`), then read the probe bounds once (`s2`).
-4. Read `animation-reflow-probe-focus-state`, wait until stable, and read the probe bounds
-   (`stable`). Invoke `Toggle reflow spacer` again and wait until stable to restore.
+**Coordinate system.** All rects and points are physical screen pixels: UIA bounds as reported by
+the driver `search`, and `point-click` coordinates. A screenshot is used only after its
+image-to-screen transform is verified (see the screen-capture source below).
 
-The motion is monotonic downward, so at `tc` the shown top lies between `start.y` and `s2.y`.
-Check mechanically:
+**Records.** Every driver command's raw JSON is saved to its own file, and a UTC timestamp is
+written to a live timeline file immediately before and after each command (never reconstructed
+afterwards).
 
-- C1 shown contains the click: `s2.y + 3 <= cy` and `cy <= start.y + h - 3`;
-- C2 target excludes the click: `cy <= stable.y - 3`, and `stable.y = final.y` within 1 px;
-- C3 focus: `Unfocused` before, `Focused` after.
+- `start = (left_0, top_0, right_0, bottom_0)`: stable probe rect before the change (UIA).
+- `target = (left_f, top_f, right_f, bottom_f)`: stable probe rect after the change (UIA), with
+  `abs(top_f - (top_0 + 130)) <= 1`.
+- `click = (x_c, y_c)`, `t_click`: the point actually sent by `point-click`, with
+  `x_c = (left_0 + right_0) / 2` and `y_c = top_0 + 124` (6 px above the predicted target top).
+- `after = (left_s, top_s, right_s, bottom_s)`, `t_after`, `source`: the probe rect observed
+  after the click, where `source` is `uia` (a real `search` started after `point-click` returned)
+  or `screen_capture` (a real post-click `capture-window --capture-screen` image).
 
-Expected: C1, C2, and C3 all hold. If C1 or C2 fails (for example `s2` was read after the
-animation ended), the attempt is INCONCLUSIVE, not PASS; restore, click elsewhere to clear focus if
-needed, and retry once. Record the numbers, timestamps, the point, and a `--capture-screen`
-screenshot taken right after the click.
+**Order.** Stable start reads (`start`, focus `Unfocused`) → UIA `invoke` of `Toggle reflow
+spacer` → real `point-click (x_c, y_c)` → immediately `capture-window --capture-screen` → UIA
+`search` for the probe (`s2`) → focus read → wait → stable `target` read → restore. The UIA `s2`
+read must never delay the screenshot. Nothing else (no other toggle, scroll, resize, move, DPI or
+monitor change, focus change to another window) may happen between the invoke and `target`.
+
+**Source `uia` (preferred).** `after = s2` when its timeline shows the `search` started after
+`point-click` returned. `t_after` is the timeline time before the `search`.
+
+**Source `screen_capture` (only when `s2` is missing or not usable).** The image must be the
+post-click capture. Its transform is verified first: the same run's pre-change capture
+(`lr04-start.png`) must place the probe top and left edges at the UIA `start` values within 2 px
+using `screen = window_origin + image_px` with the window rect from the run's latest
+`list-windows` and the 96 DPI scale recorded by `launch`. The post-click probe edges are measured
+from pixel data (not estimated by eye) and converted the same way. A missing, black, or blurred
+image, an unverifiable transform, or unclear probe edges make this source unusable.
+
+**Checks (3 px margin).** The motion is monotonic downward, so the shown top at `t_click` is at
+most `top_s` and the shown bottom at least `bottom_0`.
+
+- C1 shown rect contains the click: `left_s + 3 <= x_c <= right_s - 3`,
+  `top_s + 3 <= y_c <= bottom_0 - 3`, `top_0 <= top_s < top_f - 3`, and `t_click < t_after`.
+- C2 target rect excludes the click: `y_c <= top_f - 3`, `left_f + 3 <= x_c <= right_f - 3`, and
+  `abs(top_f - (top_0 + 130)) <= 1`.
+- C3 input took effect: `animation-reflow-probe-focus-state` reads `Unfocused` before and
+  `Focused` after. A successful `point-click` command alone is not evidence.
+
+**Classification.** PASS only when C1, C2, and C3 hold from one attempt's own raw files. If no
+usable `after` source exists, or `after` was taken at or after the end of the motion, the attempt
+is INCONCLUSIVE; a tool or host failure is BLOCKED; an attempt that never ran is NOT RUN; if C1 and
+C2 hold but focus does not change, it is FAIL. One retry is allowed after restoring the spacer and
+clearing focus, into a separate attempt directory; earlier files are never rewritten and evidence
+from other runs or HEADs is never combined. INCONCLUSIVE is never reclassified as PASS.
 
 ### LR-05 Reduce Motion snaps
 

@@ -576,8 +576,12 @@ impl AnimationRuntime {
         let key = (owner_id, RuntimeChannel::LayoutReflow);
         let had_generation = self.generations.borrow_mut().remove(&key).is_some();
         let had_channel = self.channels.borrow_mut().remove(&key).is_some();
-        let target = self.layout_reflow_targets.borrow_mut().remove(&owner_id);
-        if let Some(target) = target.and_then(|target| target.upgrade()) {
+        let target: Option<Rc<dyn crate::ui::UIElementExt>> = self
+            .layout_reflow_targets
+            .borrow_mut()
+            .remove(&owner_id)
+            .and_then(|target| target.upgrade());
+        if let Some(target) = target {
             target
                 .as_ui_element()
                 .layout_reflow_translation
@@ -598,7 +602,8 @@ impl AnimationRuntime {
             .retain(|key, _| key.1 != RuntimeChannel::LayoutReflow);
         let targets = std::mem::take(&mut *self.layout_reflow_targets.borrow_mut());
         for target in targets.into_values() {
-            if let Some(target) = target.upgrade() {
+            let target: Option<Rc<dyn crate::ui::UIElementExt>> = target.upgrade();
+            if let Some(target) = target {
                 target
                     .as_ui_element()
                     .layout_reflow_translation
@@ -682,7 +687,9 @@ impl AnimationRuntime {
         // Reflow moves presentation geometry on Render-only passes, which do not refresh semantic
         // bounds by themselves. One refresh per tick covers every reflowing element of this
         // runtime's tree, since they share one accessibility host.
-        if let Some(element) = reflowed.and_then(|element| element.upgrade()) {
+        let element: Option<Rc<dyn crate::ui::UIElementExt>> =
+            reflowed.and_then(|element| element.upgrade());
+        if let Some(element) = element {
             crate::ui::UIElementExt::request_accessibility_update(element.as_ref());
         }
         active

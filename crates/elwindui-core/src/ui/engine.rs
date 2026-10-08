@@ -215,16 +215,15 @@ fn apply_layout_reflow(
     };
     let weak: Weak<dyn UIElementExt> = Rc::downgrade(child);
     let callback_target = weak.clone();
-    let runtime = Rc::downgrade(&pass.runtime);
+    let runtime: Weak<AnimationRuntime> = Rc::downgrade(&pass.runtime);
     let callback = Box::new(move |value: AnimatedValue, finished: bool| {
         let element: Option<Rc<dyn UIElementExt>> = callback_target.upgrade();
-        let Some(element) = element else {
-            if let Some(runtime) = runtime.upgrade() {
-                runtime.cancel_layout_reflow(id);
-            }
+        let live_runtime: Option<Rc<AnimationRuntime>> = runtime.upgrade();
+        let Some(runtime) = live_runtime else {
             return;
         };
-        let Some(runtime) = runtime.upgrade() else {
+        let Some(element) = element else {
+            runtime.cancel_layout_reflow(id);
             return;
         };
         if !runtime.has_layout_reflow(id) {

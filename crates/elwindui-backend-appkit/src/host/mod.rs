@@ -1240,6 +1240,10 @@ impl TreeHost {
             return;
         }
         self.ivars().active.set(active);
+        // Layout reflow is presentation of the retained tree this host is about to drop (or has
+        // dropped): discard it at both edges so no stale displacement, intent, or reflow frame
+        // survives an inactive period. Other animation channels are untouched.
+        self.ivars().animation_runtime.discard_layout_reflows();
         if active {
             self.ivars()
                 .last_layout_size

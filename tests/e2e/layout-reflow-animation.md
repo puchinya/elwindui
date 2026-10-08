@@ -26,6 +26,7 @@ travels. Self-drawn content and a NativeControl move the same way. Reduce Motion
 |---|---|
 | `Insert / remove panel` button | toggles the self-drawn panel in a 4000 ms ease-in-out transaction (queued layout path) |
 | `Insert / remove TextBox` button | toggles the NativeControl in a 5000 ms ease-out transaction; removal begins an exit and flushes layout interactively |
+| `Toggle reflow spacer` button | verification-only: toggles a 120 DIP spacer before the TextBox in a fixed 12 s linear transaction |
 | `Reduce motion` button | toggles `ReduceMotionEnvironment` |
 | `animation-reflow-panel-marker` | self-drawn TextBlock directly below the panel |
 | `animation-native-textbox` | NativeControl TextBox below the panel marker |
@@ -77,13 +78,34 @@ stable so the TextBox is back for LR-04.
 
 ### LR-04 Pointer input follows the shown NativeControl position
 
-1. Invoke `Insert / remove panel` (state toggles) and at about +1.0 s read the TextBox bounds; it
-   must be intermediate relative to its start/final `y` for this toggle.
-2. Real-click the center of those bounds immediately.
-3. Read `animation-native-focus-state`.
+Discriminating geometry is mandatory: the click point must be inside the TextBox's shown bounds
+and outside its target bounds at the same moment. A point inside both proves nothing and is never
+PASS. Run this case first on a fresh launch so the TextBox starts unfocused
+(`animation-native-focus-state` reads `Unfocused`).
 
-Expected: the focus state is `Focused`. Restore the panel afterwards if needed and wait until
-stable.
+1. With the spacer hidden and everything stable, read the TextBox bounds (`start`).
+2. Invoke `Toggle reflow spacer` (inserts a 120 DIP spacer; the TextBox target moves down by
+   130 DIP over a fixed 12 s linear transaction). Read the TextBox bounds once (`s1`, timestamp
+   `t1`).
+3. Compute the final target rect `final = start` moved down by 130 DIP. Choose the click point
+   `x = s1.x + s1.width / 2`, `y = s1.y + s1.height - 3` and real-click it immediately
+   (timestamp `tc`).
+4. Read the TextBox bounds again immediately (`s2`, timestamp `t2`), then read
+   `animation-native-focus-state`.
+5. Wait until stable and read the TextBox bounds (`stable`); it must equal `final` within 1 px.
+   Invoke `Toggle reflow spacer` again and wait until stable to restore.
+
+Because the motion is monotonic, the shown rect at `tc` lies between `s1` and `s2`. Record and
+check mechanically:
+
+- shown contains the click: `s2.y + 3 <= y <= s1.y + s1.height - 3` (the point is inside the
+  shown rect at every moment between `t1` and `t2`);
+- target excludes the click: `y <= stable.y - 3`;
+- focus: `Unfocused` before, `Focused` after.
+
+Expected: all three hold. If either geometric condition fails (the driver was too slow), the
+attempt is INCONCLUSIVE, not PASS; restore and retry. Record the numbers, timestamps, chosen
+point, and a `--capture-screen` screenshot taken right after the click.
 
 ### LR-05 Reduce Motion snaps
 

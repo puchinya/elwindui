@@ -8,7 +8,9 @@
 //! Issue #290 adds stable-ID position markers below the dynamic self-drawn panel and the dynamic
 //! NativeControl. Inserting or removing either region moves its marker by layout reflow, so a
 //! native UI driver can read intermediate, exit, reinsertion, reversal, and Reduce Motion
-//! positions from the marker's semantic bounds.
+//! positions from the marker's semantic bounds. A separate verification-only spacer before the
+//! TextBox moves it by 130 DIP over a fixed 12 s linear transaction, so a driver can click a point
+//! inside the TextBox's shown bounds but outside its target bounds.
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
@@ -27,6 +29,8 @@ mod animation_demo_view_model {
         show_panel: bool,
         #[observable(default = true)]
         show_native: bool,
+        #[observable(default = false)]
+        show_reflow_spacer: bool,
         #[observable(default = false)]
         reduce_motion: bool,
         #[computed(expr = reduce_motion.to_string())]
@@ -59,6 +63,18 @@ mod animation_demo_view_model {
                 },
             );
             status = "Dynamic NativeControl toggled".to_string();
+        }
+
+        fn toggle_reflow_spacer(&self) {
+            elwindui::core::ui::with_animation(
+                // Verification-only: slow and linear so the moving TextBox position between two
+                // driver samples is monotonic and bracketed.
+                Animation::linear(Duration::from_millis(12000)),
+                || {
+                    show_reflow_spacer = !show_reflow_spacer;
+                },
+            );
+            status = "Reflow spacer toggled".to_string();
         }
 
         fn native_got_focus(&self) {
@@ -110,7 +126,7 @@ struct AnimationDemoWindow {
     body: view! {
         title: "ElwindUI Animation Demo"
         width: 620.0
-        height: 520.0
+        height: 600.0
         content: VerticalLayout {
             margin: 18.0
             spacing: 10.0
@@ -139,6 +155,13 @@ struct AnimationDemoWindow {
                     on_click: vm.reset
                 }
             }
+            HorizontalLayout {
+                spacing: 6.0
+                Button {
+                    text: "Toggle reflow spacer"
+                    on_click: vm.toggle_reflow_spacer
+                }
+            }
             #[animation(animation = Animation::ease_in_out(Duration::from_millis(5000)), value = expanded)]
             TextBlock {
                 text: "Scoped implicit self-drawn presentation"
@@ -160,6 +183,12 @@ struct AnimationDemoWindow {
             TextBlock {
                 text: "Reflow marker below the self-drawn panel"
                 accessibility_identifier: "animation-reflow-panel-marker"
+            }
+            if vm.show_reflow_spacer {
+                Rectangle {
+                    height: 120.0
+                    fill: "#e6e6e6"
+                }
             }
             if vm.show_native {
                 #[transition(Transition::asymmetric(

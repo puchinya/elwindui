@@ -430,10 +430,16 @@ impl RenderTree {
             self.visual_index.insert(self.root.id, Rc::downgrade(root));
         }
         // Started reflows already published their first translation above; later ticks need a
-        // frame. The host schedules it asynchronously, so no RenderTree borrow is re-entered.
+        // frame and refresh semantic bounds through this hosted root (weakly held). The host
+        // schedules the frame asynchronously, so no RenderTree borrow is re-entered.
         if let (Some(host), Some(reflow)) = (frame_host, reflow) {
-            if reflow.started.get() && reflow.runtime.take_frame_request() {
-                host.request_animation_frame();
+            if reflow.started.get() {
+                reflow
+                    .runtime
+                    .set_layout_reflow_accessibility_root(Rc::downgrade(root));
+                if reflow.runtime.take_frame_request() {
+                    host.request_animation_frame();
+                }
             }
         }
         true
@@ -2630,6 +2636,159 @@ mod layout_reflow_tests {
             accessibility.0.get(),
             before + 2,
             "no refresh without reflow"
+        );
+    }
+
+    #[test]
+    fn rem04_retarget_inside_another_tick_callback_continues_from_the_live_sample() {
+        let spring = Animation::spring(Duration::from_millis(300), 0.5);
+        // Repeat on fresh runtimes so both callback orders (C before/after the actor) occur.
+        for _ in 0..16 {
+            let fx = ReflowFixture::new(&["a", "b", "c"]);
+            let (a, b, c) = (fx.item(0), fx.item(1), fx.item(2));
+            let ReflowFixture {
+                root,
+                children,
+                host,
+                tree,
+                ..
+            } = fx;
+            let tree = Rc::new(RefCell::new(tree));
+            with_animation(spring, || assert!(children.remove(&b)));
+            layout_root(&root, size(100.0, 200.0));
+            assert!(tree.borrow_mut().reconcile::<FakeHandle>(&root));
+            assert_eq!(reflow_of(&c).y, 20.0);
+
+            // Another channel's callback performs a structural change and a synchronous layout,
+            // like a host's interactive flush, while C's channel is detached by the tick.
+            let fired = Rc::new(Cell::new(false));
+            let flag = Rc::clone(&fired);
+            let (cb_root, cb_children, cb_a, cb_tree) = (
+                Rc::clone(&root),
+                children.clone(),
+                Rc::clone(&a),
+                Rc::clone(&tree),
+            );
+            host.runtime.animate(
+                a.render_group_id(),
+                AnimationChannel::Opacity,
+                AnimatedValue::Scalar(1.0),
+                AnimatedValue::Scalar(0.9),
+                linear(1000),
+                Box::new(move |_| {
+                    if flag.replace(true) {
+                        return;
+                    }
+                    with_animation(spring, || assert!(cb_children.remove(&cb_a)));
+                    layout_root(&cb_root, size(100.0, 200.0));
+                    assert!(cb_tree.borrow_mut().reconcile::<FakeHandle>(&cb_root));
+                }),
+            );
+            host.runtime.tick(Duration::from_millis(50));
+            assert!(fired.get());
+
+            let (d50, v50) = spring.sample(20.0, 0.0, 0.0, Duration::from_millis(50));
+            assert!(v50.abs() > 1.0, "the spring is moving at t50");
+            let rebased = reflow_of(&c);
+            assert_close(rebased.y, d50 + 20.0);
+            assert_close(rebased.x, 0.0);
+
+            host.runtime.tick(Duration::from_millis(70));
+            let (expected, _) = spring.sample(d50 + 20.0, 0.0, v50, Duration::from_millis(20));
+            assert_close(reflow_of(&c).y, expected);
+        }
+    }
+
+    #[test]
+    fn rem01_discard_drops_only_reflow_state_and_reactivation_shows_no_stale_offset() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (a, b, c) = (fx.item(0), fx.item(1), fx.item(2));
+        with_animation(linear(100), || {
+            assert!(fx.children.remove(&b));
+            a.as_ui_element().set_opacity(0.0);
+        });
+        fx.relayout();
+        assert_eq!(reflow_of(&c).y, 20.0);
+        assert!(fx.host.runtime.has_layout_reflow_accessibility_root());
+
+        // Host deactivation edge.
+        fx.host.runtime.discard_layout_reflows();
+        assert_eq!(fx.host.runtime.layout_reflow_count(), 0);
+        assert_eq!(reflow_of(&c), Vector::default());
+        assert!(fx.host.runtime.pending_layout_reflow_intent().is_none());
+        assert!(!fx.host.runtime.has_layout_reflow_accessibility_root());
+        assert!(!fx.host.runtime.is_idle(), "the opacity channel survives");
+
+        // A structural change while inactive, then reactivation with a fresh tree.
+        with_animation(linear(100), || assert!(fx.children.remove(&a)));
+        fx.host.runtime.discard_layout_reflows();
+        layout_root(&fx.root, size(100.0, 200.0));
+        fx.tree = RenderTree::new::<FakeHandle>(&fx.root);
+        assert_eq!(visible_y(&c), 0.0);
+        assert_eq!(fx.group(&c).transform, AffineTransform::IDENTITY);
+        assert_eq!(fx.host.runtime.layout_reflow_count(), 0);
+        fx.tick_ms(100);
+        assert_eq!(a.presentation_opacity(), 0.0, "opacity still completed");
+    }
+
+    #[test]
+    fn rem08_completion_tick_refreshes_once_then_idle_ticks_do_not() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let a = fx.item(0);
+        let accessibility = Rc::new(CountingAccessibilityHost(Cell::new(0)));
+        fx.root.set_accessibility_host(Some(
+            accessibility.clone() as Rc<dyn crate::accessibility::AccessibilityHost>
+        ));
+        with_animation(linear(100), || assert!(fx.children.remove(&a)));
+        fx.relayout();
+        let before = accessibility.0.get();
+        assert!(!fx.tick_ms(100), "every reflow completes in this tick");
+        assert_eq!(
+            accessibility.0.get(),
+            before + 1,
+            "completion frame refreshes"
+        );
+        assert!(!fx.host.runtime.has_layout_reflow_accessibility_root());
+        fx.tick_ms(200);
+        assert_eq!(
+            accessibility.0.get(),
+            before + 1,
+            "idle tick does not refresh"
+        );
+    }
+
+    #[test]
+    fn rem09_destroyed_root_is_skipped_without_retention() {
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (a, c) = (fx.item(0), fx.item(2));
+        let accessibility = Rc::new(CountingAccessibilityHost(Cell::new(0)));
+        fx.root.set_accessibility_host(Some(
+            accessibility.clone() as Rc<dyn crate::accessibility::AccessibilityHost>
+        ));
+        with_animation(linear(100), || assert!(fx.children.remove(&a)));
+        fx.relayout();
+        let runtime = Rc::clone(&fx.host.runtime);
+        let weak_root = Rc::downgrade(&fx.root);
+        let weak_c = Rc::downgrade(&c);
+        let before = accessibility.0.get();
+        drop(c);
+        drop(a);
+        drop(fx);
+        assert!(
+            weak_root.upgrade().is_none(),
+            "the anchor does not keep the root alive"
+        );
+        assert!(weak_c.upgrade().is_none());
+        runtime.tick(Duration::from_millis(50));
+        assert_eq!(
+            accessibility.0.get(),
+            before,
+            "no refresh through a destroyed root"
+        );
+        assert_eq!(
+            runtime.layout_reflow_count(),
+            0,
+            "dead targets cancel their channels"
         );
     }
 

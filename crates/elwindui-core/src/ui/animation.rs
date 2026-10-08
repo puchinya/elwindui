@@ -347,6 +347,16 @@ struct PendingLayoutReflow {
     armed: bool,
 }
 
+/// A detached channel's state at the current `tick` time, captured before any callback runs so a
+/// callback may retarget any channel from its exact current value and velocity, independent of
+/// callback order.
+struct InFlightSample {
+    generation: u64,
+    value: AnimatedValue,
+    /// The sampled (current) velocity at the tick time, not the trajectory's initial velocity.
+    velocity: AnimatedValue,
+}
+
 struct ActiveAnimation {
     start: AnimatedValue,
     target: AnimatedValue,
@@ -370,6 +380,12 @@ pub struct AnimationRuntime {
     /// Elements whose layout reflow translation is driven by a live channel, so host
     /// unregistration can reset them even while their channel is detached by `tick`.
     layout_reflow_targets: RefCell<HashMap<u64, Weak<dyn crate::ui::UIElementExt>>>,
+    /// The hosted root that last started a reflow. Semantic refresh after a reflow tick goes
+    /// through it, so it never depends on the lifetime of any individual reflowing child.
+    layout_reflow_accessibility_root: RefCell<Option<Weak<dyn crate::ui::UIElementExt>>>,
+    /// Detached channels' samples for the tick in progress; empty outside `tick`.
+    in_flight_samples: RefCell<HashMap<ChannelKey, InFlightSample>>,
+    ticking: Cell<bool>,
     #[cfg(test)]
     layout_reflow_intent_records: Cell<usize>,
     now: RefCell<Duration>,
@@ -385,6 +401,9 @@ impl AnimationRuntime {
             next_generation: Cell::new(0),
             pending_layout_reflow: Cell::new(None),
             layout_reflow_targets: RefCell::new(HashMap::new()),
+            layout_reflow_accessibility_root: RefCell::new(None),
+            in_flight_samples: RefCell::new(HashMap::new()),
+            ticking: Cell::new(false),
             #[cfg(test)]
             layout_reflow_intent_records: Cell::new(0),
             now: RefCell::new(Duration::ZERO),
@@ -429,14 +448,27 @@ impl AnimationRuntime {
     }
 
     /// Samples a live channel at the runtime's current monotonic time.
+    ///
+    /// A channel already (re)inserted into the live map wins. Otherwise, during a `tick`, the
+    /// detached channel's pre-callback sample is used, but only while its generation is still
+    /// current, so a cancelled or replaced channel never provides a starting value.
     fn sample_active(&self, key: ChannelKey) -> Option<(AnimatedValue, AnimatedValue)> {
         let now = *self.now.borrow();
-        self.channels.borrow().get(&key).map(|active| {
+        let live = self.channels.borrow().get(&key).map(|active| {
             let elapsed = now.saturating_sub(active.started_at);
             active
                 .start
                 .sample(active.target, active.velocity, active.animation, elapsed)
-        })
+        });
+        if live.is_some() {
+            return live;
+        }
+        let generation = self.generations.borrow().get(&key).copied()?;
+        self.in_flight_samples
+            .borrow()
+            .get(&key)
+            .filter(|sample| sample.generation == generation)
+            .map(|sample| (sample.value, sample.velocity))
     }
 
     fn insert_channel(
@@ -590,10 +622,16 @@ impl AnimationRuntime {
         had_generation || had_channel
     }
 
-    /// Drops pending intent and every layout reflow, resetting the driven translations to zero.
-    /// Used when a host unregisters its tree; no invalidation is sent because the host is leaving.
-    pub(crate) fn discard_layout_reflows(&self) {
+    /// Drops the pending reflow intent, every layout reflow channel, and the semantic refresh
+    /// anchor, resetting the driven translations to zero. Other animation channels are untouched.
+    ///
+    /// Backends call this when a host stops presenting its tree (unregistration, or
+    /// `set_active(false)` and the following `set_active(true)`), so an inactive host never keeps
+    /// stale reflow displacement or frames. No invalidation is sent. Idempotent.
+    #[doc(hidden)]
+    pub fn discard_layout_reflows(&self) {
         self.pending_layout_reflow.set(None);
+        *self.layout_reflow_accessibility_root.borrow_mut() = None;
         self.channels
             .borrow_mut()
             .retain(|key, _| key.1 != RuntimeChannel::LayoutReflow);
@@ -610,6 +648,25 @@ impl AnimationRuntime {
                     .set(Vector::default());
             }
         }
+    }
+
+    /// Registers the hosted root whose accessibility host is refreshed after reflow ticks. Only a
+    /// weak reference is kept; a newer root replaces an older one.
+    pub(crate) fn set_layout_reflow_accessibility_root(
+        &self,
+        root: Weak<dyn crate::ui::UIElementExt>,
+    ) {
+        *self.layout_reflow_accessibility_root.borrow_mut() = Some(root);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_layout_reflow_accessibility_root(&self) -> bool {
+        self.layout_reflow_accessibility_root.borrow().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_flight_sample_count(&self) -> usize {
+        self.in_flight_samples.borrow().len()
     }
 
     #[cfg(test)]
@@ -634,30 +691,73 @@ impl AnimationRuntime {
     }
 
     /// Advances every channel to an explicit monotonic timestamp and returns whether work remains.
-    /// Callbacks run outside the channel borrow, so a callback may safely retarget another channel.
+    ///
+    /// Every detached channel is sampled at the same `now` before any callback runs. Callbacks run
+    /// outside the channel borrow, so a callback may safely retarget or cancel any channel: a
+    /// retarget starts from the pre-callback sample (value and current velocity), a channel
+    /// cancelled or replaced earlier in this tick never receives its callback and is never
+    /// reinserted, and a replacement first runs on the next tick. A reentrant call from inside a
+    /// callback does not sample again; it only requests another frame.
     pub fn tick(&self, now: Duration) -> bool {
+        if self.ticking.get() {
+            *self.frame_requested.borrow_mut() = true;
+            return true;
+        }
         let previous = *self.now.borrow();
         let now = now.max(previous);
         *self.now.borrow_mut() = now;
         *self.frame_requested.borrow_mut() = false;
 
-        let current = std::mem::take(&mut *self.channels.borrow_mut());
-        let mut keep = Vec::new();
-        let mut reflowed: Option<Weak<dyn crate::ui::UIElementExt>> = None;
-        for (key, mut active) in current {
-            if key.1 == RuntimeChannel::LayoutReflow && reflowed.is_none() {
-                reflowed = self.layout_reflow_targets.borrow().get(&key.0).cloned();
+        /// Clears the in-flight snapshot and the reentrancy flag on every exit, including unwind.
+        struct TickGuard<'a>(&'a AnimationRuntime);
+        impl Drop for TickGuard<'_> {
+            fn drop(&mut self) {
+                self.0.in_flight_samples.borrow_mut().clear();
+                self.0.ticking.set(false);
             }
-            let elapsed = now.saturating_sub(active.started_at);
-            let (value, velocity) =
-                active
-                    .start
-                    .sample(active.target, active.velocity, active.animation, elapsed);
+        }
+        self.ticking.set(true);
+        let _guard = TickGuard(self);
+
+        let current = std::mem::take(&mut *self.channels.borrow_mut());
+        let mut sampled = Vec::with_capacity(current.len());
+        {
+            let mut in_flight = self.in_flight_samples.borrow_mut();
+            for (key, active) in current {
+                let elapsed = now.saturating_sub(active.started_at);
+                let (value, velocity) =
+                    active
+                        .start
+                        .sample(active.target, active.velocity, active.animation, elapsed);
+                // `active.velocity` is the trajectory's initial velocity at `started_at` and must
+                // stay fixed: overwriting it with the sampled velocity would bend every later
+                // sample of the same trajectory. The sampled velocity decides settlement and is
+                // what a retarget during this tick continues from.
+                let finished = value.settled(active.target, velocity, active.animation, elapsed);
+                in_flight.insert(
+                    key,
+                    InFlightSample {
+                        generation: active.generation,
+                        value,
+                        velocity,
+                    },
+                );
+                sampled.push((key, active, value, finished));
+            }
+        }
+        let mut keep = Vec::new();
+        let mut reflow_applied = false;
+        for (key, mut active, value, finished) in sampled {
+            let current_generation =
+                self.generations.borrow().get(&key) == Some(&active.generation);
+            if !current_generation {
+                // Cancelled or replaced by an earlier callback of this tick.
+                continue;
+            }
             active.value = value;
-            // `active.velocity` is the trajectory's initial velocity at `started_at` and must stay
-            // fixed: overwriting it with the sampled velocity would bend every later sample of the
-            // same trajectory. The sampled velocity only decides settlement.
-            let finished = value.settled(active.target, velocity, active.animation, elapsed);
+            if key.1 == RuntimeChannel::LayoutReflow {
+                reflow_applied = true;
+            }
             (active.callback)(value, finished);
             if finished {
                 let mut generations = self.generations.borrow_mut();
@@ -685,12 +785,25 @@ impl AnimationRuntime {
         };
         *self.frame_requested.borrow_mut() = active;
         // Reflow moves presentation geometry on Render-only passes, which do not refresh semantic
-        // bounds by themselves. One refresh per tick covers every reflowing element of this
-        // runtime's tree, since they share one accessibility host.
-        let element: Option<Rc<dyn crate::ui::UIElementExt>> =
-            reflowed.and_then(|element| element.upgrade());
-        if let Some(element) = element {
-            crate::ui::UIElementExt::request_accessibility_update(element.as_ref());
+        // bounds by themselves. One refresh per tick, through the hosted root, covers every
+        // reflowing element of this runtime's tree, including the completion frame.
+        if reflow_applied {
+            let root: Option<Rc<dyn crate::ui::UIElementExt>> = self
+                .layout_reflow_accessibility_root
+                .borrow()
+                .as_ref()
+                .and_then(|root| root.upgrade());
+            if let Some(root) = root {
+                crate::ui::UIElementExt::request_accessibility_update(root.as_ref());
+            }
+            let any_reflow = self
+                .generations
+                .borrow()
+                .keys()
+                .any(|key| key.1 == RuntimeChannel::LayoutReflow);
+            if !any_reflow {
+                *self.layout_reflow_accessibility_root.borrow_mut() = None;
+            }
         }
         active
     }
@@ -1198,5 +1311,148 @@ mod tests {
         }
         assert_eq!(runtime.layout_reflow_count(), 0);
         assert!(!runtime.take_frame_request());
+    }
+
+    type Log = Rc<RefCell<Vec<&'static str>>>;
+
+    fn logging(log: &Log, name: &'static str) -> Box<dyn Fn(AnimatedValue, bool)> {
+        let log = Rc::clone(log);
+        Box::new(move |_, _| log.borrow_mut().push(name))
+    }
+
+    #[test]
+    fn rem05_channels_cancelled_or_replaced_earlier_in_a_tick_get_no_stale_callback() {
+        // HashMap iteration order differs per runtime instance, so repeat on fresh runtimes.
+        for _ in 0..32 {
+            let runtime = AnimationRuntime::new();
+            let log: Log = Rc::new(RefCell::new(Vec::new()));
+            let linear = Animation::linear(Duration::from_millis(100));
+            for (owner, name) in [(1, "k1-old"), (2, "k2-old")] {
+                runtime
+                    .rebase_layout_reflow(
+                        owner,
+                        Vector::default(),
+                        Vector { x: 0.0, y: 10.0 },
+                        linear,
+                        None,
+                        logging(&log, name),
+                    )
+                    .unwrap();
+            }
+            let weak = Rc::downgrade(&runtime);
+            let actor_log = Rc::clone(&log);
+            let acted = Rc::new(Cell::new(false));
+            let acted_flag = Rc::clone(&acted);
+            runtime.animate(
+                3,
+                AnimationChannel::Opacity,
+                AnimatedValue::Scalar(0.0),
+                AnimatedValue::Scalar(1.0),
+                linear,
+                Box::new(move |_| {
+                    if acted_flag.replace(true) {
+                        return;
+                    }
+                    actor_log.borrow_mut().push("actor");
+                    let runtime = weak.upgrade().unwrap();
+                    runtime.cancel_layout_reflow(1);
+                    runtime.rebase_layout_reflow(
+                        2,
+                        Vector::default(),
+                        Vector { x: 0.0, y: 50.0 },
+                        linear,
+                        None,
+                        logging(&actor_log, "k2-new"),
+                    );
+                }),
+            );
+            assert!(runtime.tick(Duration::from_millis(10)));
+            let first = log.borrow().clone();
+            let actor = first.iter().position(|name| *name == "actor").unwrap();
+            assert!(
+                first[actor + 1..].is_empty(),
+                "no stale or replacement delivery after the actor: {first:?}"
+            );
+            assert!(
+                !first.contains(&"k2-new"),
+                "replacement waits for the next tick"
+            );
+            assert_eq!(
+                runtime.layout_reflow_count(),
+                1,
+                "k1 cancelled, k2 replaced once"
+            );
+
+            log.borrow_mut().clear();
+            runtime.tick(Duration::from_millis(20));
+            let second = log.borrow().clone();
+            assert_eq!(
+                second.iter().filter(|name| **name == "k2-new").count(),
+                1,
+                "{second:?}"
+            );
+            assert!(!second.contains(&"k1-old") && !second.contains(&"k2-old"));
+        }
+    }
+
+    #[test]
+    fn rem06_a_panicking_callback_leaves_no_in_flight_sample_behind() {
+        let runtime = AnimationRuntime::new();
+        let linear = Animation::linear(Duration::from_millis(100));
+        runtime
+            .rebase_layout_reflow(
+                5,
+                Vector::default(),
+                Vector { x: 0.0, y: 40.0 },
+                linear,
+                None,
+                Box::new(|_, _| panic!("callback failure")),
+            )
+            .unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.tick(Duration::from_millis(50));
+        }));
+        assert!(result.is_err());
+        assert_eq!(runtime.in_flight_sample_count(), 0);
+
+        // A new channel on the same key starts from the caller's value, not the stale sample of
+        // the panicked tick (which was 20 with a non-zero velocity).
+        let values = Rc::new(RefCell::new(Vec::new()));
+        let observed = Rc::clone(&values);
+        let start = runtime
+            .rebase_layout_reflow(
+                5,
+                Vector::default(),
+                Vector { x: 0.0, y: 8.0 },
+                linear,
+                None,
+                Box::new(move |value, _| observed.borrow_mut().push(value)),
+            )
+            .unwrap();
+        assert_eq!(start, Vector { x: 0.0, y: 8.0 });
+        assert!(runtime.tick(Duration::from_millis(100)));
+        assert_eq!(values.borrow().as_slice(), &[reflow_value(4.0)]);
+    }
+
+    #[test]
+    fn reentrant_tick_from_a_callback_does_not_sample_again() {
+        let runtime = AnimationRuntime::new();
+        let weak = Rc::downgrade(&runtime);
+        let calls = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&calls);
+        runtime.animate(
+            1,
+            AnimationChannel::Opacity,
+            AnimatedValue::Scalar(0.0),
+            AnimatedValue::Scalar(1.0),
+            Animation::linear(Duration::from_millis(100)),
+            Box::new(move |_| {
+                observed.set(observed.get() + 1);
+                assert!(weak.upgrade().unwrap().tick(Duration::from_millis(90)));
+            }),
+        );
+        assert!(runtime.tick(Duration::from_millis(10)));
+        assert_eq!(calls.get(), 1);
+        assert!(runtime.take_frame_request());
     }
 }

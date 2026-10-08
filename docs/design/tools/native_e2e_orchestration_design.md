@@ -254,7 +254,7 @@ The required routing policy is:
 
 ```text
 Codex tester:       gpt-6-luna, reasoning effort explicitly medium
-Claude Code tester: Claude Haiku 4.5, normal/default reasoning configuration
+Claude Code tester: Claude Haiku 5.5, normal/default reasoning configuration
 ```
 
 The parent agent's reasoning effort must not be inherited as the effective Codex child effort.

@@ -140,11 +140,25 @@ hundred milliseconds apart instead of paying 2–3 s of process startup per driv
 | `read` | `ids`, `name` | reads the cached elements' current bounds and names |
 
 Locate/cache steps belong before the first `click`, so the timed part only clicks, sleeps,
-captures, and reads. Every step records `utc`, `t_start_ms`, and `t_end_ms` from one stopwatch; the
-whole result is printed as the single JSON object and also written to
-`<output-dir>/sequence-result.json`. The output directory must not exist (evidence is never
-overwritten). Coordinates are physical screen pixels (per-monitor DPI aware). A locked desktop is
-`environment_blocker`; a missing window or element is `target_error`.
+captures, and reads. Every step records `utc`, `t_start_ms`, `t_end_ms`, and `status` from one
+stopwatch; the whole result is printed as the single JSON object and also written to
+`<output-dir>/sequence-result.json`. Coordinates are physical screen pixels (per-monitor DPI aware).
+
+Evidence safety:
+
+- `capture.name` must be one ASCII basename matching `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`, must not be
+  a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`), and must be
+  unique within the step list case-insensitively. Violations are `usage_error` before any window,
+  input, or file-system work.
+- `--output-dir` must not exist; it is created per invocation. PNGs and `sequence-result.json` are
+  written with `CreateNew`, so existing evidence is never replaced; `files` lists only frames that
+  were actually written.
+- The first failing step stops the run (no later click). The result carries `category`, `error`,
+  `failure_stage` (`step`, `save-png`, `result-json`, `cleanup`, `run`), `failed_step_index`, and
+  `failed_step_op`; frames captured before the failure are still saved. `result_json_persisted`
+  says whether `sequence-result.json` was written; if not, `success` is false.
+- A locked desktop or non-foreground target is `environment_blocker`; a missing window or element
+  is `target_error`; capture, save, and unexpected failures are `tool_error`.
 
 ## UIA vs. real input
 

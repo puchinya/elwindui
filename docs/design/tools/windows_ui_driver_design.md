@@ -14,8 +14,9 @@ the Windows adapter-specific responsibilities and does not duplicate that shared
 `tools/windows-ui-driver/windows-ui-driver.ps1` is a thin, repository-owned PowerShell adapter that
 gives the repository a stable, versioned command surface for Windows native E2E, while delegating
 every UI Automation (UIA) query/action, real mouse/keyboard input, and screenshot capture to the
-external Microsoft `winapp` CLI (`winapp ui ...`). The only direct input exception is the bounded,
-cancellation-only `touch-cancel` command described in §4.1.
+external Microsoft `winapp` CLI (`winapp ui ...`). There are exactly two bounded in-process
+exceptions: the cancellation-only `touch-cancel` command (§4.1) and the timed animation
+`capture-sequence` command (§4.2).
 
 The adapter owns:
 
@@ -29,6 +30,8 @@ The adapter owns:
   taxonomy;
 - the bounded `touch-cancel` native-touch stimulus required when `winapp` has no canceled-contact
   verb;
+- the bounded `capture-sequence` timed capture (click, UIA reads, and window captures a few hundred
+  milliseconds apart), required because per-command process startup takes seconds;
 - resolution of the external backend executable, with a test-only override.
 
 The adapter delegates to `winapp ui` for: UIA tree inspection, search, invoke, focus, value/property
@@ -65,15 +68,20 @@ The adapter embeds only the minimal P/Invoke needed for operations it owns: `Enu
 `GetDpiForWindow`, `MonitorFromWindow`, `GetMonitorInfoW`, `OpenInputDesktop`, and, only for
 `touch-cancel`, the Windows 10 1809+ synthetic-pointer API
 `CreateSyntheticPointerDevice`/`InjectSyntheticPointerInput`/`DestroySyntheticPointerDevice` plus
-the legacy `InitializeTouchInjection`/`InjectTouchInput` fallback.
+the legacy `InitializeTouchInjection`/`InjectTouchInput` fallback, and, only for
+`capture-sequence`, `SetProcessDpiAwarenessContext`, `SetCursorPos`, and `mouse_event` (one left
+click per `click` step), together with the managed UIA client and GDI+ screen capture.
 
 The adapter never adds generic Win32 input injection (`SendInput`, `mouse_event`, `keybd_event`,
 `PostMessage` as a click/keystroke substitute). All normal real mouse/keyboard/touch/pen delivery
 is `winapp ui`'s responsibility; duplicating it here would recreate exactly the ad-hoc,
 unclassified `SendInput` path that Issue #224 already showed reports success without observable
-effect on at least one host. The one documented exception is `touch-cancel`, which uses the Windows
+effect on at least one host. The two documented exceptions are `touch-cancel`, which uses the Windows
 touch-injection API solely to emit one complete canceled contact and never exposes retained contact
-state.
+state, and `capture-sequence`, whose `click` step clicks a point resolved and image-confirmed earlier
+in the same invocation, only while the target window is verified foreground. Neither exception's
+`success: true` is product evidence; acceptance comes from the observed postconditions (captured
+frames and UIA values).
 
 ## 4. UIA vs. real-input selection
 
@@ -125,6 +133,31 @@ explicitly unsupported API conditions are `environment_blocker`; and malformed n
 including `ERROR_INVALID_PARAMETER` are `tool_error` with the Win32 error. RDP/VM state and absent
 physical touch metrics are not capability gates. `success: true` is injection evidence only, never
 a product PASS.
+
+## 4.2 Bounded `capture-sequence` exception
+
+`capture-sequence --hwnd <hwnd> --steps <json> --output-dir <new dir>` executes one bounded JSON
+step list (`locate-button`, `locate-id`, `cache`, `foreground`, `click`, `sleep`, `capture`,
+`read`; at most 200 steps and 50 captures) in one process, stamping every step with UTC and one
+stopwatch. It provides the timing primitive of the orchestration design's animation capture
+lifecycle; it does not interpret cases, compile plans, or decide PASS/FAIL.
+
+Evidence ownership is per invocation. Before any window, desktop, input, or file-system work it
+validates every step, including each `capture.name` (one ASCII basename
+`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`, not a Windows device name, unique case-insensitively) and
+requires that `--output-dir` does not exist. PNGs and `sequence-result.json` are created only with
+`FileMode.CreateNew`; an existing file is never replaced, and `files` lists only frames actually
+written.
+
+A step failure stops the sequence (no later step, in particular no later click, runs) and is
+recorded with its index, op, timing, and reason. Categories follow §5: invalid input is
+`usage_error`, a missing window or element `target_error`, an unavailable desktop or foreground
+`environment_blocker`, and capture, PNG, result-JSON, or unexpected managed failures `tool_error`.
+A later save or cleanup error never replaces the primary failure. Graphics objects are always
+disposed, every captured Bitmap is disposed once in `finally`, and file streams are closed on every
+path; the command still prints exactly one JSON object, including when `sequence-result.json` could
+not be written (then `success` is false). Deterministic contract tests reach the same guarded path
+through the internal `ELWINDUI_DRIVER_CONTRACT_PROBE=sequence-fault` and `sequence-names` probes.
 
 ## 5. Error and result classification boundary
 

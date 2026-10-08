@@ -426,6 +426,114 @@ finally {
     Remove-Item -LiteralPath $SeqDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# R4 -- capture-sequence evidence safety (PR #291 round 4). Names are validated before any window,
+# desktop, or file-system work; outputs are created with CreateNew; failures keep one stdout JSON.
+$R4 = Join-Path ([System.IO.Path]::GetTempPath()) ("seq-r4-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $R4 | Out-Null
+function New-R4Steps([string]$Json) { $f = Join-Path $R4 ("steps-" + [guid]::NewGuid().ToString('N') + '.json'); $Json | Set-Content -LiteralPath $f -Encoding utf8; return $f }
+function Get-R4Hash([string]$Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
+try {
+    $sentinel = Join-Path $R4 'sentinel.png'
+    [System.IO.File]::WriteAllBytes($sentinel, [byte[]](1, 2, 3, 4))
+    $sentinelHash = Get-R4Hash $sentinel
+
+    # R4-T01 -- invalid capture names are usage_error before any side effect, even with a bogus HWND.
+    $badNames = @('null', '""', '"../escape"', '"..\\escape"', '"C:abs"', '"a.b"', '" "', '"frame 1"', '"ä"', '"CON"', '"lpt1"', ('"' + ('a' * 65) + '"'), '7')
+    foreach ($n in $badNames) {
+        $steps = New-R4Steps ('[{"op":"capture","name":' + $n + '}]')
+        $out = Join-Path $R4 ('out-t01-' + [guid]::NewGuid().ToString('N'))
+        $r = Invoke-Driver @('capture-sequence', '--hwnd', '1', '--steps', $steps, '--output-dir', $out)
+        Assert-OneJsonObject $r "R4-T01 name $n"
+        Assert ($r.Json.category -eq 'usage_error' -and $r.ExitCode -eq 1) "R4-T01 name $n -- usage_error, exit 1"
+        Assert (-not (Test-Path $out)) "R4-T01 name $n -- no output directory"
+    }
+    Assert ((Get-R4Hash $sentinel) -eq $sentinelHash) 'R4-T01 -- nearby sentinel unchanged'
+
+    # R4-T02 -- case-insensitive duplicates are rejected before execution.
+    foreach ($json in @('[{"op":"capture","name":"Frame"},{"op":"capture","name":"frame"}]', '[{"op":"capture","name":"shot"},{"op":"sleep","ms":1},{"op":"capture","name":"shot"}]')) {
+        $out = Join-Path $R4 ('out-t02-' + [guid]::NewGuid().ToString('N'))
+        $r = Invoke-Driver @('capture-sequence', '--hwnd', '1', '--steps', (New-R4Steps $json), '--output-dir', $out)
+        Assert ($r.Json.category -eq 'usage_error' -and $r.Json.error -match 'duplicates') "R4-T02 $json -- usage_error (duplicate)"
+        Assert (-not (Test-Path $out)) "R4-T02 $json -- no output directory"
+    }
+    $env:ELWINDUI_DRIVER_CONTRACT_PROBE = 'sequence-names'
+    try {
+        $r = Invoke-Driver @('capture-sequence', '--steps', (New-R4Steps '[{"op":"capture","name":"lr01_1600"},{"op":"capture","name":"frame-01"}]'))
+        Assert ($r.Json.success -eq $true -and $null -eq $r.Json.name_error) 'R4-T02 -- legal names lr01_1600 / frame-01 pass the shared preflight'
+    }
+    finally { Remove-Item Env:ELWINDUI_DRIVER_CONTRACT_PROBE -ErrorAction SilentlyContinue }
+
+    # R4-T03 -- a path-escaping name cannot reach a file outside the output directory.
+    $out = Join-Path $R4 'out-t03'
+    $r = Invoke-Driver @('capture-sequence', '--hwnd', '1', '--steps', (New-R4Steps '[{"op":"capture","name":"../sentinel"}]'), '--output-dir', $out)
+    Assert ($r.Json.category -eq 'usage_error') 'R4-T03 -- ../sentinel is usage_error'
+    Assert ((Get-R4Hash $sentinel) -eq $sentinelHash) 'R4-T03 -- external sentinel SHA-256 unchanged'
+    Assert (-not (Test-Path $out)) 'R4-T03 -- no output directory'
+
+    # R4-T04 -- an existing output dir is refused; a CreateNew PNG collision is tool_error and the
+    # pre-existing file keeps its bytes.
+    $existing = Join-Path $R4 'existing'
+    New-Item -ItemType Directory -Path $existing | Out-Null
+    $kept = Join-Path $existing 'frame.png'
+    [System.IO.File]::WriteAllBytes($kept, [byte[]](9, 9, 9))
+    $keptHash = Get-R4Hash $kept
+    $r = Invoke-Driver @('capture-sequence', '--hwnd', '1', '--steps', (New-R4Steps '[{"op":"capture","name":"frame"}]'), '--output-dir', $existing)
+    Assert ($r.Json.category -eq 'usage_error' -and $r.Json.error -match 'already exists') 'R4-T04 -- existing --output-dir is usage_error'
+    Assert ((Get-R4Hash $kept) -eq $keptHash) 'R4-T04 -- existing file unchanged'
+
+    $env:ELWINDUI_DRIVER_CONTRACT_PROBE = 'sequence-fault'
+    try {
+        $pc = Join-Path $R4 'probe-png'
+        $r = Invoke-Driver @('capture-sequence', '--fault', 'png-collision', '--output-dir', $pc)
+        Assert-OneJsonObject $r 'R4-T04 png collision probe'
+        Assert ($r.Json.run.success -eq $false -and $r.Json.run.category -eq 'tool_error' -and $r.Json.run.failure_stage -eq 'save-png') 'R4-T04 -- CreateNew PNG collision is tool_error at save-png'
+        Assert ($r.Json.pre_hashes.'b.png' -eq $r.Json.post_hashes.'b.png') 'R4-T04 -- colliding pre-existing b.png unchanged'
+        $saved = @($r.Json.run.files | ForEach-Object { Split-Path -Leaf $_ })
+        Assert (($saved -join ',') -eq 'a.png,c.png') 'R4-T06 -- files lists only the frames actually saved (a, c)'
+        Assert ($r.Json.run.result_json_persisted -eq $true) 'R4-T06 -- result JSON still persisted after a PNG failure'
+        Assert ($r.Json.all_tracked_disposed -eq $true -and $r.Json.tracked_count -ge 6) 'R4-T06 -- every Bitmap/Graphics disposed after a PNG failure'
+
+        # R4-T05 -- a capture exception after the Bitmap is allocated stops the sequence.
+        $ce = Join-Path $R4 'probe-capture'
+        $r = Invoke-Driver @('capture-sequence', '--fault', 'capture-exception', '--output-dir', $ce)
+        Assert-OneJsonObject $r 'R4-T05 capture exception probe'
+        $run = $r.Json.run
+        Assert ($run.success -eq $false -and $run.category -eq 'tool_error' -and $run.failure_stage -eq 'step') 'R4-T05 -- tool_error at the failing step'
+        Assert ($run.failed_step_index -eq 1 -and $run.failed_step_op -eq 'capture') 'R4-T05 -- failed step index/op recorded'
+        $failedRec = @($run.steps | Where-Object { $_.index -eq 1 })[0]
+        Assert ($failedRec.status -eq 'failed' -and $null -ne $failedRec.t_start_ms -and $null -ne $failedRec.t_end_ms -and $failedRec.error -match 'injected') 'R4-T05 -- failed step carries status, error, and timing'
+        Assert (-not (@($r.Json.executed) -contains 'click:after-b')) 'R4-T05 -- no later step (click) runs after the failure'
+        Assert ($r.Json.tracked_count -ge 4 -and $r.Json.all_tracked_disposed -eq $true) 'R4-T05 -- the failed Bitmap/Graphics and the retained frame are disposed'
+        $ceFiles = @($run.files | ForEach-Object { Split-Path -Leaf $_ })
+        Assert (($ceFiles -join ',') -eq 'a.png') 'R4-T05 -- the frame captured before the failure is kept'
+
+        # R4-T06 -- a result JSON collision is reported, never claimed as persisted or successful.
+        $rc = Join-Path $R4 'probe-result'
+        $r = Invoke-Driver @('capture-sequence', '--fault', 'result-collision', '--output-dir', $rc)
+        Assert-OneJsonObject $r 'R4-T06 result collision probe'
+        Assert ($r.Json.run.success -eq $false -and $r.Json.run.result_json_persisted -eq $false -and $r.Json.run.category -eq 'tool_error' -and $r.Json.run.failure_stage -eq 'result-json') 'R4-T06 -- unpersisted result JSON is tool_error, success:false'
+        Assert ($r.Json.pre_hashes.'sequence-result.json' -eq $r.Json.post_hashes.'sequence-result.json') 'R4-T06 -- pre-existing sequence-result.json unchanged'
+
+        # R4-T07 -- after a failure the same directory is refused and a new one is independent.
+        $before = @{}; foreach ($f in Get-ChildItem -LiteralPath $ce -File) { $before[$f.Name] = Get-R4Hash $f.FullName }
+        $r = Invoke-Driver @('capture-sequence', '--fault', 'capture-exception', '--output-dir', $ce)
+        Assert ($r.Json.category -eq 'usage_error') 'R4-T07 -- rerun into the same directory is refused (probe)'
+        Remove-Item Env:ELWINDUI_DRIVER_CONTRACT_PROBE -ErrorAction SilentlyContinue
+        $r = Invoke-Driver @('capture-sequence', '--hwnd', '1', '--steps', (New-R4Steps '[{"op":"capture","name":"a"}]'), '--output-dir', $ce)
+        Assert ($r.Json.category -eq 'usage_error') 'R4-T07 -- rerun into the same directory is refused (command)'
+        $after = @{}; foreach ($f in Get-ChildItem -LiteralPath $ce -File) { $after[$f.Name] = Get-R4Hash $f.FullName }
+        Assert ((($before.Keys | Sort-Object) -join ',') -eq (($after.Keys | Sort-Object) -join ',') -and @($before.Keys | Where-Object { $before[$_] -ne $after[$_] }).Count -eq 0) 'R4-T07 -- earlier PNG/result files unchanged'
+        $env:ELWINDUI_DRIVER_CONTRACT_PROBE = 'sequence-fault'
+        $ce2 = Join-Path $R4 'probe-capture-2'
+        $r = Invoke-Driver @('capture-sequence', '--fault', 'capture-exception', '--output-dir', $ce2)
+        Assert ((Test-Path (Join-Path $ce2 'a.png')) -and (Test-Path (Join-Path $ce2 'sequence-result.json'))) 'R4-T07 -- a new directory receives its own independent evidence'
+    }
+    finally { Remove-Item Env:ELWINDUI_DRIVER_CONTRACT_PROBE -ErrorAction SilentlyContinue }
+}
+finally {
+    Remove-Item -LiteralPath $R4 -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 if ($script:FailureCount -gt 0) {
     Write-Output "`n$script:FailureCount assertion(s) failed."
     exit 1

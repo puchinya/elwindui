@@ -534,6 +534,90 @@ finally {
     Remove-Item -LiteralPath $R4 -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# R5 -- capture-sequence UIA root initialization (PR #291 round 5, A-09). The root is resolved inside
+# Invoke-SequenceWithRoot; a failure is an `initialization` result persisted with CreateNew, no step
+# runs, and stdout stays one JSON object with exit 1.
+$R5 = Join-Path ([System.IO.Path]::GetTempPath()) ("seq-r5-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $R5 | Out-Null
+function Get-R5Saved([string]$Dir) { return (Get-Content -Raw -LiteralPath (Join-Path $Dir 'sequence-result.json') | ConvertFrom-Json) }
+try {
+    $env:ELWINDUI_DRIVER_CONTRACT_PROBE = 'sequence-init-fault'
+
+    # R5-T01 -- a categorized resolver failure stops before any step and is persisted.
+    $d1 = Join-Path $R5 't01'
+    $r = Invoke-Driver @('capture-sequence', '--fault', 'throw', '--output-dir', $d1)
+    Assert-OneJsonObject $r 'R5-T01'
+    Assert ($r.ExitCode -eq 1 -and $r.Json.success -eq $false) 'R5-T01 -- exit 1, success:false'
+    Assert ($r.Json.category -eq 'tool_error' -and $r.Json.failure_stage -eq 'initialization') 'R5-T01 -- tool_error / initialization'
+    Assert ($null -eq $r.Json.failed_step_index -and $null -eq $r.Json.failed_step_op) 'R5-T01 -- failed_step_index/op are null'
+    Assert (@($r.Json.steps).Count -eq 0 -and @($r.Json.files).Count -eq 0) 'R5-T01 -- steps and files are empty'
+    Assert (@($r.Json.probe_executed).Count -eq 0) 'R5-T01 -- no step (including the click recorder) ran'
+    Assert ($r.Json.result_json_persisted -eq $true -and (Test-Path (Join-Path $d1 'sequence-result.json'))) 'R5-T01 -- sequence-result.json persisted'
+    $saved = Get-R5Saved $d1
+    Assert ($saved.category -eq $r.Json.category -and $saved.error -eq $r.Json.error -and $saved.failure_stage -eq 'initialization') 'R5-T01 -- saved primary cause matches stdout'
+    Assert ($r.Json.error -match 'injected UIA root failure') 'R5-T01 -- original error kept'
+    Assert (@(Get-ChildItem -LiteralPath $d1 -Filter '*.png').Count -eq 0) 'R5-T01 -- no PNG created'
+
+    # R5-T02 -- a null root is target_error.
+    $d2 = Join-Path $R5 't02'
+    $r = Invoke-Driver @('capture-sequence', '--fault', 'null', '--output-dir', $d2)
+    Assert-OneJsonObject $r 'R5-T02'
+    Assert ($r.ExitCode -eq 1 -and $r.Json.category -eq 'target_error' -and $r.Json.failure_stage -eq 'initialization') 'R5-T02 -- null root is target_error / initialization, exit 1'
+    Assert (@($r.Json.probe_executed).Count -eq 0 -and (Test-Path (Join-Path $d2 'sequence-result.json'))) 'R5-T02 -- no step ran, result persisted'
+
+    # R5-T03 -- a plain exception with a gone HWND is target_error after the re-check.
+    $d3 = Join-Path $R5 't03'
+    $r = Invoke-Driver @('capture-sequence', '--fault', 'race', '--output-dir', $d3)
+    Assert-OneJsonObject $r 'R5-T03'
+    Assert ($r.ExitCode -eq 1 -and $r.Json.category -eq 'target_error' -and $r.Json.failure_stage -eq 'initialization') 'R5-T03 -- HWND gone: target_error / initialization'
+    Assert ($r.Json.error -match 'injected element-not-available') 'R5-T03 -- injected cause kept'
+    Assert (@($r.Json.probe_executed).Count -eq 0) 'R5-T03 -- no step ran'
+
+    # RD5-04 live-HWND branch: a plain exception while the window still exists is tool_error.
+    $d3b = Join-Path $R5 't03-alive'
+    $r = Invoke-Driver @('capture-sequence', '--fault', 'alive', '--output-dir', $d3b)
+    if ($r.Json.probe_skipped) { Write-Output "SKIP: R5 alive-HWND branch -- $($r.Json.probe_skipped)" }
+    else { Assert ($r.Json.category -eq 'tool_error' -and $r.Json.failure_stage -eq 'initialization') 'R5 (RD5-04) -- HWND alive: tool_error / initialization' }
+
+    # R5-T04 -- the result JSON collides: primary cause kept, existing bytes unchanged.
+    $d4 = Join-Path $R5 't04'
+    $r = Invoke-Driver @('capture-sequence', '--fault', 'throw-collision', '--output-dir', $d4)
+    Assert-OneJsonObject $r 'R5-T04'
+    Assert ($r.ExitCode -eq 1 -and $r.Json.category -eq 'tool_error' -and $r.Json.failure_stage -eq 'initialization') 'R5-T04 -- primary tool_error / initialization kept'
+    Assert ($r.Json.result_json_persisted -eq $false -and -not [string]::IsNullOrEmpty($r.Json.result_json_error)) 'R5-T04 -- result_json_persisted:false with result_json_error'
+    Assert ($r.Json.error -match 'injected UIA root failure') 'R5-T04 -- error is still the injected root failure'
+    Assert ($r.Json.probe_pre_hash -eq $r.Json.probe_post_hash) 'R5-T04 -- pre-existing sequence-result.json bytes unchanged'
+
+    # R5-T05 -- a valid root proceeds to Invoke-SequenceGuarded exactly as before.
+    $d5 = Join-Path $R5 't05'
+    $r = Invoke-Driver @('capture-sequence', '--fault', 'valid', '--output-dir', $d5)
+    Assert-OneJsonObject $r 'R5-T05'
+    Assert ($r.ExitCode -eq 0 -and $r.Json.success -eq $true -and $r.Json.result_json_persisted -eq $true) 'R5-T05 -- success, exit 0, result persisted'
+    Assert ((@($r.Json.probe_executed) -join ',') -eq 'sleep,read,click') 'R5-T05 -- every step ran once, in order'
+    Assert ((@($r.Json.steps | ForEach-Object { $_.status }) -join ',') -eq 'ok,ok,ok') 'R5-T05 -- step records are the usual guarded records'
+    Assert ($null -eq $r.Json.failure_stage) 'R5-T05 -- no failure_stage on success'
+
+    # R5-T06 -- a failed run's directory is never reused; a new directory is independent.
+    $before = Get-FileHash -LiteralPath (Join-Path $d1 'sequence-result.json') -Algorithm SHA256
+    $r = Invoke-Driver @('capture-sequence', '--fault', 'throw', '--output-dir', $d1)
+    Assert ($r.Json.category -eq 'usage_error') 'R5-T06 -- rerun into the failed directory is refused (probe)'
+    Remove-Item Env:ELWINDUI_DRIVER_CONTRACT_PROBE -ErrorAction SilentlyContinue
+    $okSteps = Join-Path $R5 'ok.json'
+    '[{"op":"sleep","ms":1}]' | Set-Content -LiteralPath $okSteps -Encoding utf8
+    $r = Invoke-Driver @('capture-sequence', '--hwnd', '1', '--steps', $okSteps, '--output-dir', $d1)
+    Assert ($r.Json.category -eq 'usage_error') 'R5-T06 -- rerun into the failed directory is refused (command)'
+    $after = Get-FileHash -LiteralPath (Join-Path $d1 'sequence-result.json') -Algorithm SHA256
+    Assert ($before.Hash -eq $after.Hash) 'R5-T06 -- the failed run''s result file is unchanged'
+    $env:ELWINDUI_DRIVER_CONTRACT_PROBE = 'sequence-init-fault'
+    $d6 = Join-Path $R5 't06-new'
+    $r = Invoke-Driver @('capture-sequence', '--fault', 'throw', '--output-dir', $d6)
+    Assert ($r.Json.failure_stage -eq 'initialization' -and (Test-Path (Join-Path $d6 'sequence-result.json'))) 'R5-T06 -- a new directory stores its own failure result'
+}
+finally {
+    Remove-Item Env:ELWINDUI_DRIVER_CONTRACT_PROBE -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $R5 -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 if ($script:FailureCount -gt 0) {
     Write-Output "`n$script:FailureCount assertion(s) failed."
     exit 1

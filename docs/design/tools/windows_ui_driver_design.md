@@ -157,7 +157,15 @@ A later save or cleanup error never replaces the primary failure. Graphics objec
 disposed, every captured Bitmap is disposed once in `finally`, and file streams are closed on every
 path; the command still prints exactly one JSON object, including when `sequence-result.json` could
 not be written (then `success` is false). Deterministic contract tests reach the same guarded path
-through the internal `ELWINDUI_DRIVER_CONTRACT_PROBE=sequence-fault` and `sequence-names` probes.
+through the internal `ELWINDUI_DRIVER_CONTRACT_PROBE=sequence-fault`, `sequence-names`, and
+`sequence-init-fault` probes.
+
+Resolving the UIA root of the target window is part of the same guarded lifecycle: it happens after
+the invocation-owned output directory exists, and only a non-null root lets any step run. A null
+root is `target_error`; an exception is `target_error` when the window has disappeared and
+`tool_error` otherwise. Such a failure is persisted like any other result (`failure_stage:
+initialization`, empty `steps` and `files`, null `failed_step_index`/`failed_step_op`) and still
+yields exactly one stdout JSON object with exit code 1.
 
 ## 5. Error and result classification boundary
 

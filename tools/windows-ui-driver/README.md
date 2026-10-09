@@ -154,8 +154,11 @@ Evidence safety:
   written with `CreateNew`, so existing evidence is never replaced; `files` lists only frames that
   were actually written.
 - The first failing step stops the run (no later click). The result carries `category`, `error`,
-  `failure_stage` (`step`, `save-png`, `result-json`, `cleanup`, `run`), `failed_step_index`, and
-  `failed_step_op`; frames captured before the failure are still saved. `result_json_persisted`
+  `failure_stage` (`initialization`, `step`, `save-png`, `result-json`, `cleanup`, `run`),
+  `failed_step_index`, and `failed_step_op`; frames captured before the failure are still saved.
+- The UIA root is resolved after the output directory is created. If that fails (`null` root:
+  `target_error`; exception: `target_error` when the window is gone, otherwise `tool_error`), no
+  step runs and the run is saved as `failure_stage: initialization` with empty `steps`/`files`. `result_json_persisted`
   says whether `sequence-result.json` was written; if not, `success` is false.
 - A locked desktop or non-foreground target is `environment_blocker`; a missing window or element
   is `target_error`; capture, save, and unexpected failures are `tool_error`.

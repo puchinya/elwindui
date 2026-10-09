@@ -950,6 +950,7 @@ function Cmd-ContractProbe {
         }
         'sequence-fault' { Invoke-SequenceFaultProbe }
         'sequence-names' { Invoke-SequenceNamesProbe }
+        'sequence-init-fault' { Invoke-SequenceInitFaultProbe }
         default { Emit-Result @{ success = $false; category = 'usage_error'; error = 'unknown driver contract probe' } }
     }
 }
@@ -1645,18 +1646,68 @@ function Invoke-SequenceGuarded {
     }
     if ($saveErrors.Count -gt 0) { $result['save_errors'] = @($saveErrors) }
     if ($cleanupErrors.Count -gt 0) { $result['cleanup_errors'] = @($cleanupErrors) }
+    return (Complete-SequenceResult -Result $result -OutDir $OutDir)
+}
+
+# Persists the result once as `<OutDir>/sequence-result.json` with CreateNew (never replacing a file)
+# and records the outcome only in the returned (stdout) result: `result_json_persisted` and, on
+# failure, `result_json_error`. A failure that already exists keeps its category, error, and stage;
+# only an otherwise successful run becomes `tool_error` / `result-json`. Never emits.
+function Complete-SequenceResult {
+    param([hashtable]$Result, [string]$OutDir)
+    $priorFailure = ($Result['success'] -eq $false)
     $resultPath = Join-Path $OutDir 'sequence-result.json'
     try {
-        Save-SequenceResultNew -Result $result -Path $resultPath
-        $result['result_json_persisted'] = $true
+        Save-SequenceResultNew -Result $Result -Path $resultPath
+        $Result['result_json_persisted'] = $true
     }
     catch {
-        $result['result_json_persisted'] = $false
-        $result['result_json_error'] = $_.Exception.Message
-        $result['success'] = $false
-        if (-not $fail) { $result['category'] = 'tool_error'; $result['error'] = "sequence-result.json was not persisted: $($_.Exception.Message)"; $result['failure_stage'] = 'result-json' }
+        $Result['result_json_persisted'] = $false
+        $Result['result_json_error'] = $_.Exception.Message
+        $Result['success'] = $false
+        if (-not $priorFailure) { $Result['category'] = 'tool_error'; $Result['error'] = "sequence-result.json was not persisted: $($_.Exception.Message)"; $Result['failure_stage'] = 'result-json' }
     }
-    return $result
+    return $Result
+}
+
+# Resolves the UIA root inside the guarded lifecycle (after the invocation-owned output directory
+# exists). Only a non-null root proceeds to Invoke-SequenceGuarded; otherwise no step runs and an
+# `initialization` failure is persisted and returned. Classification: a null root is target_error; a
+# categorized failure keeps its category; any other exception re-checks the HWND (gone: target_error,
+# alive or re-check failed: tool_error). `$RootResolver` exists so contract probes can inject faults;
+# it is not a product setting. Never emits.
+function Invoke-SequenceWithRoot {
+    param([object[]]$Steps, [string]$OutDir, [IntPtr]$Hwnd, [scriptblock]$RootResolver, [scriptblock]$StepRunner)
+    $category = $null; $message = $null
+    $state = $null
+    try {
+        $root = & $RootResolver $Hwnd
+        if ($null -eq $root) {
+            $category = 'target_error'; $message = "UIA root not available for hwnd $([int64]$Hwnd)"
+        }
+        else {
+            $state = @{ root = $root; hwnd = $Hwnd; points = @{}; cache = @{} }
+        }
+    }
+    catch {
+        $ex = $_.Exception
+        $message = "UIA root initialization failed: $($ex.Message)"
+        $tagged = if ($ex.Data.Contains('sequence_category')) { [string]$ex.Data['sequence_category'] } else { $null }
+        if ($tagged -eq 'target_error' -or $tagged -eq 'tool_error') { $category = $tagged }
+        else {
+            try { $category = if ([ElwindUI.Win32Driver]::IsWindow($Hwnd)) { 'tool_error' } else { 'target_error' } }
+            catch { $category = 'tool_error'; $message = "$message (HWND re-check failed: $($_.Exception.Message))" }
+        }
+    }
+    if ($null -eq $state) {
+        $result = @{
+            success = $false; category = $category; error = $message; failure_stage = 'initialization'
+            failed_step_index = $null; failed_step_op = $null
+            hwnd = [int64]$Hwnd; output_dir = $OutDir; steps = @(); files = @()
+        }
+        return (Complete-SequenceResult -Result $result -OutDir $OutDir)
+    }
+    return (Invoke-SequenceGuarded -Steps $Steps -OutDir $OutDir -Hwnd ([int64]$Hwnd) -StepRunner $StepRunner -State $state)
 }
 
 # The production step runner. Failures are raised as categorized exceptions.
@@ -1765,8 +1816,8 @@ function Cmd-CaptureSequence {
     try { New-Item -ItemType Directory -Path $outDir -ErrorAction Stop | Out-Null }
     catch { Emit-Result @{ success = $false; category = 'tool_error'; error = "cannot create --output-dir: $($_.Exception.Message)" } }
 
-    $state = @{ root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd); hwnd = $hwnd; points = @{}; cache = @{} }
-    $result = Invoke-SequenceGuarded -Steps $steps -OutDir $outDir -Hwnd ([int64]$hwnd) -StepRunner $SequenceStepRunner -State $state
+    $resolver = { param([IntPtr]$h) [System.Windows.Automation.AutomationElement]::FromHandle($h) }
+    $result = Invoke-SequenceWithRoot -Steps $steps -OutDir $outDir -Hwnd $hwnd -RootResolver $resolver -StepRunner $SequenceStepRunner
     Emit-Result $result
 }
 
@@ -1836,6 +1887,60 @@ function Invoke-SequenceFaultProbe {
         post_hashes = $postHashes
         files_on_disk = @(Get-ChildItem -LiteralPath $outDir -File | ForEach-Object { $_.Name } | Sort-Object)
     }
+}
+
+# Contract probe (ELWINDUI_DRIVER_CONTRACT_PROBE=sequence-init-fault): drives the real
+# Invoke-SequenceWithRoot / Complete-SequenceResult / Invoke-SequenceGuarded with an injected root
+# resolver and a recording step runner (its click performs no input). `--fault`: `throw` (categorized
+# tool_error), `null`, `race` (plain exception with an invalid HWND), `alive` (plain exception with a
+# live top-level window, when one exists), `valid` (fake root, safe steps), `throw-collision` (`throw`
+# plus a pre-existing sequence-result.json). Emits the production-shaped result plus `probe_*` fields.
+function Invoke-SequenceInitFaultProbe {
+    $fault = Require-Arg 'fault'
+    $outDir = Require-Arg 'output-dir'
+    if (Test-Path -LiteralPath $outDir) { Emit-UsageError "--output-dir already exists (evidence is never overwritten): $outDir" }
+    $hwnd = [IntPtr]1
+    switch ($fault) {
+        'throw' { $resolver = { param($h) throw (New-SequenceFailure 'tool_error' 'injected UIA root failure') } }
+        'throw-collision' { $resolver = { param($h) throw (New-SequenceFailure 'tool_error' 'injected UIA root failure') } }
+        'null' { $resolver = { param($h) $null } }
+        'race' { $resolver = { param($h) throw [System.InvalidOperationException]::new('injected element-not-available') } }
+        'alive' {
+            $live = [IntPtr]::Zero
+            foreach ($pr in (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero })) { $live = $pr.MainWindowHandle; break }
+            if ($live -eq [IntPtr]::Zero) { Emit-Result @{ success = $true; probe_skipped = 'no live top-level window on this host' } }
+            $hwnd = $live
+            $resolver = { param($h) throw [System.InvalidOperationException]::new('injected UIA failure with a live window') }
+        }
+        'valid' { $resolver = { param($h) [pscustomobject]@{ fake_root = $true } } }
+        default { Emit-UsageError "unknown --fault: $fault" }
+    }
+    New-Item -ItemType Directory -Path $outDir | Out-Null
+    $preHash = $null
+    if ($fault -eq 'throw-collision') {
+        [System.IO.File]::WriteAllBytes((Join-Path $outDir 'sequence-result.json'), [byte[]](83, 69, 78, 84))
+        $preHash = (Get-FileHash -LiteralPath (Join-Path $outDir 'sequence-result.json') -Algorithm SHA256).Hash
+    }
+    $script:SequenceProbeExecuted = [System.Collections.Generic.List[string]]::new()
+    $runner = {
+        param($s, $rec, $frames, $State)
+        $script:SequenceProbeExecuted.Add([string]$s.op)
+        if ($s.op -eq 'read') { $rec.name = [string]$s.name; $rec.values = [ordered]@{} }
+        if ($s.op -eq 'sleep') { Start-Sleep -Milliseconds ([int]$s.ms); $rec.ms = [int]$s.ms }
+        if ($s.op -eq 'click') { $rec.label = 'probe recorder (no input)' }
+    }
+    $steps = @(
+        [pscustomobject]@{ op = 'sleep'; ms = 1 },
+        [pscustomobject]@{ op = 'read'; name = 'r1'; ids = @() },
+        [pscustomobject]@{ op = 'click'; x = 0; y = 0 }
+    )
+    $result = Invoke-SequenceWithRoot -Steps $steps -OutDir $outDir -Hwnd $hwnd -RootResolver $resolver -StepRunner $runner
+    $result['probe_executed'] = @($script:SequenceProbeExecuted)
+    if ($null -ne $preHash) {
+        $result['probe_pre_hash'] = $preHash
+        $result['probe_post_hash'] = (Get-FileHash -LiteralPath (Join-Path $outDir 'sequence-result.json') -Algorithm SHA256).Hash
+    }
+    Emit-Result $result
 }
 
 # Preflight-only probe (ELWINDUI_DRIVER_CONTRACT_PROBE=sequence-names): reports the shared

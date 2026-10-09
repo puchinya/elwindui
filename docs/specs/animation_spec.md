@@ -132,6 +132,54 @@ dynamic slot creates a new child; it never resurrects the old exiting child.
 Owner teardown and `DynamicChildSlot::clear` are immediate and do not play
 exit transitions.
 
+## Layout reflow
+
+A structural mutation changes which children participate in layout: adding,
+inserting, removing, or reordering a Visual child, beginning an exit
+transition, or changing `visibility` between `Visible` and `Collapsed`. Layout
+always resolves the resulting target structure immediately; it never keeps
+space for an exiting child and never solves intermediate structural layouts.
+
+When such a mutation runs inside an animated transaction, every *pre-existing*
+Active, Visible element whose arranged position within its parent changes as a
+direct layout consequence animates only its position (x/y) from the location
+it was last rendered at to its new target location. The implicit-scope rule
+that unrelated siblings are not animated refers to property mutations; it does
+not exclude the layout consequence of a structural mutation made inside the
+scope. Size changes caused by a structural mutation snap to target. Explicit
+property animations of `width`, `height`, `margin`, and min/max continue to
+move siblings through ordinary layout and never start an additional reflow.
+
+The following never reflow: newly inserted or newly visible elements (they use
+only their own insertion transition, if any), exiting elements (they keep
+rendering at their last position under their removal transition), collapsed
+elements, and the initial mount of a hosted tree. An element whose parent
+moves does not additionally reflow by the parent's displacement.
+
+Reflow is a presentation translation applied before the element's own base
+and transition transforms, in the parent's layout axes:
+
+```text
+T(arranged offset) * T(layout reflow) * local_transform(base composed with transition)
+```
+
+Public getters, layout participation, and application state remain target
+values. Rendering, hit testing, clipping, native projection, and accessibility
+bounds use the same composed presentation, so a moving Active element receives
+input at its visible position. Exiting elements remain non-interactive.
+
+Retargeting is continuous: if an element already shows a reflow translation
+`D` and a new structural change moves its target from `L_old` to `L_new`, the
+new translation starts at `D + (L_old - L_new)`, so the visible position does
+not jump, and a spring keeps its current velocity. A structural mutation
+outside an animated transaction, with `disables_animations`, a zero duration,
+or `reduce_motion = true` snaps the moved elements to their target and cancels
+their reflow. Turning `reduce_motion` on during a reflow snaps it to target and
+schedules no further reflow frames. Non-finite geometry snaps instead of
+animating. When several structural mutations happen before the next layout,
+the last one decides whether the change animates, and the starting point is
+the last rendered position.
+
 ## Input, clipping, and reduced motion
 
 Hit testing follows the rendered presentation transform. The algorithm carries

@@ -19,7 +19,7 @@ semantics. Only the selected tester model and each provider's own sub-agent mech
 
 ```text
 Codex target:  gpt-6-luna, reasoning effort explicitly medium
-Claude Code:  Claude Haiku 4.5, normal/default reasoning configuration
+Claude Code:  Claude Haiku 5.5, normal/default reasoning configuration
               (do not enable extended thinking for routine E2E execution)
 ```
 
@@ -97,6 +97,14 @@ injection API success alone is never native product evidence.
 For PC-11 only, start the complete bounded `touch-cancel --hold-ms <bounded>` invocation as a
 background PowerShell process, wait until the trace proves press acceptance and native capture,
 then terminate the product normally. Reap the driver process on PASS, FAIL, and BLOCKED paths.
+
+## Timed animation capture
+
+When acceptance needs frames or element positions a few hundred milliseconds apart (for example
+the layout reflow cases in `tests/e2e/layout-reflow-animation.md`), use the driver's
+`capture-sequence` command instead of separate `capture-window`/`search` calls, whose process
+startup alone takes 2–3 s each. Resolve buttons and elements in the same step list before the
+first click, and use plain `sleep` steps for timing. See the driver README for the step format.
 
 ## Host-context execution
 

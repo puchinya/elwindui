@@ -22,7 +22,7 @@ provider-specific sub-agent mechanism differ:
 
 ```text
 Codex target:  gpt-6-luna, reasoning effort explicitly medium
-Claude Code:  Claude Haiku 4.5, normal/default reasoning configuration
+Claude Code:  Claude Haiku 5.5, normal/default reasoning configuration
               (do not enable extended thinking for routine E2E execution)
 ```
 

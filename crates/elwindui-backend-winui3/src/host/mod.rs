@@ -1958,6 +1958,10 @@ impl TreeHost {
         if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
             eprintln!("[elwindui-winui3] TreeHost active={active}");
         }
+        // Layout reflow is presentation of the retained tree this host is about to drop (or has
+        // dropped): discard it at both edges so no stale displacement, intent, or reflow frame
+        // survives an inactive period. Other animation channels are untouched.
+        self.animation_runtime.discard_layout_reflows();
         if active {
             let canvas_ui: UIElement = self.canvas.clone().cast().expect("Canvas is a UIElement");
             let _ = canvas_ui.SetIsHitTestVisible(true);
@@ -3140,6 +3144,94 @@ pub(crate) mod live_input_surface_tests {
             surface_count, 1,
             "exactly one permanent input surface must remain attached"
         );
+    }
+
+    fn reflow_group_dy(panel: &TreeHost, element: &Rc<dyn elwindui_core::ui::UIElementExt>) -> f32 {
+        let render_tree = panel.render_tree.borrow();
+        let render_tree = render_tree
+            .as_ref()
+            .expect("an active host retains a RenderTree");
+        let path = render_tree
+            .group_paths
+            .get(&element.render_group_id())
+            .expect("element has a retained group");
+        let mut group = &render_tree.root;
+        for index in path {
+            group = &group.children[*index];
+        }
+        group.transform.dy
+    }
+
+    /// Issue #290 PR #291 remediation (REM-01/REM-03): `set_active(false)` discards layout reflow
+    /// while other animation channels survive, and reactivation never shows a stale displacement,
+    /// including after a structural change made while inactive.
+    pub(crate) fn live_set_active_discards_layout_reflow() {
+        use elwindui_core::ui::{
+            Animation, LayoutExt, UIElementExt, VerticalLayout, with_animation,
+        };
+        use std::time::Duration;
+
+        let panel = TreeHost::new();
+        panel
+            .set_viewport(TreeHostViewport {
+                width: Some(320.0),
+                height: Some(240.0),
+            })
+            .expect("set constrained viewport");
+        let layout = VerticalLayout::new();
+        let children = layout.children().clone();
+        let leaf = || {
+            let leaf = elwindui_core::ui::Rectangle::new();
+            leaf.set_height(20.0);
+            let leaf: Rc<dyn UIElementExt> = leaf;
+            leaf
+        };
+        let (a, b, c) = (leaf(), leaf(), leaf());
+        for item in [&a, &b, &c] {
+            children.add(Rc::clone(item));
+        }
+        let root: Rc<dyn UIElementExt> = layout;
+        panel.set_tree(Rc::clone(&root));
+        assert_eq!(reflow_group_dy(&panel, &c), 0.0);
+
+        let long = Animation::linear(Duration::from_secs(60));
+        with_animation(long, || {
+            assert!(children.remove(&b));
+            a.as_ui_element().set_opacity(0.5);
+        });
+        root.flush_interactive_relayout();
+        assert_eq!(
+            reflow_group_dy(&panel, &c),
+            20.0,
+            "C starts its reflow at the old rendered position"
+        );
+
+        panel.set_active(false);
+        assert!(panel.render_tree.borrow().is_none());
+        panel.set_active(true);
+        assert_eq!(
+            reflow_group_dy(&panel, &c),
+            0.0,
+            "reactivation shows no stale reflow displacement"
+        );
+        assert_eq!(
+            c.arranged_offset().map(|offset| offset.y),
+            Some(20.0),
+            "C sits at its target after reactivation"
+        );
+
+        // A structural change made while inactive snaps on the fresh tree.
+        panel.set_active(false);
+        with_animation(long, || assert!(children.remove(&a)));
+        panel.set_active(true);
+        assert_eq!(c.arranged_offset().map(|offset| offset.y), Some(0.0));
+        assert_eq!(reflow_group_dy(&panel, &c), 0.0);
+
+        // The unrelated opacity channel survived both discards and still reaches its target.
+        assert!(!panel.animation_runtime.is_idle());
+        assert_eq!(a.presentation_opacity(), 1.0);
+        panel.animation_runtime.tick(Duration::from_secs(3600));
+        assert_eq!(a.presentation_opacity(), 0.5);
     }
 
     pub(crate) fn live_input_surface_creation_persistence_viewport_and_source_classification() {

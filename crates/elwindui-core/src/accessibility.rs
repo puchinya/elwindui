@@ -389,11 +389,7 @@ fn bounds_in_root(node: &Rc<dyn UIElementExt>) -> Rect {
         };
         let offset = item.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
         let layout = AffineTransform::translation(offset.x, offset.y);
-        let local = crate::ui::local_transform(
-            item.presentation_visual_transform(),
-            item.transform_origin(),
-            size,
-        );
+        let local = crate::ui::effective_local_presentation_transform(item.as_ref(), size);
         transform = transform.concat(&layout.concat(&local));
     }
 
@@ -617,5 +613,67 @@ mod tests {
         assert_eq!(snapshot.roots[0].id, content.accessibility_id());
         assert_eq!(snapshot.roots[0].semantics.role, AccessibilityRole::Button);
         assert_eq!(snapshot.roots[0].semantics.label.as_deref(), Some("Save"));
+    }
+
+    #[test]
+    fn rf08_semantic_bounds_follow_the_layout_reflow_presentation() {
+        use crate::ui::testsupport::{ReflowFixture, reflow_of};
+        let mut fx = ReflowFixture::new(&["a", "b", "c"]);
+        let (b, c) = (fx.item(1), fx.item(2));
+        crate::ui::with_animation(
+            crate::ui::Animation::linear(std::time::Duration::from_millis(100)),
+            || assert!(fx.children.remove(&b)),
+        );
+        fx.relayout();
+        assert_eq!(reflow_of(&c).y, 20.0);
+        let bounds = bounds_in_root(&c);
+        assert_eq!(bounds.y, 40.0, "shown, not target, position");
+        assert_eq!(bounds.height, 20.0);
+        fx.tick_ms(100);
+        fx.relayout();
+        assert_eq!(bounds_in_root(&c).y, 20.0);
+    }
+
+    struct CountingHost(std::cell::Cell<usize>);
+
+    impl AccessibilityHost for CountingHost {
+        fn request_accessibility_update(&self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    #[test]
+    fn rem07_dead_first_child_does_not_suppress_the_refresh_of_live_reflows() {
+        use crate::ui::testsupport::{ReflowFixture, reflow_of, visible_y};
+        let mut fx = ReflowFixture::new(&["a", "b", "c", "d"]);
+        let (a, b, c, d) = (fx.item(0), fx.item(1), fx.item(2), fx.item(3));
+        let host = Rc::new(CountingHost(std::cell::Cell::new(0)));
+        fx.root
+            .set_accessibility_host(Some(host.clone() as Rc<dyn AccessibilityHost>));
+        crate::ui::with_animation(
+            crate::ui::Animation::linear(std::time::Duration::from_millis(100)),
+            || assert!(fx.children.remove(&a)),
+        );
+        fx.relayout();
+        assert_eq!(fx.host.runtime.layout_reflow_count(), 3);
+
+        // B's reflow target dies; C and D keep reflowing.
+        let weak_b = Rc::downgrade(&b);
+        assert!(fx.children.remove(&b));
+        fx.items.retain(|item| !Rc::ptr_eq(item, &b));
+        drop(b);
+        assert!(weak_b.upgrade().is_none());
+
+        let before = host.0.get();
+        assert!(fx.tick_ms(50));
+        assert_eq!(host.0.get(), before + 1, "exactly one refresh for the tick");
+        assert!(reflow_of(&c).y > 0.0);
+        let bounds = bounds_in_root(&c);
+        assert_eq!(
+            bounds.y,
+            visible_y(&c),
+            "semantic bounds use this frame's shown position"
+        );
+        assert_eq!(bounds_in_root(&d).y, visible_y(&d));
     }
 }

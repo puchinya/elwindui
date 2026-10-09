@@ -30,7 +30,7 @@ param(
         'doctor', 'launch', 'list-windows', 'focus-window',
         'inspect', 'search', 'invoke', 'get-value', 'set-value', 'get-property', 'set-focus', 'wait-for',
         'capture-window', 'point-click', 'drag', 'touch-cancel', 'send-keys',
-        'move-window', 'resize-window', 'terminate'
+        'move-window', 'resize-window', 'terminate', 'capture-sequence'
     )]
     [string]$Command,
 
@@ -948,6 +948,9 @@ function Cmd-ContractProbe {
                 failure_exception_has_cleanup_error_code = $failureException.ContainsKey('cleanup_device_destroy_error_code')
             }
         }
+        'sequence-fault' { Invoke-SequenceFaultProbe }
+        'sequence-names' { Invoke-SequenceNamesProbe }
+        'sequence-init-fault' { Invoke-SequenceInitFaultProbe }
         default { Emit-Result @{ success = $false; category = 'usage_error'; error = 'unknown driver contract probe' } }
     }
 }
@@ -1455,6 +1458,500 @@ function Cmd-Terminate {
 }
 
 # ---------------------------------------------------------------------------
+# capture-sequence -- the second bounded in-process exception (after touch-cancel). Timed acceptance
+# evidence needs a click, screen captures, and UIA reads a few hundred milliseconds apart, which
+# per-command process startup (2-3 s each) cannot provide. One invocation executes a fixed JSON
+# step list in order; waits are plain sleeps; every step is stamped with UTC and the elapsed
+# milliseconds of one Stopwatch. Coordinates are resolved before the timed steps (`locate-*`), the
+# click requires a verified foreground target, and captures stay in memory until the end.
+# ---------------------------------------------------------------------------
+
+function Initialize-SequenceInterop {
+    if (-not ("ElwindUI.SequenceInput" -as [type])) {
+        Add-Type -Namespace ElwindUI -Name SequenceInput -MemberDefinition @"
+[DllImport("user32.dll")]
+public static extern IntPtr SetProcessDpiAwarenessContext(IntPtr value);
+[DllImport("user32.dll")]
+[return: MarshalAs(UnmanagedType.Bool)]
+public static extern bool SetCursorPos(int x, int y);
+[DllImport("user32.dll")]
+public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+public static void LeftClick(int x, int y) {
+    SetCursorPos(x, y);
+    mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
+    mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
+}
+"@
+    }
+    # Per-monitor-v2 awareness so window rects, UIA bounds, cursor and capture share physical px.
+    [void][ElwindUI.SequenceInput]::SetProcessDpiAwarenessContext([IntPtr](-4))
+    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing.Common
+}
+
+function Get-SequenceWindowRect {
+    param([IntPtr]$Handle)
+    $r = New-Object ElwindUI.Win32Driver+RECT
+    [void][ElwindUI.Win32Driver]::GetWindowRect($Handle, [ref]$r)
+    return $r
+}
+
+# Captures a screen rect into a new Bitmap. The Graphics is always disposed; the Bitmap is disposed
+# here unless it is returned, so a failed copy never leaks or hands back a half-made frame.
+# `-Copy` and `-Track` are internal seams for the contract probe only (a substitute copy action and a
+# list that records every allocated object so disposal can be checked); the command never sets them.
+function New-SequenceCapture {
+    param($Rect, [scriptblock]$Copy = $null, [System.Collections.Generic.List[object]]$Track = $null)
+    $w = $Rect.Right - $Rect.Left; $h = $Rect.Bottom - $Rect.Top
+    $bmp = $null; $g = $null; $handedOver = $false
+    try {
+        $bmp = [System.Drawing.Bitmap]::new($w, $h)
+        if ($null -ne $Track) { $Track.Add($bmp) }
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        if ($null -ne $Track) { $Track.Add($g) }
+        if ($Copy) { & $Copy $g }
+        else { $g.CopyFromScreen($Rect.Left, $Rect.Top, 0, 0, [System.Drawing.Size]::new($w, $h)) }
+        $handedOver = $true
+        return $bmp
+    }
+    finally {
+        if ($null -ne $g) { $g.Dispose() }
+        if (-not $handedOver -and $null -ne $bmp) { $bmp.Dispose() }
+    }
+}
+
+function Get-SequenceBounds {
+    param($Element)
+    if ($null -eq $Element) { return $null }
+    try {
+        $b = $Element.Current.BoundingRectangle
+        if ($b.IsEmpty) { return $null }
+        return [ordered]@{ x = [int]$b.X; y = [int]$b.Y; width = [int]$b.Width; height = [int]$b.Height; name = $Element.Current.Name }
+    }
+    catch { return $null }
+}
+
+# Side-effect-free preflight of every capture step's name. Returns an error message or $null.
+# A name is one ASCII basename: ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$, not a Windows device name, and
+# unique within the invocation (OrdinalIgnoreCase, before '.png' is appended).
+function Test-SequenceCaptureNames {
+    param([object[]]$Steps)
+    $reserved = @('CON', 'PRN', 'AUX', 'NUL') + (1..9 | ForEach-Object { "COM$_"; "LPT$_" })
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    for ($i = 0; $i -lt $Steps.Count; $i++) {
+        $s = $Steps[$i]
+        if ($s.op -ne 'capture') { continue }
+        $name = $s.name
+        if (-not ($name -is [string])) { return "step ${i}: capture.name must be a string" }
+        if ($name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$') { return "step ${i}: capture.name '$name' must match ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$" }
+        if ($reserved -contains $name.ToUpperInvariant()) { return "step ${i}: capture.name '$name' is a reserved Windows device name" }
+        if (-not $seen.Add($name)) { return "step ${i}: capture.name '$name' duplicates an earlier capture name (case-insensitive)" }
+    }
+    return $null
+}
+
+# Raises a step failure carrying its result category for Invoke-SequenceGuarded.
+function New-SequenceFailure {
+    param([string]$Category, [string]$Message)
+    $e = [System.InvalidOperationException]::new($Message)
+    $e.Data['sequence_category'] = $Category
+    return $e
+}
+
+# Writes bytes through a new file only (FileMode.CreateNew): an existing file is never replaced.
+function Save-SequencePngNew {
+    param([System.Drawing.Bitmap]$Bitmap, [string]$Path)
+    $stream = $null
+    try {
+        $stream = [System.IO.FileStream]::new($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $Bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Save-SequenceResultNew {
+    param([hashtable]$Result, [string]$Path)
+    $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes(($Result | ConvertTo-Json -Depth 8))
+    $stream = $null
+    try {
+        $stream = [System.IO.FileStream]::new($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $stream.Write($bytes, 0, $bytes.Length)
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+# Runs validated steps through $StepRunner (param: step, record, frames list, state), then persists
+# the captured frames and the result into the already-created, invocation-owned $OutDir. Any step
+# failure stops the sequence (no later step, in particular no later click, runs). Frames are saved
+# independently with CreateNew; every Bitmap is disposed in `finally`. The primary failure is never
+# replaced by a later save or cleanup error. Returns the result hashtable; the caller emits it once.
+function Invoke-SequenceGuarded {
+    param([object[]]$Steps, [string]$OutDir, [long]$Hwnd, [scriptblock]$StepRunner, [hashtable]$State)
+    $frames = [System.Collections.Generic.List[object]]::new()
+    $records = [System.Collections.Generic.List[object]]::new()
+    $files = [System.Collections.Generic.List[string]]::new()
+    $saveErrors = [System.Collections.Generic.List[object]]::new()
+    $cleanupErrors = [System.Collections.Generic.List[string]]::new()
+    $fail = $null
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        for ($i = 0; $i -lt $Steps.Count; $i++) {
+            $s = $Steps[$i]
+            $rec = [ordered]@{ index = $i; op = $s.op; utc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ'); t_start_ms = [math]::Round($sw.Elapsed.TotalMilliseconds, 1) }
+            try {
+                & $StepRunner $s $rec $frames $State
+                $rec.status = 'ok'
+            }
+            catch {
+                $ex = $_.Exception
+                $category = if ($ex.Data.Contains('sequence_category')) { [string]$ex.Data['sequence_category'] } else { 'tool_error' }
+                $rec.status = 'failed'; $rec.error = $ex.Message
+                $fail = @{ category = $category; error = $ex.Message; stage = 'step'; failed_step_index = $i; failed_step_op = [string]$s.op }
+            }
+            $rec.t_end_ms = [math]::Round($sw.Elapsed.TotalMilliseconds, 1)
+            $records.Add($rec)
+            if ($fail) { break }
+        }
+        foreach ($f in $frames) {
+            $path = Join-Path $OutDir ($f.name + '.png')
+            try {
+                Save-SequencePngNew -Bitmap $f.bmp -Path $path
+                $files.Add($path)
+            }
+            catch {
+                $saveErrors.Add([ordered]@{ name = $f.name; path = $path; error = $_.Exception.Message })
+                if (-not $fail) { $fail = @{ category = 'tool_error'; error = "PNG save failed for '$($f.name)': $($_.Exception.Message)"; stage = 'save-png'; failed_step_index = $null; failed_step_op = $null } }
+            }
+        }
+    }
+    catch {
+        if (-not $fail) { $fail = @{ category = 'tool_error'; error = "unexpected failure: $($_.Exception.Message)"; stage = 'run'; failed_step_index = $null; failed_step_op = $null } }
+    }
+    finally {
+        $sw.Stop()
+        foreach ($f in $frames) {
+            try { $f.bmp.Dispose() } catch { $cleanupErrors.Add("dispose '$($f.name)': $($_.Exception.Message)") }
+        }
+    }
+    if (-not $fail -and $cleanupErrors.Count -gt 0) {
+        $fail = @{ category = 'tool_error'; error = 'cleanup failed'; stage = 'cleanup'; failed_step_index = $null; failed_step_op = $null }
+    }
+    $result = @{ success = ($null -eq $fail); hwnd = $Hwnd; output_dir = $OutDir; steps = @($records); files = @($files) }
+    if ($fail) {
+        $result['category'] = $fail.category; $result['error'] = $fail.error; $result['failure_stage'] = $fail.stage
+        $result['failed_step_index'] = $fail.failed_step_index; $result['failed_step_op'] = $fail.failed_step_op
+    }
+    if ($saveErrors.Count -gt 0) { $result['save_errors'] = @($saveErrors) }
+    if ($cleanupErrors.Count -gt 0) { $result['cleanup_errors'] = @($cleanupErrors) }
+    return (Complete-SequenceResult -Result $result -OutDir $OutDir)
+}
+
+# Persists the result once as `<OutDir>/sequence-result.json` with CreateNew (never replacing a file)
+# and records the outcome only in the returned (stdout) result: `result_json_persisted` and, on
+# failure, `result_json_error`. A failure that already exists keeps its category, error, and stage;
+# only an otherwise successful run becomes `tool_error` / `result-json`. Never emits.
+function Complete-SequenceResult {
+    param([hashtable]$Result, [string]$OutDir)
+    $priorFailure = ($Result['success'] -eq $false)
+    $resultPath = Join-Path $OutDir 'sequence-result.json'
+    try {
+        Save-SequenceResultNew -Result $Result -Path $resultPath
+        $Result['result_json_persisted'] = $true
+    }
+    catch {
+        $Result['result_json_persisted'] = $false
+        $Result['result_json_error'] = $_.Exception.Message
+        $Result['success'] = $false
+        if (-not $priorFailure) { $Result['category'] = 'tool_error'; $Result['error'] = "sequence-result.json was not persisted: $($_.Exception.Message)"; $Result['failure_stage'] = 'result-json' }
+    }
+    return $Result
+}
+
+# Resolves the UIA root inside the guarded lifecycle (after the invocation-owned output directory
+# exists). Only a non-null root proceeds to Invoke-SequenceGuarded; otherwise no step runs and an
+# `initialization` failure is persisted and returned. Classification: a null root is target_error; a
+# categorized failure keeps its category; any other exception re-checks the HWND (gone: target_error,
+# alive or re-check failed: tool_error). `$RootResolver` exists so contract probes can inject faults;
+# it is not a product setting. Never emits.
+function Invoke-SequenceWithRoot {
+    param([object[]]$Steps, [string]$OutDir, [IntPtr]$Hwnd, [scriptblock]$RootResolver, [scriptblock]$StepRunner)
+    $category = $null; $message = $null
+    $state = $null
+    try {
+        $root = & $RootResolver $Hwnd
+        if ($null -eq $root) {
+            $category = 'target_error'; $message = "UIA root not available for hwnd $([int64]$Hwnd)"
+        }
+        else {
+            $state = @{ root = $root; hwnd = $Hwnd; points = @{}; cache = @{} }
+        }
+    }
+    catch {
+        $ex = $_.Exception
+        $message = "UIA root initialization failed: $($ex.Message)"
+        $tagged = if ($ex.Data.Contains('sequence_category')) { [string]$ex.Data['sequence_category'] } else { $null }
+        if ($tagged -eq 'target_error' -or $tagged -eq 'tool_error') { $category = $tagged }
+        else {
+            try { $category = if ([ElwindUI.Win32Driver]::IsWindow($Hwnd)) { 'tool_error' } else { 'target_error' } }
+            catch { $category = 'tool_error'; $message = "$message (HWND re-check failed: $($_.Exception.Message))" }
+        }
+    }
+    if ($null -eq $state) {
+        $result = @{
+            success = $false; category = $category; error = $message; failure_stage = 'initialization'
+            failed_step_index = $null; failed_step_op = $null
+            hwnd = [int64]$Hwnd; output_dir = $OutDir; steps = @(); files = @()
+        }
+        return (Complete-SequenceResult -Result $result -OutDir $OutDir)
+    }
+    return (Invoke-SequenceGuarded -Steps $Steps -OutDir $OutDir -Hwnd ([int64]$Hwnd) -StepRunner $StepRunner -State $state)
+}
+
+# The production step runner. Failures are raised as categorized exceptions.
+$SequenceStepRunner = {
+    param($s, $rec, $frames, $State)
+    $AE = [System.Windows.Automation.AutomationElement]
+    $root = $State.root; $hwnd = $State.hwnd
+    switch ($s.op) {
+        'locate-button' {
+            $cond = [System.Windows.Automation.AndCondition]::new(
+                [System.Windows.Automation.PropertyCondition]::new($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button),
+                [System.Windows.Automation.PropertyCondition]::new($AE::NameProperty, [string]$s.name))
+            $b = Get-SequenceBounds ($root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond))
+            if ($null -eq $b) { throw (New-SequenceFailure 'target_error' "button not found: $($s.name)") }
+            # Image confirmation: the UIA rect, mapped into a fresh capture, must show a button border
+            # along its top edge and dark label pixels inside.
+            $wr = Get-SequenceWindowRect $hwnd
+            $bmp = New-SequenceCapture $wr
+            try {
+                $ix = $b.x - $wr.Left; $iy = $b.y - $wr.Top
+                $edge = 0; for ($x = $ix + 4; $x -lt $ix + $b.width - 4; $x++) { $p = $bmp.GetPixel($x, $iy); if ((($p.R + $p.G + $p.B) / 3) -lt 245) { $edge++ } }
+                $dark = 0; for ($y = $iy + 4; $y -lt $iy + $b.height - 4; $y++) { for ($x = $ix + 4; $x -lt $ix + $b.width - 4; $x++) { $p = $bmp.GetPixel($x, $y); if ((($p.R + $p.G + $p.B) / 3) -lt 110) { $dark++ } } }
+            }
+            finally { $bmp.Dispose() }
+            $rec.bounds = $b; $rec.top_edge_px = $edge; $rec.label_dark_px = $dark
+            if ($edge -lt [int]($b.width * 0.5) -or $dark -lt 30) { throw (New-SequenceFailure 'target_error' "image check did not confirm button '$($s.name)' at its UIA rect") }
+            $State.points[[string]$s.as] = @{ x = [int]($b.x + $b.width / 2); y = [int]($b.y + $b.height / 2) }
+            $rec.as = $s.as; $rec.point = $State.points[[string]$s.as]
+        }
+        'locate-id' {
+            $b = Get-SequenceBounds ($root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.PropertyCondition]::new($AE::AutomationIdProperty, [string]$s.id)))
+            if ($null -eq $b) { throw (New-SequenceFailure 'target_error' "element not found: $($s.id)") }
+            $State.points[[string]$s.as] = @{ x = [int]($b.x + $b.width / 2); y = [int]($b.y + $b.height / 2) }
+            $rec.as = $s.as; $rec.bounds = $b; $rec.point = $State.points[[string]$s.as]
+        }
+        'cache' {
+            foreach ($id in @($s.ids)) {
+                $State.cache[[string]$id] = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.PropertyCondition]::new($AE::AutomationIdProperty, [string]$id))
+            }
+            $rec.ids = @($s.ids); $rec.found = @(@($s.ids) | Where-Object { $null -ne $State.cache[[string]$_] })
+        }
+        'foreground' {
+            [void][ElwindUI.Win32Driver]::SetForegroundWindow($hwnd)
+            Start-Sleep -Milliseconds 200
+            $rec.foreground = ([int64][ElwindUI.Win32Driver]::GetForegroundWindow() -eq [int64]$hwnd)
+            if (-not $rec.foreground) { throw (New-SequenceFailure 'environment_blocker' 'foreground_not_target: the target window could not be made foreground; real input would go elsewhere') }
+        }
+        'click' {
+            if ([int64][ElwindUI.Win32Driver]::GetForegroundWindow() -ne [int64]$hwnd) { throw (New-SequenceFailure 'environment_blocker' 'foreground_not_target at click time') }
+            if ($s.at) {
+                if (-not $State.points.ContainsKey([string]$s.at)) { throw (New-SequenceFailure 'usage_error' "click.at refers to an unknown point: $($s.at)") }
+                $pt = $State.points[[string]$s.at]
+            }
+            else { $pt = @{ x = [int]$s.x; y = [int]$s.y } }
+            [ElwindUI.SequenceInput]::LeftClick($pt.x, $pt.y)
+            $rec.point = $pt; $rec.label = $s.label
+        }
+        'sleep' { Start-Sleep -Milliseconds ([int]$s.ms); $rec.ms = [int]$s.ms }
+        'capture' {
+            $wr = Get-SequenceWindowRect $hwnd
+            $frames.Add(@{ name = [string]$s.name; bmp = (New-SequenceCapture $wr) })
+            $rec.name = [string]$s.name; $rec.window = [ordered]@{ left = $wr.Left; top = $wr.Top; right = $wr.Right; bottom = $wr.Bottom }
+        }
+        'read' {
+            $vals = [ordered]@{}
+            foreach ($id in @($s.ids)) { $vals[[string]$id] = Get-SequenceBounds $State.cache[[string]$id] }
+            $rec.name = [string]$s.name; $rec.values = $vals
+        }
+    }
+}
+
+# Shared argument and step validation. Returns the parsed steps; emits usage_error otherwise.
+function Read-SequenceSteps {
+    $stepsPath = Require-Arg 'steps'
+    if (-not (Test-Path -LiteralPath $stepsPath)) { Emit-UsageError "--steps file not found: $stepsPath" }
+    try { $steps = @(Get-Content -Raw -LiteralPath $stepsPath | ConvertFrom-Json -ErrorAction Stop) }
+    catch { Emit-UsageError "--steps is not valid JSON: $($_.Exception.Message)" }
+    if ($steps.Count -lt 1 -or $steps.Count -gt 200) { Emit-UsageError '--steps must contain 1..200 steps' }
+    $validOps = @('locate-button', 'locate-id', 'cache', 'foreground', 'click', 'sleep', 'capture', 'read')
+    foreach ($s in $steps) {
+        if ($validOps -notcontains $s.op) { Emit-UsageError "unknown step op: $($s.op)" }
+        if ($s.op -eq 'sleep' -and (-not ($s.ms -is [long] -or $s.ms -is [int]) -or $s.ms -lt 0 -or $s.ms -gt 60000)) { Emit-UsageError 'sleep.ms must be an integer in 0..60000' }
+    }
+    if ((@($steps | Where-Object { $_.op -eq 'capture' })).Count -gt 50) { Emit-UsageError 'at most 50 capture steps' }
+    $nameError = Test-SequenceCaptureNames -Steps $steps
+    if ($nameError) { Emit-UsageError $nameError }
+    return , $steps
+}
+
+function Cmd-CaptureSequence {
+    # Order: all preflight -> HWND/desktop -> new output dir -> guarded run -> one stdout JSON.
+    if (-not (Get-Arg 'hwnd')) { Emit-UsageError 'missing required argument --hwnd' }
+    $steps = Read-SequenceSteps
+    $outDir = Require-Arg 'output-dir'
+    if (Test-Path -LiteralPath $outDir) { Emit-UsageError "--output-dir already exists (evidence is never overwritten): $outDir" }
+
+    $hwnd = ConvertTo-Hwnd (Get-Arg 'hwnd')
+    if (-not [ElwindUI.Win32Driver]::IsWindow($hwnd)) {
+        Emit-Result @{ success = $false; category = 'target_error'; error = "no window for hwnd $([int64]$hwnd)" }
+    }
+    if (-not (Test-InteractiveInputDesktop)) {
+        Emit-Result @{ success = $false; category = 'environment_blocker'; error = 'no_interactive_desktop: the input desktop is not available (session locked or secure desktop)' }
+    }
+    try { Initialize-SequenceInterop }
+    catch { Emit-Result @{ success = $false; category = 'tool_error'; error = "capture-sequence interop unavailable: $($_.Exception.Message)" } }
+    try { New-Item -ItemType Directory -Path $outDir -ErrorAction Stop | Out-Null }
+    catch { Emit-Result @{ success = $false; category = 'tool_error'; error = "cannot create --output-dir: $($_.Exception.Message)" } }
+
+    $resolver = { param([IntPtr]$h) [System.Windows.Automation.AutomationElement]::FromHandle($h) }
+    $result = Invoke-SequenceWithRoot -Steps $steps -OutDir $outDir -Hwnd $hwnd -RootResolver $resolver -StepRunner $SequenceStepRunner
+    Emit-Result $result
+}
+
+# Contract probe (ELWINDUI_DRIVER_CONTRACT_PROBE=sequence-fault): runs the real Invoke-SequenceGuarded,
+# Save-SequencePngNew, and New-SequenceCapture with an in-memory step runner, so failure, cleanup, and
+# CreateNew behavior are checked without a GUI. `--fault` selects the scenario; `--output-dir` must be
+# new. Collisions are created as real files in that directory before the run.
+function Invoke-SequenceFaultProbe {
+    $fault = Require-Arg 'fault'
+    $outDir = Require-Arg 'output-dir'
+    if (Test-Path -LiteralPath $outDir) { Emit-UsageError "--output-dir already exists: $outDir" }
+    Add-Type -AssemblyName System.Drawing.Common
+    New-Item -ItemType Directory -Path $outDir | Out-Null
+    $tracked = [System.Collections.Generic.List[object]]::new()
+    $executed = [System.Collections.Generic.List[string]]::new()
+    $rect = [pscustomobject]@{ Left = 0; Top = 0; Right = 4; Bottom = 4 }
+    $runner = {
+        param($s, $rec, $frames, $State)
+        $State.executed.Add("$($s.op):$($s.name)")
+        switch ($s.op) {
+            'capture' {
+                $copy = if ($State.fault -eq 'capture-exception' -and $s.name -eq 'b') { { param($g) throw 'injected CopyFromScreen failure' } } else { { param($g) $g.Clear([System.Drawing.Color]::White) } }
+                $frames.Add(@{ name = [string]$s.name; bmp = (New-SequenceCapture -Rect $State.rect -Copy $copy -Track $State.tracked) })
+                $rec.name = [string]$s.name
+            }
+            'click' { $rec.label = 'probe click (not performed)' }
+            default { }
+        }
+    }
+    $steps = @(
+        [pscustomobject]@{ op = 'capture'; name = 'a' },
+        [pscustomobject]@{ op = 'capture'; name = 'b' },
+        [pscustomobject]@{ op = 'click'; name = 'after-b' },
+        [pscustomobject]@{ op = 'capture'; name = 'c' }
+    )
+    $preHashes = @{}
+    switch ($fault) {
+        'capture-exception' { }
+        'png-collision' {
+            Set-Content -LiteralPath (Join-Path $outDir 'b.png') -Value 'pre-existing evidence' -NoNewline
+            $preHashes['b.png'] = (Get-FileHash -LiteralPath (Join-Path $outDir 'b.png') -Algorithm SHA256).Hash
+        }
+        'result-collision' {
+            Set-Content -LiteralPath (Join-Path $outDir 'sequence-result.json') -Value 'pre-existing result' -NoNewline
+            $preHashes['sequence-result.json'] = (Get-FileHash -LiteralPath (Join-Path $outDir 'sequence-result.json') -Algorithm SHA256).Hash
+        }
+        default { Emit-UsageError "unknown --fault: $fault" }
+    }
+    $probeState = @{ fault = $fault; tracked = $tracked; executed = $executed; rect = $rect }
+    $result = Invoke-SequenceGuarded -Steps $steps -OutDir $outDir -Hwnd 0 -StepRunner $runner -State $probeState
+    $disposed = @()
+    foreach ($o in $tracked) {
+        $isDisposed = $false
+        # Property getters keep working after Dispose on this runtime; native calls do not.
+        try { if ($o -is [System.Drawing.Bitmap]) { [void]$o.GetPixel(0, 0) } else { $o.Clear([System.Drawing.Color]::White) } } catch { $isDisposed = $true }
+        $disposed += $isDisposed
+    }
+    $postHashes = @{}
+    foreach ($k in $preHashes.Keys) { $postHashes[$k] = (Get-FileHash -LiteralPath (Join-Path $outDir $k) -Algorithm SHA256).Hash }
+    Emit-Result @{
+        success = $true
+        run = $result
+        executed = @($executed)
+        tracked_count = $tracked.Count
+        all_tracked_disposed = (@($disposed | Where-Object { -not $_ }).Count -eq 0)
+        pre_hashes = $preHashes
+        post_hashes = $postHashes
+        files_on_disk = @(Get-ChildItem -LiteralPath $outDir -File | ForEach-Object { $_.Name } | Sort-Object)
+    }
+}
+
+# Contract probe (ELWINDUI_DRIVER_CONTRACT_PROBE=sequence-init-fault): drives the real
+# Invoke-SequenceWithRoot / Complete-SequenceResult / Invoke-SequenceGuarded with an injected root
+# resolver and a recording step runner (its click performs no input). `--fault`: `throw` (categorized
+# tool_error), `null`, `race` (plain exception with an invalid HWND), `alive` (plain exception with a
+# live top-level window, when one exists), `valid` (fake root, safe steps), `throw-collision` (`throw`
+# plus a pre-existing sequence-result.json). Emits the production-shaped result plus `probe_*` fields.
+function Invoke-SequenceInitFaultProbe {
+    $fault = Require-Arg 'fault'
+    $outDir = Require-Arg 'output-dir'
+    if (Test-Path -LiteralPath $outDir) { Emit-UsageError "--output-dir already exists (evidence is never overwritten): $outDir" }
+    $hwnd = [IntPtr]1
+    switch ($fault) {
+        'throw' { $resolver = { param($h) throw (New-SequenceFailure 'tool_error' 'injected UIA root failure') } }
+        'throw-collision' { $resolver = { param($h) throw (New-SequenceFailure 'tool_error' 'injected UIA root failure') } }
+        'null' { $resolver = { param($h) $null } }
+        'race' { $resolver = { param($h) throw [System.InvalidOperationException]::new('injected element-not-available') } }
+        'alive' {
+            $live = [IntPtr]::Zero
+            foreach ($pr in (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero })) { $live = $pr.MainWindowHandle; break }
+            if ($live -eq [IntPtr]::Zero) { Emit-Result @{ success = $true; probe_skipped = 'no live top-level window on this host' } }
+            $hwnd = $live
+            $resolver = { param($h) throw [System.InvalidOperationException]::new('injected UIA failure with a live window') }
+        }
+        'valid' { $resolver = { param($h) [pscustomobject]@{ fake_root = $true } } }
+        default { Emit-UsageError "unknown --fault: $fault" }
+    }
+    New-Item -ItemType Directory -Path $outDir | Out-Null
+    $preHash = $null
+    if ($fault -eq 'throw-collision') {
+        [System.IO.File]::WriteAllBytes((Join-Path $outDir 'sequence-result.json'), [byte[]](83, 69, 78, 84))
+        $preHash = (Get-FileHash -LiteralPath (Join-Path $outDir 'sequence-result.json') -Algorithm SHA256).Hash
+    }
+    $script:SequenceProbeExecuted = [System.Collections.Generic.List[string]]::new()
+    $runner = {
+        param($s, $rec, $frames, $State)
+        $script:SequenceProbeExecuted.Add([string]$s.op)
+        if ($s.op -eq 'read') { $rec.name = [string]$s.name; $rec.values = [ordered]@{} }
+        if ($s.op -eq 'sleep') { Start-Sleep -Milliseconds ([int]$s.ms); $rec.ms = [int]$s.ms }
+        if ($s.op -eq 'click') { $rec.label = 'probe recorder (no input)' }
+    }
+    $steps = @(
+        [pscustomobject]@{ op = 'sleep'; ms = 1 },
+        [pscustomobject]@{ op = 'read'; name = 'r1'; ids = @() },
+        [pscustomobject]@{ op = 'click'; x = 0; y = 0 }
+    )
+    $result = Invoke-SequenceWithRoot -Steps $steps -OutDir $outDir -Hwnd $hwnd -RootResolver $resolver -StepRunner $runner
+    $result['probe_executed'] = @($script:SequenceProbeExecuted)
+    if ($null -ne $preHash) {
+        $result['probe_pre_hash'] = $preHash
+        $result['probe_post_hash'] = (Get-FileHash -LiteralPath (Join-Path $outDir 'sequence-result.json') -Algorithm SHA256).Hash
+    }
+    Emit-Result $result
+}
+
+# Preflight-only probe (ELWINDUI_DRIVER_CONTRACT_PROBE=sequence-names): reports the shared
+# Test-SequenceCaptureNames verdict for a --steps file without touching windows or the file system.
+function Invoke-SequenceNamesProbe {
+    $steps = @(Get-Content -Raw -LiteralPath (Require-Arg 'steps') | ConvertFrom-Json)
+    $err = Test-SequenceCaptureNames -Steps $steps
+    Emit-Result @{ success = $true; name_error = $err }
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -1483,5 +1980,6 @@ switch ($Command) {
     'move-window' { Cmd-MoveWindow }
     'resize-window' { Cmd-ResizeWindow }
     'terminate' { Cmd-Terminate }
+    'capture-sequence' { Cmd-CaptureSequence }
     default { Emit-UsageError "unknown command: $Command" }
 }

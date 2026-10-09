@@ -54,6 +54,55 @@ only then removes/unmounts the Visual on completion. Completion is idempotent.
 Centralized participation helpers prevent independent lifecycle checks from
 drifting between layout, render, focus, shortcuts, and hit testing.
 
+## Layout reflow
+
+Layout reflow implements the specification's structural position animation
+without a public channel. `AnimationRuntime` keys its channels by a private
+`RuntimeChannel::{Public(AnimationChannel), LayoutReflow}`; reflow uses an
+`AnimatedValue::Transform` with translation only. Every channel insertion
+receives a generation, so a channel cancelled or replaced from inside a `tick`
+callback is never reinserted.
+
+Intent is recorded when a mutation happens, never read from the transaction
+during reconcile, because hosts may realize layout after the closure ends.
+Effective Visual collection add/insert/remove/remove_at/clear, the
+active-to-exiting move, and `Visible <-> Collapsed` record a per-host pending
+intent, `Animate(Animation)` or `Snap`; the last one wins. `Animate` requires a
+normalized finite non-immediate animation, an enabled transaction, and
+`reduce_motion = false`. No-op mutations, exit completion, and mutations during
+subtree teardown (`unmount_subtree`, which covers `DynamicChildSlot::clear` and
+owner unmount) record nothing. Property setters never record intent.
+
+`layout_root` arms a pending intent after Arrange. The first armed
+`RenderTree::reconcile` consumes it; render-only passes and mutations after the
+last layout leave it pending. `RenderTree::new` discards it, so a first mount or
+host re-creation never reflows.
+
+The previous position is the matched retained `RenderGroup.offset` for the
+same stable `render_group_id`; `arranged_offset` is not a baseline because
+invalidation may clear it. For an Active, laid-out child with a changed finite
+offset, `Animate` samples any running reflow at the runtime's current time,
+starts at `D_current + (old - new)`, preserves velocity, and targets zero.
+`Snap` cancels that element's reflow and writes zero. Passes without an intent
+leave running reflows alone.
+
+The starting translation is written synchronously into
+`UIElement::layout_reflow_translation` and the reconciled group transform, with
+no reentrant invalidation while the RenderTree is borrowed. The frame wake is
+requested once after reconcile; later ticks publish through Render
+invalidation. Completion writes zero and removes the channel. A tick that
+observes `reduce_motion` or a dropped element cancels the channel and writes
+zero. Because those Render-only passes do not rebuild the semantic snapshot by
+themselves, a tick that advanced any reflow requests one accessibility update
+for the tree through the existing `request_accessibility_update` route.
+
+One Core composer, `effective_local_presentation_transform`, returns
+`T(layout_reflow_translation) * local_transform(base + transition)`. Render
+build/reconcile, hit testing, and accessibility bounds compose it inside the
+parent's arranged-offset translation, so native projection consumes the same
+`RenderGroup.transform` as self-drawn content. Unregistering an animation frame
+host discards pending intent and active reflows, and resets their translations.
+
 ## Backend capabilities
 
 `AnimationFrameHost` supplies a per-host runtime and frame wake request.

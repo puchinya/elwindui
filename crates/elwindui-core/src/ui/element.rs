@@ -200,6 +200,10 @@ pub struct UIElement {
     pub visual_transform: Cell<VisualTransform>,
     pub presentation_visual_transform: Cell<VisualTransform>,
     pub transition_visual_transform: Cell<VisualTransform>,
+    /// Presentation-only translation driven by a structural layout reflow, in the parent's layout
+    /// axes. Applied before the base/transition transform and zero whenever no reflow runs; see
+    /// [`effective_local_presentation_transform`].
+    pub(crate) layout_reflow_translation: Cell<crate::base::Vector>,
     pub transform_origin: Cell<UnitPoint>,
     /// WinUI3's `UIElement.IsHitTestVisible` — `true` (default) means normal hit-testing;
     /// `false` excludes this element *and its entire subtree* from `hit_test` while leaving
@@ -369,6 +373,10 @@ impl std::fmt::Debug for UIElement {
                 "transition_visual_transform",
                 &self.transition_visual_transform.get(),
             )
+            .field(
+                "layout_reflow_translation",
+                &self.layout_reflow_translation.get(),
+            )
             .field("transform_origin", &self.transform_origin.get())
             .field("hit_test_visible", &self.hit_test_visible.get())
             .field("clip_to_bounds", &self.clip_to_bounds.get())
@@ -497,6 +505,7 @@ impl UIElement {
             visual_transform: Cell::new(VisualTransform::IDENTITY),
             presentation_visual_transform: Cell::new(VisualTransform::IDENTITY),
             transition_visual_transform: Cell::new(VisualTransform::IDENTITY),
+            layout_reflow_translation: Cell::new(crate::base::Vector::default()),
             transform_origin: Cell::new(UnitPoint::CENTER),
             hit_test_visible: Cell::new(true),
             clip_to_bounds: Cell::new(None),
@@ -752,6 +761,7 @@ impl UIElement {
             return;
         }
         base.visibility.set(visibility);
+        record_layout_reflow_intent(base);
         self.invalidate_measure();
         if perf_trace {
             eprintln!("[perf] visibility_writer effective_changed=true actual_invalidate=true");
@@ -1415,7 +1425,13 @@ impl UIElement {
     }
     /// Registers the frame/runtime capability on a hosted root.
     fn set_animation_frame_host(&self, host: Option<Rc<dyn AnimationFrameHost>>) {
-        *self.as_ui_element().animation_frame_host.borrow_mut() = host;
+        let previous = std::mem::replace(
+            &mut *self.as_ui_element().animation_frame_host.borrow_mut(),
+            host,
+        );
+        if let Some(previous) = previous {
+            previous.animation_runtime().discard_layout_reflows();
+        }
     }
     /// Flushes the owning host's pending interactive arrange, if the backend supports it.
     fn flush_interactive_relayout(&self) {
@@ -1527,7 +1543,14 @@ impl UIElement {
         *self.as_ui_element().invalidate_host.borrow_mut() = None;
         *self.as_ui_element().coordinate_host.borrow_mut() = None;
         *self.as_ui_element().pointer_gesture_host.borrow_mut() = None;
-        *self.as_ui_element().animation_frame_host.borrow_mut() = None;
+        let animation_frame_host = self
+            .as_ui_element()
+            .animation_frame_host
+            .borrow_mut()
+            .take();
+        if let Some(host) = animation_frame_host {
+            host.animation_runtime().discard_layout_reflows();
+        }
         *self.as_ui_element().focus_host.borrow_mut() = None;
         *self.as_ui_element().accessibility_host.borrow_mut() = None;
         *self
@@ -2171,7 +2194,7 @@ fn pointer_gesture_host(base: &UIElement) -> Option<Rc<dyn PointerGestureHost>> 
 }
 
 /// Finds the animation frame/runtime capability registered on the hosted tree root.
-fn animation_frame_host(base: &UIElement) -> Option<Rc<dyn AnimationFrameHost>> {
+pub(crate) fn animation_frame_host(base: &UIElement) -> Option<Rc<dyn AnimationFrameHost>> {
     let mut current: Option<Rc<dyn UIElementExt>> = base
         .visual_parent
         .borrow()
@@ -2219,7 +2242,75 @@ pub fn unmount_subtree(node: &Rc<dyn UIElementExt>) {
     if let Some(host) = pointer_gesture_host(node.as_ui_element()) {
         host.cancel_pointer_gesture_in_subtree(node);
     }
+    let _teardown = TeardownScope::enter();
     unmount_subtree_inner(node);
+}
+
+thread_local! {
+    /// Depth of active subtree teardowns on this UI thread. Collection clears performed while a
+    /// subtree is being unmounted are teardown, not structural changes, and record no reflow intent.
+    static TEARDOWN_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+struct TeardownScope;
+
+impl TeardownScope {
+    fn enter() -> Self {
+        TEARDOWN_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for TeardownScope {
+    fn drop(&mut self) {
+        TEARDOWN_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Records the layout reflow intent of an effective structural change of `base`'s participation
+/// set (`base` is the Visual collection owner, or the element whose visibility changed). The
+/// transaction is read now, at mutation time: hosts may realize the layout after the closure ends.
+pub(crate) fn record_layout_reflow_intent(base: &UIElement) {
+    if TEARDOWN_DEPTH.with(Cell::get) > 0 {
+        return;
+    }
+    let Some(host) = animation_frame_host(base) else {
+        return;
+    };
+    let transaction = current_transaction();
+    let animation = transaction
+        .animation
+        .filter(|animation| !transaction.disables_animations && !animation.is_immediate())
+        .filter(|_| {
+            !base
+                .effective_environment()
+                .get::<crate::environment::ReduceMotionEnvironment>()
+        });
+    let intent = match animation {
+        Some(animation) => LayoutReflowIntent::Animate(animation),
+        None => LayoutReflowIntent::Snap,
+    };
+    host.animation_runtime().record_layout_reflow_intent(intent);
+}
+
+/// The one local presentation transform every consumer composes inside the parent's arranged
+/// offset: `T(layout reflow) * local_transform(base composed with transition)`. Render build/
+/// reconcile, hit testing, and accessibility bounds all use this so they cannot drift apart.
+pub(crate) fn effective_local_presentation_transform<T: UIElementExt + ?Sized>(
+    elem: &T,
+    size: Size,
+) -> AffineTransform {
+    let reflow = elem.as_ui_element().layout_reflow_translation.get();
+    let local = local_transform(
+        elem.presentation_visual_transform(),
+        elem.transform_origin(),
+        size,
+    );
+    if reflow == crate::base::Vector::default() {
+        local
+    } else {
+        AffineTransform::translation(reflow.x, reflow.y).concat(&local)
+    }
 }
 
 /// Moves a still-rendered child to the terminal state of an exit transition.
@@ -2588,6 +2679,29 @@ mod tests {
                 .get_attached("TestOwner", "value", NonComparable(0))
                 .0,
             7
+        );
+    }
+
+    #[test]
+    fn effective_presentation_transform_is_the_plain_local_transform_without_reflow() {
+        let leaf = native("leaf", size(20.0, 10.0));
+        leaf.as_ui_element()
+            .set_visual_transform(VisualTransform::new(Vector { x: 2.0, y: 3.0 }, 1.5, 0.3));
+        let local = local_transform(
+            leaf.presentation_visual_transform(),
+            leaf.transform_origin(),
+            size(20.0, 10.0),
+        );
+        assert_eq!(
+            effective_local_presentation_transform(leaf.as_ref(), size(20.0, 10.0)),
+            local
+        );
+        leaf.as_ui_element()
+            .layout_reflow_translation
+            .set(Vector { x: -4.0, y: 6.0 });
+        assert_eq!(
+            effective_local_presentation_transform(leaf.as_ref(), size(20.0, 10.0)),
+            AffineTransform::translation(-4.0, 6.0).concat(&local)
         );
     }
 }

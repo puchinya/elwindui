@@ -77,7 +77,8 @@ application’s state actually changed -- verify that separately (`search`/`get-
 the real mouse movement interval only; `--hold-ms` is stationary before movement and
 `--dwell-ms` is stationary at the destination before release. The external backend's
 `requestedDurationMs`, `actualMovementDurationMs`, and `moveStepCount` fields are authoritative.
-The driver does not contain a generic mouse injector. During the pinned upstream capability gap,
+The driver does not contain a generic mouse injector; its only in-process input paths are the
+bounded `touch-cancel` and `capture-sequence` exceptions below. During the pinned upstream capability gap,
 native acceptance may use the approved `puchinya/winappCli` fork based on v0.6.1; record the fork
 commit, `winapp.exe` SHA-256, and `winapp --version` with the native evidence.
 
@@ -116,6 +117,51 @@ VM/API success is never product evidence by itself. Invalid coordinates or hold 
 unsupported API is `environment_blocker`, and malformed native frames including error 87 are
 `tool_error` with their Win32 error. Driver success is injection evidence only; the product's
 native trace and visible demo postcondition are still required for E2E PASS.
+
+## `capture-sequence`
+
+```powershell
+pwsh -NoProfile -File $D capture-sequence --hwnd <hwnd> --steps <steps.json> --output-dir <new dir>
+```
+
+Runs a bounded animation capture (design doc Section 10) in one process, so steps can be a few
+hundred milliseconds apart instead of paying 2–3 s of process startup per driver command.
+`--steps` is a JSON array of at most 200 steps (at most 50 captures), executed in order:
+
+| op | fields | effect |
+|---|---|---|
+| `locate-button` | `name`, `as` | UIA Button by name; the rect is then confirmed in a fresh window capture (border on the top edge, dark label pixels inside) or the run fails; stores the center as point `as` |
+| `locate-id` | `id`, `as` | UIA element by AutomationId; stores its center as point `as` |
+| `cache` | `ids` | caches UIA elements by AutomationId for later `read` steps |
+| `foreground` | — | `SetForegroundWindow`, then requires the target to be foreground (`environment_blocker` otherwise) |
+| `click` | `at` or `x`,`y`, optional `label` | real left click; re-checks the foreground target first |
+| `sleep` | `ms` (0..60000) | plain wait |
+| `capture` | `name` | captures the window rect from the screen into memory; written as `<name>.png` at the end |
+| `read` | `ids`, `name` | reads the cached elements' current bounds and names |
+
+Locate/cache steps belong before the first `click`, so the timed part only clicks, sleeps,
+captures, and reads. Every step records `utc`, `t_start_ms`, `t_end_ms`, and `status` from one
+stopwatch; the whole result is printed as the single JSON object and also written to
+`<output-dir>/sequence-result.json`. Coordinates are physical screen pixels (per-monitor DPI aware).
+
+Evidence safety:
+
+- `capture.name` must be one ASCII basename matching `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`, must not be
+  a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`), and must be
+  unique within the step list case-insensitively. Violations are `usage_error` before any window,
+  input, or file-system work.
+- `--output-dir` must not exist; it is created per invocation. PNGs and `sequence-result.json` are
+  written with `CreateNew`, so existing evidence is never replaced; `files` lists only frames that
+  were actually written.
+- The first failing step stops the run (no later click). The result carries `category`, `error`,
+  `failure_stage` (`initialization`, `step`, `save-png`, `result-json`, `cleanup`, `run`),
+  `failed_step_index`, and `failed_step_op`; frames captured before the failure are still saved.
+- The UIA root is resolved after the output directory is created. If that fails (`null` root:
+  `target_error`; exception: `target_error` when the window is gone, otherwise `tool_error`), no
+  step runs and the run is saved as `failure_stage: initialization` with empty `steps`/`files`. `result_json_persisted`
+  says whether `sequence-result.json` was written; if not, `success` is false.
+- A locked desktop or non-foreground target is `environment_blocker`; a missing window or element
+  is `target_error`; capture, save, and unexpected failures are `tool_error`.
 
 ## UIA vs. real input
 

@@ -105,6 +105,24 @@ pub fn resolve_export_dir(
     }
 }
 
+/// Whether an export destination is the tracked prebuilt tree, inside it, or one of its ancestors.
+/// Both paths must already be absolute and resolved the same way (canonical nearest existing
+/// ancestor plus the remaining components); components compare ASCII case-insensitively, as on
+/// Windows file systems.
+pub fn export_dir_conflicts(requested: &Path, tracked: &Path) -> bool {
+    fn is_prefix(prefix: &Path, path: &Path) -> bool {
+        let prefix: Vec<_> = prefix.components().collect();
+        let path: Vec<_> = path.components().collect();
+        prefix.len() <= path.len()
+            && prefix.iter().zip(&path).all(|(a, b)| {
+                a.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
+            })
+    }
+    is_prefix(tracked, requested) || is_prefix(requested, tracked)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnsupportedPrebuiltTarget {
     pub target: String,

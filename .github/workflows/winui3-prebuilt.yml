@@ -15,6 +15,7 @@ on:
       - ".github/workflows/winui3-prebuilt.yml"
       - "crates/elwindui-backend-winui3/build.rs"
       - "crates/elwindui-backend-winui3/build_support.rs"
+      - "crates/elwindui-backend-winui3/build_nuget.rs"
       - "crates/elwindui-backend-winui3/cpp/**"
       - "crates/elwindui-backend-winui3/native/**"
       - "crates/elwindui-backend-winui3/src/app.rs"
@@ -97,6 +98,24 @@ jobs:
             -StagingRoot "$env:RUNNER_TEMP/winui3-native" `
             -RunnerLabel ${{ matrix.runner }} `
             -CargoTargetDir "$env:RUNNER_TEMP/target-source"
+      - name: Reject export destinations in or above the tracked prebuilt tree
+        run: |
+          $ErrorActionPreference = "Continue"
+          . ./tools/restore-winui3.ps1
+          $env:ELWINDUI_WINUI3_BUILD_NATIVE = "1"
+          $env:CARGO_TARGET_DIR = "$env:RUNNER_TEMP/target-source"
+          $native = "crates/elwindui-backend-winui3/native"
+          $before = (git status --porcelain --ignored -- $native) -join "`n"
+          foreach ($destination in @("$PWD/$native/prebuilt/unwanted-dir", "$PWD/$native")) {
+            $env:ELWINDUI_WINUI3_PREBUILT_EXPORT_DIR = $destination
+            $output = (cargo build -p elwindui-backend-winui3 --release --target ${{ matrix.target }} 2>&1) | Out-String
+            if ($LASTEXITCODE -eq 0) { throw "export into $destination was accepted" }
+            if ($output -notmatch "must not be, contain or lie inside") { throw "export into $destination failed for another reason:`n$output" }
+            Write-Host "Rejected export destination: $destination"
+          }
+          if (Test-Path "$native/prebuilt/unwanted-dir") { throw "a rejected export created a directory in the tracked tree" }
+          $after = (git status --porcelain --ignored -- $native) -join "`n"
+          if ($after -ne $before) { throw "tracked prebuilt tree changed:`n$after" }
       - name: Assert tracked prebuilt tree unchanged
         run: |
           git diff --exit-code -- crates/elwindui-backend-winui3/native
@@ -221,6 +240,15 @@ jobs:
             if (Test-Path (Join-Path $out $generated)) { throw "source-native output $generated exists in prebuilt OUT_DIR" }
           }
           if (Get-ChildItem $out -Recurse -Include *.obj, *.o -ErrorAction SilentlyContinue) { throw "object files exist in prebuilt OUT_DIR" }
+          $selected = @(Get-Content (Join-Path $out "elwindui-winui3-nuget-packages.txt"))
+          $pins = Get-Winui3DependencyPins
+          foreach ($pin in @(
+              @("microsoft.windowsappsdk", $pins.windows_app_sdk),
+              @("microsoft.windowsappsdk.winui", $pins.windows_app_sdk_winui),
+              @("microsoft.graphics.win2d", $pins.win2d))) {
+            if ($selected -notcontains "$($pin[0]) $($pin[1])") { throw "NuGet selection does not use pinned $($pin[0]) $($pin[1]): $($selected -join '; ')" }
+          }
+          Write-Host "NuGet selection: $($selected -join '; ')"
           $exe = Join-Path $profileDir "custom-controls-demo.exe"
           $dumpbin = Find-Winui3Dumpbin
           if (-not $dumpbin) { throw "dumpbin.exe not found" }

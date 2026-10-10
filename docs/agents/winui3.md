@@ -22,7 +22,7 @@ Before running commands requiring MSVC or Windows SDK on Windows, import the env
 
 ## Native build modes (prebuilt by default)
 
-Normal `cargo build`/`check`/`test` links the checked-in `crates/elwindui-backend-winui3/native/prebuilt/<TARGET>/` artifacts (`x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`) and runs no MIDL, C++/WinRT, `cl.exe` or makepri. It still needs the restored NuGet packages (`tools/restore-winui3.ps1`, also run by `setup-vs-env.ps1`) and the normal Rust MSVC linker. A missing target bundle fails the build; never work around that by falling back to source mode silently. See `docs/design/backends/winui3_backend_design.md`, "Native artifact manufacturing".
+Normal `cargo build`/`check`/`test` links the checked-in `crates/elwindui-backend-winui3/native/prebuilt/<TARGET>/` artifacts (`x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`) and runs no MIDL, C++/WinRT, `cl.exe` or makepri. It still needs the restored NuGet packages (`tools/restore-winui3.ps1`, also run by `setup-vs-env.ps1`) and the normal Rust MSVC linker. Only the pinned package versions (and the transitive versions they declare) are used, even if newer versions are in the NuGet cache. To change a pin, update `tools/restore-winui3.ps1` and `build_nuget.rs` together and regenerate the bundle. A missing target bundle fails the build; never work around that by falling back to source mode silently. See `docs/design/backends/winui3_backend_design.md`, "Native artifact manufacturing".
 
 Source-native mode (maintainers changing `cpp/`, the IDL or the native ABI; requires Visual Studio C++ and Windows SDK tools):
 
@@ -35,7 +35,7 @@ cargo build -p custom-controls-demo --target x86_64-pc-windows-msvc
 
 `ELWINDUI_WINUI3_BUILD_NATIVE` accepts only unset, `0` or `1`. Use a separate `CARGO_TARGET_DIR` per mode. A source build never modifies `native/prebuilt/`; `ELWINDUI_WINUI3_PREBUILT_EXPORT_DIR` (source mode only) exports its outputs to `<dir>/<TARGET>/`. A single-architecture diagnostic manufacture is `.\tools\build-winui3-prebuilt.ps1 -Arch x64 -StagingRoot .build\winui3-native-staging`.
 
-Any change to a native generation input (`build.rs`, `build_support.rs`, `cpp/`, the prebuilt scripts, `setup-vs-env.ps1`, `restore-winui3.ps1`, `.github/workflows/winui3-prebuilt.yml`) makes the tracked bundle stale; `.\tools\verify-winui3-prebuilt.ps1` then fails and the bundle must be regenerated. An incompatible native ABI change also bumps `elwindui_winui3_native_abi_v<N>` (bump rules in the design document).
+Any change to a native generation input (`build.rs`, `build_support.rs`, `build_nuget.rs`, `cpp/`, the prebuilt scripts, `setup-vs-env.ps1`, `restore-winui3.ps1`, `.github/workflows/winui3-prebuilt.yml`) makes the tracked bundle stale; `.\tools\verify-winui3-prebuilt.ps1` then fails and the bundle must be regenerated. An incompatible native ABI change also bumps `elwindui_winui3_native_abi_v<N>` (bump rules in the design document).
 
 ### Regenerating the prebuilt bundle
 

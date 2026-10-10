@@ -25,6 +25,7 @@ $script:Winui3Targets = [ordered]@{
 $script:Winui3SourceInputs = @(
     ".github/workflows/winui3-prebuilt.yml",
     "crates/elwindui-backend-winui3/build.rs",
+    "crates/elwindui-backend-winui3/build_nuget.rs",
     "crates/elwindui-backend-winui3/build_support.rs",
     "crates/elwindui-backend-winui3/cpp/accessibility_host.cpp",
     "crates/elwindui-backend-winui3/cpp/accessibility_host.h",

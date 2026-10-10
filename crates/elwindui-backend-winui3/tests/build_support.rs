@@ -2,12 +2,16 @@
 //! same pure module `build.rs` uses.
 
 #[allow(dead_code)]
+#[path = "../build_nuget.rs"]
+mod build_nuget;
+#[allow(dead_code)]
 #[path = "../build_support.rs"]
 mod build_support;
 
 use build_support::{
     ExportDirError, NativeBuildMode, PREBUILT_ARTIFACT_FILES, SUPPORTED_PREBUILT_TARGETS,
-    missing_prebuilt_message, parse_build_mode, prebuilt_target_dir, resolve_export_dir,
+    export_dir_conflicts, missing_prebuilt_message, parse_build_mode, prebuilt_target_dir,
+    resolve_export_dir,
 };
 use std::path::{Path, PathBuf};
 
@@ -128,4 +132,287 @@ fn export_dir_requires_source_mode() {
         resolve_export_dir(NativeBuildMode::Source, Some("staging")),
         Ok(Some(PathBuf::from("staging")))
     );
+}
+
+#[test]
+fn export_destination_inside_equal_to_or_above_tracked_tree_conflicts() {
+    let tracked = Path::new(r"C:\repo\crates\elwindui-backend-winui3\native\prebuilt");
+    for requested in [
+        r"C:\repo\crates\elwindui-backend-winui3\native\prebuilt",
+        r"C:\repo\crates\elwindui-backend-winui3\native\prebuilt\unwanted-dir",
+        r"C:\repo\crates\elwindui-backend-winui3\native\prebuilt\x86_64-pc-windows-msvc\x",
+        r"C:\repo\crates\elwindui-backend-winui3\NATIVE\Prebuilt\unwanted-dir",
+        r"C:\repo\crates\elwindui-backend-winui3\native",
+        r"C:\repo",
+        r"C:\",
+    ] {
+        assert!(
+            export_dir_conflicts(Path::new(requested), tracked),
+            "{requested}"
+        );
+    }
+    for requested in [
+        r"C:\repo\.build\winui3-native-staging",
+        r"C:\repo\crates\elwindui-backend-winui3\native-staging",
+        r"C:\repo\crates\elwindui-backend-winui3\native\prebuilt-export",
+        r"D:\a\_temp\winui3-native",
+    ] {
+        assert!(
+            !export_dir_conflicts(Path::new(requested), tracked),
+            "{requested}"
+        );
+    }
+}
+
+/// A throwaway NuGet cache under the system temp directory.
+struct FakeNugetCache(PathBuf);
+
+impl FakeNugetCache {
+    fn new(name: &str) -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "elwindui-nuget-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        Self(root)
+    }
+
+    fn package(&self, id: &str, version: &str, dependencies: &[(&str, &str)]) {
+        let dir = self.0.join(id).join(version);
+        std::fs::create_dir_all(&dir).unwrap();
+        let deps: String = dependencies
+            .iter()
+            .map(|(dep, ver)| format!("      <dependency id=\"{dep}\" version=\"{ver}\" />\n"))
+            .collect();
+        // Two dependency groups, like the real packages, declaring the same versions.
+        std::fs::write(
+            dir.join(format!("{id}.nuspec")),
+            format!(
+                "<package><metadata><id>{id}</id><version>{version}</version><dependencies>\n    <group targetFramework=\"native0.0\">\n{deps}    </group>\n    <group targetFramework=\"net6.0-windows10.0.17763.0\">\n{deps}    </group>\n</dependencies></metadata></package>"
+            ),
+        )
+        .unwrap();
+    }
+
+    /// The pinned 1.8 package graph plus newer versions of every package next to it.
+    fn pinned_with_newer_versions(name: &str) -> Self {
+        let cache = Self::new(name);
+        for (app_sdk, winui, foundation, ix) in [
+            (
+                "1.8.260209005",
+                "1.8.260204000",
+                "1.8.260203002",
+                "1.8.260125001",
+            ),
+            (
+                "1.8.260317003",
+                "1.8.260224000",
+                "1.8.260222000",
+                "1.8.260301000",
+            ),
+        ] {
+            cache.package(
+                "microsoft.windowsappsdk",
+                app_sdk,
+                &[
+                    (
+                        "Microsoft.WindowsAppSDK.Foundation",
+                        &format!("[{foundation}]"),
+                    ),
+                    (
+                        "Microsoft.WindowsAppSDK.InteractiveExperiences",
+                        &format!("[{ix}]"),
+                    ),
+                    ("Microsoft.WindowsAppSDK.WinUI", &format!("[{winui}]")),
+                ],
+            );
+        }
+        cache.package(
+            "microsoft.windowsappsdk.winui",
+            "1.8.260204000",
+            &[("Microsoft.Web.WebView2", "1.0.3179.45")],
+        );
+        cache.package(
+            "microsoft.windowsappsdk.winui",
+            "1.8.260224000",
+            &[("Microsoft.Web.WebView2", "1.0.3200.0")],
+        );
+        for (id, versions) in [
+            (
+                "microsoft.windowsappsdk.foundation",
+                ["1.8.260203002", "1.8.260222000"],
+            ),
+            (
+                "microsoft.windowsappsdk.interactiveexperiences",
+                ["1.8.260125001", "1.8.260301000"],
+            ),
+            ("microsoft.graphics.win2d", ["1.4.0", "1.5.0"]),
+            ("microsoft.web.webview2", ["1.0.3179.45", "1.0.3200.0"]),
+        ] {
+            for version in versions {
+                cache.package(id, version, &[]);
+            }
+        }
+        cache
+    }
+}
+
+impl Drop for FakeNugetCache {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn pinned_packages_win_over_newer_cached_versions() {
+    let cache = FakeNugetCache::pinned_with_newer_versions("two-versions");
+    let packages = build_nuget::resolve_pinned_packages(&cache.0).expect("resolve pinned");
+    let selected: Vec<(&str, &str)> = packages
+        .all()
+        .iter()
+        .map(|package| (package.id, package.version.as_str()))
+        .collect();
+    assert_eq!(
+        selected,
+        [
+            ("microsoft.windowsappsdk", "1.8.260209005"),
+            ("microsoft.windowsappsdk.winui", "1.8.260204000"),
+            ("microsoft.windowsappsdk.foundation", "1.8.260203002"),
+            (
+                "microsoft.windowsappsdk.interactiveexperiences",
+                "1.8.260125001"
+            ),
+            ("microsoft.graphics.win2d", "1.4.0"),
+            ("microsoft.web.webview2", "1.0.3179.45"),
+        ]
+    );
+    for package in packages.all() {
+        assert_eq!(package.dir, cache.0.join(package.id).join(&package.version));
+    }
+}
+
+#[test]
+fn missing_pinned_package_is_an_error_even_if_other_versions_exist() {
+    let cache = FakeNugetCache::pinned_with_newer_versions("missing-pin");
+    std::fs::remove_dir_all(cache.0.join("microsoft.graphics.win2d").join("1.4.0")).unwrap();
+    let message = build_nuget::resolve_pinned_packages(&cache.0)
+        .expect_err("missing win2d pin")
+        .to_string();
+    assert!(
+        message.contains("microsoft.graphics.win2d 1.4.0"),
+        "{message}"
+    );
+    assert!(message.contains("restore-winui3.ps1"), "{message}");
+
+    let cache = FakeNugetCache::pinned_with_newer_versions("missing-transitive");
+    std::fs::remove_dir_all(
+        cache
+            .0
+            .join("microsoft.windowsappsdk.foundation")
+            .join("1.8.260203002"),
+    )
+    .unwrap();
+    let message = build_nuget::resolve_pinned_packages(&cache.0)
+        .expect_err("missing declared foundation")
+        .to_string();
+    assert!(
+        message.contains("microsoft.windowsappsdk.foundation 1.8.260203002"),
+        "{message}"
+    );
+}
+
+#[test]
+fn app_sdk_declaring_a_different_winui_is_rejected() {
+    let cache = FakeNugetCache::pinned_with_newer_versions("winui-mismatch");
+    cache.package(
+        "microsoft.windowsappsdk",
+        "1.8.260209005",
+        &[
+            ("Microsoft.WindowsAppSDK.Foundation", "[1.8.260203002]"),
+            (
+                "Microsoft.WindowsAppSDK.InteractiveExperiences",
+                "[1.8.260125001]",
+            ),
+            ("Microsoft.WindowsAppSDK.WinUI", "[1.8.260224000]"),
+        ],
+    );
+    let message = build_nuget::resolve_pinned_packages(&cache.0)
+        .expect_err("winui mismatch")
+        .to_string();
+    assert!(message.contains("1.8.260224000"), "{message}");
+}
+
+#[test]
+fn nuspec_dependency_versions_are_exact() {
+    let nuspec = r#"<dependency id="A" version="[1.2.3]" /><dependency id="B" version="4.5" />"#;
+    assert_eq!(
+        build_nuget::nuspec_dependency_version(nuspec, "a"),
+        Ok(Some("1.2.3".to_owned()))
+    );
+    assert_eq!(
+        build_nuget::nuspec_dependency_version(nuspec, "B"),
+        Ok(Some("4.5".to_owned()))
+    );
+    assert_eq!(
+        build_nuget::nuspec_dependency_version(nuspec, "C"),
+        Ok(None)
+    );
+    for range in ["[1.0,2.0)", "(1.0,)", "1.*", ""] {
+        let nuspec = format!(r#"<dependency id="A" version="{range}" />"#);
+        assert!(
+            build_nuget::nuspec_dependency_version(&nuspec, "A").is_err(),
+            "{range}"
+        );
+    }
+    let conflicting = r#"<dependency id="A" version="[1]" /><dependency id="A" version="[2]" />"#;
+    assert!(build_nuget::nuspec_dependency_version(conflicting, "A").is_err());
+}
+
+#[test]
+fn metadata_overrides_must_point_into_the_pinned_version() {
+    let package = build_nuget::PinnedPackage {
+        id: "microsoft.windowsappsdk.winui",
+        version: "1.8.260204000".to_owned(),
+        dir: PathBuf::from("unused"),
+    };
+    for ok in [
+        r"C:\cache\microsoft.windowsappsdk.winui\1.8.260204000\metadata\Microsoft.UI.Xaml.winmd",
+        r"D:\other\Microsoft.WindowsAppSDK.WinUI\1.8.260204000\metadata\Microsoft.UI.Xaml.winmd",
+    ] {
+        assert!(
+            build_nuget::validate_override(Path::new(ok), &package).is_ok(),
+            "{ok}"
+        );
+    }
+    for bad in [
+        r"C:\cache\microsoft.windowsappsdk.winui\1.8.260224000\metadata\Microsoft.UI.Xaml.winmd",
+        r"C:\somewhere\Microsoft.UI.Xaml.winmd",
+        r"C:\cache\1.8.260204000\microsoft.windowsappsdk.winui\Microsoft.UI.Xaml.winmd",
+    ] {
+        let message = build_nuget::validate_override(Path::new(bad), &package)
+            .expect_err(bad)
+            .to_string();
+        assert!(message.contains("1.8.260204000"), "{message}");
+    }
+}
+
+#[test]
+fn pins_match_restore_script() {
+    let script = include_str!("../../../tools/restore-winui3.ps1");
+    for (name, (id, version)) in [
+        ("Microsoft.WindowsAppSDK", build_nuget::WINDOWS_APP_SDK),
+        (
+            "Microsoft.WindowsAppSDK.WinUI",
+            build_nuget::WINDOWS_APP_SDK_WINUI,
+        ),
+        ("Microsoft.Graphics.Win2D", build_nuget::WIN2D),
+    ] {
+        assert_eq!(id, name.to_ascii_lowercase());
+        let reference = format!("PackageReference Include=\"{name}\" Version=\"{version}\"");
+        assert!(script.contains(&reference), "{reference}");
+    }
 }

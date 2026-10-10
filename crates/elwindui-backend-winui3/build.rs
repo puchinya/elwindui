@@ -1,18 +1,66 @@
-//! Generates the WinUI 3 projection from the Windows App SDK and Windows SDK metadata.
+//! Generates the WinUI 3 projection from the Windows App SDK and Windows SDK metadata, and links
+//! the native C++/WinRT application host.
+//!
+//! The native host is obtained in one of two explicitly selected modes (Issue #294, see
+//! `docs/design/backends/winui3_backend_design.md`, "Native artifact manufacturing"):
+//!
+//! - prebuilt (default; `ELWINDUI_WINUI3_BUILD_NATIVE` unset or `0`): link/deploy the checked-in
+//!   `native/prebuilt/<TARGET>/` artifacts. No MIDL, C++/WinRT, MSVC compiler or makepri run.
+//! - source (`ELWINDUI_WINUI3_BUILD_NATIVE=1`): run the MIDL -> cppwinrt -> MSVC and makepri
+//!   pipeline from `cpp/`, optionally exporting the outputs to
+//!   `ELWINDUI_WINUI3_PREBUILT_EXPORT_DIR/<TARGET>/`.
+//!
+//! The Rust `windows-bindgen` projection and the Win2D / Windows App Runtime bootstrap DLL
+//! deployment are common to both modes.
+
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+mod build_nuget;
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+mod build_support;
 
 #[cfg(target_os = "windows")]
 fn main() {
-    use std::path::PathBuf;
+    use build_support::{
+        BUILD_NATIVE_ENV, NativeBuildMode, PREBUILT_EXPORT_DIR_ENV, parse_build_mode,
+        resolve_export_dir,
+    };
 
     println!("cargo:rerun-if-env-changed=WINDOWS_APP_SDK_WINMD");
     println!("cargo:rerun-if-env-changed=WIN2D_WINMD");
+    println!("cargo:rerun-if-env-changed=WEBVIEW2_WINMD");
+    println!("cargo:rerun-if-env-changed=NUGET_PACKAGES");
+    println!("cargo:rerun-if-env-changed={BUILD_NATIVE_ENV}");
+    println!("cargo:rerun-if-env-changed={PREBUILT_EXPORT_DIR_ENV}");
 
-    let app_sdk = std::env::var_os("WINDOWS_APP_SDK_WINMD")
-        .map(PathBuf::from)
-        .or_else(find_app_sdk_winmd)
-        .expect(
-            "Microsoft.UI.Xaml.winmd was not found. Restore Microsoft.WindowsAppSDK with NuGet, or set WINDOWS_APP_SDK_WINMD.",
-        );
+    let mode_value = std::env::var_os(BUILD_NATIVE_ENV).map(|v| v.to_string_lossy().into_owned());
+    let mode = parse_build_mode(mode_value.as_deref()).unwrap_or_else(|error| panic!("{error}"));
+    let export_value =
+        std::env::var_os(PREBUILT_EXPORT_DIR_ENV).map(|v| v.to_string_lossy().into_owned());
+    // Validated (never created) here, before any build work: an export destination inside or
+    // above the tracked prebuilt tree is rejected without touching the file system.
+    let export_dir = resolve_export_dir(mode, export_value.as_deref())
+        .unwrap_or_else(|error| panic!("{error}"))
+        .map(|dir| validated_export_destination(&dir));
+    let target = std::env::var("TARGET").expect("TARGET");
+    // Resolved up front so a missing/unsupported prebuilt bundle fails before binding generation.
+    let prebuilt_dir = match mode {
+        NativeBuildMode::Prebuilt => Some(resolve_prebuilt_dir(&target)),
+        NativeBuildMode::Source => None,
+    };
+
+    // Exactly the pinned packages (and the transitive versions they declare), never another
+    // version that happens to be in the NuGet cache. See `build_nuget.rs`.
+    let packages = build_nuget::resolve_pinned_packages(&nuget_packages_root())
+        .unwrap_or_else(|error| panic!("{error}"));
+    let app_sdk = pinned_override("WINDOWS_APP_SDK_WINMD", &packages.winui).unwrap_or_else(|| {
+        packages
+            .winui
+            .dir
+            .join("metadata")
+            .join("Microsoft.UI.Xaml.winmd")
+    });
     assert!(
         app_sdk.is_file(),
         "WINDOWS_APP_SDK_WINMD is not a file: {}",
@@ -61,9 +109,7 @@ fn main() {
         "Microsoft.Graphics.winmd",
         "Microsoft.UI.winmd",
     ] {
-        if let Some(path) =
-            find_package_contract_winmd("microsoft.windowsappsdk.interactiveexperiences", metadata)
-        {
+        if let Some(path) = find_contract_winmd(&packages.interactive_experiences.dir, metadata) {
             args.push("--in".to_owned());
             args.push(path.to_string_lossy().into_owned());
         }
@@ -79,34 +125,32 @@ fn main() {
         }
     }
     // Windows App SDK 1.8 ships this contract in the separate Foundation package. Keep the
-    // legacy runtime-package lookup as a fallback for older package layouts, but prefer the
-    // metadata directory used by the current package so the exact IResourceManager filter below
-    // is available to the no-deps projection.
-    if let Some(resources) = find_package_metadata_winmd(
-        "microsoft.windowsappsdk.foundation",
-        "Microsoft.Windows.ApplicationModel.Resources.winmd",
-    )
-    .or_else(|| {
-        find_package_winmd(
-            "microsoft.windowsappsdk",
-            "Microsoft.Windows.ApplicationModel.Resources.winmd",
-        )
-    }) {
+    // runtime-package lookup (of the same pinned Windows App SDK) as a fallback for its older
+    // layout, but prefer the Foundation metadata directory so the exact IResourceManager filter
+    // below is available to the no-deps projection.
+    let resources_winmd = packages
+        .foundation
+        .dir
+        .join("metadata")
+        .join("Microsoft.Windows.ApplicationModel.Resources.winmd");
+    if let Some(resources) = Some(resources_winmd)
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            find_lib_winmd(
+                &packages.app_sdk.dir,
+                "Microsoft.Windows.ApplicationModel.Resources.winmd",
+            )
+        })
+    {
         args.push("--in".to_owned());
         args.push(resources.to_string_lossy().into_owned());
     }
-    if let Some(webview2) = std::env::var_os("WEBVIEW2_WINMD") {
+    if let Some(webview2) = pinned_override("WEBVIEW2_WINMD", &packages.webview2) {
         args.push("--in".to_owned());
-        args.push(PathBuf::from(webview2).to_string_lossy().into_owned());
+        args.push(webview2.to_string_lossy().into_owned());
     }
-    if let Some(win2d) = std::env::var_os("WIN2D_WINMD")
-        .map(PathBuf::from)
-        .or_else(|| {
-            find_package_winmd(
-                "microsoft.graphics.win2d",
-                "Microsoft.Graphics.Canvas.winmd",
-            )
-        })
+    if let Some(win2d) = pinned_override("WIN2D_WINMD", &packages.win2d)
+        .or_else(|| find_lib_winmd(&packages.win2d.dir, "Microsoft.Graphics.Canvas.winmd"))
     {
         args.push("--in".to_owned());
         args.push(win2d.to_string_lossy().into_owned());
@@ -451,9 +495,21 @@ fn main() {
         std::fs::read_to_string(&interop_path).expect("read generated XAML interop bindings");
     std::fs::write(&interop_path, interop.replacen("#![allow(", "#[allow(", 1))
         .expect("write generated XAML interop bindings");
-    copy_win2d_runtime(&out_dir);
-    generate_resources_pri(&out_dir);
-    build_cpp_app_host(&out_dir, &winmd_inputs, &app_sdk);
+    copy_win2d_runtime(&out_dir, &packages);
+    write_nuget_selection(&out_dir, &packages);
+    // Required by the native host in both modes.
+    println!("cargo:rustc-link-lib=WindowsApp");
+    match prebuilt_dir {
+        Some(dir) => link_and_deploy_prebuilt(&out_dir, &dir),
+        None => {
+            let resources_pri = generate_resources_pri(&out_dir);
+            let native = build_cpp_app_host(&out_dir, &winmd_inputs, &app_sdk, &packages);
+            if let Some(export_dir) = export_dir {
+                export_source_artifacts(&export_dir, &target, &native, &resources_pri);
+            }
+        }
+    }
+    write_native_mode_marker(&out_dir, mode);
     if !warnings.is_empty() || !interop_warnings.is_empty() {
         println!(
             "cargo:warning=WinUI binding generation omitted {} unsupported metadata member(s)",
@@ -464,92 +520,20 @@ fn main() {
 }
 
 #[cfg(target_os = "windows")]
-fn find_app_sdk_winmd() -> Option<std::path::PathBuf> {
-    find_package_metadata_winmd("microsoft.windowsappsdk.winui", "Microsoft.UI.Xaml.winmd")
-        .or_else(|| find_package_winmd("microsoft.windowsappsdk", "Microsoft.UI.Xaml.winmd"))
-}
-
-#[cfg(target_os = "windows")]
-fn find_package_metadata_winmd(package: &str, filename: &str) -> Option<std::path::PathBuf> {
-    let root = std::env::var_os("NUGET_PACKAGES")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages"))
-        })?
-        .join(package);
-    let mut candidates = Vec::new();
-    for version in std::fs::read_dir(root).ok()?.flatten() {
-        let winmd = version.path().join("metadata").join(filename);
-        if winmd.is_file() {
-            candidates.push(winmd);
-        }
-    }
-    candidates.sort();
-    candidates.pop()
-}
-
-#[cfg(target_os = "windows")]
-fn find_package_contract_winmd(package: &str, filename: &str) -> Option<std::path::PathBuf> {
-    let root = std::env::var_os("NUGET_PACKAGES")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages"))
-        })?
-        .join(package);
-    let mut candidates = Vec::new();
-    for version in std::fs::read_dir(root).ok()?.flatten() {
-        let metadata = version.path().join("metadata");
-        for contract in std::fs::read_dir(metadata)
-            .ok()
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            let winmd = contract.path().join(filename);
-            if winmd.is_file() {
-                candidates.push(winmd);
-            }
-        }
-    }
-    candidates.sort();
-    candidates.pop()
-}
-
-#[cfg(target_os = "windows")]
-fn copy_win2d_runtime(out_dir: &str) {
+fn copy_win2d_runtime(out_dir: &str, packages: &build_nuget::PinnedPackages) {
     let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("x86") => "win-x86",
         Ok("aarch64") => "win-arm64",
         _ => "win-x64",
     };
-    let root = std::env::var_os("NUGET_PACKAGES")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages"))
-        })
-        .expect("NUGET_PACKAGES or USERPROFILE is required to locate Win2D runtime");
-    let mut candidates = Vec::new();
-    let package = root.join("microsoft.graphics.win2d");
-    for version in std::fs::read_dir(package)
-        .expect("read Win2D NuGet package")
-        .flatten()
-    {
-        let dll = version
-            .path()
+    let native_dll = |package: &build_nuget::PinnedPackage, name: &str| {
+        let path = package
+            .dir
             .join("runtimes")
             .join(arch)
             .join("native")
-            .join("Microsoft.Graphics.Canvas.dll");
-        if dll.is_file() {
-            candidates.push(dll);
-        }
-    }
-    candidates.sort();
-    let Some(source) = candidates.pop() else {
-        panic!("Microsoft.Graphics.Canvas.dll was not found for {arch}");
+            .join(name);
+        path.is_file().then_some(path)
     };
     let profile_dir = std::path::Path::new(out_dir)
         .ancestors()
@@ -557,6 +541,13 @@ fn copy_win2d_runtime(out_dir: &str) {
         .expect("target profile directory");
     let deps_dir = profile_dir.join("deps");
     std::fs::create_dir_all(&deps_dir).expect("create target/<profile>/deps directory");
+
+    let Some(source) = native_dll(&packages.win2d, "Microsoft.Graphics.Canvas.dll") else {
+        panic!(
+            "Microsoft.Graphics.Canvas.dll was not found for {arch} in {}",
+            packages.win2d.dir.display()
+        );
+    };
     let target = profile_dir.join("Microsoft.Graphics.Canvas.dll");
     std::fs::copy(&source, &target)
         .expect("copy Microsoft.Graphics.Canvas.dll beside application binary");
@@ -564,43 +555,101 @@ fn copy_win2d_runtime(out_dir: &str) {
         .expect("copy Microsoft.Graphics.Canvas.dll beside test binaries");
     println!("cargo:rerun-if-changed={}", source.display());
 
-    let mut bootstrap_candidates = Vec::new();
     // Current Windows App SDK packages place the native bootstrap DLL in the Foundation package;
-    // older layouts placed it directly in Microsoft.WindowsAppSDK. Search both package owners so
-    // the local runtime copy follows the metadata package pair actually restored above.
-    for package_name in [
-        "microsoft.windowsappsdk",
-        "microsoft.windowsappsdk.foundation",
-    ] {
-        let package = root.join(package_name);
-        let Ok(versions) = std::fs::read_dir(&package) else {
-            continue;
-        };
-        for version in versions.flatten() {
-            let dll = version
-                .path()
-                .join("runtimes")
-                .join(arch)
-                .join("native")
-                .join("Microsoft.WindowsAppRuntime.Bootstrap.dll");
-            if dll.is_file() {
-                bootstrap_candidates.push(dll);
-            }
-        }
-    }
-    bootstrap_candidates.sort();
-    let Some(source) = bootstrap_candidates.pop() else {
-        panic!("Microsoft.WindowsAppRuntime.Bootstrap.dll was not found for {arch}");
+    // the older layout placed it directly in Microsoft.WindowsAppSDK. Both lookups are restricted
+    // to the pinned versions.
+    let bootstrap = "Microsoft.WindowsAppRuntime.Bootstrap.dll";
+    let Some(source) = native_dll(&packages.foundation, bootstrap)
+        .or_else(|| native_dll(&packages.app_sdk, bootstrap))
+    else {
+        panic!(
+            "{bootstrap} was not found for {arch} in {} or {}",
+            packages.foundation.dir.display(),
+            packages.app_sdk.dir.display()
+        );
     };
-    let target = profile_dir.join("Microsoft.WindowsAppRuntime.Bootstrap.dll");
+    let target = profile_dir.join(bootstrap);
     std::fs::copy(&source, &target)
         .expect("copy Microsoft.WindowsAppRuntime.Bootstrap.dll beside application binary");
-    std::fs::copy(
-        &source,
-        deps_dir.join("Microsoft.WindowsAppRuntime.Bootstrap.dll"),
-    )
-    .expect("copy Microsoft.WindowsAppRuntime.Bootstrap.dll beside test binaries");
+    std::fs::copy(&source, deps_dir.join(bootstrap))
+        .expect("copy Microsoft.WindowsAppRuntime.Bootstrap.dll beside test binaries");
     println!("cargo:rerun-if-changed={}", source.display());
+}
+
+/// `NUGET_PACKAGES`, else the user's default global packages folder.
+#[cfg(target_os = "windows")]
+fn nuget_packages_root() -> std::path::PathBuf {
+    std::env::var_os("NUGET_PACKAGES")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages"))
+        })
+        .expect("NUGET_PACKAGES or USERPROFILE is required to locate the WinUI 3 NuGet packages")
+}
+
+/// Reads a metadata override environment variable. The override must resolve (`..`, symlinks and
+/// junctions resolved) to an existing `.winmd` inside the pinned package version; the resolved path
+/// is what the build then reads.
+#[cfg(target_os = "windows")]
+fn pinned_override(
+    variable: &str,
+    package: &build_nuget::PinnedPackage,
+) -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(std::env::var_os(variable)?);
+    Some(
+        build_nuget::validate_override(&path, package)
+            .unwrap_or_else(|error| panic!("{variable}: {error}")),
+    )
+}
+
+/// `<package dir>/metadata/<contract>/<filename>`, highest contract directory.
+#[cfg(target_os = "windows")]
+fn find_contract_winmd(
+    package_dir: &std::path::Path,
+    filename: &str,
+) -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<_> = std::fs::read_dir(package_dir.join("metadata"))
+        .ok()?
+        .flatten()
+        .map(|contract| contract.path().join(filename))
+        .filter(|path| path.is_file())
+        .collect();
+    candidates.sort();
+    candidates.pop()
+}
+
+/// `<package dir>/lib/<filename>` or `<package dir>/lib/<tfm>/<filename>`.
+#[cfg(target_os = "windows")]
+fn find_lib_winmd(package_dir: &std::path::Path, filename: &str) -> Option<std::path::PathBuf> {
+    let lib = package_dir.join("lib");
+    let flat = lib.join(filename);
+    if flat.is_file() {
+        return Some(flat);
+    }
+    let mut candidates: Vec<_> = std::fs::read_dir(lib)
+        .ok()?
+        .flatten()
+        .map(|target| target.path().join(filename))
+        .filter(|path| path.is_file())
+        .collect();
+    candidates.sort();
+    candidates.pop()
+}
+
+/// Records the NuGet package versions this build read in `OUT_DIR` (diagnostics/CI evidence).
+#[cfg(target_os = "windows")]
+fn write_nuget_selection(out_dir: &str, packages: &build_nuget::PinnedPackages) {
+    let text: String = packages
+        .all()
+        .iter()
+        .map(|package| format!("{} {}\n", package.id, package.version))
+        .collect();
+    std::fs::write(
+        std::path::Path::new(out_dir).join("elwindui-winui3-nuget-packages.txt"),
+        text,
+    )
+    .expect("write NuGet package selection");
 }
 
 /// An unpackaged Windows App SDK process cannot resolve *any* `ms-appx://` resource — including a
@@ -611,15 +660,12 @@ fn copy_win2d_runtime(out_dir: &str) {
 /// (indexing none of this crate's own resources — it exists purely to make that resolution
 /// possible at all) and copies it beside the built exe, the same way `copy_win2d_runtime` places
 /// `Microsoft.Graphics.Canvas.dll` there. Requires `makepri.exe` from the Windows SDK, i.e.
-/// `tools/setup-vs-env.ps1` sourced first — same precondition the whole crate already has for MSVC.
+/// `tools/setup-vs-env.ps1` sourced first — source-native mode only; prebuilt mode deploys the
+/// checked-in `resources.pri` through the same `deploy_resources_pri` destinations instead.
 #[cfg(target_os = "windows")]
-fn generate_resources_pri(out_dir: &str) {
+fn generate_resources_pri(out_dir: &str) -> std::path::PathBuf {
     let makepri =
         find_makepri().expect("makepri.exe was not found; source tools/setup-vs-env.ps1 first");
-    let profile_dir = std::path::Path::new(out_dir)
-        .ancestors()
-        .nth(3)
-        .expect("target profile directory");
     let pri_root = std::path::Path::new(out_dir).join("resources_pri");
     std::fs::create_dir_all(&pri_root).expect("create resources.pri project root");
 
@@ -651,7 +697,17 @@ fn generate_resources_pri(out_dir: &str) {
         .expect("run makepri.exe new");
     assert!(status.success(), "makepri.exe new failed");
 
-    std::fs::copy(&generated, profile_dir.join("resources.pri"))
+    deploy_resources_pri(out_dir, &generated);
+    generated
+}
+
+#[cfg(target_os = "windows")]
+fn deploy_resources_pri(out_dir: &str, resources_pri: &std::path::Path) {
+    let profile_dir = std::path::Path::new(out_dir)
+        .ancestors()
+        .nth(3)
+        .expect("target profile directory");
+    std::fs::copy(resources_pri, profile_dir.join("resources.pri"))
         .expect("copy resources.pri beside application binary");
     // `cargo test`/`cargo bench` binaries run from `target/<profile>/deps/`, not
     // `target/<profile>/` itself — MRT resource-context resolution looks beside the actual running
@@ -661,7 +717,7 @@ fn generate_resources_pri(out_dir: &str) {
     // despite the example binaries (which do live directly in `target/<profile>/`) working fine.
     let deps_dir = profile_dir.join("deps");
     std::fs::create_dir_all(&deps_dir).expect("create target/<profile>/deps directory");
-    std::fs::copy(&generated, deps_dir.join("resources.pri"))
+    std::fs::copy(resources_pri, deps_dir.join("resources.pri"))
         .expect("copy resources.pri beside test binaries");
 }
 
@@ -685,8 +741,14 @@ fn deploy_accessibility_winmd(out_dir: &str, component_winmd: &std::path::Path) 
 /// Generates a C++/WinRT projection (via `cppwinrt.exe`) for just enough of the WinUI 3 surface to
 /// host `Application`, and compiles `cpp/app_host.cpp` against it — see that file's own doc comment
 /// (and `src/composed_application.rs`'s) for why this exists at all (microsoft/windows-rs#3404).
+/// Source-native mode only.
 #[cfg(target_os = "windows")]
-fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String], app_sdk: &std::path::Path) {
+fn build_cpp_app_host(
+    out_dir: &str,
+    winmd_inputs: &[String],
+    app_sdk: &std::path::Path,
+    packages: &build_nuget::PinnedPackages,
+) -> SourceNativeOutputs {
     let cppwinrt = find_sdk_tool("cppwinrt.exe")
         .expect("cppwinrt.exe was not found; source tools/setup-vs-env.ps1 first");
     let midl = find_sdk_tool("midl.exe")
@@ -760,10 +822,9 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String], app_sdk: &std::pat
         component_args.push("-reference".to_owned());
         component_args.push(winmd.clone());
     }
-    if let Some(webview2) = find_package_lib_winmd(
-        "microsoft.web.webview2",
-        "Microsoft.Web.WebView2.Core.winmd",
-    ) {
+    if let Some(webview2) =
+        find_lib_winmd(&packages.webview2.dir, "Microsoft.Web.WebView2.Core.winmd")
+    {
         component_args.push("-reference".to_owned());
         component_args.push(webview2.to_string_lossy().into_owned());
     }
@@ -807,10 +868,9 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String], app_sdk: &std::pat
     // `Microsoft.UI.Xaml.winmd`'s own `IWebView2` interface references WebView2's winmd even
     // though this shim never touches WebView2 — cppwinrt validates the whole input database
     // up front, so the reference has to resolve even when `-exclude` drops the type from output.
-    if let Some(webview2) = find_package_lib_winmd(
-        "microsoft.web.webview2",
-        "Microsoft.Web.WebView2.Core.winmd",
-    ) {
+    if let Some(webview2) =
+        find_lib_winmd(&packages.webview2.dir, "Microsoft.Web.WebView2.Core.winmd")
+    {
         args.push("-input".to_owned());
         args.push(webview2.to_string_lossy().into_owned());
     }
@@ -859,35 +919,171 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String], app_sdk: &std::pat
         .flag_if_supported("/await:strict")
         .flag_if_supported("/EHsc")
         .flag_if_supported("/utf-8")
-        .compile("elwindui_winui3_app_host");
+        .compile(build_support::NATIVE_LIB_NAME);
 
-    println!("cargo:rustc-link-lib=WindowsApp");
     println!("cargo:rerun-if-changed=cpp/app_host.cpp");
     println!("cargo:rerun-if-changed=cpp/accessibility_host.h");
     println!("cargo:rerun-if-changed=cpp/accessibility_host.cpp");
     println!("cargo:rerun-if-changed=cpp/accessibility_semantic_peer.idl");
+
+    let native_lib = std::path::Path::new(out_dir).join(build_support::NATIVE_LIB_FILE);
+    assert!(
+        native_lib.is_file(),
+        "cc did not produce {}",
+        native_lib.display()
+    );
+    SourceNativeOutputs {
+        native_lib,
+        accessibility_winmd: component_winmd,
+    }
 }
 
-/// Looks for `<nuget_packages>/<package>/<version>/lib/<filename>` (the WebView2 package's own
-/// layout — a flat `lib/` with no per-TFM subfolder, unlike `find_package_winmd`'s `lib/<target>/`).
+/// Native artifacts produced by `build_cpp_app_host`, located by their known output paths (never
+/// by scanning `target/`).
 #[cfg(target_os = "windows")]
-fn find_package_lib_winmd(package: &str, filename: &str) -> Option<std::path::PathBuf> {
-    let root = std::env::var_os("NUGET_PACKAGES")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages"))
-        })?
-        .join(package);
-    let mut candidates = Vec::new();
-    for version in std::fs::read_dir(root).ok()?.flatten() {
-        let winmd = version.path().join("lib").join(filename);
-        if winmd.is_file() {
-            candidates.push(winmd);
-        }
+struct SourceNativeOutputs {
+    native_lib: std::path::PathBuf,
+    accessibility_winmd: std::path::PathBuf,
+}
+
+/// Selects `native/prebuilt/<TARGET>/` and requires all three artifacts to be present. Panics with
+/// an actionable message otherwise; there is no fallback to source compilation.
+#[cfg(target_os = "windows")]
+fn resolve_prebuilt_dir(target: &str) -> std::path::PathBuf {
+    let manifest_dir = std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
+    );
+    let dir = build_support::prebuilt_target_dir(&manifest_dir, target).unwrap_or_else(|error| {
+        panic!(
+            "{error}. Normal builds never fall back to compiling native sources; ElwindUI \
+             maintainers can build the native shim from source with {}=1.",
+            build_support::BUILD_NATIVE_ENV
+        )
+    });
+    for file in build_support::PREBUILT_ARTIFACT_FILES {
+        let path = dir.join(file);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let present = std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file());
+        assert!(
+            present,
+            "{}",
+            build_support::missing_prebuilt_message(target, &path)
+        );
     }
-    candidates.sort();
-    candidates.pop()
+    dir
+}
+
+/// Prebuilt mode: links the checked-in static library and deploys the checked-in `resources.pri`
+/// and accessibility WinMD to the same executable/test locations source-native mode uses.
+#[cfg(target_os = "windows")]
+fn link_and_deploy_prebuilt(out_dir: &str, dir: &std::path::Path) {
+    println!("cargo:rustc-link-search=native={}", dir.display());
+    println!(
+        "cargo:rustc-link-lib=static={}",
+        build_support::NATIVE_LIB_NAME
+    );
+    deploy_resources_pri(out_dir, &dir.join(build_support::RESOURCES_PRI_FILE));
+    deploy_accessibility_winmd(out_dir, &dir.join(build_support::ACCESSIBILITY_WINMD_FILE));
+}
+
+/// Source-native mode with `ELWINDUI_WINUI3_PREBUILT_EXPORT_DIR`: copies the three artifacts this
+/// build produced into `<export_dir>/<TARGET>/`. A build never writes the checked-in
+/// `native/prebuilt/` tree.
+#[cfg(target_os = "windows")]
+fn export_source_artifacts(
+    export_dir: &std::path::Path,
+    target: &str,
+    native: &SourceNativeOutputs,
+    resources_pri: &std::path::Path,
+) {
+    let destination = export_dir.join(target);
+    std::fs::create_dir_all(&destination).unwrap_or_else(|error| {
+        panic!(
+            "create prebuilt export directory {}: {error}",
+            destination.display()
+        )
+    });
+    for (source, file) in [
+        (native.native_lib.as_path(), build_support::NATIVE_LIB_FILE),
+        (
+            native.accessibility_winmd.as_path(),
+            build_support::ACCESSIBILITY_WINMD_FILE,
+        ),
+        (resources_pri, build_support::RESOURCES_PRI_FILE),
+    ] {
+        std::fs::copy(source, destination.join(file)).unwrap_or_else(|error| {
+            panic!(
+                "export {} to {}: {error}",
+                source.display(),
+                destination.display()
+            )
+        });
+    }
+}
+
+/// Resolves `ELWINDUI_WINUI3_PREBUILT_EXPORT_DIR` to an absolute path without creating anything
+/// and panics if it is the tracked prebuilt tree, inside it, or one of its ancestors.
+#[cfg(target_os = "windows")]
+fn validated_export_destination(raw: &std::path::Path) -> std::path::PathBuf {
+    let manifest_dir = std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
+    );
+    let requested = resolve_without_creating(&manifest_dir.join(raw)).unwrap_or_else(|| {
+        panic!(
+            "{}={} cannot be resolved safely (a `..` below its nearest existing directory)",
+            build_support::PREBUILT_EXPORT_DIR_ENV,
+            raw.display()
+        )
+    });
+    let tracked = resolve_without_creating(
+        &manifest_dir
+            .join(build_support::PREBUILT_ROOT[0])
+            .join(build_support::PREBUILT_ROOT[1]),
+    )
+    .expect("resolve the tracked prebuilt tree");
+    assert!(
+        !build_support::export_dir_conflicts(&requested, &tracked),
+        "{}={} must not be, contain or lie inside the checked-in prebuilt tree {}",
+        build_support::PREBUILT_EXPORT_DIR_ENV,
+        raw.display(),
+        tracked.display()
+    );
+    requested
+}
+
+/// Canonicalizes the nearest existing ancestor (resolving symlinks/junctions) and appends the
+/// remaining, not yet existing components. `None` if those remaining components contain `..`.
+#[cfg(target_os = "windows")]
+fn resolve_without_creating(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let existing = path.ancestors().find(|ancestor| ancestor.exists())?;
+    let remainder = path.strip_prefix(existing).ok()?;
+    if remainder
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(existing).ok()?;
+    if remainder.as_os_str().is_empty() {
+        Some(canonical)
+    } else {
+        Some(canonical.join(remainder))
+    }
+}
+
+/// Records which native mode this build script run used (`prebuilt` or `source`) in `OUT_DIR`, so
+/// CI can assert that a consumer build took the prebuilt path.
+#[cfg(target_os = "windows")]
+fn write_native_mode_marker(out_dir: &str, mode: build_support::NativeBuildMode) {
+    let value = match mode {
+        build_support::NativeBuildMode::Prebuilt => "prebuilt\n",
+        build_support::NativeBuildMode::Source => "source\n",
+    };
+    std::fs::write(
+        std::path::Path::new(out_dir).join("elwindui-winui3-native-mode.txt"),
+        value,
+    )
+    .expect("write native build mode marker");
 }
 
 #[cfg(target_os = "windows")]
@@ -1015,29 +1211,6 @@ fn find_makepri() -> Option<std::path::PathBuf> {
         .map(|entry| entry.path().join(arch).join("makepri.exe"))
         .filter(|path| path.is_file())
         .collect();
-    candidates.sort();
-    candidates.pop()
-}
-
-#[cfg(target_os = "windows")]
-fn find_package_winmd(package: &str, filename: &str) -> Option<std::path::PathBuf> {
-    let root = std::env::var_os("NUGET_PACKAGES")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages"))
-        })?
-        .join(package);
-    let mut candidates = Vec::new();
-    for version in std::fs::read_dir(root).ok()?.flatten() {
-        let lib = version.path().join("lib");
-        for target in std::fs::read_dir(lib).ok().into_iter().flatten().flatten() {
-            let winmd = target.path().join(filename);
-            if winmd.is_file() {
-                candidates.push(winmd);
-            }
-        }
-    }
     candidates.sort();
     candidates.pop()
 }

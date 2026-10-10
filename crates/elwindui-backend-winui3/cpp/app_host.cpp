@@ -92,6 +92,14 @@ struct App : ApplicationT<App, IXamlMetadataProvider> {
 
 }  // namespace
 
+// Native ABI generation anchor (Issue #294). Rust (`src/app.rs`) references this symbol on every
+// application start, so a prebuilt `elwindui_winui3_app_host.lib` from another ABI generation fails
+// at link time instead of running. Bump the `v1` suffix here, in `src/app.rs`, and
+// `NATIVE_ABI_VERSION` in `build_support.rs` whenever an exported C function name/signature/calling
+// convention, `ElwinduiAccessibilityNodeRecord`, `ElwinduiAccessibilityCallbacks`, or another
+// native ABI assumption used by Rust call sites changes incompatibly.
+extern "C" __declspec(dllexport) void elwindui_winui3_native_abi_v1() noexcept {}
+
 extern "C" __declspec(dllexport) void elwindui_winui3_run(void (*startup)()) {
     g_startup = startup;
     // COM apartment initialization happens on the Rust side before this is called (see

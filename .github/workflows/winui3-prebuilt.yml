@@ -1,0 +1,307 @@
+# Manufactures and verifies the WinUI3 prebuilt native artifacts (Issue #294).
+#
+# manufacture (x64 + ARM64, native runners) -> assemble -> consumer-link (x64 + ARM64)
+#   -> publish-verified-bundle (uploads the `winui3-prebuilt-verified` Actions artifact).
+#
+# Read-only: no repository writes, secrets, commits, releases or deployments. Promotion into
+# crates/elwindui-backend-winui3/native/prebuilt is a separate, human-reviewed local step
+# (tools/promote-winui3-prebuilt.ps1); see docs/agents/winui3.md.
+name: winui3-prebuilt
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/winui3-prebuilt.yml"
+      - "crates/elwindui-backend-winui3/build.rs"
+      - "crates/elwindui-backend-winui3/build_support.rs"
+      - "crates/elwindui-backend-winui3/build_nuget.rs"
+      - "crates/elwindui-backend-winui3/cpp/**"
+      - "crates/elwindui-backend-winui3/native/**"
+      - "crates/elwindui-backend-winui3/src/app.rs"
+      - "crates/elwindui-backend-winui3/Cargo.toml"
+      - "Cargo.lock"
+      - "tools/setup-vs-env.ps1"
+      - "tools/restore-winui3.ps1"
+      - "tools/winui3-prebuilt-common.ps1"
+      - "tools/build-winui3-prebuilt.ps1"
+      - "tools/assemble-winui3-prebuilt.ps1"
+      - "tools/verify-winui3-prebuilt.ps1"
+      - "tools/promote-winui3-prebuilt.ps1"
+      - "tools/test-winui3-prebuilt-tooling.ps1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: winui3-prebuilt-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Exact immutable source revision: the PR head (not the synthetic merge commit) or the
+  # dispatched commit.
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  CARGO_TERM_COLOR: never
+
+jobs:
+  manufacture:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+            runner: windows-2025-vs2026
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-vs2026-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Assert checkout is the source SHA
+        run: |
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $env:SOURCE_SHA) { throw "checked out $head, expected $env:SOURCE_SHA" }
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Install native Rust toolchain
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            $init = Join-Path $env:RUNNER_TEMP "rustup-init.exe"
+            Invoke-WebRequest "https://static.rust-lang.org/rustup/dist/${{ matrix.target }}/rustup-init.exe" -OutFile $init
+            & $init -y --profile minimal --default-host ${{ matrix.target }} --default-toolchain none
+            if ($LASTEXITCODE -ne 0) { throw "rustup-init failed" }
+            "$env:USERPROFILE\.cargo\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+            $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+          }
+          rustup toolchain install stable-${{ matrix.target }} --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install failed" }
+          rustup default stable-${{ matrix.target }}
+          rustc -vV
+          $rustHost = (rustc -vV | Select-String '^host: ').ToString().Substring(6)
+          if ($rustHost -ne "${{ matrix.target }}") { throw "rustc host is $rustHost" }
+      - name: Report host architecture
+        run: |
+          [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+          [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
+      - name: Manufacture ${{ matrix.target }} from source
+        run: |
+          ./tools/build-winui3-prebuilt.ps1 -Arch ${{ matrix.arch }} `
+            -StagingRoot "$env:RUNNER_TEMP/winui3-native" `
+            -RunnerLabel ${{ matrix.runner }} `
+            -CargoTargetDir "$env:RUNNER_TEMP/target-source"
+      - name: Reject export destinations in or above the tracked prebuilt tree
+        run: |
+          $ErrorActionPreference = "Continue"
+          . ./tools/restore-winui3.ps1
+          $env:ELWINDUI_WINUI3_BUILD_NATIVE = "1"
+          $env:CARGO_TARGET_DIR = "$env:RUNNER_TEMP/target-source"
+          $native = "crates/elwindui-backend-winui3/native"
+          $before = (git status --porcelain --ignored -- $native) -join "`n"
+          foreach ($destination in @("$PWD/$native/prebuilt/unwanted-dir", "$PWD/$native")) {
+            $env:ELWINDUI_WINUI3_PREBUILT_EXPORT_DIR = $destination
+            $output = (cargo build -p elwindui-backend-winui3 --release --target ${{ matrix.target }} 2>&1) | Out-String
+            if ($LASTEXITCODE -eq 0) { throw "export into $destination was accepted" }
+            if ($output -notmatch "must not be, contain or lie inside") { throw "export into $destination failed for another reason:`n$output" }
+            Write-Host "Rejected export destination: $destination"
+          }
+          if (Test-Path "$native/prebuilt/unwanted-dir") { throw "a rejected export created a directory in the tracked tree" }
+          $after = (git status --porcelain --ignored -- $native) -join "`n"
+          if ($after -ne $before) { throw "tracked prebuilt tree changed:`n$after" }
+      - name: Assert tracked prebuilt tree unchanged
+        run: |
+          git diff --exit-code -- crates/elwindui-backend-winui3/native
+          if ($LASTEXITCODE -ne 0) { throw "tracked prebuilt tree changed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: winui3-native-${{ matrix.arch }}
+          path: ${{ runner.temp }}/winui3-native
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble:
+    needs: manufacture
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: winui3-native-*
+          path: ${{ runner.temp }}/winui3-native-input
+      - name: Assemble and verify candidate
+        run: |
+          Get-ChildItem -Recurse "$env:RUNNER_TEMP/winui3-native-input" | Select-Object FullName, Length
+          ./tools/assemble-winui3-prebuilt.ps1 `
+            -InputRoot "$env:RUNNER_TEMP/winui3-native-input" `
+            -OutputRoot "$env:RUNNER_TEMP/winui3-prebuilt-candidate" `
+            -RequireCoffMachine
+          $manifest = Get-Content "$env:RUNNER_TEMP/winui3-prebuilt-candidate/manifest.json" -Raw
+          if ((ConvertFrom-Json $manifest).source_commit -ne $env:SOURCE_SHA) { throw "candidate source_commit != $env:SOURCE_SHA" }
+          $manifest
+      - name: Negative tooling checks
+        run: ./tools/test-winui3-prebuilt-tooling.ps1 -CandidateRoot "$env:RUNNER_TEMP/winui3-prebuilt-candidate" -ExercisePromotionSuccess
+      - uses: actions/upload-artifact@v4
+        with:
+          name: winui3-prebuilt-candidate
+          path: ${{ runner.temp }}/winui3-prebuilt-candidate
+          if-no-files-found: error
+          retention-days: 14
+
+  consumer-link:
+    needs: assemble
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+            runner: windows-2025-vs2026
+            machine: x64
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-vs2026-arm
+            machine: ARM64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Install native Rust toolchain
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            $init = Join-Path $env:RUNNER_TEMP "rustup-init.exe"
+            Invoke-WebRequest "https://static.rust-lang.org/rustup/dist/${{ matrix.target }}/rustup-init.exe" -OutFile $init
+            & $init -y --profile minimal --default-host ${{ matrix.target }} --default-toolchain none
+            if ($LASTEXITCODE -ne 0) { throw "rustup-init failed" }
+            "$env:USERPROFILE\.cargo\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+            $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+          }
+          rustup toolchain install stable-${{ matrix.target }} --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install failed" }
+          rustup default stable-${{ matrix.target }}
+          rustc -vV
+      - uses: actions/download-artifact@v4
+        with:
+          name: winui3-prebuilt-candidate
+          path: ${{ runner.temp }}/winui3-prebuilt-candidate
+      - name: Place candidate in the disposable checkout
+        run: |
+          $tracked = "crates/elwindui-backend-winui3/native/prebuilt"
+          if (Test-Path $tracked) { Remove-Item -Recurse -Force $tracked }
+          New-Item -ItemType Directory -Force -Path (Split-Path $tracked) | Out-Null
+          Copy-Item -Recurse "$env:RUNNER_TEMP/winui3-prebuilt-candidate" $tracked
+          ./tools/verify-winui3-prebuilt.ps1 -RequireCoffMachine
+      - name: Default prebuilt build of custom-controls-demo
+        run: |
+          Remove-Item Env:ELWINDUI_WINUI3_BUILD_NATIVE -ErrorAction SilentlyContinue
+          Remove-Item Env:ELWINDUI_WINUI3_PREBUILT_EXPORT_DIR -ErrorAction SilentlyContinue
+          # Any C/C++ compilation attempted through `cc` fails loudly.
+          $env:CC = "elwindui-prebuilt-forbids-cc.exe"
+          $env:CXX = "elwindui-prebuilt-forbids-cxx.exe"
+          # NuGet metadata/runtime only; no Visual Studio developer environment is imported.
+          . ./tools/restore-winui3.ps1
+          $env:CARGO_TARGET_DIR = "$env:RUNNER_TEMP/target-prebuilt"
+          cargo build -p custom-controls-demo --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { throw "prebuilt consumer build failed" }
+      - name: Assert prebuilt path, architecture and deployment
+        run: |
+          . ./tools/winui3-prebuilt-common.ps1
+          $profileDir = "$env:RUNNER_TEMP/target-prebuilt/${{ matrix.target }}/debug"
+          $outDirs = @(Get-ChildItem "$profileDir/build" -Directory -Filter "elwindui-backend-winui3-*" |
+            Where-Object { Test-Path (Join-Path $_.FullName "out/elwindui-winui3-native-mode.txt") })
+          if ($outDirs.Count -ne 1) { throw "expected exactly one backend build-script OUT_DIR, found $($outDirs.Count)" }
+          $out = Join-Path $outDirs[0].FullName "out"
+          $mode = (Get-Content (Join-Path $out "elwindui-winui3-native-mode.txt") -Raw).Trim()
+          if ($mode -ne "prebuilt") { throw "native mode marker is '$mode'" }
+          foreach ($generated in @("cppwinrt_include", "accessibility_component", "resources_pri", "elwindui_winui3_app_host.lib")) {
+            if (Test-Path (Join-Path $out $generated)) { throw "source-native output $generated exists in prebuilt OUT_DIR" }
+          }
+          if (Get-ChildItem $out -Recurse -Include *.obj, *.o -ErrorAction SilentlyContinue) { throw "object files exist in prebuilt OUT_DIR" }
+          $selected = @(Get-Content (Join-Path $out "elwindui-winui3-nuget-packages.txt"))
+          $pins = Get-Winui3DependencyPins
+          foreach ($pin in @(
+              @("microsoft.windowsappsdk", $pins.windows_app_sdk),
+              @("microsoft.windowsappsdk.winui", $pins.windows_app_sdk_winui),
+              @("microsoft.graphics.win2d", $pins.win2d))) {
+            if ($selected -notcontains "$($pin[0]) $($pin[1])") { throw "NuGet selection does not use pinned $($pin[0]) $($pin[1]): $($selected -join '; ')" }
+          }
+          Write-Host "NuGet selection: $($selected -join '; ')"
+          $exe = Join-Path $profileDir "custom-controls-demo.exe"
+          $dumpbin = Find-Winui3Dumpbin
+          if (-not $dumpbin) { throw "dumpbin.exe not found" }
+          Assert-Winui3CoffMachine $dumpbin $exe "${{ matrix.machine }}"
+          $bundle = "crates/elwindui-backend-winui3/native/prebuilt/${{ matrix.target }}"
+          foreach ($dir in @($profileDir, (Join-Path $profileDir "deps"))) {
+            foreach ($file in @("resources.pri", "Elwindui.WinUI3.Accessibility.winmd")) {
+              $deployed = Join-Path $dir $file
+              if (-not (Test-Path $deployed)) { throw "$deployed was not deployed" }
+              if ((Get-Winui3Sha256 $deployed) -ne (Get-Winui3Sha256 (Join-Path $bundle $file))) { throw "$deployed does not come from the prebuilt bundle" }
+            }
+            foreach ($file in @("Microsoft.Graphics.Canvas.dll", "Microsoft.WindowsAppRuntime.Bootstrap.dll")) {
+              $deployed = Join-Path $dir $file
+              if (-not (Test-Path $deployed)) { throw "$deployed was not deployed" }
+            }
+          }
+          Write-Host "Prebuilt consumer link OK for ${{ matrix.target }} (link only; no interactive WinUI3 runtime test)."
+
+  publish-verified-bundle:
+    needs: [assemble, consumer-link]
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: winui3-prebuilt-candidate
+          path: ${{ runner.temp }}/winui3-prebuilt-verified
+      - name: Re-verify candidate
+        run: |
+          ./tools/verify-winui3-prebuilt.ps1 -Root "$env:RUNNER_TEMP/winui3-prebuilt-verified" -RequireCoffMachine
+          $manifest = Get-Content "$env:RUNNER_TEMP/winui3-prebuilt-verified/manifest.json" -Raw | ConvertFrom-Json
+          if ($manifest.source_commit -ne $env:SOURCE_SHA) { throw "source_commit mismatch" }
+          if ($manifest.ci.run_id -ne $env:GITHUB_RUN_ID) { throw "candidate was assembled by another run" }
+          @(
+            "## winui3-prebuilt-verified",
+            "",
+            "- source SHA: ``$env:SOURCE_SHA``",
+            "- run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID (attempt $env:GITHUB_RUN_ATTEMPT)",
+            "- published by job ``$env:GITHUB_JOB`` after both consumer-link jobs passed",
+            "- source_inputs_sha256: ``$($manifest.source_inputs_sha256)``",
+            "- x86_64 lib/winmd/pri: ``$($manifest.targets.'x86_64-pc-windows-msvc'.lib_sha256)`` / ``$($manifest.targets.'x86_64-pc-windows-msvc'.winmd_sha256)`` / ``$($manifest.targets.'x86_64-pc-windows-msvc'.pri_sha256)``",
+            "- aarch64 lib/winmd/pri: ``$($manifest.targets.'aarch64-pc-windows-msvc'.lib_sha256)`` / ``$($manifest.targets.'aarch64-pc-windows-msvc'.winmd_sha256)`` / ``$($manifest.targets.'aarch64-pc-windows-msvc'.pri_sha256)``"
+          ) | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: winui3-prebuilt-verified
+          path: ${{ runner.temp }}/winui3-prebuilt-verified
+          if-no-files-found: error
+          retention-days: 30

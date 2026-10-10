@@ -14,8 +14,42 @@ Guidelines for AI agents modifying `elwindui-backend-winui3` or building/testing
 Before running commands requiring MSVC or Windows SDK on Windows, import the environment in PowerShell:
 
 ```powershell
-. .\tools\setup-vs-env.ps1
+. .\tools\setup-vs-env.ps1            # x64 (same as -Arch x64)
+. .\tools\setup-vs-env.ps1 -Arch arm64  # native ARM64 host only
 ```
+
+`-Arch` accepts only `x64` and `arm64` and requires a native host of that architecture (no x86, ARM64EC, cross-compilation or emulation).
+
+## Native build modes (prebuilt by default)
+
+Normal `cargo build`/`check`/`test` links the checked-in `crates/elwindui-backend-winui3/native/prebuilt/<TARGET>/` artifacts (`x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`) and runs no MIDL, C++/WinRT, `cl.exe` or makepri. It still needs the restored NuGet packages (`tools/restore-winui3.ps1`, also run by `setup-vs-env.ps1`) and the normal Rust MSVC linker. A missing target bundle fails the build; never work around that by falling back to source mode silently. See `docs/design/backends/winui3_backend_design.md`, "Native artifact manufacturing".
+
+Source-native mode (maintainers changing `cpp/`, the IDL or the native ABI; requires Visual Studio C++ and Windows SDK tools):
+
+```powershell
+. .\tools\setup-vs-env.ps1 -Arch x64
+$env:ELWINDUI_WINUI3_BUILD_NATIVE = "1"
+$env:CARGO_TARGET_DIR = ".build/winui3-source-verify"
+cargo build -p custom-controls-demo --target x86_64-pc-windows-msvc
+```
+
+`ELWINDUI_WINUI3_BUILD_NATIVE` accepts only unset, `0` or `1`. Use a separate `CARGO_TARGET_DIR` per mode. A source build never modifies `native/prebuilt/`; `ELWINDUI_WINUI3_PREBUILT_EXPORT_DIR` (source mode only) exports its outputs to `<dir>/<TARGET>/`. A single-architecture diagnostic manufacture is `.\tools\build-winui3-prebuilt.ps1 -Arch x64 -StagingRoot .build\winui3-native-staging`.
+
+Any change to a native generation input (`build.rs`, `build_support.rs`, `cpp/`, the prebuilt scripts, `setup-vs-env.ps1`, `restore-winui3.ps1`, `.github/workflows/winui3-prebuilt.yml`) makes the tracked bundle stale; `.\tools\verify-winui3-prebuilt.ps1` then fails and the bundle must be regenerated. An incompatible native ABI change also bumps `elwindui_winui3_native_abi_v<N>` (bump rules in the design document).
+
+### Regenerating the prebuilt bundle
+
+Only GitHub Actions manufactures the bundle (no local ARM64 machine is needed or used): `.github/workflows/winui3-prebuilt.yml` builds x64 on `windows-2025-vs2026` and ARM64 on `windows-11-vs2026-arm`, assembles and verifies both, final-links `custom-controls-demo` for both in prebuilt mode, then uploads `winui3-prebuilt-verified`. On the default branch:
+
+```powershell
+gh workflow run winui3-prebuilt.yml --ref master
+gh run list --workflow winui3-prebuilt.yml --limit 5
+gh run download <run-id> -n winui3-prebuilt-verified -D .build/winui3-prebuilt-candidate
+.\tools\verify-winui3-prebuilt.ps1 -Root .build/winui3-prebuilt-candidate
+.\tools\promote-winui3-prebuilt.ps1 -BundleRoot .build/winui3-prebuilt-candidate
+```
+
+For a PR that changes native inputs (when the workflow change is not yet on `master`), use that PR's `pull_request` run instead: review its source SHA, workflow and scripts, download its `winui3-prebuilt-verified` artifact, promote, commit on the Issue branch, and let the workflow run again on the new head. Promotion verifies the candidate (CI provenance, hashes, ABI, current source-input digest), replaces the tracked tree transactionally and never commits or pushes. Inspect `git diff --stat` and the manifest before committing. Check the logs for `cl`/SDK tool architecture, `dumpbin` machine lines and artifact hashes, not just green jobs. CI compile/link on the ARM64 runner is not WinUI3 runtime acceptance.
 
 ## Sandbox boundary for WinUI3 live verification
 

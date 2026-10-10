@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "native_abi": 1,
+  "source_commit": "eff044d7957d18875f32e3da8239b0d1b2b21739",
+  "source_inputs_sha256": "cec158c7677d23f6500a75ad85f3e7edbd4d43b64204f2ca449d862164384113",
+  "windows_app_sdk": "1.8.260209005",
+  "windows_app_sdk_winui": "1.8.260204000",
+  "win2d": "1.4.0",
+  "targets": {
+    "x86_64-pc-windows-msvc": {
+      "runner_label": "windows-2025-vs2026",
+      "windows_sdk_version": "10.0.26100.0",
+      "msvc_version": "14.51.36231",
+      "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+      "lib_sha256": "3c6aeb4a4080ee6c5880ff59ec134ed870bafcb90d723229f2de1621ec19f93a",
+      "winmd_sha256": "ed439f6e2d5606d46aae885d5f1039ad4c2bb4aa7d312709a249ee030d3a27d6",
+      "pri_sha256": "7d5b8ecd18a1464b7c031f6de53c343e42c55b15b2373d6e421f287543d3190b"
+    },
+    "aarch64-pc-windows-msvc": {
+      "runner_label": "windows-11-vs2026-arm",
+      "windows_sdk_version": "10.0.26100.0",
+      "msvc_version": "14.51.36231",
+      "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+      "lib_sha256": "992a0b0922dade97a020fc6d9563bb69707ebe82137f134592564f40181f25e1",
+      "winmd_sha256": "8ca2a91f8e8d9c98b1745c6f4464cff19c62d6fbed5291921dfb65e2fe884de9",
+      "pri_sha256": "7d5b8ecd18a1464b7c031f6de53c343e42c55b15b2373d6e421f287543d3190b"
+    }
+  },
+  "ci": {
+    "repository": "puchinya/elwindui",
+    "workflow_ref": "puchinya/elwindui/.github/workflows/winui3-prebuilt.yml@refs/pull/295/merge",
+    "event": "pull_request",
+    "run_id": "38035652815",
+    "run_attempt": "1",
+    "run_url": "https://github.com/puchinya/elwindui/actions/runs/38035652815"
+  }
+}

@@ -1,11 +1,47 @@
-//! Generates the WinUI 3 projection from the Windows App SDK and Windows SDK metadata.
+//! Generates the WinUI 3 projection from the Windows App SDK and Windows SDK metadata, and links
+//! the native C++/WinRT application host.
+//!
+//! The native host is obtained in one of two explicitly selected modes (Issue #294, see
+//! `docs/design/backends/winui3_backend_design.md`, "Native artifact manufacturing"):
+//!
+//! - prebuilt (default; `ELWINDUI_WINUI3_BUILD_NATIVE` unset or `0`): link/deploy the checked-in
+//!   `native/prebuilt/<TARGET>/` artifacts. No MIDL, C++/WinRT, MSVC compiler or makepri run.
+//! - source (`ELWINDUI_WINUI3_BUILD_NATIVE=1`): run the MIDL -> cppwinrt -> MSVC and makepri
+//!   pipeline from `cpp/`, optionally exporting the outputs to
+//!   `ELWINDUI_WINUI3_PREBUILT_EXPORT_DIR/<TARGET>/`.
+//!
+//! The Rust `windows-bindgen` projection and the Win2D / Windows App Runtime bootstrap DLL
+//! deployment are common to both modes.
+
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+mod build_support;
 
 #[cfg(target_os = "windows")]
 fn main() {
+    use build_support::{
+        BUILD_NATIVE_ENV, NativeBuildMode, PREBUILT_EXPORT_DIR_ENV, parse_build_mode,
+        resolve_export_dir,
+    };
     use std::path::PathBuf;
 
     println!("cargo:rerun-if-env-changed=WINDOWS_APP_SDK_WINMD");
     println!("cargo:rerun-if-env-changed=WIN2D_WINMD");
+    println!("cargo:rerun-if-env-changed={BUILD_NATIVE_ENV}");
+    println!("cargo:rerun-if-env-changed={PREBUILT_EXPORT_DIR_ENV}");
+
+    let mode_value = std::env::var_os(BUILD_NATIVE_ENV).map(|v| v.to_string_lossy().into_owned());
+    let mode = parse_build_mode(mode_value.as_deref()).unwrap_or_else(|error| panic!("{error}"));
+    let export_value =
+        std::env::var_os(PREBUILT_EXPORT_DIR_ENV).map(|v| v.to_string_lossy().into_owned());
+    let export_dir =
+        resolve_export_dir(mode, export_value.as_deref()).unwrap_or_else(|error| panic!("{error}"));
+    let target = std::env::var("TARGET").expect("TARGET");
+    // Resolved up front so a missing/unsupported prebuilt bundle fails before binding generation.
+    let prebuilt_dir = match mode {
+        NativeBuildMode::Prebuilt => Some(resolve_prebuilt_dir(&target)),
+        NativeBuildMode::Source => None,
+    };
 
     let app_sdk = std::env::var_os("WINDOWS_APP_SDK_WINMD")
         .map(PathBuf::from)
@@ -452,8 +488,19 @@ fn main() {
     std::fs::write(&interop_path, interop.replacen("#![allow(", "#[allow(", 1))
         .expect("write generated XAML interop bindings");
     copy_win2d_runtime(&out_dir);
-    generate_resources_pri(&out_dir);
-    build_cpp_app_host(&out_dir, &winmd_inputs, &app_sdk);
+    // Required by the native host in both modes.
+    println!("cargo:rustc-link-lib=WindowsApp");
+    match prebuilt_dir {
+        Some(dir) => link_and_deploy_prebuilt(&out_dir, &dir),
+        None => {
+            let resources_pri = generate_resources_pri(&out_dir);
+            let native = build_cpp_app_host(&out_dir, &winmd_inputs, &app_sdk);
+            if let Some(export_dir) = export_dir {
+                export_source_artifacts(&export_dir, &target, &native, &resources_pri);
+            }
+        }
+    }
+    write_native_mode_marker(&out_dir, mode);
     if !warnings.is_empty() || !interop_warnings.is_empty() {
         println!(
             "cargo:warning=WinUI binding generation omitted {} unsupported metadata member(s)",
@@ -611,15 +658,12 @@ fn copy_win2d_runtime(out_dir: &str) {
 /// (indexing none of this crate's own resources — it exists purely to make that resolution
 /// possible at all) and copies it beside the built exe, the same way `copy_win2d_runtime` places
 /// `Microsoft.Graphics.Canvas.dll` there. Requires `makepri.exe` from the Windows SDK, i.e.
-/// `tools/setup-vs-env.ps1` sourced first — same precondition the whole crate already has for MSVC.
+/// `tools/setup-vs-env.ps1` sourced first — source-native mode only; prebuilt mode deploys the
+/// checked-in `resources.pri` through the same `deploy_resources_pri` destinations instead.
 #[cfg(target_os = "windows")]
-fn generate_resources_pri(out_dir: &str) {
+fn generate_resources_pri(out_dir: &str) -> std::path::PathBuf {
     let makepri =
         find_makepri().expect("makepri.exe was not found; source tools/setup-vs-env.ps1 first");
-    let profile_dir = std::path::Path::new(out_dir)
-        .ancestors()
-        .nth(3)
-        .expect("target profile directory");
     let pri_root = std::path::Path::new(out_dir).join("resources_pri");
     std::fs::create_dir_all(&pri_root).expect("create resources.pri project root");
 
@@ -651,7 +695,17 @@ fn generate_resources_pri(out_dir: &str) {
         .expect("run makepri.exe new");
     assert!(status.success(), "makepri.exe new failed");
 
-    std::fs::copy(&generated, profile_dir.join("resources.pri"))
+    deploy_resources_pri(out_dir, &generated);
+    generated
+}
+
+#[cfg(target_os = "windows")]
+fn deploy_resources_pri(out_dir: &str, resources_pri: &std::path::Path) {
+    let profile_dir = std::path::Path::new(out_dir)
+        .ancestors()
+        .nth(3)
+        .expect("target profile directory");
+    std::fs::copy(resources_pri, profile_dir.join("resources.pri"))
         .expect("copy resources.pri beside application binary");
     // `cargo test`/`cargo bench` binaries run from `target/<profile>/deps/`, not
     // `target/<profile>/` itself — MRT resource-context resolution looks beside the actual running
@@ -661,7 +715,7 @@ fn generate_resources_pri(out_dir: &str) {
     // despite the example binaries (which do live directly in `target/<profile>/`) working fine.
     let deps_dir = profile_dir.join("deps");
     std::fs::create_dir_all(&deps_dir).expect("create target/<profile>/deps directory");
-    std::fs::copy(&generated, deps_dir.join("resources.pri"))
+    std::fs::copy(resources_pri, deps_dir.join("resources.pri"))
         .expect("copy resources.pri beside test binaries");
 }
 
@@ -685,8 +739,13 @@ fn deploy_accessibility_winmd(out_dir: &str, component_winmd: &std::path::Path) 
 /// Generates a C++/WinRT projection (via `cppwinrt.exe`) for just enough of the WinUI 3 surface to
 /// host `Application`, and compiles `cpp/app_host.cpp` against it — see that file's own doc comment
 /// (and `src/composed_application.rs`'s) for why this exists at all (microsoft/windows-rs#3404).
+/// Source-native mode only.
 #[cfg(target_os = "windows")]
-fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String], app_sdk: &std::path::Path) {
+fn build_cpp_app_host(
+    out_dir: &str,
+    winmd_inputs: &[String],
+    app_sdk: &std::path::Path,
+) -> SourceNativeOutputs {
     let cppwinrt = find_sdk_tool("cppwinrt.exe")
         .expect("cppwinrt.exe was not found; source tools/setup-vs-env.ps1 first");
     let midl = find_sdk_tool("midl.exe")
@@ -859,13 +918,145 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String], app_sdk: &std::pat
         .flag_if_supported("/await:strict")
         .flag_if_supported("/EHsc")
         .flag_if_supported("/utf-8")
-        .compile("elwindui_winui3_app_host");
+        .compile(build_support::NATIVE_LIB_NAME);
 
-    println!("cargo:rustc-link-lib=WindowsApp");
     println!("cargo:rerun-if-changed=cpp/app_host.cpp");
     println!("cargo:rerun-if-changed=cpp/accessibility_host.h");
     println!("cargo:rerun-if-changed=cpp/accessibility_host.cpp");
     println!("cargo:rerun-if-changed=cpp/accessibility_semantic_peer.idl");
+
+    let native_lib = std::path::Path::new(out_dir).join(build_support::NATIVE_LIB_FILE);
+    assert!(
+        native_lib.is_file(),
+        "cc did not produce {}",
+        native_lib.display()
+    );
+    SourceNativeOutputs {
+        native_lib,
+        accessibility_winmd: component_winmd,
+    }
+}
+
+/// Native artifacts produced by `build_cpp_app_host`, located by their known output paths (never
+/// by scanning `target/`).
+#[cfg(target_os = "windows")]
+struct SourceNativeOutputs {
+    native_lib: std::path::PathBuf,
+    accessibility_winmd: std::path::PathBuf,
+}
+
+/// Selects `native/prebuilt/<TARGET>/` and requires all three artifacts to be present. Panics with
+/// an actionable message otherwise; there is no fallback to source compilation.
+#[cfg(target_os = "windows")]
+fn resolve_prebuilt_dir(target: &str) -> std::path::PathBuf {
+    let manifest_dir = std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
+    );
+    let dir = build_support::prebuilt_target_dir(&manifest_dir, target).unwrap_or_else(|error| {
+        panic!(
+            "{error}. Normal builds never fall back to compiling native sources; ElwindUI \
+             maintainers can build the native shim from source with {}=1.",
+            build_support::BUILD_NATIVE_ENV
+        )
+    });
+    for file in build_support::PREBUILT_ARTIFACT_FILES {
+        let path = dir.join(file);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let present = std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file());
+        assert!(
+            present,
+            "{}",
+            build_support::missing_prebuilt_message(target, &path)
+        );
+    }
+    dir
+}
+
+/// Prebuilt mode: links the checked-in static library and deploys the checked-in `resources.pri`
+/// and accessibility WinMD to the same executable/test locations source-native mode uses.
+#[cfg(target_os = "windows")]
+fn link_and_deploy_prebuilt(out_dir: &str, dir: &std::path::Path) {
+    println!("cargo:rustc-link-search=native={}", dir.display());
+    println!(
+        "cargo:rustc-link-lib=static={}",
+        build_support::NATIVE_LIB_NAME
+    );
+    deploy_resources_pri(out_dir, &dir.join(build_support::RESOURCES_PRI_FILE));
+    deploy_accessibility_winmd(out_dir, &dir.join(build_support::ACCESSIBILITY_WINMD_FILE));
+}
+
+/// Source-native mode with `ELWINDUI_WINUI3_PREBUILT_EXPORT_DIR`: copies the three artifacts this
+/// build produced into `<export_dir>/<TARGET>/`. A build never writes the checked-in
+/// `native/prebuilt/` tree.
+#[cfg(target_os = "windows")]
+fn export_source_artifacts(
+    export_dir: &std::path::Path,
+    target: &str,
+    native: &SourceNativeOutputs,
+    resources_pri: &std::path::Path,
+) {
+    let manifest_dir = std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
+    );
+    std::fs::create_dir_all(export_dir).unwrap_or_else(|error| {
+        panic!(
+            "create prebuilt export directory {}: {error}",
+            export_dir.display()
+        )
+    });
+    if let (Ok(tracked), Ok(requested)) = (
+        std::fs::canonicalize(
+            manifest_dir
+                .join(build_support::PREBUILT_ROOT[0])
+                .join(build_support::PREBUILT_ROOT[1]),
+        ),
+        std::fs::canonicalize(export_dir),
+    ) {
+        assert!(
+            !requested.starts_with(&tracked) && !tracked.starts_with(&requested),
+            "{} must not point at or contain the checked-in prebuilt tree {}",
+            build_support::PREBUILT_EXPORT_DIR_ENV,
+            tracked.display()
+        );
+    }
+    let destination = export_dir.join(target);
+    std::fs::create_dir_all(&destination).unwrap_or_else(|error| {
+        panic!(
+            "create prebuilt export directory {}: {error}",
+            destination.display()
+        )
+    });
+    for (source, file) in [
+        (native.native_lib.as_path(), build_support::NATIVE_LIB_FILE),
+        (
+            native.accessibility_winmd.as_path(),
+            build_support::ACCESSIBILITY_WINMD_FILE,
+        ),
+        (resources_pri, build_support::RESOURCES_PRI_FILE),
+    ] {
+        std::fs::copy(source, destination.join(file)).unwrap_or_else(|error| {
+            panic!(
+                "export {} to {}: {error}",
+                source.display(),
+                destination.display()
+            )
+        });
+    }
+}
+
+/// Records which native mode this build script run used (`prebuilt` or `source`) in `OUT_DIR`, so
+/// CI can assert that a consumer build took the prebuilt path.
+#[cfg(target_os = "windows")]
+fn write_native_mode_marker(out_dir: &str, mode: build_support::NativeBuildMode) {
+    let value = match mode {
+        build_support::NativeBuildMode::Prebuilt => "prebuilt\n",
+        build_support::NativeBuildMode::Source => "source\n",
+    };
+    std::fs::write(
+        std::path::Path::new(out_dir).join("elwindui-winui3-native-mode.txt"),
+        value,
+    )
+    .expect("write native build mode marker");
 }
 
 /// Looks for `<nuget_packages>/<package>/<version>/lib/<filename>` (the WebView2 package's own

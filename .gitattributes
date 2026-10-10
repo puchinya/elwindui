@@ -2,3 +2,8 @@
 
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# WinUI3 prebuilt native artifacts (Issue #294) are binary release payloads.
+crates/elwindui-backend-winui3/native/prebuilt/**/*.lib binary
+crates/elwindui-backend-winui3/native/prebuilt/**/*.winmd binary
+crates/elwindui-backend-winui3/native/prebuilt/**/*.pri binary

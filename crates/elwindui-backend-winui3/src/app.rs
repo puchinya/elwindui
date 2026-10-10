@@ -73,6 +73,10 @@ pub(crate) struct RetainedWindow {
 // it through nothing but the one C ABI function below. See microsoft/windows-rs#3404 and
 // `cpp/app_host.cpp`'s own doc comment for the full investigation.
 unsafe extern "C" {
+    /// Native ABI generation anchor exported by `cpp/app_host.cpp` (Issue #294). Referencing it
+    /// makes a stale prebuilt native library from another ABI generation fail at link time. See
+    /// that definition for the bump rules.
+    fn elwindui_winui3_native_abi_v1();
     fn elwindui_winui3_run(startup: extern "C" fn());
 }
 
@@ -202,5 +206,8 @@ where
     // function call reachable from `startup()` and from any later event callback alike. See
     // `docs/design/runtime/theme_environment_design.md`'s "Application boundary" and
     // `elwindui-backend-appkit`'s `app::run` for the mirrored AppKit shape.
-    unsafe { elwindui_winui3_run(startup_trampoline) };
+    unsafe {
+        elwindui_winui3_native_abi_v1();
+        elwindui_winui3_run(startup_trampoline);
+    }
 }

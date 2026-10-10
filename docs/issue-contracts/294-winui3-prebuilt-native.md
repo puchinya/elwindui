@@ -988,28 +988,29 @@ Paste-safe canonical checklist block:
 
 ```text
 ELWINDUI_REVIEWER_CHECKLIST_V1_BEGIN
-R1|Default build is prebuilt; unset/0 mode does not execute native source-generation tools.
-R2|Only ELWINDUI_WINUI3_BUILD_NATIVE=1 selects source-native mode; invalid values fail.
-R3|Missing/unsupported prebuilt artifacts fail without source-build fallback.
-R4|x86_64/aarch64 MSVC prebuilt bundles are complete and manifest hashes match; i686/x86 is unsupported.
-R5|PRI/WinMD executable+deps deployment and Win2D/bootstrap deployment remain correct.
-R6|windows-bindgen Rust projection behavior remains unchanged.
-R7|ApplicationT/accessibility/backend ownership and lifecycle architecture remain unchanged.
-R8|Native ABI v1 link anchor exists, is referenced, verified, and has documented bump rules.
-R9|Source builds do not modify tracked prebuilt artifacts without explicit export staging.
-R10|CI aggregation and local promotion are transactional; any failure leaves or restores tracked bundle unchanged.R11|Manifest records source commit/input hash/pinned dependencies and per-target SDK/MSVC/Rust versions/hashes/ABI.
-R12|No Microsoft SDK libraries or SDK/compiler tools are bundled as project prebuilt artifacts.
-R13|Prebuilt selection uses Cargo TARGET exactly and cannot reuse host-architecture artifacts.
-R14|x64 prebuilt and source-native established WinUI3 regression both pass in host context.
-R15|Native ARM64 VS2026 runner source and consumer final-link verification pass; interactive runtime is not inferred.
-R16|Package payload size is checked when package assembly is available; oversize returns to design.
-R17|WinUI3 design/agent/status docs are synchronized without unnecessary public spec changes.
-R18|Canonical Rust/workspace/host-context final verification passes on final committed HEAD.
-R19|No unrelated refactor/dependency change; cc remains for source mode and no manifest parser dep added.
-R20|Commit/push/self-review/PR Closes/phase:review/review-entry delivery gate is complete.
-R21|Exact x64 and ARM64 GitHub Actions native runners execute source manufacture and prebuilt consumer links with separate uploaded artifacts.
-R22|CI read-only with no auto-publish/secrets; initial PR artifact requires explicit source-reviewed promotion and post-promotion CI rerun.
-R23|setup-vs-env selects native x64/ARM64 VS components, host arch and SDK tools; default x64 remains compatible.
+REVIEW_ITEM: R1 — Default build is prebuilt; unset/0 mode does not execute native source-generation tools.
+REVIEW_ITEM: R2 — Only ELWINDUI_WINUI3_BUILD_NATIVE=1 selects source-native mode; invalid values fail.
+REVIEW_ITEM: R3 — Missing/unsupported prebuilt artifacts fail without source-build fallback.
+REVIEW_ITEM: R4 — x86_64/aarch64 MSVC prebuilt bundles are complete and manifest hashes match; i686/x86 is unsupported.
+REVIEW_ITEM: R5 — PRI/WinMD executable+deps deployment and Win2D/bootstrap deployment remain correct.
+REVIEW_ITEM: R6 — windows-bindgen Rust projection behavior remains unchanged.
+REVIEW_ITEM: R7 — ApplicationT/accessibility/backend ownership and lifecycle architecture remain unchanged.
+REVIEW_ITEM: R8 — Native ABI v1 link anchor exists, is referenced, verified, and has documented bump rules.
+REVIEW_ITEM: R9 — Source builds do not modify tracked prebuilt artifacts without explicit export staging.
+REVIEW_ITEM: R10 — CI aggregation and local promotion are transactional; any failure leaves or restores tracked bundle unchanged.
+REVIEW_ITEM: R11 — Manifest records source commit/input hash/pinned dependencies and per-target SDK/MSVC/Rust versions/hashes/ABI.
+REVIEW_ITEM: R12 — No Microsoft SDK libraries or SDK/compiler tools are bundled as project prebuilt artifacts.
+REVIEW_ITEM: R13 — Prebuilt selection uses Cargo TARGET exactly and cannot reuse host-architecture artifacts.
+REVIEW_ITEM: R14 — x64 prebuilt and source-native established WinUI3 regression both pass in host context.
+REVIEW_ITEM: R15 — Native ARM64 VS2026 runner source and consumer final-link verification pass; interactive runtime is not inferred.
+REVIEW_ITEM: R16 — Package payload size is checked when package assembly is available; oversize returns to design.
+REVIEW_ITEM: R17 — WinUI3 design/agent/status docs are synchronized without unnecessary public spec changes.
+REVIEW_ITEM: R18 — Canonical Rust/workspace/host-context final verification passes on final committed HEAD.
+REVIEW_ITEM: R19 — No unrelated refactor/dependency change; cc remains for source mode and no manifest parser dep added.
+REVIEW_ITEM: R20 — Commit/push/self-review/PR Closes/phase:review/review-entry delivery gate is complete.
+REVIEW_ITEM: R21 — Exact x64 and ARM64 GitHub Actions native runners execute source manufacture and prebuilt consumer links with separate uploaded artifacts.
+REVIEW_ITEM: R22 — CI read-only with no auto-publish/secrets; initial PR artifact requires explicit source-reviewed promotion and post-promotion CI rerun.
+REVIEW_ITEM: R23 — setup-vs-env selects native x64/ARM64 VS components, host arch and SDK tools; default x64 remains compatible.
 ELWINDUI_REVIEWER_CHECKLIST_V1_END
 ```
 

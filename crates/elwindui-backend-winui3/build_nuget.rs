@@ -170,27 +170,72 @@ pub fn resolve_pinned_packages(root: &Path) -> Result<PinnedPackages, NugetError
     })
 }
 
-/// An explicit metadata override (`WINDOWS_APP_SDK_WINMD`, `WIN2D_WINMD`, `WEBVIEW2_WINMD`) must lie
-/// inside a `<package id>/<pinned version>/` directory, wherever that cache lives.
-pub fn validate_override(path: &Path, package: &PinnedPackage) -> Result<(), NugetError> {
-    let components: Vec<String> = path
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect();
-    let matches = components.windows(2).any(|pair| {
-        pair[0].eq_ignore_ascii_case(package.id) && pair[1].eq_ignore_ascii_case(&package.version)
-    });
-    if matches {
-        Ok(())
-    } else {
+/// An explicit metadata override (`WINDOWS_APP_SDK_WINMD`, `WIN2D_WINMD`, `WEBVIEW2_WINMD`) must be
+/// an existing `.winmd` file that, **after resolution** (`..`, symlinks and junctions resolved by
+/// `std::fs::canonicalize`), lies inside a `<package id>/<pinned version>/` directory, wherever that
+/// cache lives. A pinned-looking segment that only appears lexically (for example
+/// `<id>/<pinned>/../<other>/...`, or a junction inside the pinned directory pointing elsewhere) is
+/// rejected. Returns the resolved path, which is the one the build must read.
+pub fn validate_override(path: &Path, package: &PinnedPackage) -> Result<PathBuf, NugetError> {
+    let reject = |reason: &str| {
         Err(NugetError(format!(
-            "{} must point inside a {}/{} package directory (the pinned version).",
+            "{} {reason}; it must be an existing .winmd file inside a {}/{} package directory (the pinned version).",
             path.display(),
             package.id,
             package.version
         )))
+    };
+    let Ok(resolved) = std::fs::canonicalize(path) else {
+        return reject("does not exist");
+    };
+    if !resolved.is_file() {
+        return reject("is not a file");
+    }
+    if !resolved
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("winmd"))
+    {
+        return reject("is not a .winmd metadata file");
+    }
+    if !resolved_in_pinned_version(&resolved, package) {
+        return Err(NugetError(format!(
+            "{} resolves to {}, which is not inside a {}/{} package directory (the pinned version).",
+            path.display(),
+            resolved.display(),
+            package.id,
+            package.version
+        )));
+    }
+    Ok(without_verbatim_prefix(&resolved))
+}
+
+/// Whether a fully resolved path contains the adjacent `<package id>/<pinned version>` directories.
+pub fn resolved_in_pinned_version(resolved: &Path, package: &PinnedPackage) -> bool {
+    let mut components = Vec::new();
+    for component in resolved.components() {
+        match component {
+            Component::Normal(part) => components.push(part.to_string_lossy().into_owned()),
+            Component::Prefix(_) | Component::RootDir => {}
+            // A resolved path never contains these; refuse rather than reason about them.
+            Component::CurDir | Component::ParentDir => return false,
+        }
+    }
+    // The file itself is the last component; the pair must be among its parent directories.
+    components.pop();
+    components.windows(2).any(|pair| {
+        pair[0].eq_ignore_ascii_case(package.id) && pair[1].eq_ignore_ascii_case(&package.version)
+    })
+}
+
+/// `\\?\C:\x` -> `C:\x` and `\\?\UNC\server\share` -> `\\server\share`, so resolved paths stay
+/// usable as arguments to MIDL / cppwinrt.exe. Other paths are returned unchanged.
+pub fn without_verbatim_prefix(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc}"))
+    } else if let Some(local) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(local)
+    } else {
+        path.to_path_buf()
     }
 }

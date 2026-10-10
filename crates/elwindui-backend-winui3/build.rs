@@ -588,16 +588,19 @@ fn nuget_packages_root() -> std::path::PathBuf {
         .expect("NUGET_PACKAGES or USERPROFILE is required to locate the WinUI 3 NuGet packages")
 }
 
-/// Reads a metadata override environment variable, which must point inside the pinned package.
+/// Reads a metadata override environment variable. The override must resolve (`..`, symlinks and
+/// junctions resolved) to an existing `.winmd` inside the pinned package version; the resolved path
+/// is what the build then reads.
 #[cfg(target_os = "windows")]
 fn pinned_override(
     variable: &str,
     package: &build_nuget::PinnedPackage,
 ) -> Option<std::path::PathBuf> {
     let path = std::path::PathBuf::from(std::env::var_os(variable)?);
-    build_nuget::validate_override(&path, package)
-        .unwrap_or_else(|error| panic!("{variable}: {error}"));
-    Some(path)
+    Some(
+        build_nuget::validate_override(&path, package)
+            .unwrap_or_else(|error| panic!("{variable}: {error}")),
+    )
 }
 
 /// `<package dir>/metadata/<contract>/<filename>`, highest contract directory.

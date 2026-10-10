@@ -372,32 +372,175 @@ fn nuspec_dependency_versions_are_exact() {
     assert!(build_nuget::nuspec_dependency_version(conflicting, "A").is_err());
 }
 
-#[test]
-fn metadata_overrides_must_point_into_the_pinned_version() {
-    let package = build_nuget::PinnedPackage {
+fn winui_package(cache: &FakeNugetCache) -> build_nuget::PinnedPackage {
+    build_nuget::PinnedPackage {
         id: "microsoft.windowsappsdk.winui",
         version: "1.8.260204000".to_owned(),
-        dir: PathBuf::from("unused"),
-    };
-    for ok in [
-        r"C:\cache\microsoft.windowsappsdk.winui\1.8.260204000\metadata\Microsoft.UI.Xaml.winmd",
-        r"D:\other\Microsoft.WindowsAppSDK.WinUI\1.8.260204000\metadata\Microsoft.UI.Xaml.winmd",
-    ] {
-        assert!(
-            build_nuget::validate_override(Path::new(ok), &package).is_ok(),
-            "{ok}"
-        );
+        dir: cache
+            .0
+            .join("microsoft.windowsappsdk.winui")
+            .join("1.8.260204000"),
     }
-    for bad in [
-        r"C:\cache\microsoft.windowsappsdk.winui\1.8.260224000\metadata\Microsoft.UI.Xaml.winmd",
-        r"C:\somewhere\Microsoft.UI.Xaml.winmd",
-        r"C:\cache\1.8.260204000\microsoft.windowsappsdk.winui\Microsoft.UI.Xaml.winmd",
+}
+
+fn write_winmd(dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let file = dir.join("Microsoft.UI.Xaml.winmd");
+    std::fs::write(&file, b"winmd").unwrap();
+    file
+}
+
+#[test]
+fn metadata_overrides_must_resolve_into_the_pinned_version() {
+    let cache = FakeNugetCache::pinned_with_newer_versions("override-ok");
+    let package = winui_package(&cache);
+    let pinned = write_winmd(&package.dir.join("metadata"));
+    let resolved = build_nuget::validate_override(&pinned, &package).expect("pinned file");
+    assert!(
+        !resolved.to_string_lossy().starts_with(r"\\?\"),
+        "{}",
+        resolved.display()
+    );
+    assert_eq!(
+        std::fs::canonicalize(&resolved).unwrap(),
+        std::fs::canonicalize(&pinned).unwrap()
+    );
+    // Another cache location with the pinned `<id>/<version>` layout stays supported.
+    let other = FakeNugetCache::new("override-other-location");
+    let elsewhere = write_winmd(
+        &other
+            .0
+            .join("Microsoft.WindowsAppSDK.WinUI")
+            .join("1.8.260204000")
+            .join("metadata"),
+    );
+    assert!(build_nuget::validate_override(&elsewhere, &package).is_ok());
+}
+
+#[test]
+fn metadata_overrides_reject_lexical_pinned_segments_that_resolve_elsewhere() {
+    let cache = FakeNugetCache::pinned_with_newer_versions("override-escape");
+    let package = winui_package(&cache);
+    write_winmd(&package.dir.join("metadata"));
+    let newer = cache
+        .0
+        .join("microsoft.windowsappsdk.winui")
+        .join("1.8.260224000");
+    write_winmd(&newer.join("metadata"));
+
+    // `<id>/<pinned>/../<newer>/...`: the pinned pair appears lexically but resolves away.
+    let traversal = package
+        .dir
+        .join("..")
+        .join("1.8.260224000")
+        .join("metadata")
+        .join("Microsoft.UI.Xaml.winmd");
+    let message = build_nuget::validate_override(&traversal, &package)
+        .expect_err("traversal")
+        .to_string();
+    assert!(message.contains("1.8.260224000"), "{message}");
+
+    for (case, path) in [
+        (
+            "missing",
+            package.dir.join("metadata").join("Missing.winmd"),
+        ),
+        ("directory", package.dir.join("metadata")),
+        (
+            "not winmd",
+            package.dir.join("microsoft.windowsappsdk.winui.nuspec"),
+        ),
+        (
+            "other version",
+            newer.join("metadata").join("Microsoft.UI.Xaml.winmd"),
+        ),
     ] {
-        let message = build_nuget::validate_override(Path::new(bad), &package)
-            .expect_err(bad)
+        let message = build_nuget::validate_override(&path, &package)
+            .expect_err(case)
             .to_string();
-        assert!(message.contains("1.8.260204000"), "{message}");
+        assert!(message.contains("1.8.260204000"), "{case}: {message}");
     }
+}
+
+/// Creates a directory junction (no elevation or Developer Mode needed).
+#[cfg(windows)]
+fn junction(link: &Path, target: &Path) {
+    let status = std::process::Command::new("cmd")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run mklink /J");
+    assert!(status.success(), "mklink /J {}", link.display());
+}
+
+#[cfg(windows)]
+fn remove_junction(link: &Path) {
+    // Removes only the junction itself, never the target's contents.
+    std::fs::remove_dir(link).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn metadata_overrides_reject_junction_escapes() {
+    let cache = FakeNugetCache::pinned_with_newer_versions("override-junction");
+    let package = winui_package(&cache);
+    let newer_metadata = cache
+        .0
+        .join("microsoft.windowsappsdk.winui")
+        .join("1.8.260224000")
+        .join("metadata");
+    write_winmd(&newer_metadata);
+
+    // A junction inside the pinned directory that points at another version.
+    let inner = package.dir.join("escape");
+    junction(&inner, &newer_metadata);
+    let message = build_nuget::validate_override(&inner.join("Microsoft.UI.Xaml.winmd"), &package)
+        .expect_err("junction inside pinned dir")
+        .to_string();
+    remove_junction(&inner);
+    assert!(message.contains("1.8.260224000"), "{message}");
+
+    // A pinned-looking `<id>/<version>` directory that is itself a junction to another version.
+    let decoy = FakeNugetCache::new("override-decoy");
+    let decoy_id = decoy.0.join("microsoft.windowsappsdk.winui");
+    std::fs::create_dir_all(&decoy_id).unwrap();
+    let decoy_version = decoy_id.join("1.8.260204000");
+    junction(
+        &decoy_version,
+        &cache
+            .0
+            .join("microsoft.windowsappsdk.winui")
+            .join("1.8.260224000"),
+    );
+    let result = build_nuget::validate_override(
+        &decoy_version
+            .join("metadata")
+            .join("Microsoft.UI.Xaml.winmd"),
+        &package,
+    );
+    remove_junction(&decoy_version);
+    assert!(result.is_err(), "decoy version junction must be rejected");
+
+    // Every junction removed: the newer package's files are still there.
+    assert!(newer_metadata.join("Microsoft.UI.Xaml.winmd").is_file());
+}
+
+#[test]
+fn verbatim_prefixes_are_removed_for_tool_arguments() {
+    assert_eq!(
+        build_nuget::without_verbatim_prefix(Path::new(r"\\?\C:\cache\a.winmd")),
+        PathBuf::from(r"C:\cache\a.winmd")
+    );
+    assert_eq!(
+        build_nuget::without_verbatim_prefix(Path::new(r"\\?\UNC\server\share\a.winmd")),
+        PathBuf::from(r"\\server\share\a.winmd")
+    );
+    assert_eq!(
+        build_nuget::without_verbatim_prefix(Path::new(r"C:\cache\a.winmd")),
+        PathBuf::from(r"C:\cache\a.winmd")
+    );
 }
 
 #[test]

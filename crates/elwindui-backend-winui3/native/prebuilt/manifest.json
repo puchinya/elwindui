@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "native_abi": 1,
-  "source_commit": "754003c1c1f2530467fb5f2c6de6d5c61b73d7d7",
-  "source_inputs_sha256": "be9a77d43813f897bc2f020515c77a72653a8733f49098f66e60d5a9d3879fdb",
+  "source_commit": "e6077598d929ba0ff65eeed58a08b900d69d351a",
+  "source_inputs_sha256": "e97519fbd6a58b3af51665c6a205a0647e5002a8a63bf65ceedfad342932beb8",
   "windows_app_sdk": "1.8.260209005",
   "windows_app_sdk_winui": "1.8.260204000",
   "win2d": "1.4.0",
@@ -12,8 +12,8 @@
       "windows_sdk_version": "10.0.26100.0",
       "msvc_version": "14.51.36231",
       "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
-      "lib_sha256": "dceb28440e0dcaeab2cee2ab46237feff3b24e8eacbdafcc454d2dce75ab4dd2",
-      "winmd_sha256": "c4ef1732eadd923784ef365216ec1f9d025d9229a5a8c0b5057e3649571a9bfb",
+      "lib_sha256": "f1c331d1237c02167d4a5fc7b903316160b50e33cb8718e7692f89cbc377734e",
+      "winmd_sha256": "38e69b3f1db57ee28f7ad5ab17d54c8f23bcedb9486949ceed3d3549bc477f6d",
       "pri_sha256": "7d5b8ecd18a1464b7c031f6de53c343e42c55b15b2373d6e421f287543d3190b"
     },
     "aarch64-pc-windows-msvc": {
@@ -21,8 +21,8 @@
       "windows_sdk_version": "10.0.26100.0",
       "msvc_version": "14.51.36231",
       "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
-      "lib_sha256": "9e0c592be5c0a48ae4922737a38bf432725ce04e842cc50aeacc56018908b136",
-      "winmd_sha256": "83750314bb408d308774371c039ac3926d8f4734a78de76a3a3b855fe4a1ee45",
+      "lib_sha256": "de2309f771721ffc6816cfca3b066fdca77fe2146452a08742007d79d0500dd6",
+      "winmd_sha256": "7be354b2eb078e8f16a65a49c78aa81a88390427e0531152a5b1cb645d7cc3d8",
       "pri_sha256": "7d5b8ecd18a1464b7c031f6de53c343e42c55b15b2373d6e421f287543d3190b"
     }
   },
@@ -30,8 +30,8 @@
     "repository": "puchinya/elwindui",
     "workflow_ref": "puchinya/elwindui/.github/workflows/winui3-prebuilt.yml@refs/pull/295/merge",
     "event": "pull_request",
-    "run_id": "38043115248",
+    "run_id": "38053471991",
     "run_attempt": "1",
-    "run_url": "https://github.com/puchinya/elwindui/actions/runs/38043115248"
+    "run_url": "https://github.com/puchinya/elwindui/actions/runs/38053471991"
   }
 }

@@ -79,6 +79,11 @@ PASS requires every delivered click to leave a valid selected page, the final pa
 final clicked header, no duplicate/ghost content, crash, hang, or unintended reorder, and a
 responsive main window.
 
+Judge the selected page from the visible page body (`Document A editor` / `Document B editor`)
+together with the selected header, never from the active-item status or marker alone: selection
+and the active item are distinct. Windows diagnostic evidence for repeated DNP-01 sessions is
+indexed in [`docs/issues/282-dnp01-windows-mismatch/evidence/`](../../docs/issues/282-dnp01-windows-mismatch/evidence/README.md).
+
 ## DNP-02 — same-group reorder
 
 Setup: reset with visible header order Document A, Document B.

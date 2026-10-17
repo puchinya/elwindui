@@ -23,6 +23,8 @@ Snapshot: 2026-10-07. Desired behavior is defined by the docking specification; 
 - Fresh normal non-elevated Windows comparisons pass the dark selected-tab outline and hover states, normal/compact narrow widths, and all four auto-hide resize/reopen cases. Updated paired splitter/header acceptance and the light-theme pass (initial layout, split drop with the joined accent frame, auto-hide pane) also pass; detailed results live in the WDF matrix and Issue evidence.
 - Quiet debug startup (process start to first content Rendering, line-tables-only, startup trace only) measures 1519–1709 ms (median 1593) over five launches of the latest executable, against 1538–2714 ms (median 1651) for the pre-remediation build on the same host. Backend `measure_text` calls up to first content rendering fell from 44 to 40 per launch (three traced launches each); the review target of a 30% reduction is not met.
 
+- Windows DNP-01 repeatability (#282) on master `a445183`: 10/10 fresh sessions and 200/200 real tab clicks PASS on one RDP host, so the intermittent #279 mismatch was not reproduced in that scope. Two unclassified anomalies (the historical #279 click 18 and one session on `0366fc8`) remain in the [#282 evidence index](../issues/282-dnp01-windows-mismatch/evidence/README.md).
+
 ## Platform boundaries
 
 - WinUI 3 acceptance covers all WDF rows on the pinned example, including Escape dismissal from a focused field inside an open auto-hide pane.

@@ -103,6 +103,8 @@ impl InnerPopupSurface {
             placed_size: Cell::new(request.size),
             on_native_dismiss,
         });
+        // From here on every exit path runs `close()` (via `Drop`), which forgets this again.
+        TreeHost::set_popup_canvas_offset(surface.content_host.canvas(), Some((local.x, local.y)));
 
         // 7. Register the native `Closed` handler. On registration failure, `surface` is dropped
         // (nothing else holds a strong reference yet) — `Drop::drop` -> `close()` runs with
@@ -225,6 +227,10 @@ impl InnerPopupSurface {
         if let Some(local) = TreeHost::screen_logical_to_xaml_local(&self.owner_canvas, position) {
             let _ = self.popup.SetHorizontalOffset(local.x as f64);
             let _ = self.popup.SetVerticalOffset(local.y as f64);
+            TreeHost::set_popup_canvas_offset(
+                &self.content_host.canvas(),
+                Some((local.x, local.y)),
+            );
         }
     }
 
@@ -270,6 +276,7 @@ impl InnerPopupSurface {
         self.unmount_owned_content();
         self.popup.SetIsOpen(false).ok();
         self.content_host.clear_tree();
+        TreeHost::set_popup_canvas_offset(&self.content_host.canvas(), None);
     }
 
     /// Handles a **native-originated** `Popup.Closed` event — critically, including WinUI3's own
@@ -295,6 +302,7 @@ impl InnerPopupSurface {
         }
         self.unmount_owned_content();
         self.content_host.clear_tree();
+        TreeHost::set_popup_canvas_offset(&self.content_host.canvas(), None);
         if let Some(on_native_dismiss) = self.on_native_dismiss.as_ref() {
             on_native_dismiss();
         }

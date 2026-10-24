@@ -42,6 +42,13 @@ use elwindui_core::ui::{
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+
+thread_local! {
+    /// Popup content canvases (by COM identity) and their popup's XAML-root offset — see
+    /// `TreeHost::popup_offset`.
+    static POPUP_CANVAS_OFFSETS: RefCell<HashMap<usize, (f32, f32)>> =
+        RefCell::new(HashMap::new());
+}
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
@@ -2783,23 +2790,34 @@ impl TreeHost {
         }
     }
 
-    /// XAML-root offset of the windowed `Popup` directly hosting `canvas` (a popup content host),
-    /// or zero. For a windowed popup's child, `TransformToVisual` yields popup-local coordinates
-    /// with the popup's own `HorizontalOffset`/`VerticalOffset` left out, so the canvas/screen
-    /// conversions add it back explicitly (UIA bounds and context anchors inside popups).
-    fn popup_offset(canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas) -> (f32, f32) {
-        let popup = canvas.Parent().ok().and_then(|parent| {
-            parent
-                .cast::<crate::bindings::Microsoft::UI::Xaml::Controls::Primitives::Popup>()
-                .ok()
+    /// Records (or with `None`, forgets) the XAML-root offset of the windowed `Popup` hosting
+    /// `canvas` — see [`Self::popup_offset`]. Called by the popup surface whenever it positions
+    /// the popup and when it closes.
+    pub(crate) fn set_popup_canvas_offset(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        offset: Option<(f32, f32)>,
+    ) {
+        let key = canvas.as_raw() as usize;
+        POPUP_CANVAS_OFFSETS.with(|offsets| match offset {
+            Some(offset) => {
+                offsets.borrow_mut().insert(key, offset);
+            }
+            None => {
+                offsets.borrow_mut().remove(&key);
+            }
         });
-        match popup {
-            Some(popup) => (
-                popup.HorizontalOffset().unwrap_or(0.0) as f32,
-                popup.VerticalOffset().unwrap_or(0.0) as f32,
-            ),
-            None => (0.0, 0.0),
-        }
+    }
+
+    /// XAML-root offset of the windowed `Popup` hosting `canvas` (a popup content host), or zero.
+    /// For a windowed popup's child, `TransformToVisual` yields popup-local coordinates without the
+    /// popup's own offset, and the child's `Parent` does not lead back to the `Popup`, so the
+    /// popup surface registers its offset here and the canvas/screen conversions add it back
+    /// (UIA bounds and anchors inside popups).
+    fn popup_offset(canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas) -> (f32, f32) {
+        let key = canvas.as_raw() as usize;
+        POPUP_CANVAS_OFFSETS
+            .with(|offsets| offsets.borrow().get(&key).copied())
+            .unwrap_or((0.0, 0.0))
     }
 
     /// Converts canvas-local logical DIPs to desktop screen physical coordinates.

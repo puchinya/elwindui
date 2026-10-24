@@ -43,6 +43,16 @@ use elwindui_core::ui::{
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
+/// COM identity of `canvas` (its `IUnknown` pointer). Callers reach the same canvas through
+/// different interface pointers (e.g. an upgraded weak reference), so the raw `Canvas` pointer is
+/// not a stable key.
+fn popup_canvas_key(canvas: &Canvas) -> usize {
+    canvas
+        .cast::<windows::core::IUnknown>()
+        .map(|unknown| unknown.as_raw() as usize)
+        .unwrap_or(0)
+}
+
 thread_local! {
     /// Popup content canvases (by COM identity) and their popup's XAML-root offset — see
     /// `TreeHost::popup_offset`.
@@ -2797,7 +2807,7 @@ impl TreeHost {
         canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
         offset: Option<(f32, f32)>,
     ) {
-        let key = canvas.as_raw() as usize;
+        let key = popup_canvas_key(canvas);
         POPUP_CANVAS_OFFSETS.with(|offsets| match offset {
             Some(offset) => {
                 offsets.borrow_mut().insert(key, offset);
@@ -2814,7 +2824,7 @@ impl TreeHost {
     /// popup surface registers its offset here and the canvas/screen conversions add it back
     /// (UIA bounds and anchors inside popups).
     fn popup_offset(canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas) -> (f32, f32) {
-        let key = canvas.as_raw() as usize;
+        let key = popup_canvas_key(canvas);
         POPUP_CANVAS_OFFSETS
             .with(|offsets| offsets.borrow().get(&key).copied())
             .unwrap_or((0.0, 0.0))

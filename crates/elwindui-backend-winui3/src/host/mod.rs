@@ -2783,6 +2783,25 @@ impl TreeHost {
         }
     }
 
+    /// XAML-root offset of the windowed `Popup` directly hosting `canvas` (a popup content host),
+    /// or zero. For a windowed popup's child, `TransformToVisual` yields popup-local coordinates
+    /// with the popup's own `HorizontalOffset`/`VerticalOffset` left out, so the canvas/screen
+    /// conversions add it back explicitly (UIA bounds and context anchors inside popups).
+    fn popup_offset(canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas) -> (f32, f32) {
+        let popup = canvas.Parent().ok().and_then(|parent| {
+            parent
+                .cast::<crate::bindings::Microsoft::UI::Xaml::Controls::Primitives::Popup>()
+                .ok()
+        });
+        match popup {
+            Some(popup) => (
+                popup.HorizontalOffset().unwrap_or(0.0) as f32,
+                popup.VerticalOffset().unwrap_or(0.0) as f32,
+            ),
+            None => (0.0, 0.0),
+        }
+    }
+
     /// Converts canvas-local logical DIPs to desktop screen physical coordinates.
     ///
     /// The XAML root/content transform and ContentCoordinateConverter are the only source of
@@ -2793,18 +2812,17 @@ impl TreeHost {
         canvas_point: Point,
     ) -> Option<Point> {
         let xaml_root = canvas.XamlRoot().ok()?;
+        let content = xaml_root.Content().ok()?;
         let uie: crate::bindings::Microsoft::UI::Xaml::UIElement = canvas.cast().ok()?;
-        // Relative to the XamlRoot itself (null visual), not to `XamlRoot.Content`: a Canvas hosted
-        // in a windowed `Popup` is not a descendant of the window content, and transforming to the
-        // content dropped the popup's own offset (wrong UIA bounds / anchors inside popups).
-        let transform = uie
-            .TransformToVisual(None::<&crate::bindings::Microsoft::UI::Xaml::UIElement>)
-            .ok()?;
+        let transform = uie.TransformToVisual(&content).ok()?;
         let pt = windows::Foundation::Point {
             X: canvas_point.x,
             Y: canvas_point.y,
         };
-        let local_dip = transform.TransformPoint(pt).ok()?;
+        let mut local_dip = transform.TransformPoint(pt).ok()?;
+        let (offset_x, offset_y) = Self::popup_offset(canvas);
+        local_dip.X += offset_x;
+        local_dip.Y += offset_y;
 
         let island = xaml_root.ContentIslandEnvironment().ok()?;
         let app_window_id = island.AppWindowId().ok()?;
@@ -2839,19 +2857,16 @@ impl TreeHost {
         canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
         screen_point: Point,
     ) -> Option<Point> {
+        let xaml_root = canvas.XamlRoot().ok()?;
+        let content = xaml_root.Content().ok()?;
         let xaml_local = Self::screen_logical_to_xaml_local(canvas, screen_point)?;
         let canvas_element: crate::bindings::Microsoft::UI::Xaml::UIElement = canvas.cast().ok()?;
-        // Inverse of the root-relative transform used by `canvas_to_screen_physical_point`, so a
-        // Canvas inside a windowed `Popup` resolves through the popup's offset as well.
-        let transform = canvas_element
-            .TransformToVisual(None::<&crate::bindings::Microsoft::UI::Xaml::UIElement>)
-            .ok()?
-            .Inverse()
-            .ok()?;
+        let transform = content.TransformToVisual(&canvas_element).ok()?;
+        let (offset_x, offset_y) = Self::popup_offset(canvas);
         let canvas_local = transform
             .TransformPoint(windows::Foundation::Point {
-                X: xaml_local.x,
-                Y: xaml_local.y,
+                X: xaml_local.x - offset_x,
+                Y: xaml_local.y - offset_y,
             })
             .ok()?;
         Some(Point {

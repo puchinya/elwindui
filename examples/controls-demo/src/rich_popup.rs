@@ -102,9 +102,9 @@ fn add(layout: &Rc<elwindui::core::ui::VerticalLayout>, child: Rc<dyn UIElementE
 fn text(value: &str) -> Rc<elwindui::core::ui::TextBlock> {
     let block = elwindui::core::ui::TextBlock::new();
     block.set_text(value);
-    block
-        .text_style
-        .set_foreground(Some(elwindui::core::graphics::Color::rgb(20, 20, 25).into()));
+    block.text_style.set_foreground(Some(
+        elwindui::core::graphics::Color::rgb(20, 20, 25).into(),
+    ));
     block
 }
 

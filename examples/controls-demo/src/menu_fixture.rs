@@ -3,9 +3,7 @@
 //! that a button cycles through System -> Rgba8 -> none to exercise live set / replace / clear and
 //! a later context-menu realization picking up the latest icon.
 
-use elwindui::core::graphics::{
-    AlphaMode, BitmapImage, IconSource, ImageSource, SystemIcon,
-};
+use elwindui::core::graphics::{AlphaMode, BitmapImage, IconSource, ImageSource, SystemIcon};
 
 /// A 16x16 solid green PNG, embedded so the Encoded raster path needs no external asset.
 const GREEN_PNG: [u8; 82] = [

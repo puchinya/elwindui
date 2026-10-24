@@ -146,6 +146,10 @@ pub(crate) fn build_rich_context_popup(ctx: ViewBuildContext) -> Option<Rc<dyn U
 
     let layout = elwindui::core::ui::VerticalLayout::new();
     layout.set_margin(12.0);
+    // A popup draws no chrome of its own; without a background the window shows through.
+    layout.set_background(Some(
+        elwindui::core::graphics::Color::rgb(246, 246, 248).into(),
+    ));
     layout.set_spacing(6.0);
 
     add(

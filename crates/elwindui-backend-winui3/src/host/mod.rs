@@ -1099,27 +1099,9 @@ impl TreeHost {
                     Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
                 > = active_for_key.upgrade();
                 if let (Some(tree), Some(kb), Some(active)) = (tree_ref, kb_ref, active_ref) {
-                    let screen_anchor = if let Some(focused) = kb.as_ref().focus.focused() {
-                        let offset = focused
-                            .arranged_offset()
-                            .unwrap_or(Point { x: 0.0, y: 0.0 });
-                        let w = focused.arranged_width().unwrap_or(0.0);
-                        let h = focused.arranged_height().unwrap_or(0.0);
-                        Self::canvas_to_screen_point(&canvas_for_context_key, offset).map(
-                            |screen_pt| {
-                                elwindui_core::ui::popup::PopupAnchor::Rect(
-                                    elwindui_core::base::Rect {
-                                        x: screen_pt.x,
-                                        y: screen_pt.y,
-                                        width: w,
-                                        height: h,
-                                    },
-                                )
-                            },
-                        )
-                    } else {
-                        None
-                    };
+                    let screen_anchor = kb.as_ref().focus.focused().and_then(|focused| {
+                        Self::focused_screen_anchor(&canvas_for_context_key, &focused)
+                    });
                     if let Some(screen_anchor) = screen_anchor {
                         let request =
                             elwindui_core::ui::ContextRequest::keyboard(Some(screen_anchor));
@@ -1558,41 +1540,18 @@ impl TreeHost {
                     let is_pointer = args
                         .TryGetPosition(&canvas_for_ctx, &mut pt)
                         .unwrap_or(false);
+                    // A pointer-originated request is dispatched by the `RightTapped` handler
+                    // above; WinUI raises both events for one secondary click, and dispatching
+                    // here too opened the context popup twice (build, replace, rebuild).
                     let request = if is_pointer {
-                        let local_pt = elwindui_core::base::Point { x: pt.X, y: pt.Y };
-                        TreeHost::canvas_to_screen_point(&canvas_for_ctx, local_pt).map(
-                            |screen_pt| {
-                                elwindui_core::ui::ContextRequest::pointer(local_pt, screen_pt)
-                            },
-                        )
+                        None
                     } else {
                         let keyboard: Option<Rc<KeyboardDispatcher>> = keyboard_for_ctx.upgrade();
-                        let screen_anchor = if let Some(keyboard) = keyboard {
-                            if let Some(focused) = keyboard.as_ref().focus.focused() {
-                                let offset = focused
-                                    .arranged_offset()
-                                    .unwrap_or(Point { x: 0.0, y: 0.0 });
-                                let w = focused.arranged_width().unwrap_or(0.0);
-                                let h = focused.arranged_height().unwrap_or(0.0);
-                                TreeHost::canvas_to_screen_point(&canvas_for_ctx, offset).map(
-                                    |screen_pt| {
-                                        elwindui_core::ui::popup::PopupAnchor::Rect(
-                                            elwindui_core::base::Rect {
-                                                x: screen_pt.x,
-                                                y: screen_pt.y,
-                                                width: w,
-                                                height: h,
-                                            },
-                                        )
-                                    },
-                                )
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                        screen_anchor
+                        keyboard
+                            .and_then(|keyboard| keyboard.as_ref().focus.focused())
+                            .and_then(|focused| {
+                                TreeHost::focused_screen_anchor(&canvas_for_ctx, &focused)
+                            })
                             .map(|anchor| elwindui_core::ui::ContextRequest::keyboard(Some(anchor)))
                     };
                     if let Some(request) = request {
@@ -2962,6 +2921,34 @@ impl TreeHost {
         }
 
         None
+    }
+
+    /// Screen-logical anchor rectangle of the keyboard-focused element for a keyboard context
+    /// request. `arranged_offset()` is relative to the visual parent, so the offsets are summed up
+    /// the visual-parent chain to get the element's position in this host's root Canvas.
+    fn focused_screen_anchor(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        focused: &Rc<dyn UIElementExt>,
+    ) -> Option<elwindui_core::ui::popup::PopupAnchor> {
+        let mut origin = Point { x: 0.0, y: 0.0 };
+        let mut current = Some(Rc::clone(focused));
+        while let Some(element) = current {
+            let offset = element
+                .arranged_offset()
+                .unwrap_or(Point { x: 0.0, y: 0.0 });
+            origin.x += offset.x;
+            origin.y += offset.y;
+            current = element.visual_parent();
+        }
+        let screen_pt = Self::canvas_to_screen_point(canvas, origin)?;
+        Some(elwindui_core::ui::popup::PopupAnchor::Rect(
+            elwindui_core::base::Rect {
+                x: screen_pt.x,
+                y: screen_pt.y,
+                width: focused.arranged_width().unwrap_or(0.0),
+                height: focused.arranged_height().unwrap_or(0.0),
+            },
+        ))
     }
 
     pub(crate) fn dispatch_context_request(

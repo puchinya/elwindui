@@ -421,6 +421,8 @@ impl ContextMenuService {
             content: Rc::clone(&content),
             position,
             size: popup_size,
+            anchor: anchor.clone(),
+            work_area,
             focus_policy: PopupFocusPolicy::None,
             dismiss_policy: PopupDismissPolicy::LightDismiss,
         }) else {
@@ -504,6 +506,8 @@ impl ContextMenuService {
             content: Rc::clone(&content),
             position,
             size: popup_size,
+            anchor: anchor.clone(),
+            work_area,
             focus_policy: PopupFocusPolicy::Root,
             dismiss_policy: PopupDismissPolicy::LightDismiss,
         }) else {
@@ -801,8 +805,16 @@ pub enum PopupDismissPolicy {
 #[derive(Clone)]
 pub struct PopupRequest {
     pub content: Rc<dyn UIElementExt>,
+    /// Top-left placement computed by [`calculate_popup_placement`] for `size`.
     pub position: Point,
+    /// Content size measured before the popup was shown.
     pub size: Size,
+    /// The anchor and monitor work area `position` was computed from. A backend whose native
+    /// children only report their natural size once realized in the popup (WinUI 3 `Loaded`) uses
+    /// them to re-run [`calculate_popup_placement`] with the realized size, so the popup is
+    /// neither clipped nor placed off the work area.
+    pub anchor: PopupAnchor,
+    pub work_area: Rect,
     pub focus_policy: PopupFocusPolicy,
     pub dismiss_policy: PopupDismissPolicy,
 }

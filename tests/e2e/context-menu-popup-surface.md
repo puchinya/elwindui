@@ -64,9 +64,12 @@ text or trace lines. Seeing a driver `success: true` alone is never PASS.
 
 - **CMP-06 open.** Right-click the custom target. PASS: an ElwindUI-drawn menu on a popup shows the
   five items with icons, the `S` shortcut, and `Disabled Action` visibly disabled.
-- **CMP-07 hover.** Move the pointer over an enabled item without clicking. PASS: that item is
-  highlighted. The current Windows driver has no pointer-move primitive; record NOT RUN with that
-  reason rather than substituting a click.
+- **CMP-07 hover.** Move the pointer over an enabled item without clicking, with the driver's
+  `hover --selector <item> --dwell-ms 800` (real pointer movement through `winapp ui hover`), then
+  capture. PASS: that item is highlighted and nothing is activated (no log line, menu stays open).
+  `hover` needs a UIA selector for the item; if `search` inside the open menu finds none, record
+  BLOCKED with the search output (the driver has no coordinate pointer-move primitive) — never
+  substitute a click.
 - **CMP-08 keyboard.** With the menu open, send `down`, `down`, ... PASS: the highlight moves and
   skips `Disabled Action`; `up` moves back; `enter` activates the highlighted item (log line) and
   closes the menu.
@@ -91,14 +94,22 @@ text or trace lines. Seeing a driver `success: true` alone is never PASS.
 
 ### PopupSurface placement (single monitor)
 
+WinUI 3 presents each popup in a `PopupHost` window that is larger than the popup content by a
+shadow margin (observed: 10 px left/right, 2 px top, 18 px bottom at 100 % scale). Judge placement
+on the popup content rectangle seen in the screenshot (or the host rect minus that margin), not on
+the raw `PopupHost` rect. With `ELWINDUI_WINUI3_DIAGNOSTICS=1` the demo also writes
+`[diag popup] shown ... position/size/anchor/work_area` and `[diag popup] re-placed size/position`
+lines to stderr (launch with stderr redirected) — record them as supporting evidence.
+
 - **CMP-14 outside client area.** Resize the window so the popup target is near the window's
   bottom edge and right-click it. PASS: the popup extends beyond the window bounds and is fully
   drawn there.
 - **CMP-15 over NativeControl.** Open the rich popup so it overlaps a native control (for example
   the `Native Button target` or the log ScrollView). PASS: the popup is drawn in front of it.
-- **CMP-16 right edge flip.** Move the window so the right-click point is closer to the work-area
-  right edge than the popup width. PASS: the popup opens to the left of the pointer and stays fully
-  inside the work area.
+- **CMP-16 right edge flip.** Move the window so the right-click point on the rich popup target
+  is less than the popup width (about 560 px) from the work-area right edge, e.g. a click at
+  x = work-area right − 200. PASS: the popup content opens to the left of the pointer (its right
+  edge at the pointer) and stays fully inside the work area.
 - **CMP-17 bottom edge flip.** As CMP-16 against the bottom edge. PASS: the popup opens above the
   pointer.
 - **CMP-18 work-area clamp.** Right-click just above the taskbar. PASS: no part of the popup covers
@@ -111,9 +122,13 @@ text or trace lines. Seeing a driver `success: true` alone is never PASS.
 - **CMP-20 Escape.** Open the custom menu, send `esc` (CMP-09 evidence may be reused). Open the rich
   popup, send `esc`; record whether it closes (it is light-dismiss with no initial focus) and its
   unmount count.
-- **CMP-21 replacement.** Open the rich popup, then right-click the custom target. PASS: the old
-  popup closes with exactly one `popup_unmount` before or while the new menu appears, and only one
-  popup is visible.
+- **CMP-21 replacement.** Per `docs/specs/ui_spec.md` (Dismiss と置換): open the rich popup, then
+  right-click the custom-rendered target once. PASS: with that single right-click the rich popup
+  closes (exactly one `popup_unmount`) and the custom menu opens at the new pointer position; only
+  one popup is visible. Also open the native menu and right-click the custom target once: the
+  native flyout closes and the custom menu opens. Then open the rich popup and left-click the
+  `Native Button target`: the popup closes and the log gains no `NativeButton > clicked` line
+  (a primary outside click only dismisses).
 - **CMP-22 focus restoration.** Click `Native Button target` (one `NativeButton > clicked` line),
   send `shift+f10` to open its menu, send `esc`, then send `space`. PASS: a second
   `NativeButton > clicked` line appears, showing keyboard focus returned to the button.
@@ -139,9 +154,13 @@ text or trace lines. Seeing a driver `success: true` alone is never PASS.
 
 - **CMP-27** On the other tabs: a Button click logs, TextArea/TextBox accept typed text, TabView
   switching works, the Dropdown opens and changes selection. PASS when each behaves as before.
-- **CMP-28 pointer events and `on_right_tapped`.** Covered by the
-  [`self-drawn-pointer-input.md`](self-drawn-pointer-input.md) probes in `custom-controls-demo`;
-  run its right-tap row or record NOT RUN.
+- **CMP-28 pointer events and `on_right_tapped`.** The secondary-click dispatch changed in #157,
+  so verify the self-drawn pointer route in `examples/custom-controls-demo` on the final HEAD: on
+  Probe A (see [`pointer-cancellation-capture-loss.md`](pointer-cancellation-capture-loss.md)), a
+  real left click increases `pressed`, `released` and `tapped` by exactly one each, and a real
+  right click increases `right_tapped` by exactly one (no double count, no context menu). Also run
+  [`self-drawn-pointer-input.md`](self-drawn-pointer-input.md) SDP-01 (CustomTabView real-pointer
+  selection).
 
 ## Cleanup
 

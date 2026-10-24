@@ -93,6 +93,11 @@ focus behavior that depends on real key/mouse delivery. WinUI 3 real-key E2E alw
 send-keys ... --via send-input`; `PostMessage`-style keystroke injection is never an accepted
 substitute for windowless XAML controls.
 
+Pointer hover is delegated to the external `winapp ui hover <selector> --dwell-time <ms>` (real
+SendInput movement to the selected element's centre); the adapter's `hover --selector --dwell-ms`
+only validates and forwards. Hovering an arbitrary screen coordinate is not available, because
+`winapp` exposes no coordinate pointer-move primitive and the adapter does not inject mouse input.
+
 Mouse drag duration is delegated to the external `winapp ui drag --duration-ms <1..60000>`
 capability. The repository adapter validates and forwards the option; it does not implement a
 second mouse transport or a local generic Win32 injector. `--hold-ms` is stationary before the

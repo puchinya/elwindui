@@ -97,8 +97,17 @@ impl InnerScrollView {
         self.handle.clone()
     }
 
-    pub(crate) fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElementExt>) {
-        self.content_host.set_tree(content);
+    pub(crate) fn set_content(
+        &self,
+        content: Rc<dyn elwindui_core::ui::UIElementExt>,
+        owner: Option<Rc<dyn elwindui_core::ui::UIElementExt>>,
+    ) {
+        self.content_host.set_hosted_tree(content, owner);
+    }
+
+    /// The nested content host (a cheap handle clone).
+    pub(crate) fn content_host(&self) -> crate::host::TreeHost {
+        self.content_host.clone()
     }
 
     pub(crate) fn set_horizontal_scroll_enabled(&self, enabled: bool) {

@@ -138,6 +138,8 @@ pub struct PopupRequest {
     pub content: Rc<dyn UIElementExt>,
     pub position: Point,
     pub size: Size,
+    pub anchor: PopupAnchor,
+    pub work_area: Rect,
     pub focus_policy: PopupFocusPolicy,
     pub dismiss_policy: PopupDismissPolicy,
 }
@@ -154,6 +156,8 @@ pub trait PopupSurfaceHandle {
     fn close(&self);
 }
 ```
+
+`anchor` / `work_area` (Issue #157) carry the inputs `position` was computed from. Core measures the popup content before any native surface exists; WinUI 3 native controls report no natural size until they are `Loaded` inside the popup, so the measured `size` can be too small. The WinUI 3 popup host therefore lets its content host grow to the realized natural size and re-runs `calculate_popup_placement(anchor, realized_size, work_area, AutoFlip)` whenever that size changes, so the same placement rules (flip, work-area clamp) apply to the final size. AppKit measures realized `NSView`s up front and ignores these fields.
 
 `PopupHost::show_popup` became fallible in Issue #161's second review pass (previously `-> Rc<dyn PopupSurfaceHandle>`, unconditionally). Before that, WinUI3's `InnerPopupSurface::show` could already fail, but `WinUI3PopupHost::show_popup` papered over it with a handle wrapping `surface: Option<Rc<InnerPopupSurface>>` — Core saw a successfully-opened popup even when no native surface existed. `WinUI3PopupHandle` no longer has that `Option` layer: it always wraps a live `Rc<InnerPopupSurface>`, and `WinUI3PopupHost::show_popup` returns `None` directly on failure.
 

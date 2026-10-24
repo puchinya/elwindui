@@ -58,6 +58,17 @@ if ($WindowHwnd -eq '4660' -and $FakeArgs.Count -eq 5 -and
     exit 0
 }
 
+if ($WindowHwnd -eq '4660' -and $FakeArgs.Count -eq 6 -and
+    $FakeArgs[0] -eq 'ui' -and
+    $FakeArgs[1] -eq 'hover' -and
+    $FakeArgs[2] -eq 'FAKE_HOVER_SELECTOR' -and
+    $FakeArgs[3] -eq '--dwell-time' -and
+    $FakeArgs[4] -eq '500' -and
+    $FakeArgs[5] -eq '--json') {
+    Write-Output '{"success":true,"forwarded":true}'
+    exit 0
+}
+
 if ($joined -match 'FAKE_SUCCESS') {
     Write-Output '{"success":true,"matchCount":1,"matches":[{"name":"FAKE_SUCCESS","selector":"fake-1"}]}'
     exit 0

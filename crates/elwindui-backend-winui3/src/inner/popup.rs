@@ -3,13 +3,16 @@
 //! Hosts arbitrary `UIElement` subtrees inside a lightweight, light-dismissable XAML `Popup`.
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::Primitives::Popup;
+use crate::bindings::Microsoft::UI::Xaml::SizeChangedEventHandler;
 use crate::ffi::{UiCallbackRegistryOwner, invoke_ui_event_callback};
 use crate::host::{TreeHost, TreeHostViewport};
+use elwindui_core::base::{Rect, Size};
 use elwindui_core::ui::popup::{
-    PopupDismissPolicy, PopupFocusPolicy, PopupHost, PopupRequest, PopupSurfaceHandle,
+    PopupAnchor, PopupDismissPolicy, PopupFocusPolicy, PopupHost, PopupPlacement, PopupRequest,
+    PopupSurfaceHandle, calculate_popup_placement,
 };
 use elwindui_core::ui::{UIElementExt, unmount_subtree};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use windows::core::Interface;
 
@@ -24,6 +27,14 @@ pub(crate) struct InnerPopupSurface {
     content: RefCell<Option<Rc<dyn UIElementExt>>>,
     is_open: RefCell<bool>,
     callback_owner: UiCallbackRegistryOwner,
+    /// Re-placement inputs — see [`Self::replace_for_realized_size`].
+    owner_canvas: crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+    anchor: PopupAnchor,
+    work_area: Rect,
+    placed_size: Cell<Size>,
+    /// Run after a native-originated close (WinUI light dismiss) — see
+    /// `TreeHost::secondary_dismiss_hook`.
+    on_native_dismiss: Option<Rc<dyn Fn()>>,
 }
 
 impl InnerPopupSurface {
@@ -42,21 +53,23 @@ impl InnerPopupSurface {
     pub(crate) fn show(
         request: PopupRequest,
         owner_canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        on_native_dismiss: Option<Rc<dyn Fn()>>,
     ) -> Option<Rc<Self>> {
         // 1. Core screen -> WinUI local coordinate conversion.
         let local = TreeHost::screen_logical_to_xaml_local(owner_canvas, request.position)?;
         // 2. Native Popup construction.
         let popup = Popup::new().ok()?;
-        // 3. Empty content host only — no `set_tree` yet. `PopupRequest.size` is this host's
-        // viewport authority (Issue #261 review remediation §2.4) — pushed through `set_viewport`
-        // now, before any tree is attached, so it's already the stored viewport `set_tree`'s own
-        // initial layout (step 10, below) will use; `set_viewport` itself is a no-op layout-wise
-        // with no tree attached yet (see that method's own doc comment).
+        // 3. Empty content host only — no `set_tree` yet. The popup is this host's viewport
+        // authority (Issue #261 review remediation §2.4) and leaves both axes unconstrained, so
+        // the host presents the content at its natural size. `PopupRequest.size` was measured by
+        // Core before the content was realized here, and WinUI native controls report no natural
+        // size until `Loaded` (`AnyView::measure`); a fixed viewport of that size clipped them.
+        // The realized size is re-placed by `replace_for_realized_size` (Issue #157, #298).
         let content_host = TreeHost::new();
         content_host
             .set_viewport(TreeHostViewport {
-                width: Some(request.size.width as f64),
-                height: Some(request.size.height as f64),
+                width: None,
+                height: None,
             })
             .ok()?;
 
@@ -84,6 +97,11 @@ impl InnerPopupSurface {
             content: RefCell::new(None),
             is_open: RefCell::new(true),
             callback_owner: UiCallbackRegistryOwner::default(),
+            owner_canvas: owner_canvas.clone(),
+            anchor: request.anchor.clone(),
+            work_area: request.work_area,
+            placed_size: Cell::new(request.size),
+            on_native_dismiss,
         });
 
         // 7. Register the native `Closed` handler. On registration failure, `surface` is dropped
@@ -103,6 +121,23 @@ impl InnerPopupSurface {
             .popup
             .Closed(&windows::Foundation::EventHandler::new(move |_, _| {
                 invoke_ui_event_callback(callback_id);
+                Ok(())
+            }))
+            .ok()?;
+
+        // 7b. Re-place whenever the presented content size changes (native children realized).
+        let weak_surface = Rc::downgrade(&surface);
+        let resize_id = surface.callback_owner.register_event(Rc::new(move || {
+            let surface: Option<Rc<Self>> = weak_surface.upgrade();
+            if let Some(s) = surface {
+                s.replace_for_realized_size();
+            }
+        }));
+        surface
+            .content_host
+            .canvas()
+            .SizeChanged(&SizeChangedEventHandler::new(move |_, _| {
+                invoke_ui_event_callback(resize_id);
                 Ok(())
             }))
             .ok()?;
@@ -147,8 +182,50 @@ impl InnerPopupSurface {
             return None;
         }
 
+        if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "[diag popup] shown position={:?} size={:?} anchor={:?} work_area={:?}",
+                request.position, request.size, request.anchor, request.work_area
+            );
+        }
+
         // 14.
         Some(surface)
+    }
+
+    /// Re-runs Core placement for the size the content host actually presents, once it differs
+    /// from the size the popup was placed with (Core measured the content before its native
+    /// children were realized). Keeps the same anchor, work area and flip/clamp rules.
+    fn replace_for_realized_size(&self) {
+        if !*self.is_open.borrow() {
+            return;
+        }
+        let canvas = self.content_host.canvas();
+        let (Ok(width), Ok(height)) = (canvas.ActualWidth(), canvas.ActualHeight()) else {
+            return;
+        };
+        let size = Size {
+            width: width as f32,
+            height: height as f32,
+        };
+        let placed = self.placed_size.get();
+        if size.width <= 0.0
+            || size.height <= 0.0
+            || ((size.width - placed.width).abs() < 0.5
+                && (size.height - placed.height).abs() < 0.5)
+        {
+            return;
+        }
+        self.placed_size.set(size);
+        let position =
+            calculate_popup_placement(&self.anchor, size, self.work_area, PopupPlacement::AutoFlip);
+        if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+            eprintln!("[diag popup] re-placed size={size:?} position={position:?}");
+        }
+        if let Some(local) = TreeHost::screen_logical_to_xaml_local(&self.owner_canvas, position) {
+            let _ = self.popup.SetHorizontalOffset(local.x as f64);
+            let _ = self.popup.SetVerticalOffset(local.y as f64);
+        }
     }
 
     /// Exactly-once close guard shared by [`Self::close`] (framework-controlled) and
@@ -218,6 +295,9 @@ impl InnerPopupSurface {
         }
         self.unmount_owned_content();
         self.content_host.clear_tree();
+        if let Some(on_native_dismiss) = self.on_native_dismiss.as_ref() {
+            on_native_dismiss();
+        }
     }
 }
 
@@ -249,12 +329,22 @@ impl PopupSurfaceHandle for WinUI3PopupHandle {
 #[derive(Clone)]
 pub struct WinUI3PopupHost {
     owner_canvas: crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+    on_native_dismiss: Option<Rc<dyn Fn()>>,
 }
 
 impl WinUI3PopupHost {
     /// Creates a new popup host associated with an owner canvas context.
     pub fn new(owner_canvas: crate::bindings::Microsoft::UI::Xaml::Controls::Canvas) -> Self {
-        Self { owner_canvas }
+        Self {
+            owner_canvas,
+            on_native_dismiss: None,
+        }
+    }
+
+    /// Runs `hook` after a popup shown by this host is closed by WinUI itself (light dismiss).
+    pub(crate) fn with_on_native_dismiss(mut self, hook: Rc<dyn Fn()>) -> Self {
+        self.on_native_dismiss = Some(hook);
+        self
     }
 }
 
@@ -264,7 +354,8 @@ impl PopupHost for WinUI3PopupHost {
         // propagate that as `None` rather than a handle wrapping a nonexistent surface. The caller
         // (`ContextMenuService::open_custom_popup`/`open_custom_menu`) is responsible for unmounting
         // the already-built popup content in that case.
-        let surface = InnerPopupSurface::show(request, &self.owner_canvas)?;
+        let surface =
+            InnerPopupSurface::show(request, &self.owner_canvas, self.on_native_dismiss.clone())?;
         Some(Rc::new(WinUI3PopupHandle { surface }))
     }
 }

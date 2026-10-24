@@ -166,6 +166,19 @@ Assert ($r.Json.success -eq $false) 'set-value (backend error) -- success:false'
 Assert ($r.Json.category -eq 'target_error') 'set-value (backend error) -- category:target_error'
 Assert ($r.ExitCode -eq 1) 'set-value (backend error) -- exit code 1'
 
+# T2f -- hover forwards the selector and dwell to `winapp ui hover`; missing selector and an
+# out-of-range dwell fail closed before the backend is invoked.
+$r = Invoke-Driver @('hover', '--hwnd', '4660', '--selector', 'FAKE_HOVER_SELECTOR', '--dwell-ms', '500')
+Assert-OneJsonObject $r 'hover (success)'
+Assert ($r.Json.success -eq $true) 'hover (success) -- success:true'
+Assert ($r.Json.backend.forwarded -eq $true) 'hover (success) -- selector/HWND/dwell forwarded as exact backend arguments'
+$r = Invoke-Driver @('hover', '--hwnd', '4660')
+Assert-OneJsonObject $r 'hover (missing selector)'
+Assert ($r.Json.category -eq 'usage_error') 'hover (missing selector) -- category:usage_error'
+$r = Invoke-Driver @('hover', '--hwnd', '4660', '--selector', 'FAKE_HOVER_SELECTOR', '--dwell-ms', '60001')
+Assert-OneJsonObject $r 'hover (invalid dwell)'
+Assert ($r.Json.category -eq 'usage_error') 'hover (invalid dwell) -- category:usage_error'
+
 # T3 (large-stderr deadlock regression) -- Invoke-WinApp must drain the winapp backend's stdout
 # and stderr concurrently. A fake backend that writes >= 256 KiB to stderr before exiting would
 # deadlock a sequential stdout-then-stderr ReadToEnd() implementation (blocked filling stderr's

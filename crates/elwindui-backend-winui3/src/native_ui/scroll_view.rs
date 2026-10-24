@@ -23,13 +23,21 @@ impl ScrollView {
     }
 
     fn set_content(&self, content: Rc<dyn UIElementExt>) {
-        self.inner.set_content(content);
+        self.inner
+            .set_content(content, self.as_ui_element().visual_collection.owner_rc());
     }
     fn set_horizontal_scroll_enabled(&self, enabled: bool) {
         self.inner.set_horizontal_scroll_enabled(enabled);
     }
     fn set_vertical_scroll_enabled(&self, enabled: bool) {
         self.inner.set_vertical_scroll_enabled(enabled);
+    }
+
+    /// The content lives in a nested host outside the Visual tree, so it is unmounted (popups
+    /// first) when this ScrollView unmounts — see `TreeHost::unmount_hosted_tree`.
+    fn on_constructed(&self) {
+        let content_host = self.inner.content_host();
+        self.add_unmount_hook(Box::new(move || content_host.unmount_hosted_tree()));
     }
 
     fn construct() -> Self {

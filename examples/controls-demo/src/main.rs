@@ -18,6 +18,9 @@
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
+mod menu_fixture;
+mod rich_popup;
+
 use elwindui::core::input::Key;
 #[allow(unused_imports)]
 use elwindui::core::ui::{
@@ -90,15 +93,8 @@ mod controls_demo_view_model {
         })]
         radio_selected_label: String,
 
-        #[computed(expr = Some(ViewFactory::new(|_ctx| {
-            let layout = elwindui::core::ui::VerticalLayout::new();
-            layout.set_margin(12.0);
-            let text = elwindui::core::ui::TextBlock::new();
-            text.set_text("✨ Rich Context Popup (Custom UIElement)");
-            text.text_style.set_foreground(Some(elwindui::core::graphics::Color::rgb(20, 20, 25).into()));
-            LayoutExt::children(&*layout).add(text as std::rc::Rc<dyn UIElementExt>);
-            Some(layout as std::rc::Rc<dyn UIElementExt>)
-        })))]
+        // Interactive popup content and its lifecycle trace live in `rich_popup.rs`.
+        #[computed(expr = Some(ViewFactory::new(crate::rich_popup::build_rich_context_popup)))]
         custom_popup_template: Option<ViewFactory>,
 
         // A second logical group under the same native parent catches WinUI's implicit
@@ -253,11 +249,27 @@ mod controls_demo_view_model {
         icon_delete: Option<elwindui::core::graphics::IconSource>,
         #[computed(expr = Some(elwindui::core::graphics::IconSource::System(elwindui::core::graphics::SystemIcon::Edit)))]
         icon_edit: Option<elwindui::core::graphics::IconSource>,
+
+        // Per-kind icon fixtures and the button-cycled dynamic icon (`menu_fixture.rs`).
+        #[computed(expr = crate::menu_fixture::encoded_png_icon())]
+        icon_encoded: Option<elwindui::core::graphics::IconSource>,
+        #[computed(expr = crate::menu_fixture::rgba8_icon())]
+        icon_rgba8: Option<elwindui::core::graphics::IconSource>,
+        #[observable(default = 0usize)]
+        dynamic_icon_mode: usize,
+        #[computed(expr = crate::menu_fixture::dynamic_icon(dynamic_icon_mode))]
+        dynamic_icon: Option<elwindui::core::graphics::IconSource>,
+        #[computed(expr = crate::menu_fixture::dynamic_icon_label(dynamic_icon_mode))]
+        dynamic_icon_label: String,
     }
 
     impl ControlsDemoViewModel {
         fn context_menu_item_selected(&self, which: String) {
             context_menu_log = format!("{}{which} selected\n", self.context_menu_log.borrow());
+        }
+
+        fn cycle_dynamic_icon(&self) {
+            dynamic_icon_mode = self.dynamic_icon_mode.get() + 1;
         }
 
         // `text`/`password` themselves are already two-way bound directly (`text <=>
@@ -331,6 +343,45 @@ struct ControlsDemoWindow {
         title: "elwindui NativeControl Demo"
         width: 640.0
         height: 480.0
+
+        menu_bar: MenuBar {
+            MenuBarItem {
+                text: "Icons"
+                Menu {
+                    MenuItem {
+                        text: "System Icon (Copy)"
+                        icon: vm.icon_copy
+                        shortcut: "c"
+                        on_select: || vm.context_menu_item_selected("MenuBar > System Icon".to_string())
+                    }
+                    MenuItem {
+                        text: "Encoded PNG Icon"
+                        icon: vm.icon_encoded
+                        on_select: || vm.context_menu_item_selected("MenuBar > Encoded PNG Icon".to_string())
+                    }
+                    MenuItem {
+                        text: "Rgba8 Icon"
+                        icon: vm.icon_rgba8
+                        on_select: || vm.context_menu_item_selected("MenuBar > Rgba8 Icon".to_string())
+                    }
+                    MenuItem {
+                        text: "Vector Icon"
+                        icon: vm.custom_menu_vector_icon
+                        on_select: || vm.context_menu_item_selected("MenuBar > Vector Icon".to_string())
+                    }
+                    MenuItem {
+                        text: "Dynamic Icon"
+                        icon: vm.dynamic_icon
+                        on_select: || vm.context_menu_item_selected("MenuBar > Dynamic Icon".to_string())
+                    }
+                    MenuItem {
+                        text: "Disabled (MenuBar)"
+                        enabled: false
+                        on_select: || vm.context_menu_item_selected("MenuBar > Disabled".to_string())
+                    }
+                }
+            }
+        }
         content: TabView {
             TabViewItem {
                 header: "TextBox"
@@ -680,6 +731,7 @@ struct ControlsDemoWindow {
                                     MenuItem {
                                         text: "Cut"
                                         icon: vm.icon_cut
+                                        shortcut: "x"
                                         on_select: || vm.context_menu_item_selected("Native > Cut".to_string())
                                     }
                                     MenuItem {
@@ -701,6 +753,26 @@ struct ControlsDemoWindow {
                                         text: "User Vector Icon"
                                         icon: vm.custom_menu_vector_icon
                                         on_select: || vm.context_menu_item_selected("Native > User Vector Icon".to_string())
+                                    }
+                                    MenuItem {
+                                        text: "Encoded PNG Icon"
+                                        icon: vm.icon_encoded
+                                        on_select: || vm.context_menu_item_selected("Native > Encoded PNG Icon".to_string())
+                                    }
+                                    MenuItem {
+                                        text: "Rgba8 Icon"
+                                        icon: vm.icon_rgba8
+                                        on_select: || vm.context_menu_item_selected("Native > Rgba8 Icon".to_string())
+                                    }
+                                    MenuItem {
+                                        text: "Dynamic Icon"
+                                        icon: vm.dynamic_icon
+                                        on_select: || vm.context_menu_item_selected("Native > Dynamic Icon".to_string())
+                                    }
+                                    MenuItem {
+                                        text: "Disabled (native)"
+                                        enabled: false
+                                        on_select: || vm.context_menu_item_selected("Native > Disabled".to_string())
                                     }
                                 }
                             }
@@ -752,6 +824,43 @@ struct ControlsDemoWindow {
                                 text: "【Custom Context Popup Target — Right-click here】"
                                 context_popup: vm.custom_popup_template
                             }
+                        }
+
+                        TextBlock { text: "4. NativeControl / ancestor lookup:" }
+                        HorizontalLayout {
+                            margin: 4.0
+                            spacing: 8.0
+                            Button {
+                                text: "Native Button target"
+                                on_click: || vm.context_menu_item_selected("NativeButton > clicked".to_string())
+                                context_menu: Menu {
+                                    MenuItem {
+                                        text: "Button Context Action"
+                                        on_select: || vm.context_menu_item_selected("NativeButton > Button Context Action".to_string())
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                context_menu: Menu {
+                                    MenuItem {
+                                        text: "Ancestor Action"
+                                        on_select: || vm.context_menu_item_selected("Ancestor > Ancestor Action".to_string())
+                                    }
+                                }
+                                TextBlock {
+                                    margin: 8.0
+                                    text: "[Child without own menu - Right-click here]"
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            margin: 4.0
+                            spacing: 8.0
+                            Button {
+                                text: "Cycle dynamic icon"
+                                on_click: vm.cycle_dynamic_icon
+                            }
+                            TextBlock { text: vm.dynamic_icon_label }
                         }
                     }
 
@@ -805,6 +914,7 @@ impl ControlsDemoWindow {}
 
 #[elwindui::main]
 fn main() {
+    rich_popup::install_demo_environment();
     let vm = ControlsDemoViewModel::new();
     let window = elwindui::new!(ControlsDemoWindow(vm: vm));
     window.show();

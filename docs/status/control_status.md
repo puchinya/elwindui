@@ -11,7 +11,7 @@ Snapshot: 2026-09-06. Public behavior is defined by [`../specs/ui_spec.md`](../s
 | ScrollView | ✅ | ✅ | ⬜ | Native viewport with ElwindUI content host. |
 | Button / CheckBox / RadioButton / ToggleSwitch | ✅ | ✅ | ⬜ | Roles, tri-state/group behavior, TwoWay state, and focus/default paths are implemented. |
 | Dropdown / DropdownItem | ✅ | ✅ | ⬜ | Selection and dynamic item rebuilding are implemented. |
-| MenuBar / Menu / MenuItem | ✅ | 🚧 | ⬜ | Native/custom menus and icon sources are implemented; WinUI 3 runtime verification remains [#157](https://github.com/puchinya/elwindui/issues/157). |
+| MenuBar / Menu / MenuItem | ✅ | 🚧 | ⬜ | Native/custom menus and icon sources are implemented. WinUI 3 native MenuBar/context menu icons (System, Encoded, Rgba8, Vector, live replace/clear) are verified on Windows; custom-rendered menu raster icons render. `shortcut` follows the `ui_spec.md` grammar on WinUI 3 (AppKit: [#306](https://github.com/puchinya/elwindui/issues/306)). |
 | PopupSurface / `context_popup` | ✅ | 🚧 | ⬜ | Auto-flip placement, light dismiss, deferred content, environment propagation, and teardown ordering are implemented; Windows runtime remains pending. |
 | TabView / TabViewItem | ✅ | ✅ | ⬜ | Hosted page activation, native child reconciliation, and AppKit chrome are implemented. |
 | Rectangle / Ellipse / Image | ✅ | ✅ | ⬜ | Backend-neutral self-rendered controls. |

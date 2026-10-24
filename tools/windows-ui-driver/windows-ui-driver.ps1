@@ -29,7 +29,7 @@ param(
     [ValidateSet(
         'doctor', 'launch', 'list-windows', 'focus-window',
         'inspect', 'search', 'invoke', 'get-value', 'set-value', 'get-property', 'set-focus', 'wait-for',
-        'capture-window', 'point-click', 'drag', 'touch-cancel', 'send-keys',
+        'capture-window', 'point-click', 'hover', 'drag', 'touch-cancel', 'send-keys',
         'move-window', 'resize-window', 'terminate', 'capture-sequence'
     )]
     [string]$Command,
@@ -1379,6 +1379,22 @@ function Cmd-PointClick {
     Emit-Result $result
 }
 
+function Cmd-Hover {
+    # Thin pass-through to external `winapp ui hover`: real SendInput pointer movement to the
+    # selected element's centre, then a stationary dwell. No local mouse injection.
+    $target = Get-TargetArgs -TargetPid (Get-Arg 'pid') -Hwnd (Get-Arg 'hwnd')
+    $selector = Require-Arg 'selector'
+    $baseArgs = @('ui', 'hover', $selector) + $target
+    if ($Args2.ContainsKey('dwell-ms')) {
+        $dwellMs = ConvertTo-Int32Argument 'dwell-ms' (Get-Arg 'dwell-ms')
+        if ($dwellMs -lt 0 -or $dwellMs -gt 60000) {
+            Emit-UsageError '--dwell-ms must be between 0 and 60000 milliseconds'
+        }
+        $baseArgs += @('--dwell-time', $dwellMs)
+    }
+    Invoke-UiaCommand -BaseArgs $baseArgs
+}
+
 function Cmd-Drag {
     $target = Get-TargetArgs -TargetPid (Get-Arg 'pid') -Hwnd (Get-Arg 'hwnd')
     $from = if (Get-Arg 'from-selector') { Get-Arg 'from-selector' } else { "$(Require-Arg 'from-x'),$(Require-Arg 'from-y')" }
@@ -1971,6 +1987,7 @@ switch ($Command) {
     'set-value' { Cmd-SetValue }
     'get-property' { Cmd-GetProperty }
     'set-focus' { Cmd-SetFocus }
+    'hover' { Cmd-Hover }
     'wait-for' { Cmd-WaitFor }
     'capture-window' { Cmd-CaptureWindow }
     'point-click' { Cmd-PointClick }

@@ -183,6 +183,17 @@ impl TabView {
                 }
             }
         }));
+        // Tab content lives in nested hosts outside the Visual tree, so it is unmounted (popups
+        // first) when this TabView unmounts — see `TreeHost::unmount_hosted_tree`.
+        let weak: Weak<TabView> = Rc::downgrade(&this);
+        self.add_unmount_hook(Box::new(move || {
+            let this: Option<Rc<TabView>> = weak.upgrade();
+            let Some(this) = this else { return };
+            let hosts: Vec<TreeHost> = this.content_hosts.borrow().clone();
+            for host in hosts {
+                host.unmount_hosted_tree();
+            }
+        }));
         // WinUI3's `TabView` is a tab stop by default — see
         // docs/design/runtime/input_focus_design.md.
         self.set_tab_stop(true);
@@ -394,7 +405,10 @@ impl TabView {
                     self.inner
                         .insert_tab(target_index.min(displayed.len()), &label, closable);
                 if let Some(content) = entry.content.borrow_mut().take() {
-                    content_host.set_tree(content);
+                    content_host.set_hosted_tree(
+                        content,
+                        self.as_ui_element().visual_collection.owner_rc(),
+                    );
                 }
                 let insertion_index = target_index.min(displayed.len());
                 self.content_hosts

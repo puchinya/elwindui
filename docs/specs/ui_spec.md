@@ -263,6 +263,10 @@ pub trait CoordinateHost {
   - プラットフォームの独立ポップアップサーフェス（ウィンドウ/パネル）を利用し、owner Window の境界を越えて表示可能。
   - owner Window より前面かつ `NativeControl` よりも前面の Z-order を維持する（application-global な最前面にはしない）。
   - モニターの有効表示領域（work area）内に収まるよう、右/下の端部では自動的に左/上方向へ反転（flip）配置される。
+  - flip / work area への収め込みは、ポップアップが実際に表示する内容サイズに対して行う。ネイティブ子要素が表示後に初めて自然サイズを報告するバックエンドでは、そのサイズで配置を再計算し、内容を切り詰めない。
+- **Dismiss と置換**:
+  - light-dismiss の popup または context menu の表示中に、主ボタン（左クリック）で外側をクリックした場合は閉じるだけで、そのクリックは下の要素に届かない。
+  - 表示中に二次ボタン（右クリック）で別の場所をクリックした場合は、表示中のものを閉じたうえで、同じクリックでその位置の context request を処理する（その位置にコンテキストメニュー/ popup があれば開く）。もう一度クリックし直す必要はない（Win32・macOS の一般的な挙動）。
 - **Lifecycle & Environment**:
   - `context_popup` の内容は表示要求（open）時点で構築（build）される。owner Component の mount 時点で一度だけ構築されるのではなく、popup が開かれるたびに新たに `ViewFactory::build` が呼ばれる。
   - `ViewFactory` の factory は owner を `Weak` としてのみ捕捉する（strong retain cycle を作らない）。owner が既に解放されている場合、`ViewFactory::build` は `None` を返し、popup は表示されない。
@@ -850,8 +854,14 @@ ON / OFF を切り替えるスイッチコントロール。
 |---|---|---|---|
 | `text` | `String` | OneWay | メニュー表示名 |
 | `icon` | `Option<IconSource>` | OneWay | 任意の backend-neutral メニューアイコン。`MenuBar` submenu と `context_menu` の両方の表示に共通で使われる |
-| `shortcut` | `Option<String>` | OneWay | キーボードショートカット記号（例: `"Cmd+S"`） |
+| `shortcut` | `Option<String>` | OneWay | キーボードショートカット記号（例: `"s"`, `"Cmd+S"`）。文法は下記 |
 | `enabled` | `Option<bool>` | OneWay | 有効状態 |
+
+`shortcut` の文法（大文字小文字を区別しない）:
+
+- 英数字 1 文字（例: `"s"`）: プラットフォームの主修飾キー + その文字（macOS `Cmd+S`、Windows `Ctrl+S`）。
+- `修飾+…+キー`（例: `"Cmd+Shift+S"`）: 修飾は `Cmd`/`Command`/`Ctrl`/`Control`（いずれも主修飾キー）、`Shift`、`Alt`/`Option`。キーは英数字 1 文字。
+- 上記以外は未対応。バックエンドはアクセラレータを登録せず、表示する場合は指定文字列をそのまま表示する。指定と異なるキー組み合わせを表示・登録してはならない。
 
 #### Events
 

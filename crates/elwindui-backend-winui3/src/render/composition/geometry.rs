@@ -16,7 +16,6 @@ use elwindui_core::base::{AffineTransform, Point, Rect};
 use elwindui_core::graphics::{BitmapImage, Brush, ImageData, Stretch, TileMode};
 use windows::Foundation::Rect as WinRect;
 use windows::Foundation::Size as WinSize;
-use windows::Storage::Streams::{DataWriter, IRandomAccessStream, InMemoryRandomAccessStream};
 use windows::UI::Color as WinColor;
 use windows::core::{Interface, Result};
 use windows_numerics::{Matrix3x2, Matrix4x4, Vector2};
@@ -220,23 +219,13 @@ pub(crate) fn raster_scale_matrix(rasterization_scale: f32) -> Matrix3x2 {
     }
 }
 
+/// Decodes any `BitmapImage` representation (encoded, `Rgba8`, or a compatible backend handle)
+/// for drawing-surface replay.
 pub(crate) fn canvas_bitmap(
     creator: &ICanvasResourceCreator,
     image: &BitmapImage,
 ) -> Result<CanvasBitmap> {
-    let ImageData::Encoded { bytes, .. } = image.data() else {
-        return Err(windows::core::Error::new(
-            windows::core::HRESULT(0x80004001_u32 as i32),
-            "CompositionDrawingSurface replay currently requires encoded image data",
-        ));
-    };
-    let stream = InMemoryRandomAccessStream::new()?;
-    let writer = DataWriter::CreateDataWriter(&stream)?;
-    writer.WriteBytes(bytes)?;
-    writer.StoreAsync()?.join()?;
-    let stream: IRandomAccessStream = stream.cast()?;
-    stream.Seek(0)?;
-    CanvasBitmap::LoadAsyncFromStream(creator, &stream)?.join()
+    crate::render::win2d::win2d_bitmap(creator, image)
 }
 
 pub(crate) fn fitted_image_rect(
@@ -304,11 +293,15 @@ pub(crate) fn is_image_node(desired: &DesiredCompositionNode) -> bool {
     image_brush(desired).is_some()
 }
 
+/// `LoadedImageSurface` (the sprite fast path) only decodes encoded bytes, so `Rgba8` and backend
+/// image handles also take the drawing-surface path, as do source rects and tiling.
 pub(crate) fn requires_drawing_surface(desired: &DesiredCompositionNode) -> bool {
     let Some(image) = image_brush(desired) else {
         return false;
     };
-    image.source_rect.is_some() || image.tile_mode != TileMode::None
+    image.source_rect.is_some()
+        || image.tile_mode != TileMode::None
+        || !matches!(image.image.data(), ImageData::Encoded { .. })
 }
 
 pub(crate) fn apply_image_brush(

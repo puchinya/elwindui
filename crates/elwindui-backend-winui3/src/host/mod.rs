@@ -42,6 +42,23 @@ use elwindui_core::ui::{
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+
+/// COM identity of `canvas` (its `IUnknown` pointer). Callers reach the same canvas through
+/// different interface pointers (e.g. an upgraded weak reference), so the raw `Canvas` pointer is
+/// not a stable key.
+fn popup_canvas_key(canvas: &Canvas) -> usize {
+    canvas
+        .cast::<windows::core::IUnknown>()
+        .map(|unknown| unknown.as_raw() as usize)
+        .unwrap_or(0)
+}
+
+thread_local! {
+    /// Popup content canvases (by COM identity) and their popup's XAML-root offset — see
+    /// `TreeHost::popup_offset`.
+    static POPUP_CANVAS_OFFSETS: RefCell<HashMap<usize, (f32, f32)>> =
+        RefCell::new(HashMap::new());
+}
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
@@ -1099,27 +1116,9 @@ impl TreeHost {
                     Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
                 > = active_for_key.upgrade();
                 if let (Some(tree), Some(kb), Some(active)) = (tree_ref, kb_ref, active_ref) {
-                    let screen_anchor = if let Some(focused) = kb.as_ref().focus.focused() {
-                        let offset = focused
-                            .arranged_offset()
-                            .unwrap_or(Point { x: 0.0, y: 0.0 });
-                        let w = focused.arranged_width().unwrap_or(0.0);
-                        let h = focused.arranged_height().unwrap_or(0.0);
-                        Self::canvas_to_screen_point(&canvas_for_context_key, offset).map(
-                            |screen_pt| {
-                                elwindui_core::ui::popup::PopupAnchor::Rect(
-                                    elwindui_core::base::Rect {
-                                        x: screen_pt.x,
-                                        y: screen_pt.y,
-                                        width: w,
-                                        height: h,
-                                    },
-                                )
-                            },
-                        )
-                    } else {
-                        None
-                    };
+                    let screen_anchor = kb.as_ref().focus.focused().and_then(|focused| {
+                        Self::focused_screen_anchor(&canvas_for_context_key, &focused)
+                    });
                     if let Some(screen_anchor) = screen_anchor {
                         let request =
                             elwindui_core::ui::ContextRequest::keyboard(Some(screen_anchor));
@@ -1129,6 +1128,12 @@ impl TreeHost {
                             &canvas_for_context_key,
                             &active,
                             &request,
+                            Self::context_redispatcher(
+                                tree_for_key.clone(),
+                                keyboard_for_key.clone(),
+                                canvas_for_context_key.clone(),
+                                active_for_key.clone(),
+                            ),
                         );
                     }
                 }
@@ -1528,6 +1533,12 @@ impl TreeHost {
                                     &canvas_for_context,
                                     &active,
                                     &request,
+                                    Self::context_redispatcher(
+                                        tree_for_context.clone(),
+                                        keyboard_for_context.clone(),
+                                        canvas_for_context.clone(),
+                                        active_for_context.clone(),
+                                    ),
                                 ) {
                                     let _ = args.SetHandled(true);
                                 }
@@ -1558,41 +1569,18 @@ impl TreeHost {
                     let is_pointer = args
                         .TryGetPosition(&canvas_for_ctx, &mut pt)
                         .unwrap_or(false);
+                    // A pointer-originated request is dispatched by the `RightTapped` handler
+                    // above; WinUI raises both events for one secondary click, and dispatching
+                    // here too opened the context popup twice (build, replace, rebuild).
                     let request = if is_pointer {
-                        let local_pt = elwindui_core::base::Point { x: pt.X, y: pt.Y };
-                        TreeHost::canvas_to_screen_point(&canvas_for_ctx, local_pt).map(
-                            |screen_pt| {
-                                elwindui_core::ui::ContextRequest::pointer(local_pt, screen_pt)
-                            },
-                        )
+                        None
                     } else {
                         let keyboard: Option<Rc<KeyboardDispatcher>> = keyboard_for_ctx.upgrade();
-                        let screen_anchor = if let Some(keyboard) = keyboard {
-                            if let Some(focused) = keyboard.as_ref().focus.focused() {
-                                let offset = focused
-                                    .arranged_offset()
-                                    .unwrap_or(Point { x: 0.0, y: 0.0 });
-                                let w = focused.arranged_width().unwrap_or(0.0);
-                                let h = focused.arranged_height().unwrap_or(0.0);
-                                TreeHost::canvas_to_screen_point(&canvas_for_ctx, offset).map(
-                                    |screen_pt| {
-                                        elwindui_core::ui::popup::PopupAnchor::Rect(
-                                            elwindui_core::base::Rect {
-                                                x: screen_pt.x,
-                                                y: screen_pt.y,
-                                                width: w,
-                                                height: h,
-                                            },
-                                        )
-                                    },
-                                )
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                        screen_anchor
+                        keyboard
+                            .and_then(|keyboard| keyboard.as_ref().focus.focused())
+                            .and_then(|focused| {
+                                TreeHost::focused_screen_anchor(&canvas_for_ctx, &focused)
+                            })
                             .map(|anchor| elwindui_core::ui::ContextRequest::keyboard(Some(anchor)))
                     };
                     if let Some(request) = request {
@@ -1617,6 +1605,12 @@ impl TreeHost {
                                     &canvas_for_ctx,
                                     &active,
                                     &request,
+                                    Self::context_redispatcher(
+                                        tree_for_ctx.clone(),
+                                        keyboard_for_ctx.clone(),
+                                        canvas_for_ctx.clone(),
+                                        active_for_ctx.clone(),
+                                    ),
                                 ) {
                                     let _ = args.SetHandled(true);
                                 }
@@ -2112,6 +2106,33 @@ impl TreeHost {
         close_active_popup_slot(&self.active_popup);
     }
 
+    /// Attaches `content` as the tree of a nested host owned by a native control (a `TabView` tab
+    /// or `ScrollView` content), linking `content`'s logical parent to that control. The nested
+    /// host's root has no Visual parent, so without the link `effective_environment()` stopped at
+    /// the nested root and resolved a fresh root Environment instead of the control's ancestors.
+    pub(crate) fn set_hosted_tree(
+        &self,
+        content: Rc<dyn elwindui_core::ui::UIElementExt>,
+        owner: Option<Rc<dyn elwindui_core::ui::UIElementExt>>,
+    ) {
+        if let Some(owner) = owner {
+            *content.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&owner));
+        }
+        self.set_tree(content);
+    }
+
+    /// Unmounts a nested host's tree when the native control owning it unmounts. `unmount_subtree`
+    /// only follows Visual children, which never include a nested host's tree, so the owning
+    /// control calls this from its own unmount. The host's active popup closes first, so a popup
+    /// opened from this content unmounts before the content (its owner) does.
+    pub(crate) fn unmount_hosted_tree(&self) {
+        self.close_active_popup();
+        let tree = self.tree.borrow().clone();
+        if let Some(tree) = tree {
+            elwindui_core::ui::unmount_subtree(&tree);
+        }
+    }
+
     /// Focuses the specified element within this host's focus tracker.
     pub(crate) fn focus_element(&self, element: &Rc<dyn elwindui_core::ui::UIElementExt>) {
         self.keyboard
@@ -2213,13 +2234,22 @@ impl TreeHost {
         // be read back as this host's own layout input (that self-observation is exactly the
         // same-host feedback loop `set_viewport`'s own doc comment describes) — this host has no
         // `canvas.SizeChanged` listener, so it structurally cannot be.
+        // The natural size is the root's measured (desired) size, which includes its margin;
+        // the arranged size excludes it, so using it clipped the root's right/bottom margin.
+        let natural = tree.measured_size();
         let final_width = if unconstrained_width {
-            tree.arranged_width().unwrap_or(0.0) as f64
+            natural
+                .map(|size| size.width)
+                .or_else(|| tree.arranged_width())
+                .unwrap_or(0.0) as f64
         } else {
             available.width as f64
         };
         let final_height = if unconstrained_height {
-            tree.arranged_height().unwrap_or(0.0) as f64
+            natural
+                .map(|size| size.height)
+                .or_else(|| tree.arranged_height())
+                .unwrap_or(0.0) as f64
         } else {
             available.height as f64
         };
@@ -2770,6 +2800,49 @@ impl TreeHost {
         }
     }
 
+    /// Records (or with `None`, forgets) the XAML-root offset of the windowed `Popup` hosting
+    /// `canvas` — see [`Self::popup_offset`]. Called by the popup surface whenever it positions
+    /// the popup and when it closes.
+    pub(crate) fn set_popup_canvas_offset(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        offset: Option<(f32, f32)>,
+    ) {
+        let key = popup_canvas_key(canvas);
+        POPUP_CANVAS_OFFSETS.with(|offsets| match offset {
+            Some(offset) => {
+                offsets.borrow_mut().insert(key, offset);
+            }
+            None => {
+                offsets.borrow_mut().remove(&key);
+            }
+        });
+    }
+
+    /// XAML-root offset of the windowed `Popup` hosting `canvas` (a popup content host), or zero.
+    /// For a windowed popup's child, `TransformToVisual` yields popup-local coordinates without the
+    /// popup's own offset, and the child's `Parent` does not lead back to the `Popup`, so the
+    /// popup surface registers its offset here and the canvas/screen conversions add it back
+    /// (UIA bounds and anchors inside popups).
+    fn popup_offset(canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas) -> (f32, f32) {
+        let key = popup_canvas_key(canvas);
+        POPUP_CANVAS_OFFSETS
+            .with(|offsets| offsets.borrow().get(&key).copied())
+            .unwrap_or((0.0, 0.0))
+    }
+
+    /// [`Self::popup_offset`] in physical pixels.
+    pub(crate) fn popup_offset_physical(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+    ) -> (f32, f32) {
+        let (x, y) = Self::popup_offset(canvas);
+        let scale = canvas
+            .XamlRoot()
+            .and_then(|root| root.RasterizationScale())
+            .unwrap_or(1.0);
+        let scale = if scale <= 0.0 { 1.0 } else { scale as f32 };
+        (x * scale, y * scale)
+    }
+
     /// Converts canvas-local logical DIPs to desktop screen physical coordinates.
     ///
     /// The XAML root/content transform and ContentCoordinateConverter are the only source of
@@ -2787,7 +2860,10 @@ impl TreeHost {
             X: canvas_point.x,
             Y: canvas_point.y,
         };
-        let local_dip = transform.TransformPoint(pt).ok()?;
+        let mut local_dip = transform.TransformPoint(pt).ok()?;
+        let (offset_x, offset_y) = Self::popup_offset(canvas);
+        local_dip.X += offset_x;
+        local_dip.Y += offset_y;
 
         let island = xaml_root.ContentIslandEnvironment().ok()?;
         let app_window_id = island.AppWindowId().ok()?;
@@ -2827,10 +2903,11 @@ impl TreeHost {
         let xaml_local = Self::screen_logical_to_xaml_local(canvas, screen_point)?;
         let canvas_element: crate::bindings::Microsoft::UI::Xaml::UIElement = canvas.cast().ok()?;
         let transform = content.TransformToVisual(&canvas_element).ok()?;
+        let (offset_x, offset_y) = Self::popup_offset(canvas);
         let canvas_local = transform
             .TransformPoint(windows::Foundation::Point {
-                X: xaml_local.x,
-                Y: xaml_local.y,
+                X: xaml_local.x - offset_x,
+                Y: xaml_local.y - offset_y,
             })
             .ok()?;
         Some(Point {
@@ -2964,13 +3041,122 @@ impl TreeHost {
         None
     }
 
+    /// Screen-logical anchor rectangle of the keyboard-focused element for a keyboard context
+    /// request. `arranged_offset()` is relative to the visual parent, so the offsets are summed up
+    /// the visual-parent chain to get the element's position in this host's root Canvas.
+    fn focused_screen_anchor(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        focused: &Rc<dyn UIElementExt>,
+    ) -> Option<elwindui_core::ui::popup::PopupAnchor> {
+        let mut origin = Point { x: 0.0, y: 0.0 };
+        let mut current = Some(Rc::clone(focused));
+        while let Some(element) = current {
+            let offset = element
+                .arranged_offset()
+                .unwrap_or(Point { x: 0.0, y: 0.0 });
+            origin.x += offset.x;
+            origin.y += offset.y;
+            current = element.visual_parent();
+        }
+        let screen_pt = Self::canvas_to_screen_point(canvas, origin)?;
+        Some(elwindui_core::ui::popup::PopupAnchor::Rect(
+            elwindui_core::base::Rect {
+                x: screen_pt.x,
+                y: screen_pt.y,
+                width: focused.arranged_width().unwrap_or(0.0),
+                height: focused.arranged_height().unwrap_or(0.0),
+            },
+        ))
+    }
+
+    /// Dispatches a pointer context request at a screen-logical point into this host's tree.
+    /// Built per request and handed to the popup/flyout it opens, so that a secondary click which
+    /// light-dismisses that popup can still open the context menu under the pointer (#303).
+    fn context_redispatcher(
+        tree: Weak<RefCell<Option<Rc<dyn UIElementExt>>>>,
+        keyboard: Weak<KeyboardDispatcher>,
+        canvas: crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        active: Weak<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
+    ) -> Rc<dyn Fn(Point)> {
+        Rc::new(move |screen_pt: Point| {
+            let tree_storage: Option<Rc<RefCell<Option<Rc<dyn UIElementExt>>>>> = tree.upgrade();
+            let keyboard: Option<Rc<KeyboardDispatcher>> = keyboard.upgrade();
+            let active_slot: Option<
+                Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
+            > = active.upgrade();
+            let (Some(tree_storage), Some(keyboard), Some(active_slot)) =
+                (tree_storage, keyboard, active_slot)
+            else {
+                return;
+            };
+            let root: Option<Rc<dyn UIElementExt>> = tree_storage.borrow().clone();
+            let Some(root) = root else { return };
+            let Some(local_pt) = Self::screen_to_canvas_point(&canvas, screen_pt) else {
+                return;
+            };
+            let request = elwindui_core::ui::ContextRequest::pointer(local_pt, screen_pt);
+            Self::dispatch_context_request(
+                &Some(root),
+                &keyboard,
+                &canvas,
+                &active_slot,
+                &request,
+                Self::context_redispatcher(
+                    tree.clone(),
+                    Rc::downgrade(&keyboard),
+                    canvas.clone(),
+                    active.clone(),
+                ),
+            );
+        })
+    }
+
+    /// Hook run after a context popup or flyout this host opened was dismissed by WinUI. Native
+    /// light dismiss consumes the pointer press that dismissed it, so when that press was a
+    /// secondary click the context request the user made never reaches the element under the
+    /// pointer. Like a Win32 context menu re-posting `WM_CONTEXTMENU`, re-dispatch it at the cursor
+    /// on the next dispatcher turn (`docs/specs/ui_spec.md`, popup replacement by secondary click).
+    fn secondary_dismiss_hook(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        redispatch: Rc<dyn Fn(Point)>,
+    ) -> Rc<dyn Fn()> {
+        let canvas = canvas.clone();
+        Rc::new(move || {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_RBUTTON};
+            // High bit set: the secondary button is down right now, i.e. the dismissal came
+            // from a secondary-button press rather than a primary click, Escape or focus loss.
+            if unsafe { GetAsyncKeyState(VK_RBUTTON.0 as i32) } >= 0 {
+                return;
+            }
+            let mut cursor = windows::Win32::Foundation::POINT::default();
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut cursor) }
+                .is_err()
+            {
+                return;
+            }
+            let scale = canvas
+                .XamlRoot()
+                .and_then(|root| root.RasterizationScale())
+                .unwrap_or(1.0);
+            let scale = if scale <= 0.0 { 1.0 } else { scale };
+            let screen_pt = Point {
+                x: (cursor.x as f64 / scale) as f32,
+                y: (cursor.y as f64 / scale) as f32,
+            };
+            let redispatch = Rc::clone(&redispatch);
+            elwindui_core::task::spawn_local(async move { redispatch(screen_pt) });
+        })
+    }
+
     pub(crate) fn dispatch_context_request(
         tree: &Option<Rc<dyn UIElementExt>>,
-        keyboard: &crate::host::KeyboardDispatcher,
+        keyboard: &Rc<crate::host::KeyboardDispatcher>,
         canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
         active_popup: &RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>,
         request: &elwindui_core::ui::ContextRequest,
+        redispatch: Rc<dyn Fn(Point)>,
     ) -> bool {
+        let on_dismissed = Self::secondary_dismiss_hook(canvas, redispatch);
         let Some(tree) = tree.as_ref() else {
             return false;
         };
@@ -2989,7 +3175,19 @@ impl TreeHost {
                             if let Ok(flyout) = winui_menu.create_flyout() {
                                 let fe: FrameworkElement =
                                     canvas.cast().expect("Canvas as FrameworkElement");
-                                if flyout.show_at(&fe).is_ok() {
+                                // A pointer request opens at the pointer; a keyboard request
+                                // (anchor = target bounds) opens at the target's bottom-left.
+                                let anchor_screen = match &anchor {
+                                    elwindui_core::ui::popup::PopupAnchor::Point(pt) => *pt,
+                                    elwindui_core::ui::popup::PopupAnchor::Rect(r) => {
+                                        elwindui_core::base::Point {
+                                            x: r.x,
+                                            y: r.y + r.height,
+                                        }
+                                    }
+                                };
+                                let local = Self::screen_to_canvas_point(canvas, anchor_screen);
+                                if flyout.show_at(&fe, local, Some(on_dismissed)).is_ok() {
                                     return true;
                                 }
                             }
@@ -3009,7 +3207,8 @@ impl TreeHost {
                         if let Some(old) = active_popup.borrow_mut().take() {
                             old.close();
                         }
-                        let host = crate::inner::WinUI3PopupHost::new(canvas.clone());
+                        let host = crate::inner::WinUI3PopupHost::new(canvas.clone())
+                            .with_on_native_dismiss(on_dismissed);
                         let handle = elwindui_core::ui::ContextMenuService::open_custom_menu(
                             &host, &*menu, &anchor, work_area,
                         );
@@ -3032,7 +3231,8 @@ impl TreeHost {
                 if let Some(old) = active_popup.borrow_mut().take() {
                     old.close();
                 }
-                let host = crate::inner::WinUI3PopupHost::new(canvas.clone());
+                let host = crate::inner::WinUI3PopupHost::new(canvas.clone())
+                    .with_on_native_dismiss(on_dismissed);
                 let handle = elwindui_core::ui::ContextMenuService::open_custom_popup(
                     &host,
                     &resolved.owner,

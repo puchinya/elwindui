@@ -530,7 +530,15 @@ fn physical_canvas_bounds(state: &WinUI3AccessibilityState) -> Option<Rect> {
             y: height,
         },
     )?;
-    Some(physical_bounds_from_points(top_left, bottom_right))
+    let mut bounds = physical_bounds_from_points(top_left, bottom_right);
+    // Virtual child peers return `record - parent bounds`, and WinUI adds back the origin it
+    // measures for the semantic root element. For a canvas inside a windowed `Popup` that
+    // measured origin omits the popup offset, so the root reports the same origin (without the
+    // offset) and the children's absolute records then compose to their true screen position.
+    let (offset_x, offset_y) = super::TreeHost::popup_offset_physical(&canvas);
+    bounds.x -= offset_x;
+    bounds.y -= offset_y;
+    Some(bounds)
 }
 
 #[cfg(windows)]

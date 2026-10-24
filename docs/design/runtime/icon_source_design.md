@@ -96,7 +96,7 @@ Custom presentation は backend-neutral な `UIElement` ツリーのままであ
 
 ## 5. User-defined icon conversion
 
-`IconSource::Image(ImageSource)` は既存の raster/vector decode・rasterize pipeline をそのまま再利用する。`ImageSource::Raster`/`Vector` のいずれも、AppKit・WinUI 3 両 backend に実装パスを持つ(PR #171 review remediation で追加)。AppKit は実機で検証済み。WinUI 3 は実装・テストコードとも追加済みだが、Windows ビルド環境が無いためビルド・テスト実行・実機検証はすべて未実施であり、Issue #157 に委譲する。
+`IconSource::Image(ImageSource)` は既存の raster/vector decode・rasterize pipeline をそのまま再利用する。`ImageSource::Raster`/`Vector` のいずれも、AppKit・WinUI 3 両 backend に実装パスを持つ(PR #171 review remediation で追加)。AppKit は実機で検証済み。WinUI 3 は Issue #157 でビルド・テスト実行・実機検証を行い、native MenuBar / Context Menu での表示を確認した(custom-rendered menu の raster icon は #302)。
 
 ### AppKit
 
@@ -112,7 +112,7 @@ Custom presentation は backend-neutral な `UIElement` ツリーのままであ
 
 いずれの経路で得た `CanvasBitmap`/`CanvasRenderTarget` も、`canvas_bitmap_to_xaml_image_source`(`CanvasBitmap.SaveToStreamAsync` で in-memory PNG stream にエンコードし、`XamlBitmapImage.SetSource` に渡す——同じ `InMemoryRandomAccessStream` ブリッジ規約)経由で XAML image source に変換し、`xaml_image_source_to_icon_element` で `ImageIcon`/`IconElement` にラップする。encoded fast path も含め、全経路がこの同じ終端ロジックを共有する。`SaveToStreamAsync` は Win2D ABI が stream+format オーバーロードに付ける正式名であり(`SaveToFileAsync`/`SaveToFileWithBitmapFileFormatAsync`/`SaveToStreamWithQualityAsync` とは別名)、この crate 既存の `CanvasBitmap::LoadAsyncFromStream` と同じ命名規則(ABI 固有のオーバーロード名をそのまま projection する)に基づく(PR #171 第二次 review remediation §A1)。
 
-**実装状況の注記**: `CanvasRenderTarget` のコンストラクタ(`CreateWithWidthAndHeightAndDpi`)の正確な windows_bindgen 生成名は、このセッションに Windows ビルド環境が無いため未確認である。実装コードとテストコードは追加済みだが、WinUI 3 の実際のビルド・テスト実行・実機検証は Issue #157 に委譲する(owner 承認済みの検証スコープ決定、PR #171 第二次 review remediation §4)。生成バインディングの正確なスペルが異なると判明した場合も、#157 側での機械的な修正に留め、アーキテクチャは変更しない。
+**実装状況の注記**: `CanvasRenderTarget::CreateWithWidthAndHeightAndDpi` / `CanvasBitmap::SaveToStreamAsync` の生成バインディング名は Issue #157 の Windows ビルドで確認済みで、修正は不要だった。
 
 ### `ImageData::Backend` の扱い(PR #171 review remediation の決定)
 
@@ -128,7 +128,7 @@ Custom presentation は backend-neutral な `UIElement` ツリーのままであ
 
 - ユーザー定義アイコンの decode/rasterize 失敗: icon を表示しない。`text`/`enabled`/`shortcut`/`on_select` は維持する。panic しない。`MenuItem` を削除しない。
 - ネイティブ `SystemIcon` lookup 失敗(例: AppKit の SF Symbol が実行環境に存在しない): icon を省略し、`MenuItem` は正常に残る。
-- ただし、既知の `SystemIcon` variant に対して backend 側の mapping 自体が存在しない状態(§2 の表を網羅していない)は、実行時 fallback で隠してはならず、compile-time/design defect として扱う——mapping completeness はテストで保証する設計である(`crates/elwindui-backend-appkit`/`crates/elwindui-backend-winui3` の pure mapping テスト)。AppKit 側は実行・PASS 済み。WinUI3 側はテストコード追加済みだが Windows 環境が無く未実行(Issue #157)。
+- ただし、既知の `SystemIcon` variant に対して backend 側の mapping 自体が存在しない状態(§2 の表を網羅していない)は、実行時 fallback で隠してはならず、compile-time/design defect として扱う——mapping completeness はテストで保証する設計である(`crates/elwindui-backend-appkit`/`crates/elwindui-backend-winui3` の pure mapping テスト)。AppKit 側・WinUI3 側とも実行・PASS 済み(WinUI3 は Issue #157)。
 
 ## 7. Backend state ownership
 

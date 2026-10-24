@@ -3037,13 +3037,18 @@ impl TreeHost {
         canvas: crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
         active: Weak<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
     ) -> Rc<dyn Fn(Point)> {
-        Rc::new(move |screen_pt| {
+        Rc::new(move |screen_pt: Point| {
+            let tree_storage: Option<Rc<RefCell<Option<Rc<dyn UIElementExt>>>>> = tree.upgrade();
+            let keyboard: Option<Rc<KeyboardDispatcher>> = keyboard.upgrade();
+            let active_slot: Option<
+                Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
+            > = active.upgrade();
             let (Some(tree_storage), Some(keyboard), Some(active_slot)) =
-                (tree.upgrade(), keyboard.upgrade(), active.upgrade())
+                (tree_storage, keyboard, active_slot)
             else {
                 return;
             };
-            let root = tree_storage.borrow().clone();
+            let root: Option<Rc<dyn UIElementExt>> = tree_storage.borrow().clone();
             let Some(root) = root else { return };
             let Some(local_pt) = Self::screen_to_canvas_point(&canvas, screen_pt) else {
                 return;

@@ -267,6 +267,8 @@ pub trait CoordinateHost {
 - **Dismiss と置換**:
   - light-dismiss の popup または context menu の表示中に、主ボタン（左クリック）で外側をクリックした場合は閉じるだけで、そのクリックは下の要素に届かない。
   - 表示中に二次ボタン（右クリック）で別の場所をクリックした場合は、表示中のものを閉じたうえで、同じクリックでその位置の context request を処理する（その位置にコンテキストメニュー/ popup があれば開く）。もう一度クリックし直す必要はない（Win32・macOS の一般的な挙動）。
+  - その context request の対象は、クリック位置で実際に入力を受ける要素で決まる。開いていた popup のホストと同じである必要はなく、同じ Window 内で同時に表示されている別のコンテンツホスト（例: 隣の `ScrollView` の内容、`TabView` のタブ内容）上でも同じ 1 回のクリックで置換される。非表示（選択されていないタブ等）・削除済み・破棄済みのホスト、Window の外、主ボタン・Escape・フォーカス喪失による dismiss では新しいメニューを開かない。
+- **入れ子コンテンツの破棄**: ネイティブコントロールが保持する入れ子コンテンツ（`TabView` の各タブの内容、`ScrollView` の `content`）を、コントロール自体は残したまま個別に削除・差し替えた場合（タブの削除・`clear`、`content` の再設定）、そのコンテンツから開いた popup を先に閉じ、次にコンテンツを一度だけ unmount し、論理親との関係を解除してから新しいコンテンツを取り付ける。コントロールや Window 全体の破棄時に、既に破棄したコンテンツを再度 unmount してはならない。
 - **Lifecycle & Environment**:
   - `context_popup` の内容は表示要求（open）時点で構築（build）される。owner Component の mount 時点で一度だけ構築されるのではなく、popup が開かれるたびに新たに `ViewFactory::build` が呼ばれる。
   - `ViewFactory` の factory は owner を `Weak` としてのみ捕捉する（strong retain cycle を作らない）。owner が既に解放されている場合、`ViewFactory::build` は `None` を返し、popup は表示されない。

@@ -49,3 +49,62 @@ impl ScrollView {
         }
     }
 }
+
+/// Live XAML assertion helpers (Issue #157): replacing ScrollView content retires the previous
+/// content (popup first, unmounted exactly once, logical parent released) before the new content
+/// is attached. Run by `inner::button::hosted_xaml_regression_tests`.
+#[cfg(test)]
+pub(crate) mod hosted_lifecycle_tests {
+    use super::*;
+    use crate::host::hosted_context_lifecycle_tests::{
+        Log, count, open_recording_popup, probe_content,
+    };
+    use elwindui_core::ui::ScrollViewExt;
+    use std::cell::RefCell;
+
+    pub(crate) fn content_replacement_retires_previous_content() {
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let scroll_view = ScrollView::new();
+        let host = scroll_view.inner.content_host();
+        let a = probe_content(&log, "A");
+        let b = probe_content(&log, "B");
+        let c = probe_content(&log, "C");
+
+        scroll_view.set_content(Rc::clone(&a));
+        assert!(a.parent().is_some());
+        open_recording_popup(&host, &log, "A");
+        scroll_view.set_content(Rc::clone(&b));
+        assert_eq!(*log.borrow(), ["A popup close", "A unmount"]);
+        assert!(
+            a.parent().is_none(),
+            "replaced content keeps no logical parent"
+        );
+        assert!(b.parent().is_some());
+
+        open_recording_popup(&host, &log, "B");
+        scroll_view.set_content(Rc::clone(&c));
+        assert_eq!(log.borrow()[2..], ["B popup close", "B unmount"]);
+        assert!(
+            host.hosted_tree_for_test()
+                .is_some_and(|tree| Rc::ptr_eq(&tree, &c))
+        );
+
+        // Setting the same content again is not a replacement.
+        scroll_view.set_content(Rc::clone(&c));
+        assert_eq!(log.borrow().len(), 4);
+
+        // (e) closing after replacements unmounts only the current content, once.
+        open_recording_popup(&host, &log, "C");
+        let as_element: Rc<dyn UIElementExt> = scroll_view.clone();
+        elwindui_core::ui::unmount_subtree(&as_element);
+        elwindui_core::ui::unmount_subtree(&as_element);
+        assert_eq!(log.borrow()[4..], ["C popup close", "C unmount"]);
+        for name in ["A", "B", "C"] {
+            assert_eq!(
+                count(&log, &format!("{name} unmount")),
+                1,
+                "{name} exactly once"
+            );
+        }
+    }
+}

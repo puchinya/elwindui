@@ -19,6 +19,7 @@
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
 mod menu_fixture;
+mod popup_hosts;
 mod rich_popup;
 
 use elwindui::core::input::Key;
@@ -330,6 +331,21 @@ mod controls_demo_view_model {
         }
     }
 }
+
+/// Cross-host / nested-content lifecycle fixtures, built imperatively in `popup_hosts.rs` because
+/// they need native TabView / ScrollView handles at runtime (removing tabs, replacing content).
+#[elwindui::component(inherits VerticalLayout)]
+struct PopupHostsPanel {
+    body: view! {
+        on_mount {
+            crate::popup_hosts::populate(this.as_ref());
+        }
+        TextBlock { text: "Popup Hosts fixtures (Issue #157)" }
+    },
+}
+
+#[elwindui::component]
+impl PopupHostsPanel {}
 
 #[elwindui::component(inherits Window)]
 struct ControlsDemoWindow {
@@ -875,6 +891,14 @@ struct ControlsDemoWindow {
                         margin: 12.0
                         content: TextBlock { text: vm.context_menu_log }
                     }
+                }
+            }
+            TabViewItem {
+                header: "Popup Hosts"
+                closable: false
+                on_close: || {}
+                content: PopupHostsPanel {
+                    margin: 12.0
                 }
             }
             TabViewItem {

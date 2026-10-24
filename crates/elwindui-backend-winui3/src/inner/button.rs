@@ -848,6 +848,12 @@ mod hosted_xaml_regression_tests {
                     create_flyout_snapshots_icon_onto_a_distinct_realization();
                 crate::inner::menu::live_menu_item_icon_tests::
                     failed_icon_conversion_does_not_remove_the_action();
+                crate::host::hosted_context_lifecycle_tests::
+                    context_host_resolution_follows_nearest_active_host();
+                crate::native_ui::tab_view::hosted_lifecycle_tests::
+                    tab_removal_retires_content_popup_first_exactly_once();
+                crate::native_ui::scroll_view::hosted_lifecycle_tests::
+                    content_replacement_retires_previous_content();
                 crate::app::reset_window_lifecycle_test_state();
                 // Issue #254: `InnerWindow` stores only the final owner's `Weak<dyn WindowExt>`;
                 // the application registry becomes the strong lifetime authority after show().

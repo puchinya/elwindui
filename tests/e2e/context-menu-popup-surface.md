@@ -162,6 +162,40 @@ lines to stderr (launch with stderr redirected) — record them as supporting ev
   [`self-drawn-pointer-input.md`](self-drawn-pointer-input.md) SDP-01 (CustomTabView real-pointer
   selection).
 
+### Popup Hosts tab — cross-host replacement and nested content (review of PR #305)
+
+The **Popup Hosts** tab (`popup_hosts.rs`) has two side-by-side ScrollViews (`Host A`, `Host B`,
+each content its own nested host), a `Root target (tab host)`, a TabView with closable tabs
+`Tab L1..L3`, and a ScrollView whose content `Replace ScrollView content` cycles `SA -> SB -> SC`.
+Popups trace `host_popup_build` / `host_popup_unmount` with detail `<name>#<n>`; contents trace
+`content_unmount <id>`; the content button traces `content_click <id>`.
+
+- **CMP-29 A -> B and B -> A.** Right-click `Host A target` (popup A#n opens at the pointer). Then
+  right-click `Host B target` once. PASS: exactly one `host_popup_unmount A#n`, exactly one new
+  `host_popup_build B#m`, popup B visible at the second pointer position, no other popup. Repeat
+  from B to A with the same expectations.
+- **CMP-30 nested host <-> tab host.** Popup A open, right-click `Root target` once: A unmounts
+  once, popup R opens at the pointer. Popup R open, right-click `Host B target` once: R unmounts
+  once, popup B opens.
+- **CMP-31 no menu / not a replacement.** Popup A open, right-click `[Host B - no menu here]` once:
+  A unmounts once and no popup is built. Popup A open, left-click `Host B target`: A unmounts once
+  and no popup is built. Popup A open, `esc`: A unmounts once, no popup built. Popup A open,
+  right-click outside the window (e.g. on the desktop next to it): A unmounts once (or stays, as
+  WinUI decides) and no popup is built in the app.
+- **CMP-32 tab removal.** Select `Tab L2`, open its popup (`L2#n`), then close `Tab L2` with its
+  close button (or select L1 and press `Remove first tab` for the L1 variant). PASS: the trace
+  shows `host_popup_unmount L2#n` before `content_unmount L2`, each exactly once, and the remaining
+  tabs still open their popups. Also remove a non-selected tab (inactive) and confirm its
+  `content_unmount` appears exactly once.
+- **CMP-33 content replacement.** Open the `Content SA target` popup, press `Replace ScrollView
+  content`: `host_popup_unmount SA#n` then `content_unmount SA#k` (each once), then content SB is
+  shown; click `Content SB#.. button` (trace `content_click`) to show the new content takes input.
+  Press replace twice more (SC, then SA again); each step unmounts only the previous content once.
+- **CMP-34 close after removal / replacement.** After CMP-32/33, open a popup in the remaining
+  content and close the Window (`alt+f4`). PASS: that popup unmounts before its content, every
+  remaining content unmounts exactly once, previously removed/replaced contents never appear
+  again, and the process exits without force.
+
 ## Cleanup
 
 `terminate --pid <pid> --timeout 5` after the last row (CMP-24 ends the process itself; record

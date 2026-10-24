@@ -386,6 +386,9 @@ impl TabView {
         let children = self.children.borrow();
         let new_keys: Vec<usize> = children.iter().map(tab_view_item_key).collect();
         let mut displayed = self.displayed.borrow_mut();
+        // Hosts of removed tabs; their content is retired after every borrow below is released,
+        // because unmounting runs user `on_unmount` code that may re-enter this TabView.
+        let mut removed_hosts: Vec<TreeHost> = Vec::new();
 
         for i in (0..displayed.len()).rev() {
             if !new_keys.contains(&displayed[i]) {
@@ -393,6 +396,7 @@ impl TabView {
                 host.set_active(false);
                 self.inner.remove_tab_at(i);
                 displayed.remove(i);
+                removed_hosts.push(host);
             }
         }
 
@@ -425,6 +429,12 @@ impl TabView {
         }
         drop(children);
         self.rebuilding.set(false);
+        // A removed tab's content is unmounted now, while this TabView (its owner) is alive: its
+        // popup closes first, then the content unmounts exactly once. The TabView's own unmount
+        // hook only walks the tabs still present, so these are never unmounted twice.
+        for host in removed_hosts {
+            host.unmount_hosted_tree();
+        }
         self.sync_active_content_host();
     }
 }
@@ -485,5 +495,71 @@ impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::TabViewItemExt> for TabVi
     }
     fn to_vec(&self) -> Vec<Rc<dyn elwindui_core::ui::TabViewItemExt>> {
         self.children.borrow().clone()
+    }
+}
+
+/// Live XAML assertion helpers (Issue #157): removing a tab retires exactly that tab's content —
+/// popup first, content unmounted exactly once, logical parent released — and the TabView's own
+/// unmount never touches it again. Run by `inner::button::hosted_xaml_regression_tests`.
+#[cfg(test)]
+pub(crate) mod hosted_lifecycle_tests {
+    use super::*;
+    use crate::host::hosted_context_lifecycle_tests::{
+        Log, count, open_recording_popup, probe_content,
+    };
+    use elwindui_core::ui::{ListExt, TabViewItemExt};
+
+    pub(crate) fn tab_removal_retires_content_popup_first_exactly_once() {
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let tab_view = TabView::new();
+        let contents: Vec<Rc<dyn UIElementExt>> = (0..4)
+            .map(|i| probe_content(&log, &format!("c{i}")))
+            .collect();
+        for (i, content) in contents.iter().enumerate() {
+            let item = TabViewItem::new();
+            item.set_header(&format!("T{i}"));
+            item.set_content(Rc::clone(content));
+            tab_view.add(item as Rc<dyn TabViewItemExt>);
+        }
+        let hosts: Vec<TreeHost> = tab_view.content_hosts.borrow().clone();
+        assert_eq!(hosts.len(), 4);
+        assert!(contents.iter().all(|content| content.parent().is_some()));
+
+        // (a)/(c) inactive tab with an open popup.
+        open_recording_popup(&hosts[1], &log, "c1");
+        tab_view.remove_at(1);
+        assert_eq!(*log.borrow(), ["c1 popup close", "c1 unmount"]);
+        assert!(hosts[1].hosted_tree_for_test().is_none());
+        assert!(
+            contents[1].parent().is_none(),
+            "removed content keeps no logical parent"
+        );
+
+        // (a)/(c) the selected tab with an open popup.
+        open_recording_popup(&hosts[0], &log, "c0");
+        tab_view.remove_at(0);
+        assert_eq!(log.borrow()[2..], ["c0 popup close", "c0 unmount"]);
+
+        // (b) clear removes several tabs; each content unmounts exactly once.
+        tab_view.clear();
+        for name in ["c2", "c3"] {
+            assert_eq!(count(&log, &format!("{name} unmount")), 1, "{name}");
+        }
+
+        // A tab added afterwards is unmounted with the TabView; earlier ones never again.
+        let late = probe_content(&log, "c4");
+        let item = TabViewItem::new();
+        item.set_content(Rc::clone(&late));
+        tab_view.add(item as Rc<dyn TabViewItemExt>);
+        let as_element: Rc<dyn UIElementExt> = tab_view.clone();
+        elwindui_core::ui::unmount_subtree(&as_element);
+        elwindui_core::ui::unmount_subtree(&as_element);
+        for name in ["c0", "c1", "c2", "c3", "c4"] {
+            assert_eq!(
+                count(&log, &format!("{name} unmount")),
+                1,
+                "{name} exactly once"
+            );
+        }
     }
 }

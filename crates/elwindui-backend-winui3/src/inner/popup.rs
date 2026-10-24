@@ -66,6 +66,9 @@ impl InnerPopupSurface {
 
         // 5. Configure every structural popup property on the still-empty host/native popup.
         // `request.content` is not reachable through any of this yet.
+        // A Popup that is not part of the visual tree has no XamlRoot of its own in a desktop
+        // (island-hosted) app; without one it is never displayed. Bind it to the owner's root.
+        popup.SetXamlRoot(&owner_canvas.XamlRoot().ok()?).ok()?;
         popup.SetChild(&uie).ok()?;
         popup.SetHorizontalOffset(local.x as f64).ok()?;
         popup.SetVerticalOffset(local.y as f64).ok()?;

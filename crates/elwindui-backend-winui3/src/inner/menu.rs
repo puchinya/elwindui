@@ -126,6 +126,13 @@ impl InnerMenuItem {
     }
 }
 
+/// Display text for a bare-key shortcut (`"x"` -> `"Ctrl+X"`), the same `Ctrl` modifier
+/// `InnerMenuItem::set_shortcut` installs as a live accelerator. `None` for an empty shortcut.
+fn shortcut_display_text(key_equivalent: &str) -> Option<String> {
+    let key = key_equivalent.chars().next()?;
+    Some(format!("Ctrl+{}", key.to_ascii_uppercase()))
+}
+
 /// Exact mapping fixed by `docs/design/runtime/icon_source_design.md` §2 — every `SystemIcon`
 /// variant maps to exactly one WinUI `Symbol`, no wildcard/typo fallback. The `_` arm exists only
 /// because `SystemIcon` is `#[non_exhaustive]` (required by the compiler for a match in a
@@ -337,9 +344,15 @@ impl InnerMenuFlyout {
     /// Shows this realization and keeps it alive through the native flyout's terminal `Closed`
     /// event. The close callback captures only its numeric registry id in the generated WinRT
     /// delegate; the UI-thread-local lifetime state remains in the TLS callback registry.
+    ///
+    /// `point` is the context request anchor in `target`-local DIPs. With it, the flyout opens at
+    /// that point (`MenuFlyout.ShowAt(UIElement, Point)`); without it, WinUI places the flyout
+    /// relative to the whole `target` element, which for the root Canvas is unrelated to where the
+    /// context request happened.
     pub(crate) fn show_at(
         self,
         target: &crate::bindings::Microsoft::UI::Xaml::FrameworkElement,
+        point: Option<elwindui_core::base::Point>,
     ) -> windows::core::Result<()> {
         let lifetime = Rc::new(FlyoutLifetime {
             realization: RefCell::new(Some(self)),
@@ -387,7 +400,19 @@ impl InnerMenuFlyout {
                 .expect("flyout realization must exist")
                 .flyout
                 .clone();
-            flyout.ShowAt(target)
+            match point {
+                Some(point) => {
+                    let element: crate::bindings::Microsoft::UI::Xaml::UIElement = target.cast()?;
+                    flyout.ShowAt2(
+                        &element,
+                        windows::Foundation::Point {
+                            X: point.x,
+                            Y: point.y,
+                        },
+                    )
+                }
+                None => flyout.ShowAt(target),
+            }
         };
         if let Err(error) = show_result {
             lifetime.release();
@@ -460,10 +485,12 @@ impl InnerMenu {
             let flyout_item = MenuFlyoutItem::new()?;
             flyout_item.SetText(&windows::core::HSTRING::from(item.text().as_str()))?;
             flyout_item.SetIsEnabled(item.enabled())?;
-            if let Some(shortcut) = item.shortcut() {
-                let _ = flyout_item.SetKeyboardAcceleratorTextOverride(
-                    &windows::core::HSTRING::from(shortcut.as_str()),
-                );
+            // Display-only: no live accelerator is attached to a temporary context realization.
+            // The text matches what WinUI renders for the MenuBar-side Ctrl accelerator that
+            // `InnerMenuItem::set_shortcut` installs (e.g. "c" -> "Ctrl+C").
+            if let Some(text) = item.shortcut().as_deref().and_then(shortcut_display_text) {
+                let _ = flyout_item
+                    .SetKeyboardAcceleratorTextOverride(&windows::core::HSTRING::from(text));
             }
             // §2.13/§8.14: this Context Menu realization is a brand-new `MenuFlyoutItem` distinct
             // from `item`'s own live `xaml` (PR #156's realization-ownership separation) — so the
@@ -556,6 +583,13 @@ impl InnerMenuBar {
 #[cfg(test)]
 mod icon_tests {
     use super::*;
+
+    #[test]
+    fn shortcut_display_text_matches_the_ctrl_accelerator() {
+        assert_eq!(shortcut_display_text("x").as_deref(), Some("Ctrl+X"));
+        assert_eq!(shortcut_display_text("S").as_deref(), Some("Ctrl+S"));
+        assert_eq!(shortcut_display_text(""), None);
+    }
 
     /// §8.12: every `SystemIcon` variant maps to exactly one WinUI `Symbol`, matching
     /// `docs/design/runtime/icon_source_design.md` §2's table exactly, no variant omitted. Pure

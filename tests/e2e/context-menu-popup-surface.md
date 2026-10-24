@@ -46,10 +46,13 @@ text or trace lines. Seeing a driver `success: true` alone is never PASS.
 - **CMP-01 secondary click, native menu.** Right-click the native target. PASS: a native flyout
   appears at the pointer showing every item with its icon (System icons, a blue triangle for
   Vector, a green square for Encoded PNG, an orange square for Rgba8, the Edit symbol for
-  Dynamic), `Ctrl+X` beside Cut, and `Disabled (native)` greyed out. Click `Copy`; the log gains
+  Dynamic), `Ctrl+X` beside Cut, and `Disabled (native)` greyed out. The flyout's top-left is within a few pixels of the
+  right-click point (or flipped to stay on screen). Click `Copy`; the log gains
   `Native > Copy selected` and the flyout closes. Clicking the disabled item adds no log line.
-- **CMP-02 Shift+F10.** Left-click the native target, then send `shift+f10`. PASS: the same native
-  menu opens near the target. `esc` closes it without a log line.
+- **CMP-02 Shift+F10.** A keyboard context request targets the element with keyboard focus, and
+  the self-drawn TextBlock targets cannot take focus. Click `Native Button target` (one
+  `NativeButton > clicked` line), then send `shift+f10`. PASS: the button's native menu opens at
+  the button (not at an unrelated place). `esc` closes it without a log line.
 - **CMP-03 Menu key.** As CMP-02 with `vk=0x5D` (Application/Menu key).
 - **CMP-04 NativeControl.** Right-click `Native Button target`. PASS: a menu with
   `Button Context Action`; selecting it logs `NativeButton > Button Context Action`, and the button

@@ -2989,7 +2989,19 @@ impl TreeHost {
                             if let Ok(flyout) = winui_menu.create_flyout() {
                                 let fe: FrameworkElement =
                                     canvas.cast().expect("Canvas as FrameworkElement");
-                                if flyout.show_at(&fe).is_ok() {
+                                // A pointer request opens at the pointer; a keyboard request
+                                // (anchor = target bounds) opens at the target's bottom-left.
+                                let anchor_screen = match &anchor {
+                                    elwindui_core::ui::popup::PopupAnchor::Point(pt) => *pt,
+                                    elwindui_core::ui::popup::PopupAnchor::Rect(r) => {
+                                        elwindui_core::base::Point {
+                                            x: r.x,
+                                            y: r.y + r.height,
+                                        }
+                                    }
+                                };
+                                let local = Self::screen_to_canvas_point(canvas, anchor_screen);
+                                if flyout.show_at(&fe, local).is_ok() {
                                     return true;
                                 }
                             }

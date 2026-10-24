@@ -2830,6 +2830,19 @@ impl TreeHost {
             .unwrap_or((0.0, 0.0))
     }
 
+    /// [`Self::popup_offset`] in physical pixels.
+    pub(crate) fn popup_offset_physical(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+    ) -> (f32, f32) {
+        let (x, y) = Self::popup_offset(canvas);
+        let scale = canvas
+            .XamlRoot()
+            .and_then(|root| root.RasterizationScale())
+            .unwrap_or(1.0);
+        let scale = if scale <= 0.0 { 1.0 } else { scale as f32 };
+        (x * scale, y * scale)
+    }
+
     /// Converts canvas-local logical DIPs to desktop screen physical coordinates.
     ///
     /// The XAML root/content transform and ContentCoordinateConverter are the only source of

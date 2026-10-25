@@ -182,7 +182,9 @@ Popups trace `host_popup_build` / `host_popup_unmount` with detail `<name>#<n>`;
   `[Host B - no menu here]` once: B unmounts once and no popup is built. Popup A open, left-click `Host B target`: A unmounts once
   and no popup is built. Popup A open, `esc`: A unmounts once, no popup built. Popup A open,
   right-click outside the window (e.g. on the desktop next to it): A unmounts once (or stays, as
-  WinUI decides) and no popup is built in the app.
+  WinUI decides) and no popup is built in the app. The desktop then shows its own shell menu:
+  send one `esc` immediately (it holds the foreground and blocks every later real-input step),
+  and run this sub-step last within the launch.
 - **CMP-32 tab removal.** Select `Tab L2`, open its popup (`L2#n`), then close `Tab L2` with its
   close button (or select L1 and press `Remove first tab` for the L1 variant). PASS: the trace
   shows `host_popup_unmount L2#n` before `content_unmount L2`, each exactly once, and the remaining

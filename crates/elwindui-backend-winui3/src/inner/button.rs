@@ -856,6 +856,8 @@ mod hosted_xaml_regression_tests {
                     content_replacement_retires_previous_content();
                 crate::native_ui::scroll_view::hosted_lifecycle_tests::
                     reentrant_replacement_keeps_the_latest_content();
+                crate::native_ui::scroll_view::hosted_lifecycle_tests::
+                    reentrant_same_content_is_not_unmounted();
                 crate::native_ui::tab_view::hosted_lifecycle_tests::
                     removing_the_selected_tab_selects_a_consistent_replacement();
                 crate::app::reset_window_lifecycle_test_state();

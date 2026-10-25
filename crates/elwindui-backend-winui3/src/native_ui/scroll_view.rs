@@ -57,7 +57,7 @@ impl ScrollView {
 pub(crate) mod hosted_lifecycle_tests {
     use super::*;
     use crate::host::hosted_context_lifecycle_tests::{
-        Log, count, open_recording_popup, probe_content,
+        Log, capture_events, count, open_recording_popup, probe_content,
     };
     use elwindui_core::ui::ScrollViewExt;
     use std::cell::RefCell;
@@ -108,11 +108,14 @@ pub(crate) mod hosted_lifecycle_tests {
         }
     }
 
-    /// `set_content(B)` while A is published, where A's `on_unmount` sets C on the same
-    /// ScrollView: the latest request (C) wins and stays published; B is superseded (never
-    /// attached, unmounted once); A unmounts and its popup closes exactly once; no stale parent.
+    /// `set_content(B)` while A is published, where A's first extra `on_unmount` hook sets C on the
+    /// same ScrollView and a second hook runs after it: nothing is attached and no native child is
+    /// detached until A's last hook has run (the second hook still sees A published); then the
+    /// latest request (C) is attached, B is superseded (never attached, unmounted once), A unmounts
+    /// and its popup closes exactly once; no stale parent.
     pub(crate) fn reentrant_replacement_keeps_the_latest_content() {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let _events = capture_events(&log);
         let scroll_view = ScrollView::new();
         let host = scroll_view.inner.content_host();
         let a = probe_content(&log, "A");
@@ -123,18 +126,43 @@ pub(crate) mod hosted_lifecycle_tests {
 
         let weak = Rc::downgrade(&scroll_view);
         let c_for_hook = Rc::clone(&c);
+        let log_for_hook = Rc::clone(&log);
         a.add_unmount_hook(Box::new(move || {
+            log_for_hook.borrow_mut().push("A hook sets C".to_owned());
             let scroll_view: Option<Rc<ScrollView>> = weak.upgrade();
             if let Some(scroll_view) = scroll_view {
                 scroll_view.set_content(Rc::clone(&c_for_hook));
             }
         }));
+        let host_for_hook = host.clone();
+        let a_for_hook = Rc::downgrade(&a);
+        let log_for_hook = Rc::clone(&log);
+        a.add_unmount_hook(Box::new(move || {
+            let still_a = match (host_for_hook.hosted_tree_for_test(), a_for_hook.upgrade()) {
+                (Some(tree), Some(a)) => Rc::ptr_eq(&tree, &a),
+                _ => false,
+            };
+            log_for_hook
+                .borrow_mut()
+                .push(format!("A last hook (A still published: {still_a})"));
+        }));
+        log.borrow_mut().clear();
         scroll_view.set_content(Rc::clone(&b));
 
+        let events = log.borrow().clone();
+        let position = |entry: &str| events.iter().position(|e| e == entry);
+        let last_hook = position("A last hook (A still published: true)")
+            .unwrap_or_else(|| panic!("A's last hook must still see A published: {events:?}"));
+        let detach = position("native children detach").expect("A's native children detach");
+        assert!(position("A hook sets C").unwrap() < last_hook);
+        assert!(
+            last_hook < detach,
+            "native detach follows A's last hook: {events:?}"
+        );
         assert!(
             host.hosted_tree_for_test()
                 .is_some_and(|tree| Rc::ptr_eq(&tree, &c)),
-            "the reentrant (latest) content stays published"
+            "the latest content stays published"
         );
         assert_eq!(count(&log, "A popup close"), 1);
         assert_eq!(count(&log, "A unmount"), 1);
@@ -152,5 +180,50 @@ pub(crate) mod hosted_lifecycle_tests {
         assert_eq!(count(&log, "C unmount"), 1);
         assert_eq!(count(&log, "A unmount"), 1);
         assert_eq!(count(&log, "B unmount"), 1);
+    }
+
+    /// `set_content(B)` while A is published, where A's `on_unmount` sets the same B again: B is
+    /// published once and is never unmounted while live; owner close unmounts it exactly once.
+    pub(crate) fn reentrant_same_content_is_not_unmounted() {
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let scroll_view = ScrollView::new();
+        let host = scroll_view.inner.content_host();
+        let a = probe_content(&log, "A");
+        let b = probe_content(&log, "B");
+        scroll_view.set_content(Rc::clone(&a));
+
+        let weak = Rc::downgrade(&scroll_view);
+        let b_for_hook = Rc::clone(&b);
+        a.add_unmount_hook(Box::new(move || {
+            let scroll_view: Option<Rc<ScrollView>> = weak.upgrade();
+            if let Some(scroll_view) = scroll_view {
+                scroll_view.set_content(Rc::clone(&b_for_hook));
+            }
+        }));
+        scroll_view.set_content(Rc::clone(&b));
+
+        assert!(
+            host.hosted_tree_for_test()
+                .is_some_and(|tree| Rc::ptr_eq(&tree, &b)),
+            "B is published"
+        );
+        assert_eq!(count(&log, "B unmount"), 0, "live B is never unmounted");
+        assert_eq!(count(&log, "A unmount"), 1);
+        assert!(b.parent().is_some(), "B keeps its owner link");
+        // The host's relayout / input / focus wiring is installed by `set_tree` and cleared by
+        // `unmount`, so its presence shows B is attached and live.
+        assert!(
+            b.as_ui_element().invalidate_host.borrow().is_some(),
+            "B keeps its host wiring (relayout / input)"
+        );
+
+        let as_element: Rc<dyn UIElementExt> = scroll_view.clone();
+        elwindui_core::ui::unmount_subtree(&as_element);
+        elwindui_core::ui::unmount_subtree(&as_element);
+        assert_eq!(
+            count(&log, "B unmount"),
+            1,
+            "owner close unmounts B exactly once"
+        );
     }
 }

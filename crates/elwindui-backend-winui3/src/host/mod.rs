@@ -53,6 +53,9 @@ fn popup_canvas_key(canvas: &Canvas) -> usize {
         .unwrap_or(0)
 }
 
+/// A hosted-content request: the content and the control that owns it (its logical parent).
+type HostedRequest = (Rc<dyn UIElementExt>, Option<Rc<dyn UIElementExt>>);
+
 /// Weak handles to one `TreeHost`, registered so a secondary click consumed by a light-dismiss
 /// popup can be re-dispatched to whichever host is under the pointer (`resolve_context_host_at`).
 struct ContextHostEntry {
@@ -488,10 +491,12 @@ pub struct TreeHost {
     /// Keeps track of an active standalone custom popup surface, if any, ensuring single-popup ownership.
     pub(crate) active_popup:
         Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
-    /// Sequence number of `set_hosted_tree` requests; see its reentrancy note.
-    hosted_request: Rc<Cell<u64>>,
     /// The hosted tree currently being retired (`retire_hosted_tree`), if any.
     retiring_tree: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
+    /// Latest `set_hosted_tree` request made while a tree was retiring; see its reentrancy note.
+    pending_hosted: Rc<RefCell<Option<HostedRequest>>>,
+    /// Requested contents that lost to a later request and still await their single unmount.
+    superseded_hosted: Rc<RefCell<Vec<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
     /// Keeps every FFI callback registered by this host alive for exactly this host's lifetime.
     callback_owner: UiCallbackRegistryOwner,
     animation_runtime: Rc<AnimationRuntime>,
@@ -1200,8 +1205,9 @@ impl TreeHost {
             viewport: Rc::new(Cell::new(None)),
             active: Rc::new(Cell::new(true)),
             active_popup: Rc::new(RefCell::new(None)),
-            hosted_request: Rc::new(Cell::new(0)),
             retiring_tree: Rc::new(RefCell::new(None)),
+            pending_hosted: Rc::new(RefCell::new(None)),
+            superseded_hosted: Rc::new(RefCell::new(Vec::new())),
             callback_owner: UiCallbackRegistryOwner::default(),
             animation_runtime: AnimationRuntime::new(),
             rendering: Rc::new(WinUI3RenderingState::default()),
@@ -2219,30 +2225,72 @@ impl TreeHost {
     /// its logical parent) before the new tree is attached.
     ///
     /// Reentrancy (`docs/design/runtime/popup_context_menu_design.md`, nested content retirement):
-    /// the latest request wins. If retiring the previous tree runs user `on_unmount` code that sets
-    /// newer content on this same host, that newer content is attached by the inner call, and this
-    /// outer request's `content` is superseded: it is never attached and is unmounted once.
+    /// while the previous tree is being retired, a reentrant `set_hosted_tree` (from its
+    /// `on_unmount`) is only recorded as the pending request; nothing is attached and no native
+    /// child is touched until the previous tree's `unmount_subtree` has fully completed. Then the
+    /// latest request wins: its content is attached exactly once. Every other requested content is
+    /// superseded and unmounted once — unless it is the content being attached (the same `Rc`
+    /// requested again) or it has already been adopted by another owner.
     pub(crate) fn set_hosted_tree(
         &self,
         content: Rc<dyn elwindui_core::ui::UIElementExt>,
         owner: Option<Rc<dyn elwindui_core::ui::UIElementExt>>,
     ) {
-        let request = self.hosted_request.get().wrapping_add(1);
-        self.hosted_request.set(request);
-        let previous = self.tree.borrow().clone();
-        if let Some(previous) = previous {
-            if !Rc::ptr_eq(&previous, &content) {
-                self.retire_hosted_tree(previous);
+        if self.retiring_tree.borrow().is_some() {
+            let replaced = self.pending_hosted.replace(Some((content, owner)));
+            if let Some((replaced, _)) = replaced {
+                self.superseded_hosted.borrow_mut().push(replaced);
             }
-        }
-        if self.hosted_request.get() != request {
-            elwindui_core::ui::unmount_subtree(&content);
             return;
         }
+        let previous = self.tree.borrow().clone();
+        let Some(previous) = previous else {
+            self.attach_hosted_tree(content, owner);
+            return;
+        };
+        if Rc::ptr_eq(&previous, &content) {
+            return;
+        }
+        self.retire_hosted_tree(previous);
+        // The previous tree is fully unmounted and detached; resolve the latest request.
+        let (latest, latest_owner) = match self.pending_hosted.take() {
+            Some(pending) => {
+                self.superseded_hosted.borrow_mut().push(content);
+                pending
+            }
+            None => (content, owner),
+        };
+        self.unmount_superseded(Some(&latest));
+        self.attach_hosted_tree(latest, latest_owner);
+    }
+
+    fn attach_hosted_tree(
+        &self,
+        content: Rc<dyn elwindui_core::ui::UIElementExt>,
+        owner: Option<Rc<dyn elwindui_core::ui::UIElementExt>>,
+    ) {
         if let Some(owner) = owner {
             *content.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&owner));
         }
         self.set_tree(content);
+    }
+
+    /// Unmounts each superseded request's content once, skipping `kept` (the content being
+    /// attached), duplicates, and content another owner has adopted meanwhile (its logical parent
+    /// is set — this host never sets a parent on content it has not attached).
+    fn unmount_superseded(&self, kept: Option<&Rc<dyn elwindui_core::ui::UIElementExt>>) {
+        let superseded = std::mem::take(&mut *self.superseded_hosted.borrow_mut());
+        let mut done: Vec<Rc<dyn elwindui_core::ui::UIElementExt>> = Vec::new();
+        for content in superseded {
+            if kept.is_some_and(|kept| Rc::ptr_eq(kept, &content))
+                || done.iter().any(|seen| Rc::ptr_eq(seen, &content))
+                || content.as_ui_element().parent.borrow().is_some()
+            {
+                continue;
+            }
+            elwindui_core::ui::unmount_subtree(&content);
+            done.push(content);
+        }
     }
 
     /// Unmounts a nested host's tree when the native control owning it unmounts. `unmount_subtree`
@@ -2251,46 +2299,39 @@ impl TreeHost {
     /// opened from this content unmounts before the content (its owner) does.
     ///
     /// Also used when the owning control drops this host's content while staying alive (a removed
-    /// tab, replaced ScrollView content). Afterwards the host holds no tree, its native children and
-    /// composition are released, and the old content no longer links to the control. Calling it
-    /// again is a no-op.
+    /// tab). Afterwards the host holds no tree, its native children and composition are released,
+    /// and the old content no longer links to the control. Content requested from `on_unmount`
+    /// during this retirement is never attached (the owner is dropping this host) and is unmounted
+    /// once. Calling it again, or reentrantly, is a no-op.
     pub(crate) fn unmount_hosted_tree(&self) {
+        if self.retiring_tree.borrow().is_some() {
+            return;
+        }
         let tree = self.tree.borrow().clone();
         if let Some(tree) = tree {
             self.retire_hosted_tree(tree);
+            if let Some((pending, _)) = self.pending_hosted.take() {
+                self.superseded_hosted.borrow_mut().push(pending);
+            }
+            self.unmount_superseded(None);
         }
     }
 
     /// Retires `tree`, the tree currently published by this host: popup close → `unmount_subtree`
-    /// → logical parent cleared → native children / composition detached (`clear_tree`). The tree
-    /// is recorded as retiring first, so a reentrant retirement of the same tree (from its own
-    /// `on_unmount`) is a no-op instead of a second unmount / popup close; and the final detach
-    /// only happens if `tree` is still the published tree, so a newer tree a reentrant
-    /// `set_hosted_tree` attached meanwhile is never cleared.
+    /// (every `on_unmount` hook) → logical parent cleared → native children / composition detached
+    /// (`clear_tree`). While it runs, `retiring_tree` is set, so reentrant `set_hosted_tree` calls
+    /// only record a pending request and reentrant retirement is a no-op: the native detach always
+    /// follows the last `on_unmount` hook, and the tree is unmounted and its popup closed exactly
+    /// once.
     fn retire_hosted_tree(&self, tree: Rc<dyn elwindui_core::ui::UIElementExt>) {
-        if self
-            .retiring_tree
-            .borrow()
-            .as_ref()
-            .is_some_and(|retiring| Rc::ptr_eq(retiring, &tree))
-        {
-            return;
-        }
-        let outer = self.retiring_tree.replace(Some(Rc::clone(&tree)));
+        *self.retiring_tree.borrow_mut() = Some(Rc::clone(&tree));
         self.close_active_popup();
         #[cfg(test)]
         hosted_context_lifecycle_tests::record_event("content retire");
         elwindui_core::ui::unmount_subtree(&tree);
         *tree.as_ui_element().parent.borrow_mut() = None;
-        *self.retiring_tree.borrow_mut() = outer;
-        let still_published = self
-            .tree
-            .borrow()
-            .as_ref()
-            .is_some_and(|published| Rc::ptr_eq(published, &tree));
-        if still_published {
-            self.clear_tree();
-        }
+        self.clear_tree();
+        *self.retiring_tree.borrow_mut() = None;
     }
 
     #[cfg(test)]

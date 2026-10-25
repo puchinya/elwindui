@@ -771,4 +771,42 @@ pub(crate) mod hosted_lifecycle_tests {
         );
         assert!(!last_host.is_active_for_test());
     }
+
+    /// `TabView::remove_at` of a tab whose content A requests B on the tab's host from its
+    /// `on_unmount`, and B requests C: the removed tab's host never re-attaches anything, ends
+    /// empty, and A, B and C unmount exactly once.
+    pub(crate) fn tab_removal_never_reattaches_reentrant_requests() {
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let (tab_view, contents) = tab_view_with(&log, &["A", "keep"]);
+        let host = tab_view.content_hosts.borrow()[0].clone();
+        let b = probe_content(&log, "B");
+        let c = probe_content(&log, "C");
+        let request = |content: &Rc<dyn UIElementExt>, next: &Rc<dyn UIElementExt>| {
+            let host = host.clone();
+            let next = Rc::clone(next);
+            content.add_unmount_hook(Box::new(move || {
+                host.set_hosted_tree(Rc::clone(&next), None);
+            }));
+        };
+        request(&contents[0], &b);
+        request(&b, &c);
+        open_recording_popup(&host, &log, "A");
+
+        tab_view.remove_at(0);
+
+        assert!(
+            host.hosted_tree_for_test().is_none(),
+            "removed tab host stays empty"
+        );
+        assert_eq!(count(&log, "A popup close"), 1);
+        for name in ["A", "B", "C"] {
+            assert_eq!(
+                count(&log, &format!("{name} unmount")),
+                1,
+                "{name} exactly once"
+            );
+        }
+        assert_eq!(count(&log, "keep unmount"), 0, "the other tab is untouched");
+        assert!(contents[0].parent().is_none() && b.parent().is_none() && c.parent().is_none());
+    }
 }

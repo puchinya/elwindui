@@ -226,4 +226,134 @@ pub(crate) mod hosted_lifecycle_tests {
             "owner close unmounts B exactly once"
         );
     }
+
+    /// Makes `content`'s unmount call `set_content(next)` on `scroll_view`.
+    fn on_unmount_set(
+        content: &Rc<dyn UIElementExt>,
+        scroll_view: &Rc<ScrollView>,
+        next: &Rc<dyn UIElementExt>,
+    ) {
+        let weak = Rc::downgrade(scroll_view);
+        let next = Rc::clone(next);
+        content.add_unmount_hook(Box::new(move || {
+            let scroll_view: Option<Rc<ScrollView>> = weak.upgrade();
+            if let Some(scroll_view) = scroll_view {
+                scroll_view.set_content(Rc::clone(&next));
+            }
+        }));
+    }
+
+    fn published(host: &crate::host::TreeHost, content: &Rc<dyn UIElementExt>) -> bool {
+        host.hosted_tree_for_test()
+            .is_some_and(|tree| Rc::ptr_eq(&tree, content))
+    }
+
+    /// Start `set_content(B)` with A published; A's `on_unmount` requests C; superseded B's
+    /// `on_unmount` requests D. The newest request (D) is attached once all teardown is done;
+    /// A, B and C unmount exactly once; D unmounts only when the owner closes. Variant: B's hook
+    /// requests C again (same `Rc`) — C is attached and never unmounted while live.
+    pub(crate) fn superseded_hooks_cannot_override_the_newest_request() {
+        for same_rc in [false, true] {
+            let log: Log = Rc::new(RefCell::new(Vec::new()));
+            let scroll_view = ScrollView::new();
+            let host = scroll_view.inner.content_host();
+            let a = probe_content(&log, "A");
+            let b = probe_content(&log, "B");
+            let c = probe_content(&log, "C");
+            let d = if same_rc {
+                Rc::clone(&c)
+            } else {
+                probe_content(&log, "D")
+            };
+            scroll_view.set_content(Rc::clone(&a));
+            open_recording_popup(&host, &log, "A");
+            on_unmount_set(&a, &scroll_view, &c);
+            on_unmount_set(&b, &scroll_view, &d);
+
+            scroll_view.set_content(Rc::clone(&b));
+
+            let label = if same_rc { "C/D same Rc" } else { "distinct D" };
+            assert!(
+                published(&host, &d),
+                "{label}: the newest request is published"
+            );
+            assert_eq!(count(&log, "A popup close"), 1, "{label}");
+            assert_eq!(count(&log, "A unmount"), 1, "{label}");
+            assert_eq!(count(&log, "B unmount"), 1, "{label}");
+            if same_rc {
+                assert_eq!(
+                    count(&log, "C unmount"),
+                    0,
+                    "{label}: live C never unmounted"
+                );
+            } else {
+                assert_eq!(count(&log, "C unmount"), 1, "{label}");
+                assert_eq!(count(&log, "D unmount"), 0, "{label}");
+            }
+            assert!(
+                a.parent().is_none() && b.parent().is_none(),
+                "{label}: no stale parent"
+            );
+            assert!(d.parent().is_some(), "{label}: D linked to its owner");
+            assert!(
+                d.as_ui_element().invalidate_host.borrow().is_some(),
+                "{label}: D wired to the host"
+            );
+
+            let as_element: Rc<dyn UIElementExt> = scroll_view.clone();
+            elwindui_core::ui::unmount_subtree(&as_element);
+            let final_name = if same_rc { "C" } else { "D" };
+            assert_eq!(
+                count(&log, &format!("{final_name} unmount")),
+                1,
+                "{label}: owner close"
+            );
+            assert!(
+                host.hosted_tree_for_test().is_none(),
+                "{label}: host empty after close"
+            );
+        }
+    }
+
+    /// Owner close with A published; A's `on_unmount` requests B; B's `on_unmount` requests C.
+    /// Nothing is re-attached at any stage: the host ends empty, A, B and C unmount exactly once,
+    /// no logical parent is left, and later requests are rejected (unmounted, never attached).
+    pub(crate) fn owner_close_never_reattaches_reentrant_requests() {
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let scroll_view = ScrollView::new();
+        let host = scroll_view.inner.content_host();
+        let a = probe_content(&log, "A");
+        let b = probe_content(&log, "B");
+        let c = probe_content(&log, "C");
+        scroll_view.set_content(Rc::clone(&a));
+        open_recording_popup(&host, &log, "A");
+        on_unmount_set(&a, &scroll_view, &b);
+        on_unmount_set(&b, &scroll_view, &c);
+
+        let as_element: Rc<dyn UIElementExt> = scroll_view.clone();
+        elwindui_core::ui::unmount_subtree(&as_element);
+
+        assert!(host.hosted_tree_for_test().is_none(), "host stays empty");
+        assert_eq!(count(&log, "A popup close"), 1);
+        for name in ["A", "B", "C"] {
+            assert_eq!(
+                count(&log, &format!("{name} unmount")),
+                1,
+                "{name} exactly once"
+            );
+        }
+        assert!(a.parent().is_none() && b.parent().is_none() && c.parent().is_none());
+
+        let late = probe_content(&log, "late");
+        scroll_view.set_content(Rc::clone(&late));
+        assert!(
+            host.hosted_tree_for_test().is_none(),
+            "a closed host never re-attaches"
+        );
+        assert_eq!(
+            count(&log, "late unmount"),
+            1,
+            "rejected content is unmounted once"
+        );
+    }
 }

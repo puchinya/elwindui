@@ -126,8 +126,7 @@ fn cross_host_section() -> Vec<Rc<dyn UIElementExt>> {
 fn tab_removal_section() -> Vec<Rc<dyn UIElementExt>> {
     let tab_view = elwindui::ui::TabView::new();
     tab_view.set_height(140.0);
-    for index in 1..=3 {
-        let name: &'static str = ["L1", "L2", "L3"][index - 1];
+    for name in ["L1", "L2", "L3", "L4"] {
         let item = elwindui::ui::TabViewItem::new();
         item.set_header(&format!("Tab {name}"));
         item.set_closable(true);
@@ -139,7 +138,8 @@ fn tab_removal_section() -> Vec<Rc<dyn UIElementExt>> {
     }
     let weak: Weak<elwindui::ui::TabView> = Rc::downgrade(&tab_view);
     tab_view.set_on_close(Box::new(move |index| {
-        if let Some(tab_view) = weak.upgrade() {
+        let tab_view: Option<Rc<elwindui::ui::TabView>> = weak.upgrade();
+        if let Some(tab_view) = tab_view {
             trace("tab_close_request", &index.to_string());
             tab_view.remove_at(index);
         }
@@ -148,7 +148,8 @@ fn tab_removal_section() -> Vec<Rc<dyn UIElementExt>> {
     remove_first.set_text("Remove first tab");
     let weak: Weak<elwindui::ui::TabView> = Rc::downgrade(&tab_view);
     remove_first.set_on_click(Box::new(move || {
-        if let Some(tab_view) = weak.upgrade() {
+        let tab_view: Option<Rc<elwindui::ui::TabView>> = weak.upgrade();
+        if let Some(tab_view) = tab_view {
             if tab_view.len() > 0 {
                 trace("tab_remove_first", "");
                 tab_view.remove_at(0);
@@ -192,7 +193,8 @@ fn content_replacement_section() -> Vec<Rc<dyn UIElementExt>> {
     replace.set_text("Replace ScrollView content");
     let weak: Weak<elwindui::ui::ScrollView> = Rc::downgrade(&scroll);
     replace.set_on_click(Box::new(move || {
-        if let Some(scroll) = weak.upgrade() {
+        let scroll: Option<Rc<elwindui::ui::ScrollView>> = weak.upgrade();
+        if let Some(scroll) = scroll {
             trace("content_replace", "");
             scroll.set_content(replacement_content(&cycle));
         }

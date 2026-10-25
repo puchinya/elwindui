@@ -166,7 +166,7 @@ lines to stderr (launch with stderr redirected) — record them as supporting ev
 
 The **Popup Hosts** tab (`popup_hosts.rs`) has two side-by-side ScrollViews (`Host A`, `Host B`,
 each content its own nested host), a `Root target (tab host)`, a TabView with closable tabs
-`Tab L1..L3`, and a ScrollView whose content `Replace ScrollView content` cycles `SA -> SB -> SC`.
+`Tab L1..L4`, and a ScrollView whose content `Replace ScrollView content` cycles `SA -> SB -> SC`.
 Popups trace `host_popup_build` / `host_popup_unmount` with detail `<name>#<n>`; contents trace
 `content_unmount <id>`; the content button traces `content_click <id>`.
 
@@ -178,15 +178,17 @@ Popups trace `host_popup_build` / `host_popup_unmount` with detail `<name>#<n>`;
   once, popup R opens at the pointer. Popup R open, right-click `Host B target` once: R unmounts
   once, popup B opens.
 - **CMP-31 no menu / not a replacement.** Popup A open, right-click `[Host B - no menu here]` once:
-  A unmounts once and no popup is built. Popup A open, left-click `Host B target`: A unmounts once
+  A unmounts once and no popup is built. Same-host variant: popup B open, right-click
+  `[Host B - no menu here]` once: B unmounts once and no popup is built. Popup A open, left-click `Host B target`: A unmounts once
   and no popup is built. Popup A open, `esc`: A unmounts once, no popup built. Popup A open,
   right-click outside the window (e.g. on the desktop next to it): A unmounts once (or stays, as
   WinUI decides) and no popup is built in the app.
 - **CMP-32 tab removal.** Select `Tab L2`, open its popup (`L2#n`), then close `Tab L2` with its
   close button (or select L1 and press `Remove first tab` for the L1 variant). PASS: the trace
   shows `host_popup_unmount L2#n` before `content_unmount L2`, each exactly once, and the remaining
-  tabs still open their popups. Also remove a non-selected tab (inactive) and confirm its
-  `content_unmount` appears exactly once.
+  tabs still open their popups. Inactive removal: select `Tab L4`, then press `Remove first tab`
+  (removes the non-selected first tab): its `content_unmount` appears exactly once and `Tab L4`
+  stays selected and working.
 - **CMP-33 content replacement.** Open the `Content SA target` popup, press `Replace ScrollView
   content`: `host_popup_unmount SA#n` then `content_unmount SA#k` (each once), then content SB is
   shown; click `Content SB#.. button` (trace `content_click`) to show the new content takes input.

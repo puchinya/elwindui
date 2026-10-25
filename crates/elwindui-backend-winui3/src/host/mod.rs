@@ -73,13 +73,18 @@ struct ContextHostHandles {
 }
 
 impl ContextHostEntry {
+    /// `false` once the host's tree slot (and so the host) has been dropped.
+    fn is_alive(&self) -> bool {
+        Weak::<RefCell<Option<Rc<dyn UIElementExt>>>>::strong_count(&self.tree) > 0
+    }
+
     /// `None` once the host is destroyed, inactive (a non-selected tab) or has no tree.
     fn upgrade(&self) -> Option<ContextHostHandles> {
-        let active = self.active.upgrade()?;
+        let active: Rc<Cell<bool>> = self.active.upgrade()?;
         if !active.get() {
             return None;
         }
-        let tree_slot = self.tree.upgrade()?;
+        let tree_slot: Rc<RefCell<Option<Rc<dyn UIElementExt>>>> = self.tree.upgrade()?;
         let tree = tree_slot.borrow().clone()?;
         Some(ContextHostHandles {
             canvas: self.canvas.upgrade()?,
@@ -111,7 +116,7 @@ fn register_context_host(host: &TreeHost) {
     CONTEXT_HOSTS.with(|hosts| {
         let mut hosts = hosts.borrow_mut();
         // Destroyed hosts are pruned here, so the registry never outgrows the live host count.
-        hosts.retain(|entry| entry.tree.strong_count() > 0);
+        hosts.retain(ContextHostEntry::is_alive);
         hosts.push(entry);
     });
 }
@@ -146,7 +151,7 @@ fn nearest_registered_context_host(
                 hosts
                     .borrow()
                     .iter()
-                    .find(|entry| entry.key == key && entry.tree.strong_count() > 0)
+                    .find(|entry: &&ContextHostEntry| entry.key == key && entry.is_alive())
                     .map(ContextHostEntry::upgrade)
             });
             if let Some(found) = found {
@@ -3287,6 +3292,11 @@ impl TreeHost {
         let Some((resolved, anchor)) =
             elwindui_core::ui::ContextMenuService::process_request(tree, &keyboard.focus, request)
         else {
+            // A secondary click that reached this host (WinUI did not consume it for light
+            // dismiss) still dismisses this host's open popup, even where nothing has a menu.
+            if request.source == elwindui_core::ui::popup::ContextRequestSource::Pointer {
+                close_active_popup_slot(active_popup);
+            }
             return false;
         };
         match resolved.definition {

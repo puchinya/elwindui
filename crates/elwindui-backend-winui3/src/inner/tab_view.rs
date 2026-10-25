@@ -162,6 +162,14 @@ impl InnerTabView {
         *self.on_select.borrow_mut() = Some(callback);
     }
 
+    /// Invokes the selection callback as a native `SelectionChanged` would.
+    #[cfg(test)]
+    pub(crate) fn emit_select_for_test(&self, index: usize) {
+        if let Some(callback) = self.on_select.borrow().as_ref() {
+            callback(index);
+        }
+    }
+
     pub(crate) fn set_on_close(&self, callback: Box<dyn Fn(usize)>) {
         *self.on_close.borrow_mut() = Some(callback);
     }

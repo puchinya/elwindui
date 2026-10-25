@@ -2244,6 +2244,11 @@ impl TreeHost {
     }
 
     #[cfg(test)]
+    pub(crate) fn is_active_for_test(&self) -> bool {
+        self.active.get()
+    }
+
+    #[cfg(test)]
     pub(crate) fn hosted_tree_for_test(&self) -> Option<Rc<dyn elwindui_core::ui::UIElementExt>> {
         self.tree.borrow().clone()
     }

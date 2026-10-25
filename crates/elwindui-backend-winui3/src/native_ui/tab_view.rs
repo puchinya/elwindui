@@ -49,6 +49,9 @@ pub struct TabView {
     /// `selected_item`/`selected_container` can read it back.
     selected_index: Cell<usize>,
     on_close: RefCell<Option<Box<dyn Fn(usize)>>>,
+    /// User / binding selection callback, invoked after this TabView has followed a native
+    /// selection change itself (see `on_constructed`).
+    user_on_select: RefCell<Option<Rc<dyn Fn(usize)>>>,
     weak_self: RefCell<Weak<TabView>>,
 }
 
@@ -123,6 +126,7 @@ impl TabView {
             rebuilding: Cell::new(false),
             selected_index: Cell::new(0),
             on_close: RefCell::new(None),
+            user_on_select: RefCell::new(None),
             weak_self: RefCell::new(Weak::<TabView>::new()),
         }
     }
@@ -183,6 +187,27 @@ impl TabView {
                 }
             }
         }));
+        // A native (user) selection activates the selected tab's content host here, whether or not
+        // a `selected_index` binding exists; without this, an unbound TabView left the newly
+        // selected tab's host inactive and its content blank. The binding write-back that follows
+        // reaches `set_selected_index` with the same index, which is then a no-op.
+        let weak: Weak<TabView> = Rc::downgrade(&this);
+        self.inner.set_on_select(Box::new(move |index| {
+            let this: Option<Rc<TabView>> = weak.upgrade();
+            let Some(this) = this else { return };
+            // XAML raises transient selection changes synchronously while `rebuild` edits
+            // `TabItems`. Publishing those intermediate indices can re-enter the declarative list
+            // diff while it still holds collection borrows; the final model-selected index is
+            // applied after rebuilding instead.
+            if this.rebuilding.get() {
+                return;
+            }
+            this.set_selected_index(index);
+            let callback: Option<Rc<dyn Fn(usize)>> = this.user_on_select.borrow().clone();
+            if let Some(callback) = callback {
+                callback(index);
+            }
+        }));
         // Tab content lives in nested hosts outside the Visual tree, so it is unmounted (popups
         // first) when this TabView unmounts — see `TreeHost::unmount_hosted_tree`.
         let weak: Weak<TabView> = Rc::downgrade(&this);
@@ -215,18 +240,7 @@ impl TabView {
 
     #[inherent]
     pub fn set_on_select(&self, callback: Box<dyn Fn(usize)>) {
-        let weak: Weak<TabView> = self.weak_self.borrow().clone();
-        self.inner.set_on_select(Box::new(move |index| {
-            let this: Option<Rc<TabView>> = weak.upgrade();
-            let Some(this) = this else { return };
-            // XAML raises transient selection changes synchronously while `rebuild` edits
-            // `TabItems`. Publishing those intermediate indices can re-enter the declarative list
-            // diff while it still holds collection borrows; the final model-selected index is
-            // applied after rebuilding instead.
-            if !this.rebuilding.get() {
-                callback(index);
-            }
-        }));
+        *self.user_on_select.borrow_mut() = Some(Rc::from(callback));
     }
 
     /// Registers the write-back callback used by a two-way `selected_index` binding.
@@ -523,6 +537,22 @@ pub(crate) mod hosted_lifecycle_tests {
         }
         let hosts: Vec<TreeHost> = tab_view.content_hosts.borrow().clone();
         assert_eq!(hosts.len(), 4);
+
+        // A native selection on an unbound TabView activates that tab's host (and only it).
+        let selected = Rc::new(Cell::new(None::<usize>));
+        let selected_for_callback = Rc::clone(&selected);
+        tab_view.set_on_select(Box::new(move |index| {
+            selected_for_callback.set(Some(index))
+        }));
+        tab_view.inner.emit_select_for_test(2);
+        assert!(hosts[2].is_active_for_test(), "selected tab host is active");
+        assert!(
+            !hosts[0].is_active_for_test(),
+            "previous tab host is suppressed"
+        );
+        assert_eq!(selected.get(), Some(2), "user callback still runs");
+        tab_view.inner.emit_select_for_test(0);
+        assert!(hosts[0].is_active_for_test() && !hosts[2].is_active_for_test());
         assert!(contents.iter().all(|content| content.parent().is_some()));
 
         // (a)/(c) inactive tab with an open popup.

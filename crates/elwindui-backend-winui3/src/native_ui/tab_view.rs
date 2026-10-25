@@ -397,20 +397,48 @@ impl TabView {
         if self.rebuilding.replace(true) {
             return;
         }
+        let active_before = self.active.get();
+
+        // Phase 1 — retire the content of every removed tab while its XAML TabViewItem and native
+        // children are still attached: its popup closes, the content unmounts exactly once, and
+        // only then are its native children detached (`TreeHost::unmount_hosted_tree`). No
+        // collection borrow is held, because `on_unmount` may re-enter this TabView; a removal made
+        // from there is picked up by the next loop pass, and a reentrant `rebuild` returns early.
+        let mut retired: Vec<usize> = Vec::new();
+        loop {
+            let pending: Vec<(usize, TreeHost)> = {
+                let children = self.children.borrow();
+                let keys: Vec<usize> = children.iter().map(tab_view_item_key).collect();
+                let displayed = self.displayed.borrow();
+                let hosts = self.content_hosts.borrow();
+                displayed
+                    .iter()
+                    .zip(hosts.iter())
+                    .filter(|(key, _)| !keys.contains(key) && !retired.contains(key))
+                    .map(|(key, host)| (*key, host.clone()))
+                    .collect()
+            };
+            if pending.is_empty() {
+                break;
+            }
+            for (key, host) in pending {
+                retired.push(key);
+                host.unmount_hosted_tree();
+            }
+        }
+
+        // Phase 2 — structural diff: remove the (already retired) XAML tabs, insert new ones.
         let children = self.children.borrow();
         let new_keys: Vec<usize> = children.iter().map(tab_view_item_key).collect();
         let mut displayed = self.displayed.borrow_mut();
-        // Hosts of removed tabs; their content is retired after every borrow below is released,
-        // because unmounting runs user `on_unmount` code that may re-enter this TabView.
-        let mut removed_hosts: Vec<TreeHost> = Vec::new();
-
+        let mut removed_any = false;
         for i in (0..displayed.len()).rev() {
             if !new_keys.contains(&displayed[i]) {
                 let host = self.content_hosts.borrow_mut().remove(i);
                 host.set_active(false);
                 self.inner.remove_tab_at(i);
                 displayed.remove(i);
-                removed_hosts.push(host);
+                removed_any = true;
             }
         }
 
@@ -441,29 +469,41 @@ impl TabView {
             self.inner
                 .set_tab_title(index, &downcast_tab_view_item(&**entry).header.borrow());
         }
-        // Keep the selected tab selected by identity: removing tabs before it shifts its index,
-        // and a stale `selected_index` would point past it (or at another tab) and suppress its
-        // host, leaving it blank. Native XAML selection changes during the edit were suppressed.
-        if let Some(active_key) = self.active.get() {
-            if let Some(index) = children
-                .iter()
-                .position(|entry| tab_view_item_key(entry) == active_key)
-            {
-                if index != self.selected_index.get() {
-                    self.selected_index.set(index);
+
+        // Selection after removal (`docs/specs/ui_spec.md` TabView): a surviving selected tab stays
+        // selected by identity; if the selected tab itself was removed, the tab now at its index is
+        // selected, or the new last tab when it was last. Native `SelectedIndex`, `selected_index`
+        // and the active host are all set from that one decision (native selection events are
+        // suppressed while `rebuilding`), and a changed index is reported to the user / binding
+        // callback once the edit is complete.
+        let mut changed_selection = None;
+        if removed_any {
+            if let Some(active_key) = active_before {
+                let survivor = children
+                    .iter()
+                    .position(|entry| tab_view_item_key(entry) == active_key);
+                let replacement = survivor.or_else(|| {
+                    (!children.is_empty())
+                        .then(|| self.selected_index.get().min(children.len() - 1))
+                });
+                if let Some(index) = replacement {
+                    if index != self.selected_index.get() {
+                        self.selected_index.set(index);
+                        changed_selection = Some(index);
+                    }
                     self.inner.set_selected_index(index);
                 }
             }
         }
         drop(children);
         self.rebuilding.set(false);
-        // A removed tab's content is unmounted now, while this TabView (its owner) is alive: its
-        // popup closes first, then the content unmounts exactly once. The TabView's own unmount
-        // hook only walks the tabs still present, so these are never unmounted twice.
-        for host in removed_hosts {
-            host.unmount_hosted_tree();
-        }
         self.sync_active_content_host();
+        if let Some(index) = changed_selection {
+            let callback: Option<Rc<dyn Fn(usize)>> = self.user_on_select.borrow().clone();
+            if let Some(callback) = callback {
+                callback(index);
+            }
+        }
     }
 }
 
@@ -526,31 +566,58 @@ impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::TabViewItemExt> for TabVi
     }
 }
 
-/// Live XAML assertion helpers (Issue #157): removing a tab retires exactly that tab's content —
-/// popup first, content unmounted exactly once, logical parent released — and the TabView's own
-/// unmount never touches it again. Run by `inner::button::hosted_xaml_regression_tests`.
+/// Live XAML assertion helpers (Issue #157): removing a tab retires exactly that tab's content in
+/// the order popup close → content unmount → native-children detach → XAML TabViewItem removal;
+/// the TabView's own unmount never touches it again; and the selection stays consistent (native
+/// `SelectedIndex`, `selected_index`, active host, user/binding callback) when the selected tab or
+/// an earlier tab is removed. Run by `inner::button::hosted_xaml_regression_tests`.
 #[cfg(test)]
 pub(crate) mod hosted_lifecycle_tests {
     use super::*;
     use crate::host::hosted_context_lifecycle_tests::{
-        Log, count, open_recording_popup, probe_content,
+        Log, capture_events, count, open_recording_popup, probe_content,
     };
     use elwindui_core::ui::{ListExt, TabViewItemExt};
 
-    pub(crate) fn tab_removal_retires_content_popup_first_exactly_once() {
-        let log: Log = Rc::new(RefCell::new(Vec::new()));
+    fn tab_view_with(log: &Log, names: &[&str]) -> (Rc<TabView>, Vec<Rc<dyn UIElementExt>>) {
         let tab_view = TabView::new();
-        let contents: Vec<Rc<dyn UIElementExt>> = (0..4)
-            .map(|i| probe_content(&log, &format!("c{i}")))
-            .collect();
-        for (i, content) in contents.iter().enumerate() {
+        let contents: Vec<Rc<dyn UIElementExt>> =
+            names.iter().map(|name| probe_content(log, name)).collect();
+        for (name, content) in names.iter().zip(&contents) {
             let item = TabViewItem::new();
-            item.set_header(&format!("T{i}"));
+            item.set_header(name);
             item.set_content(Rc::clone(content));
             tab_view.add(item as Rc<dyn TabViewItemExt>);
         }
+        (tab_view, contents)
+    }
+
+    fn take(log: &Log) -> Vec<String> {
+        std::mem::take(&mut *log.borrow_mut())
+    }
+
+    /// The one retirement sequence every removed tab must produce, in this order.
+    fn retirement(name: &str, with_popup: bool) -> Vec<String> {
+        let mut expected = Vec::new();
+        if with_popup {
+            expected.push(format!("{name} popup close"));
+        }
+        expected.extend([
+            "content retire".to_owned(),
+            format!("{name} unmount"),
+            "native children detach".to_owned(),
+        ]);
+        expected
+    }
+
+    pub(crate) fn tab_removal_retires_content_popup_first_exactly_once() {
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let _events = capture_events(&log);
+        let (tab_view, contents) = tab_view_with(&log, &["c0", "c1", "c2", "c3"]);
         let hosts: Vec<TreeHost> = tab_view.content_hosts.borrow().clone();
         assert_eq!(hosts.len(), 4);
+        assert!(contents.iter().all(|content| content.parent().is_some()));
+        take(&log);
 
         // A native selection on an unbound TabView activates that tab's host (and only it).
         let selected = Rc::new(Cell::new(None::<usize>));
@@ -565,52 +632,143 @@ pub(crate) mod hosted_lifecycle_tests {
             "previous tab host is suppressed"
         );
         assert_eq!(selected.get(), Some(2), "user callback still runs");
-        tab_view.inner.emit_select_for_test(0);
-        assert!(hosts[0].is_active_for_test() && !hosts[2].is_active_for_test());
-        assert!(contents.iter().all(|content| content.parent().is_some()));
 
-        // (a)/(c) inactive tab with an open popup, before the selected tab: the selected tab
-        // (c3) stays selected and active although its index shifts from 3 to 2.
+        // (a)/(c) inactive tab with an open popup, before the selected tab (c3 at index 3): the
+        // retirement happens while the XAML TabViewItem is still attached, and the selected tab
+        // keeps its selection by identity although its index shifts to 2.
         tab_view.inner.emit_select_for_test(3);
+        selected.set(None);
         open_recording_popup(&hosts[1], &log, "c1");
         tab_view.remove_at(1);
-        assert!(
-            hosts[3].is_active_for_test(),
-            "selected tab stays active after an earlier removal"
+        let mut expected = retirement("c1", true);
+        expected.push("tab item remove".to_owned());
+        assert_eq!(
+            take(&log),
+            expected,
+            "popup → unmount → native detach → TabViewItem remove"
         );
-        assert_eq!(tab_view.selected_index.get(), 2);
-        assert_eq!(*log.borrow(), ["c1 popup close", "c1 unmount"]);
         assert!(hosts[1].hosted_tree_for_test().is_none());
         assert!(
             contents[1].parent().is_none(),
             "removed content keeps no logical parent"
         );
+        assert!(
+            hosts[3].is_active_for_test(),
+            "selected tab stays active after an earlier removal"
+        );
+        assert_eq!(tab_view.selected_index.get(), 2);
+        assert_eq!(tab_view.inner.native_selected_index_for_test(), 2);
+        assert_eq!(selected.get(), Some(2), "binding is told the shifted index");
 
-        // (a)/(c) another inactive tab with an open popup.
-        open_recording_popup(&hosts[0], &log, "c0");
-        tab_view.remove_at(0);
-        assert_eq!(log.borrow()[2..], ["c0 popup close", "c0 unmount"]);
-
-        // (b) clear removes several tabs; each content unmounts exactly once.
+        // (b) clear removes several tabs; each is retired before any TabViewItem is removed.
         tab_view.clear();
-        for name in ["c2", "c3"] {
-            assert_eq!(count(&log, &format!("{name} unmount")), 1, "{name}");
+        let events = take(&log);
+        for name in ["c0", "c2", "c3"] {
+            assert_eq!(count(&log, &format!("{name} unmount")), 0);
+            let unmount = events.iter().position(|e| *e == format!("{name} unmount"));
+            assert!(unmount.is_some(), "{name} unmounted by clear: {events:?}");
         }
+        let first_remove = events.iter().position(|e| e == "tab item remove").unwrap();
+        let last_unmount = events
+            .iter()
+            .rposition(|e| e.ends_with(" unmount"))
+            .unwrap();
+        assert!(
+            last_unmount < first_remove,
+            "all retirements precede TabViewItem removal: {events:?}"
+        );
 
         // A tab added afterwards is unmounted with the TabView; earlier ones never again.
         let late = probe_content(&log, "c4");
         let item = TabViewItem::new();
         item.set_content(Rc::clone(&late));
         tab_view.add(item as Rc<dyn TabViewItemExt>);
+        take(&log);
         let as_element: Rc<dyn UIElementExt> = tab_view.clone();
         elwindui_core::ui::unmount_subtree(&as_element);
         elwindui_core::ui::unmount_subtree(&as_element);
-        for name in ["c0", "c1", "c2", "c3", "c4"] {
+        let events = take(&log);
+        assert_eq!(
+            events.iter().filter(|e| *e == "c4 unmount").count(),
+            1,
+            "{events:?}"
+        );
+        assert!(events.iter().all(|e| !e.starts_with("c0")
+            && !e.starts_with("c1")
+            && !e.starts_with("c2")
+            && !e.starts_with("c3")));
+    }
+
+    /// Removing the selected tab itself selects the tab now at its index, or the new last tab;
+    /// native `SelectedIndex`, `selected_index`, the active host and the user/binding callback agree;
+    /// removing the only tab leaves an empty TabView with no active host.
+    pub(crate) fn removing_the_selected_tab_selects_a_consistent_replacement() {
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let (tab_view, _contents) = tab_view_with(&log, &["s0", "s1", "s2"]);
+        let hosts: Vec<TreeHost> = tab_view.content_hosts.borrow().clone();
+        // A two-way binding: the callback writes the index back like generated code does.
+        let reported = Rc::new(RefCell::new(Vec::<usize>::new()));
+        let weak = Rc::downgrade(&tab_view);
+        let reported_for_callback = Rc::clone(&reported);
+        tab_view.set_on_select(Box::new(move |index| {
+            reported_for_callback.borrow_mut().push(index);
+            if let Some(tab_view) = weak.upgrade() {
+                tab_view.set_selected_index(index);
+            }
+        }));
+        let assert_selected = |index: usize, host: &TreeHost, label: &str| {
             assert_eq!(
-                count(&log, &format!("{name} unmount")),
-                1,
-                "{name} exactly once"
+                tab_view.selected_index.get(),
+                index,
+                "{label}: selected_index"
             );
-        }
+            assert_eq!(
+                tab_view.inner.native_selected_index_for_test(),
+                index as i32,
+                "{label}: native"
+            );
+            assert!(
+                host.is_active_for_test(),
+                "{label}: replacement host active"
+            );
+        };
+
+        // Selected last tab removed → new last tab.
+        tab_view.inner.emit_select_for_test(2);
+        reported.borrow_mut().clear();
+        tab_view.remove_at(2);
+        assert_selected(1, &hosts[1], "selected last");
+        assert_eq!(*reported.borrow(), [1], "binding told the replacement once");
+        assert!(!hosts[0].is_active_for_test());
+
+        // Selected middle tab removed → the tab now at its index (re-add one to have a middle).
+        let item = TabViewItem::new();
+        item.set_content(probe_content(&log, "s3"));
+        tab_view.add(item as Rc<dyn TabViewItemExt>);
+        let hosts: Vec<TreeHost> = tab_view.content_hosts.borrow().clone();
+        tab_view.inner.emit_select_for_test(1);
+        reported.borrow_mut().clear();
+        tab_view.remove_at(1);
+        assert_selected(1, &hosts[2], "selected middle");
+        assert!(
+            reported.borrow().is_empty(),
+            "same index: nothing to report"
+        );
+
+        // Only tab: remove until one is left, then remove it.
+        tab_view.remove_at(0);
+        assert_selected(
+            0,
+            &tab_view.content_hosts.borrow()[0],
+            "after removing first",
+        );
+        let last_host = tab_view.content_hosts.borrow()[0].clone();
+        tab_view.remove_at(0);
+        assert_eq!(tab_view.len(), 0);
+        assert!(
+            tab_view.active.get().is_none(),
+            "no active host in an empty TabView"
+        );
+        assert!(!last_host.is_active_for_test());
     }
 }

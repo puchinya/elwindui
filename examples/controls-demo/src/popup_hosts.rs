@@ -126,7 +126,7 @@ fn cross_host_section() -> Vec<Rc<dyn UIElementExt>> {
 fn tab_removal_section() -> Vec<Rc<dyn UIElementExt>> {
     let tab_view = elwindui::ui::TabView::new();
     tab_view.set_height(140.0);
-    for name in ["L1", "L2", "L3", "L4"] {
+    for name in ["L1", "L2", "L3", "L4", "L5", "L6"] {
         let item = elwindui::ui::TabViewItem::new();
         item.set_header(&format!("Tab {name}"));
         item.set_closable(true);

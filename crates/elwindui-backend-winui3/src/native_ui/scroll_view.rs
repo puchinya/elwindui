@@ -107,4 +107,50 @@ pub(crate) mod hosted_lifecycle_tests {
             );
         }
     }
+
+    /// `set_content(B)` while A is published, where A's `on_unmount` sets C on the same
+    /// ScrollView: the latest request (C) wins and stays published; B is superseded (never
+    /// attached, unmounted once); A unmounts and its popup closes exactly once; no stale parent.
+    pub(crate) fn reentrant_replacement_keeps_the_latest_content() {
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let scroll_view = ScrollView::new();
+        let host = scroll_view.inner.content_host();
+        let a = probe_content(&log, "A");
+        let b = probe_content(&log, "B");
+        let c = probe_content(&log, "C");
+        scroll_view.set_content(Rc::clone(&a));
+        open_recording_popup(&host, &log, "A");
+
+        let weak = Rc::downgrade(&scroll_view);
+        let c_for_hook = Rc::clone(&c);
+        a.add_unmount_hook(Box::new(move || {
+            let scroll_view: Option<Rc<ScrollView>> = weak.upgrade();
+            if let Some(scroll_view) = scroll_view {
+                scroll_view.set_content(Rc::clone(&c_for_hook));
+            }
+        }));
+        scroll_view.set_content(Rc::clone(&b));
+
+        assert!(
+            host.hosted_tree_for_test()
+                .is_some_and(|tree| Rc::ptr_eq(&tree, &c)),
+            "the reentrant (latest) content stays published"
+        );
+        assert_eq!(count(&log, "A popup close"), 1);
+        assert_eq!(count(&log, "A unmount"), 1);
+        assert_eq!(
+            count(&log, "B unmount"),
+            1,
+            "superseded content is unmounted once"
+        );
+        assert_eq!(count(&log, "C unmount"), 0);
+        assert!(a.parent().is_none() && b.parent().is_none());
+        assert!(c.parent().is_some());
+
+        let as_element: Rc<dyn UIElementExt> = scroll_view.clone();
+        elwindui_core::ui::unmount_subtree(&as_element);
+        assert_eq!(count(&log, "C unmount"), 1);
+        assert_eq!(count(&log, "A unmount"), 1);
+        assert_eq!(count(&log, "B unmount"), 1);
+    }
 }

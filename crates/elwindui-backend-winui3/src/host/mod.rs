@@ -488,6 +488,10 @@ pub struct TreeHost {
     /// Keeps track of an active standalone custom popup surface, if any, ensuring single-popup ownership.
     pub(crate) active_popup:
         Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
+    /// Sequence number of `set_hosted_tree` requests; see its reentrancy note.
+    hosted_request: Rc<Cell<u64>>,
+    /// The hosted tree currently being retired (`retire_hosted_tree`), if any.
+    retiring_tree: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
     /// Keeps every FFI callback registered by this host alive for exactly this host's lifetime.
     callback_owner: UiCallbackRegistryOwner,
     animation_runtime: Rc<AnimationRuntime>,
@@ -1196,6 +1200,8 @@ impl TreeHost {
             viewport: Rc::new(Cell::new(None)),
             active: Rc::new(Cell::new(true)),
             active_popup: Rc::new(RefCell::new(None)),
+            hosted_request: Rc::new(Cell::new(0)),
+            retiring_tree: Rc::new(RefCell::new(None)),
             callback_owner: UiCallbackRegistryOwner::default(),
             animation_runtime: AnimationRuntime::new(),
             rendering: Rc::new(WinUI3RenderingState::default()),
@@ -2154,6 +2160,8 @@ impl TreeHost {
 
     /// Clears this host's tree, cleans up native composition and children, and closes any active popup.
     pub(crate) fn clear_tree(&self) {
+        #[cfg(test)]
+        hosted_context_lifecycle_tests::record_event("native children detach");
         self.cancel_and_unregister_current_tree();
         if let Some(old) = self.active_popup.borrow_mut().take() {
             old.close();
@@ -2209,14 +2217,27 @@ impl TreeHost {
     /// Replacing different content first retires the previous tree completely
     /// ([`Self::unmount_hosted_tree`]: its popup closes, then it unmounts exactly once and loses
     /// its logical parent) before the new tree is attached.
+    ///
+    /// Reentrancy (`docs/design/runtime/popup_context_menu_design.md`, nested content retirement):
+    /// the latest request wins. If retiring the previous tree runs user `on_unmount` code that sets
+    /// newer content on this same host, that newer content is attached by the inner call, and this
+    /// outer request's `content` is superseded: it is never attached and is unmounted once.
     pub(crate) fn set_hosted_tree(
         &self,
         content: Rc<dyn elwindui_core::ui::UIElementExt>,
         owner: Option<Rc<dyn elwindui_core::ui::UIElementExt>>,
     ) {
+        let request = self.hosted_request.get().wrapping_add(1);
+        self.hosted_request.set(request);
         let previous = self.tree.borrow().clone();
-        if previous.is_some_and(|previous| !Rc::ptr_eq(&previous, &content)) {
-            self.unmount_hosted_tree();
+        if let Some(previous) = previous {
+            if !Rc::ptr_eq(&previous, &content) {
+                self.retire_hosted_tree(previous);
+            }
+        }
+        if self.hosted_request.get() != request {
+            elwindui_core::ui::unmount_subtree(&content);
+            return;
         }
         if let Some(owner) = owner {
             *content.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&owner));
@@ -2234,11 +2255,40 @@ impl TreeHost {
     /// composition are released, and the old content no longer links to the control. Calling it
     /// again is a no-op.
     pub(crate) fn unmount_hosted_tree(&self) {
-        self.close_active_popup();
         let tree = self.tree.borrow().clone();
         if let Some(tree) = tree {
-            elwindui_core::ui::unmount_subtree(&tree);
-            *tree.as_ui_element().parent.borrow_mut() = None;
+            self.retire_hosted_tree(tree);
+        }
+    }
+
+    /// Retires `tree`, the tree currently published by this host: popup close → `unmount_subtree`
+    /// → logical parent cleared → native children / composition detached (`clear_tree`). The tree
+    /// is recorded as retiring first, so a reentrant retirement of the same tree (from its own
+    /// `on_unmount`) is a no-op instead of a second unmount / popup close; and the final detach
+    /// only happens if `tree` is still the published tree, so a newer tree a reentrant
+    /// `set_hosted_tree` attached meanwhile is never cleared.
+    fn retire_hosted_tree(&self, tree: Rc<dyn elwindui_core::ui::UIElementExt>) {
+        if self
+            .retiring_tree
+            .borrow()
+            .as_ref()
+            .is_some_and(|retiring| Rc::ptr_eq(retiring, &tree))
+        {
+            return;
+        }
+        let outer = self.retiring_tree.replace(Some(Rc::clone(&tree)));
+        self.close_active_popup();
+        #[cfg(test)]
+        hosted_context_lifecycle_tests::record_event("content retire");
+        elwindui_core::ui::unmount_subtree(&tree);
+        *tree.as_ui_element().parent.borrow_mut() = None;
+        *self.retiring_tree.borrow_mut() = outer;
+        let still_published = self
+            .tree
+            .borrow()
+            .as_ref()
+            .is_some_and(|published| Rc::ptr_eq(published, &tree));
+        if still_published {
             self.clear_tree();
         }
     }
@@ -4366,6 +4416,32 @@ pub(crate) mod hosted_context_lifecycle_tests {
     use elwindui_core::ui::popup::PopupSurfaceHandle;
 
     pub(crate) type Log = Rc<RefCell<Vec<String>>>;
+
+    thread_local! {
+        /// When set, backend lifecycle steps (`record_event`) are appended to this log too, so a
+        /// test can see where native detach happens relative to popup close / content unmount.
+        static EVENT_LOG: RefCell<Option<Log>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn record_event(event: &str) {
+        EVENT_LOG.with(|log| {
+            if let Some(log) = log.borrow().as_ref() {
+                log.borrow_mut().push(event.to_owned());
+            }
+        });
+    }
+
+    /// Routes `record_event` into `log` until the returned guard is dropped.
+    pub(crate) fn capture_events(log: &Log) -> impl Drop {
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                EVENT_LOG.with(|log| *log.borrow_mut() = None);
+            }
+        }
+        EVENT_LOG.with(|slot| *slot.borrow_mut() = Some(Rc::clone(log)));
+        Guard
+    }
 
     struct RecordingPopup {
         log: Log,

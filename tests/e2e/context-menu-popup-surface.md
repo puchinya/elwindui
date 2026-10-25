@@ -166,7 +166,7 @@ lines to stderr (launch with stderr redirected) — record them as supporting ev
 
 The **Popup Hosts** tab (`popup_hosts.rs`) has two side-by-side ScrollViews (`Host A`, `Host B`,
 each content its own nested host), a `Root target (tab host)`, a TabView with closable tabs
-`Tab L1..L4`, and a ScrollView whose content `Replace ScrollView content` cycles `SA -> SB -> SC`.
+`Tab L1..L6`, and a ScrollView whose content `Replace ScrollView content` cycles `SA -> SB -> SC`.
 Popups trace `host_popup_build` / `host_popup_unmount` with detail `<name>#<n>`; contents trace
 `content_unmount <id>`; the content button traces `content_click <id>`.
 
@@ -186,11 +186,17 @@ Popups trace `host_popup_build` / `host_popup_unmount` with detail `<name>#<n>`;
   send one `esc` immediately (it holds the foreground and blocks every later real-input step),
   and run this sub-step last within the launch.
 - **CMP-32 tab removal.** Select `Tab L2`, open its popup (`L2#n`), then close `Tab L2` with its
-  close button (or select L1 and press `Remove first tab` for the L1 variant). PASS: the trace
-  shows `host_popup_unmount L2#n` before `content_unmount L2`, each exactly once, and the remaining
-  tabs still open their popups. Inactive removal: select `Tab L4`, then press `Remove first tab`
-  (removes the non-selected first tab): its `content_unmount` appears exactly once and `Tab L4`
-  stays selected and working.
+  close button (a primary click while a popup is open only dismisses it — click again). PASS: the
+  trace shows `host_popup_unmount L2#n` before `content_unmount L2`, each exactly once.
+  Inactive removal: select `Tab L6`, press `Remove first tab` (removes the non-selected `L1`):
+  `content_unmount L1` exactly once, `Tab L6` stays selected and its content and popup work.
+  The native-detach ordering (popup → unmount → native children → TabViewItem) is asserted by the
+  hosted test; E2E checks the user-visible result.
+- **CMP-32b removing the selected tab.** (1) `Tab L6` selected (last): close it → `Tab L5` is
+  selected, its content is visible and its popup opens. (2) Select `Tab L4` (middle of L3/L4/L5),
+  close it → `Tab L5` (the tab now at that index) is selected, visible, popup works. (3) Close tabs
+  until one is left, then close the selected only tab → the TabView is empty, nothing is shown in
+  its content area, no crash; every `content_unmount` appears exactly once.
 - **CMP-33 content replacement.** Open the `Content SA target` popup, press `Replace ScrollView
   content`: `host_popup_unmount SA#n` then `content_unmount SA#k` (each once), then content SB is
   shown; click `Content SB#.. button` (trace `content_click`) to show the new content takes input.

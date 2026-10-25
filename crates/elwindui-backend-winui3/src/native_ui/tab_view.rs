@@ -441,6 +441,20 @@ impl TabView {
             self.inner
                 .set_tab_title(index, &downcast_tab_view_item(&**entry).header.borrow());
         }
+        // Keep the selected tab selected by identity: removing tabs before it shifts its index,
+        // and a stale `selected_index` would point past it (or at another tab) and suppress its
+        // host, leaving it blank. Native XAML selection changes during the edit were suppressed.
+        if let Some(active_key) = self.active.get() {
+            if let Some(index) = children
+                .iter()
+                .position(|entry| tab_view_item_key(entry) == active_key)
+            {
+                if index != self.selected_index.get() {
+                    self.selected_index.set(index);
+                    self.inner.set_selected_index(index);
+                }
+            }
+        }
         drop(children);
         self.rebuilding.set(false);
         // A removed tab's content is unmounted now, while this TabView (its owner) is alive: its
@@ -555,9 +569,16 @@ pub(crate) mod hosted_lifecycle_tests {
         assert!(hosts[0].is_active_for_test() && !hosts[2].is_active_for_test());
         assert!(contents.iter().all(|content| content.parent().is_some()));
 
-        // (a)/(c) inactive tab with an open popup.
+        // (a)/(c) inactive tab with an open popup, before the selected tab: the selected tab
+        // (c3) stays selected and active although its index shifts from 3 to 2.
+        tab_view.inner.emit_select_for_test(3);
         open_recording_popup(&hosts[1], &log, "c1");
         tab_view.remove_at(1);
+        assert!(
+            hosts[3].is_active_for_test(),
+            "selected tab stays active after an earlier removal"
+        );
+        assert_eq!(tab_view.selected_index.get(), 2);
         assert_eq!(*log.borrow(), ["c1 popup close", "c1 unmount"]);
         assert!(hosts[1].hosted_tree_for_test().is_none());
         assert!(
@@ -565,7 +586,7 @@ pub(crate) mod hosted_lifecycle_tests {
             "removed content keeps no logical parent"
         );
 
-        // (a)/(c) the selected tab with an open popup.
+        // (a)/(c) another inactive tab with an open popup.
         open_recording_popup(&hosts[0], &log, "c0");
         tab_view.remove_at(0);
         assert_eq!(log.borrow()[2..], ["c0 popup close", "c0 unmount"]);

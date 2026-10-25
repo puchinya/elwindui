@@ -862,6 +862,8 @@ mod hosted_xaml_regression_tests {
                     superseded_hooks_cannot_override_the_newest_request();
                 crate::native_ui::scroll_view::hosted_lifecycle_tests::
                     owner_close_never_reattaches_reentrant_requests();
+                crate::native_ui::scroll_view::hosted_lifecycle_tests::
+                    retired_content_is_never_republished();
                 crate::native_ui::tab_view::hosted_lifecycle_tests::
                     tab_removal_never_reattaches_reentrant_requests();
                 crate::native_ui::tab_view::hosted_lifecycle_tests::

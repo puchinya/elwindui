@@ -356,4 +356,100 @@ pub(crate) mod hosted_lifecycle_tests {
             "rejected content is unmounted once"
         );
     }
+
+    /// Content torn down during a transition is never re-published, even when the newest request
+    /// names it again. (1) A→B, A.on_unmount→C, B.on_unmount→A: the host ends empty; A, B, C
+    /// unmount once; A keeps no parent / host wiring. (2) A superseded content re-requested by a
+    /// later hook: A→B, A→C, B→D, C→B: the newest request (B) is dead, so the host ends empty and
+    /// A, B, C, D unmount once. (3) The same chain during owner close keeps the host closed and
+    /// empty. Afterwards a direct request for a retired content is ignored.
+    pub(crate) fn retired_content_is_never_republished() {
+        // (1)
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let scroll_view = ScrollView::new();
+        let host = scroll_view.inner.content_host();
+        let a = probe_content(&log, "A");
+        let b = probe_content(&log, "B");
+        let c = probe_content(&log, "C");
+        scroll_view.set_content(Rc::clone(&a));
+        open_recording_popup(&host, &log, "A");
+        on_unmount_set(&a, &scroll_view, &c);
+        on_unmount_set(&b, &scroll_view, &a);
+        scroll_view.set_content(Rc::clone(&b));
+        assert!(
+            host.hosted_tree_for_test().is_none(),
+            "(1) dead A is not re-published"
+        );
+        assert_eq!(count(&log, "A popup close"), 1);
+        for name in ["A", "B", "C"] {
+            assert_eq!(
+                count(&log, &format!("{name} unmount")),
+                1,
+                "(1) {name} once"
+            );
+        }
+        assert!(a.parent().is_none() && b.parent().is_none() && c.parent().is_none());
+        assert!(
+            a.as_ui_element().invalidate_host.borrow().is_none(),
+            "(1) A has no host wiring"
+        );
+        // A later direct request for retired A is ignored; a live content still works.
+        scroll_view.set_content(Rc::clone(&a));
+        assert!(host.hosted_tree_for_test().is_none());
+        assert_eq!(count(&log, "A unmount"), 1);
+        let e = probe_content(&log, "E");
+        scroll_view.set_content(Rc::clone(&e));
+        assert!(
+            published(&host, &e),
+            "(1) a live content is attached afterwards"
+        );
+
+        // (2)
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let scroll_view = ScrollView::new();
+        let host = scroll_view.inner.content_host();
+        let a = probe_content(&log, "A");
+        let b = probe_content(&log, "B");
+        let c = probe_content(&log, "C");
+        let d = probe_content(&log, "D");
+        scroll_view.set_content(Rc::clone(&a));
+        on_unmount_set(&a, &scroll_view, &c);
+        on_unmount_set(&b, &scroll_view, &d);
+        on_unmount_set(&c, &scroll_view, &b);
+        scroll_view.set_content(Rc::clone(&b));
+        assert!(
+            host.hosted_tree_for_test().is_none(),
+            "(2) dead B is not re-published"
+        );
+        for name in ["A", "B", "C", "D"] {
+            assert_eq!(
+                count(&log, &format!("{name} unmount")),
+                1,
+                "(2) {name} once"
+            );
+        }
+
+        // (3)
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let scroll_view = ScrollView::new();
+        let host = scroll_view.inner.content_host();
+        let a = probe_content(&log, "A");
+        let b = probe_content(&log, "B");
+        scroll_view.set_content(Rc::clone(&a));
+        on_unmount_set(&a, &scroll_view, &b);
+        on_unmount_set(&b, &scroll_view, &a);
+        let as_element: Rc<dyn UIElementExt> = scroll_view.clone();
+        elwindui_core::ui::unmount_subtree(&as_element);
+        assert!(
+            host.hosted_tree_for_test().is_none(),
+            "(3) closed host stays empty"
+        );
+        for name in ["A", "B"] {
+            assert_eq!(
+                count(&log, &format!("{name} unmount")),
+                1,
+                "(3) {name} once"
+            );
+        }
+    }
 }

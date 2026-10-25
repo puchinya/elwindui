@@ -506,6 +506,9 @@ pub struct TreeHost {
     hosted_terminal: Rc<Cell<bool>>,
     /// Latest `set_hosted_tree` request made during a transition.
     pending_hosted: Rc<RefCell<Option<HostedRequest>>>,
+    /// Contents this host has unmounted (published trees it retired, superseded and rejected
+    /// requests). Such a content is torn down for good and is never attached again.
+    retired_hosted: Rc<RefCell<Vec<Weak<dyn elwindui_core::ui::UIElementExt>>>>,
     /// Requested contents that lost to a later request and still await their single unmount.
     superseded_hosted: Rc<RefCell<Vec<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
     /// Keeps every FFI callback registered by this host alive for exactly this host's lifetime.
@@ -1220,6 +1223,7 @@ impl TreeHost {
             hosted_terminal: Rc::new(Cell::new(false)),
             pending_hosted: Rc::new(RefCell::new(None)),
             superseded_hosted: Rc::new(RefCell::new(Vec::new())),
+            retired_hosted: Rc::new(RefCell::new(Vec::new())),
             callback_owner: UiCallbackRegistryOwner::default(),
             animation_runtime: AnimationRuntime::new(),
             rendering: Rc::new(WinUI3RenderingState::default()),
@@ -2265,6 +2269,11 @@ impl TreeHost {
                 if published.is_some_and(|published| Rc::ptr_eq(&published, &content)) {
                     return;
                 }
+                // A request for content this host already tore down is rejected outright: the
+                // current content stays, and the dead content is not unmounted again.
+                if self.was_retired(&content) {
+                    return;
+                }
                 *self.pending_hosted.borrow_mut() = Some((content, owner));
                 self.run_hosted_transition(false);
             }
@@ -2296,10 +2305,9 @@ impl TreeHost {
             self.hosted_terminal.set(true);
         }
         let published = self.tree.borrow().clone();
-        let mut unmounted: Vec<Rc<dyn elwindui_core::ui::UIElementExt>> = Vec::new();
         if let Some(published) = published {
+            self.mark_retired(&published);
             self.retire_published_tree(&published);
-            unmounted.push(published);
         }
         let mut candidate: Option<HostedRequest> = None;
         loop {
@@ -2323,10 +2331,8 @@ impl TreeHost {
                 let keep = candidate
                     .as_ref()
                     .is_some_and(|(candidate, _)| Rc::ptr_eq(candidate, &content));
-                let seen = unmounted
-                    .iter()
-                    .chain(work.iter())
-                    .any(|done| Rc::ptr_eq(done, &content));
+                let seen = self.was_retired(&content)
+                    || work.iter().any(|queued| Rc::ptr_eq(queued, &content));
                 // Content another owner adopted meanwhile has a logical parent; it is not ours.
                 let adopted = content.as_ui_element().parent.borrow().is_some();
                 if !keep && !seen && !adopted {
@@ -2337,7 +2343,7 @@ impl TreeHost {
                 break;
             }
             for content in work {
-                unmounted.push(Rc::clone(&content));
+                self.mark_retired(&content);
                 elwindui_core::ui::unmount_subtree(&content);
             }
         }
@@ -2346,6 +2352,10 @@ impl TreeHost {
             return;
         }
         self.hosted_phase.set(HostedPhase::Idle);
+        // The newest request may name content that was torn down earlier in this transition (or
+        // before): it is rejected and the host stays empty — earlier candidates were superseded
+        // and are torn down as well, so there is nothing valid to fall back to.
+        let candidate = candidate.filter(|(content, _)| !self.was_retired(content));
         if let Some((content, owner)) = candidate {
             if let Some(owner) = owner {
                 *content.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&owner));
@@ -2361,11 +2371,33 @@ impl TreeHost {
         for content in superseded {
             if kept.is_some_and(|kept| Rc::ptr_eq(kept, &content))
                 || content.as_ui_element().parent.borrow().is_some()
+                || self.was_retired(&content)
             {
                 continue;
             }
+            self.mark_retired(&content);
             elwindui_core::ui::unmount_subtree(&content);
         }
+    }
+
+    /// Records `content` as torn down by this host (before its unmount starts, so its own hooks
+    /// already see it as retired). Dead entries are pruned here.
+    fn mark_retired(&self, content: &Rc<dyn elwindui_core::ui::UIElementExt>) {
+        let mut retired = self.retired_hosted.borrow_mut();
+        retired.retain(|entry: &Weak<dyn elwindui_core::ui::UIElementExt>| {
+            Weak::<dyn elwindui_core::ui::UIElementExt>::strong_count(entry) > 0
+        });
+        retired.push(Rc::downgrade(content));
+    }
+
+    fn was_retired(&self, content: &Rc<dyn elwindui_core::ui::UIElementExt>) -> bool {
+        let target = Rc::as_ptr(content) as *const ();
+        self.retired_hosted.borrow().iter().any(
+            |entry: &Weak<dyn elwindui_core::ui::UIElementExt>| {
+                Weak::as_ptr(entry) as *const () == target
+                    && Weak::<dyn elwindui_core::ui::UIElementExt>::strong_count(entry) > 0
+            },
+        )
     }
 
     /// Retires the published `tree`: popup close → `unmount_subtree` (every `on_unmount` hook) →

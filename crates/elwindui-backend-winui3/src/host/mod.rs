@@ -4636,7 +4636,8 @@ pub(crate) mod hosted_context_lifecycle_tests {
     /// 2. the published content (if any) has never been unmounted, is linked to the owner, and
     ///    is wired to the host; no other content keeps a logical parent;
     /// 3. latest request wins: unless the host was closed, the published content is the content
-    ///    of the last request made, or nothing if that content has been torn down;
+    ///    of the last request made — or nothing only if that content had already been torn down
+    ///    when it was requested (the transition itself must never tear down the newest request);
     /// 4. after a final owner close, the host is empty and every content that was ever published
     ///    or requested is unmounted exactly once; untouched contents never are.
     pub(crate) fn hosted_content_transition_invariants_hold_exhaustively() {
@@ -4665,8 +4666,8 @@ pub(crate) mod hosted_context_lifecycle_tests {
         let owner: Rc<dyn UIElementExt> = elwindui_core::ui::VerticalLayout::new();
         let contents: Vec<Rc<dyn UIElementExt>> =
             POOL.iter().map(|name| probe_content(&log, name)).collect();
-        // Requests in the order they are made, by pool index.
-        let requests: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+        // Requests in the order they are made: (pool index, already torn down when requested).
+        let requests: Rc<RefCell<Vec<(usize, bool)>>> = Rc::new(RefCell::new(Vec::new()));
         let closed = Rc::new(Cell::new(false));
 
         let install = |index: usize, action: HookAction| {
@@ -4675,12 +4676,15 @@ pub(crate) mod hosted_context_lifecycle_tests {
             let pool: Vec<Weak<dyn UIElementExt>> = contents.iter().map(Rc::downgrade).collect();
             let requests = Rc::clone(&requests);
             let closed = Rc::clone(&closed);
+            let log = Rc::clone(&log);
             contents[index].add_unmount_hook(Box::new(move || match action {
                 HookAction::Nothing => {}
                 HookAction::Request(target) => {
                     let target: Option<Rc<dyn UIElementExt>> = pool[target].upgrade();
                     if let Some(target) = target {
-                        requests.borrow_mut().push(index_of(&pool, &target));
+                        let target_index = index_of(&pool, &target);
+                        let dead = count(&log, &format!("{} unmount", POOL[target_index])) > 0;
+                        requests.borrow_mut().push((target_index, dead));
                         host.set_hosted_tree(target, Some(Rc::clone(&owner)));
                     }
                 }
@@ -4702,7 +4706,7 @@ pub(crate) mod hosted_context_lifecycle_tests {
             closed.set(true);
             host.unmount_hosted_tree();
         } else {
-            requests.borrow_mut().push(1);
+            requests.borrow_mut().push((1, false));
             host.set_hosted_tree(Rc::clone(&contents[1]), Some(Rc::clone(&owner)));
         }
 
@@ -4729,7 +4733,7 @@ pub(crate) mod hosted_context_lifecycle_tests {
                 .borrow()
                 .last()
                 .copied()
-                .filter(|&index| !unmounted(index))
+                .and_then(|(index, dead_when_requested)| (!dead_when_requested).then_some(index))
         };
         let published_index = published.as_ref().map(|tree| index_of_rc(&contents, tree));
         assert_eq!(published_index, expected, "{label}: latest request wins");
@@ -4758,7 +4762,7 @@ pub(crate) mod hosted_context_lifecycle_tests {
             "{label}: closed host is empty"
         );
         let involved: Vec<usize> = std::iter::once(0)
-            .chain(requests.borrow().iter().copied())
+            .chain(requests.borrow().iter().map(|&(index, _)| index))
             .collect();
         for (index, name) in POOL.iter().enumerate() {
             let expected = usize::from(involved.contains(&index));

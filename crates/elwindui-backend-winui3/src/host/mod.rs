@@ -2309,6 +2309,10 @@ impl TreeHost {
             self.mark_retired(&published);
             self.retire_published_tree(&published);
         }
+        // Superseded cleanup, one content at a time: every unmount can run hooks that make a
+        // newer request (or close the host), so the candidate and the next content to retire are
+        // re-decided after each single unmount — a content that became the newest request while
+        // waiting in the superseded queue is kept, never torn down.
         let mut candidate: Option<HostedRequest> = None;
         loop {
             let newer = self.pending_hosted.take();
@@ -2325,26 +2329,14 @@ impl TreeHost {
                     self.superseded_hosted.borrow_mut().push(dropped);
                 }
             }
-            let batch = std::mem::take(&mut *self.superseded_hosted.borrow_mut());
-            let mut work: Vec<Rc<dyn elwindui_core::ui::UIElementExt>> = Vec::new();
-            for content in batch {
-                let keep = candidate
-                    .as_ref()
-                    .is_some_and(|(candidate, _)| Rc::ptr_eq(candidate, &content));
-                let seen = self.was_retired(&content)
-                    || work.iter().any(|queued| Rc::ptr_eq(queued, &content));
-                // Content another owner adopted meanwhile has a logical parent; it is not ours.
-                let adopted = content.as_ui_element().parent.borrow().is_some();
-                if !keep && !seen && !adopted {
-                    work.push(content);
+            let next = self.next_superseded_to_retire(candidate.as_ref().map(|(c, _)| c));
+            match next {
+                Some(content) => {
+                    self.mark_retired(&content);
+                    elwindui_core::ui::unmount_subtree(&content);
                 }
-            }
-            if work.is_empty() && self.pending_hosted.borrow().is_none() {
-                break;
-            }
-            for content in work {
-                self.mark_retired(&content);
-                elwindui_core::ui::unmount_subtree(&content);
+                None if self.pending_hosted.borrow().is_none() => break,
+                None => {}
             }
         }
         if self.hosted_terminal.get() {
@@ -2361,6 +2353,29 @@ impl TreeHost {
                 *content.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&owner));
             }
             self.set_tree(content);
+        }
+    }
+
+    /// Removes and returns the next queued superseded content that still has to be torn down,
+    /// discarding entries that need nothing: the current candidate (it is live and kept), content
+    /// already torn down, and content another owner adopted (logical parent set).
+    fn next_superseded_to_retire(
+        &self,
+        candidate: Option<&Rc<dyn elwindui_core::ui::UIElementExt>>,
+    ) -> Option<Rc<dyn elwindui_core::ui::UIElementExt>> {
+        loop {
+            let content = {
+                let mut queue = self.superseded_hosted.borrow_mut();
+                if queue.is_empty() {
+                    return None;
+                }
+                queue.remove(0)
+            };
+            let keep = candidate.is_some_and(|candidate| Rc::ptr_eq(candidate, &content));
+            let adopted = content.as_ui_element().parent.borrow().is_some();
+            if !keep && !adopted && !self.was_retired(&content) {
+                return Some(content);
+            }
         }
     }
 
@@ -4591,6 +4606,180 @@ pub(crate) mod hosted_context_lifecycle_tests {
             log: Rc::clone(log),
             name: name.to_owned(),
         }));
+    }
+
+    /// What one `on_unmount` hook does in the exhaustive transition test.
+    #[derive(Clone, Copy, Debug)]
+    enum HookAction {
+        Nothing,
+        Request(usize),
+        Close,
+    }
+
+    const POOL: [&str; 4] = ["A", "B", "C", "D"];
+    const ACTIONS: [HookAction; 6] = [
+        HookAction::Nothing,
+        HookAction::Request(0),
+        HookAction::Request(1),
+        HookAction::Request(2),
+        HookAction::Request(3),
+        HookAction::Close,
+    ];
+
+    /// Exhaustive check of the hosted-content transition (`TreeHost::set_hosted_tree` /
+    /// `unmount_hosted_tree`) against its invariants, over every combination of: the outer action
+    /// (request B, or owner close) on a host publishing A with an open popup; two `on_unmount`
+    /// hook actions on A; one hook action on each of B, C and D — each action being nothing, a
+    /// request for any of A..D, or owner close. For every scenario:
+    ///
+    /// 1. no content is unmounted more than once, and A's popup closes once, before A unmounts;
+    /// 2. the published content (if any) has never been unmounted, is linked to the owner, and
+    ///    is wired to the host; no other content keeps a logical parent;
+    /// 3. latest request wins: unless the host was closed, the published content is the content
+    ///    of the last request made, or nothing if that content has been torn down;
+    /// 4. after a final owner close, the host is empty and every content that was ever published
+    ///    or requested is unmounted exactly once; untouched contents never are.
+    pub(crate) fn hosted_content_transition_invariants_hold_exhaustively() {
+        let mut scenarios = 0usize;
+        for outer_close in [false, true] {
+            for a_first in ACTIONS {
+                for a_second in ACTIONS {
+                    for b in ACTIONS {
+                        for c in ACTIONS {
+                            for d in ACTIONS {
+                                check_scenario(outer_close, [a_first, a_second], [b, c, d]);
+                                scenarios += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(scenarios, 2 * 6 * 6 * 6 * 6 * 6);
+    }
+
+    fn check_scenario(outer_close: bool, a_hooks: [HookAction; 2], others: [HookAction; 3]) {
+        let label = format!("outer_close={outer_close} A={a_hooks:?} B,C,D={others:?}");
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let host = TreeHost::new();
+        let owner: Rc<dyn UIElementExt> = elwindui_core::ui::VerticalLayout::new();
+        let contents: Vec<Rc<dyn UIElementExt>> =
+            POOL.iter().map(|name| probe_content(&log, name)).collect();
+        // Requests in the order they are made, by pool index.
+        let requests: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+        let closed = Rc::new(Cell::new(false));
+
+        let install = |index: usize, action: HookAction| {
+            let host = host.clone();
+            let owner = Rc::clone(&owner);
+            let pool: Vec<Weak<dyn UIElementExt>> = contents.iter().map(Rc::downgrade).collect();
+            let requests = Rc::clone(&requests);
+            let closed = Rc::clone(&closed);
+            contents[index].add_unmount_hook(Box::new(move || match action {
+                HookAction::Nothing => {}
+                HookAction::Request(target) => {
+                    let target: Option<Rc<dyn UIElementExt>> = pool[target].upgrade();
+                    if let Some(target) = target {
+                        requests.borrow_mut().push(index_of(&pool, &target));
+                        host.set_hosted_tree(target, Some(Rc::clone(&owner)));
+                    }
+                }
+                HookAction::Close => {
+                    closed.set(true);
+                    host.unmount_hosted_tree();
+                }
+            }));
+        };
+        host.set_hosted_tree(Rc::clone(&contents[0]), Some(Rc::clone(&owner)));
+        open_recording_popup(&host, &log, "A");
+        install(0, a_hooks[0]);
+        install(0, a_hooks[1]);
+        for (offset, action) in others.into_iter().enumerate() {
+            install(offset + 1, action);
+        }
+
+        if outer_close {
+            closed.set(true);
+            host.unmount_hosted_tree();
+        } else {
+            requests.borrow_mut().push(1);
+            host.set_hosted_tree(Rc::clone(&contents[1]), Some(Rc::clone(&owner)));
+        }
+
+        // 1.
+        for name in POOL {
+            assert!(
+                count(&log, &format!("{name} unmount")) <= 1,
+                "{label}: {name} twice"
+            );
+        }
+        assert_eq!(count(&log, "A popup close"), 1, "{label}: popup once");
+        let events = log.borrow().clone();
+        let popup = events.iter().position(|e| e == "A popup close");
+        let a_unmount = events.iter().position(|e| e == "A unmount");
+        assert!(popup < a_unmount, "{label}: popup before A");
+
+        // 2. and 3.
+        let published = host.hosted_tree_for_test();
+        let unmounted = |index: usize| count(&log, &format!("{} unmount", POOL[index])) > 0;
+        let expected = if closed.get() {
+            None
+        } else {
+            requests
+                .borrow()
+                .last()
+                .copied()
+                .filter(|&index| !unmounted(index))
+        };
+        let published_index = published.as_ref().map(|tree| index_of_rc(&contents, tree));
+        assert_eq!(published_index, expected, "{label}: latest request wins");
+        for (index, content) in contents.iter().enumerate() {
+            let is_published = published_index == Some(index);
+            assert_eq!(
+                content.parent().is_some(),
+                is_published,
+                "{label}: parent link of {}",
+                POOL[index]
+            );
+            if is_published {
+                assert!(!unmounted(index), "{label}: published content is live");
+                assert!(
+                    content.as_ui_element().invalidate_host.borrow().is_some(),
+                    "{label}: published content wired to the host"
+                );
+            }
+        }
+
+        // 4.
+        closed.set(true);
+        host.unmount_hosted_tree();
+        assert!(
+            host.hosted_tree_for_test().is_none(),
+            "{label}: closed host is empty"
+        );
+        let involved: Vec<usize> = std::iter::once(0)
+            .chain(requests.borrow().iter().copied())
+            .collect();
+        for (index, name) in POOL.iter().enumerate() {
+            let expected = usize::from(involved.contains(&index));
+            assert_eq!(
+                count(&log, &format!("{name} unmount")),
+                expected,
+                "{label}: {name} unmounted exactly once iff involved"
+            );
+        }
+    }
+
+    fn index_of(pool: &[Weak<dyn UIElementExt>], target: &Rc<dyn UIElementExt>) -> usize {
+        pool.iter()
+            .position(|entry| std::ptr::addr_eq(entry.as_ptr(), Rc::as_ptr(target)))
+            .expect("pool member")
+    }
+
+    fn index_of_rc(pool: &[Rc<dyn UIElementExt>], target: &Rc<dyn UIElementExt>) -> usize {
+        pool.iter()
+            .position(|entry| Rc::ptr_eq(entry, target))
+            .expect("pool member")
     }
 
     pub(crate) fn count(log: &Log, entry: &str) -> usize {

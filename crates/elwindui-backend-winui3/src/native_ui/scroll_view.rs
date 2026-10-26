@@ -452,4 +452,72 @@ pub(crate) mod hosted_lifecycle_tests {
             );
         }
     }
+
+    /// Review case: A published, start `set_content(B)`; A's two hooks request C then D; B's hook
+    /// requests C again while C still waits, live, in the superseded queue. C is the final
+    /// published content and is never unmounted while published; A, B, D unmount once; A's popup
+    /// closes once, before A; owner close unmounts C once. Variant: C and D the same `Rc`.
+    pub(crate) fn queued_superseded_content_becoming_newest_is_kept() {
+        for same_rc in [false, true] {
+            let label = if same_rc { "C/D same Rc" } else { "distinct" };
+            let log: Log = Rc::new(RefCell::new(Vec::new()));
+            let scroll_view = ScrollView::new();
+            let host = scroll_view.inner.content_host();
+            let a = probe_content(&log, "A");
+            let b = probe_content(&log, "B");
+            let c = probe_content(&log, "C");
+            let d = if same_rc {
+                Rc::clone(&c)
+            } else {
+                probe_content(&log, "D")
+            };
+            scroll_view.set_content(Rc::clone(&a));
+            open_recording_popup(&host, &log, "A");
+            on_unmount_set(&a, &scroll_view, &c);
+            on_unmount_set(&a, &scroll_view, &d);
+            on_unmount_set(&b, &scroll_view, &c);
+
+            scroll_view.set_content(Rc::clone(&b));
+
+            assert!(
+                published(&host, &c),
+                "{label}: C is the final published content"
+            );
+            assert_eq!(
+                count(&log, "C unmount"),
+                0,
+                "{label}: live C never unmounted"
+            );
+            assert_eq!(count(&log, "A unmount"), 1, "{label}");
+            assert_eq!(count(&log, "B unmount"), 1, "{label}");
+            if !same_rc {
+                assert_eq!(count(&log, "D unmount"), 1, "{label}");
+            }
+            let events = log.borrow().clone();
+            let popup = events.iter().position(|e| e == "A popup close");
+            let a_unmount = events.iter().position(|e| e == "A unmount");
+            assert!(
+                popup.is_some() && popup < a_unmount,
+                "{label}: popup before A"
+            );
+            assert!(
+                a.parent().is_none() && b.parent().is_none(),
+                "{label}: no stale parent"
+            );
+            assert!(c.parent().is_some(), "{label}: C linked to its owner");
+            assert!(
+                c.as_ui_element().invalidate_host.borrow().is_some(),
+                "{label}: C wired to the host"
+            );
+
+            let as_element: Rc<dyn UIElementExt> = scroll_view.clone();
+            elwindui_core::ui::unmount_subtree(&as_element);
+            assert_eq!(
+                count(&log, "C unmount"),
+                1,
+                "{label}: owner close unmounts C once"
+            );
+            assert!(host.hosted_tree_for_test().is_none(), "{label}");
+        }
+    }
 }

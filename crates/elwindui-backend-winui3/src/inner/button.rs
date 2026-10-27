@@ -866,6 +866,8 @@ mod hosted_xaml_regression_tests {
                     retired_content_is_never_republished();
                 crate::native_ui::scroll_view::hosted_lifecycle_tests::
                     queued_superseded_content_becoming_newest_is_kept();
+                crate::native_ui::scroll_view::hosted_lifecycle_tests::
+                    content_adopted_by_another_owner_is_not_taken_over();
                 crate::host::hosted_context_lifecycle_tests::
                     hosted_content_transition_invariants_hold_exhaustively();
                 crate::native_ui::tab_view::hosted_lifecycle_tests::

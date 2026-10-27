@@ -65,6 +65,19 @@ enum HostedPhase {
 /// A hosted-content request: the content and the control that owns it (its logical parent).
 type HostedRequest = (Rc<dyn UIElementExt>, Option<Rc<dyn UIElementExt>>);
 
+/// `true` if `content` is linked (logical parent) to a live owner other than `owner` — it belongs
+/// to that owner (another host's control or any other container) and must not be taken over. A
+/// parent equal to `owner` (the control requesting it) or a dead parent is not an adoption.
+fn adopted_elsewhere(content: &Rc<dyn UIElementExt>, owner: Option<&Rc<dyn UIElementExt>>) -> bool {
+    let parent: Option<Rc<dyn UIElementExt>> = content.parent();
+    match parent {
+        None => false,
+        Some(parent) => {
+            owner.is_none_or(|owner| !std::ptr::addr_eq(Rc::as_ptr(&parent), Rc::as_ptr(owner)))
+        }
+    }
+}
+
 /// Weak handles to one `TreeHost`, registered so a secondary click consumed by a light-dismiss
 /// popup can be re-dispatched to whichever host is under the pointer (`resolve_context_host_at`).
 struct ContextHostEntry {
@@ -2274,6 +2287,11 @@ impl TreeHost {
                 if self.was_retired(&content) {
                     return;
                 }
+                // Content another live owner has adopted stays with that owner: the request is
+                // rejected, the current content stays, and the adopted content is not touched.
+                if adopted_elsewhere(&content, owner.as_ref()) {
+                    return;
+                }
                 *self.pending_hosted.borrow_mut() = Some((content, owner));
                 self.run_hosted_transition(false);
             }
@@ -2347,7 +2365,13 @@ impl TreeHost {
         // The newest request may name content that was torn down earlier in this transition (or
         // before): it is rejected and the host stays empty — earlier candidates were superseded
         // and are torn down as well, so there is nothing valid to fall back to.
-        let candidate = candidate.filter(|(content, _)| !self.was_retired(content));
+        //
+        // Likewise, a newest request naming content another live owner adopted meanwhile (for
+        // example from an `on_unmount` hook) is rejected: this host never overwrites that owner's
+        // logical parent or host wiring, and does not unmount the content.
+        let candidate = candidate.filter(|(content, owner)| {
+            !self.was_retired(content) && !adopted_elsewhere(content, owner.as_ref())
+        });
         if let Some((content, owner)) = candidate {
             if let Some(owner) = owner {
                 *content.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&owner));

@@ -520,4 +520,73 @@ pub(crate) mod hosted_lifecycle_tests {
             assert!(host.hosted_tree_for_test().is_none(), "{label}");
         }
     }
+
+    /// Cross-host ownership: a content adopted by another live owner is never taken over.
+    /// (1) X publishes A; A's `on_unmount` gives B to Y; then `X.set_content(B)` → X retires A
+    /// and ends empty; Y keeps B (parent, host wiring) and B is not unmounted. (2) An `Idle`
+    /// request for Y's live B on X is ignored (X keeps its content). (3) Y's normal replacement
+    /// B → Z unmounts B once; closing X never touches B; closing Y unmounts Z once.
+    pub(crate) fn content_adopted_by_another_owner_is_not_taken_over() {
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let x = ScrollView::new();
+        let y = ScrollView::new();
+        let x_host = x.inner.content_host();
+        let y_host = y.inner.content_host();
+        let a = probe_content(&log, "A");
+        let b = probe_content(&log, "B");
+        x.set_content(Rc::clone(&a));
+        open_recording_popup(&x_host, &log, "A");
+        on_unmount_set(&a, &y, &b);
+
+        // (1)
+        x.set_content(Rc::clone(&b));
+        assert!(
+            x_host.hosted_tree_for_test().is_none(),
+            "(1) X does not take B over"
+        );
+        assert!(published(&y_host, &b), "(1) Y keeps B");
+        assert_eq!(count(&log, "A unmount"), 1);
+        assert_eq!(count(&log, "A popup close"), 1);
+        assert_eq!(
+            count(&log, "B unmount"),
+            0,
+            "(1) adopted B is not unmounted"
+        );
+        let y_element: Rc<dyn UIElementExt> = y.clone();
+        assert!(
+            b.parent().is_some_and(|parent| std::ptr::addr_eq(
+                Rc::as_ptr(&parent),
+                Rc::as_ptr(&y_element)
+            )),
+            "(1) B's parent is still Y"
+        );
+        assert!(
+            b.as_ui_element().invalidate_host.borrow().is_some(),
+            "(1) B wired to Y"
+        );
+
+        // (2)
+        let e = probe_content(&log, "E");
+        x.set_content(Rc::clone(&e));
+        x.set_content(Rc::clone(&b));
+        assert!(published(&x_host, &e), "(2) X keeps E");
+        assert!(published(&y_host, &b), "(2) Y keeps B");
+        assert_eq!(count(&log, "E unmount"), 0);
+
+        // (3)
+        let z = probe_content(&log, "Z");
+        y.set_content(Rc::clone(&z));
+        assert_eq!(
+            count(&log, "B unmount"),
+            1,
+            "(3) Y's replacement unmounts B once"
+        );
+        let x_element: Rc<dyn UIElementExt> = x.clone();
+        elwindui_core::ui::unmount_subtree(&x_element);
+        assert_eq!(count(&log, "B unmount"), 1, "(3) X close never touches B");
+        assert_eq!(count(&log, "E unmount"), 1);
+        elwindui_core::ui::unmount_subtree(&y_element);
+        assert_eq!(count(&log, "Z unmount"), 1);
+        assert_eq!(count(&log, "B unmount"), 1);
+    }
 }

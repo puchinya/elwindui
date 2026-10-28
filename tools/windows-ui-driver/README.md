@@ -56,6 +56,7 @@ pwsh -NoProfile -File $D search --hwnd <hwnd> --query "Ocean"
 pwsh -NoProfile -File $D invoke --hwnd <hwnd> --selector <selector-from-search>
 pwsh -NoProfile -File $D set-value --hwnd <hwnd> --selector <selector-from-search> --value "text with spaces"
 pwsh -NoProfile -File $D point-click --hwnd <hwnd> --x <screen-x> --y <screen-y>
+pwsh -NoProfile -File $D hover --hwnd <hwnd> --selector <selector-from-search> --dwell-ms 800
 pwsh -NoProfile -File $D drag --hwnd <hwnd> --from-x <x1> --from-y <y1> --to-x <x2> --to-y <y2>
 pwsh -NoProfile -File $D drag --hwnd <hwnd> --from-x <x1> --from-y <y1> --to-x <x2> --to-y <y2> --duration-ms 4000
 pwsh -NoProfile -File $D touch-cancel --hwnd <hwnd> --from-x <screen-x> --from-y <screen-y> --to-x <screen-x> --to-y <screen-y> --hold-ms 250

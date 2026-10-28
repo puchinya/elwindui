@@ -42,6 +42,178 @@ use elwindui_core::ui::{
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+
+/// COM identity of `canvas` (its `IUnknown` pointer). Callers reach the same canvas through
+/// different interface pointers (e.g. an upgraded weak reference), so the raw `Canvas` pointer is
+/// not a stable key.
+fn popup_canvas_key(canvas: &Canvas) -> usize {
+    canvas
+        .cast::<windows::core::IUnknown>()
+        .map(|unknown| unknown.as_raw() as usize)
+        .unwrap_or(0)
+}
+
+/// State of a host's nested content (`TreeHost::set_hosted_tree`): no change running, one
+/// transition running (reentrant requests are only recorded), or retired for good by its owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostedPhase {
+    Idle,
+    Transition,
+    Closed,
+}
+
+/// A hosted-content request: the content and the control that owns it (its logical parent).
+type HostedRequest = (Rc<dyn UIElementExt>, Option<Rc<dyn UIElementExt>>);
+
+/// `true` if `content` is linked (logical parent) to a live owner other than `owner` — it belongs
+/// to that owner (another host's control or any other container) and must not be taken over. A
+/// parent equal to `owner` (the control requesting it) or a dead parent is not an adoption.
+fn adopted_elsewhere(content: &Rc<dyn UIElementExt>, owner: Option<&Rc<dyn UIElementExt>>) -> bool {
+    let parent: Option<Rc<dyn UIElementExt>> = content.parent();
+    match parent {
+        None => false,
+        Some(parent) => {
+            owner.is_none_or(|owner| !std::ptr::addr_eq(Rc::as_ptr(&parent), Rc::as_ptr(owner)))
+        }
+    }
+}
+
+/// Weak handles to one `TreeHost`, registered so a secondary click consumed by a light-dismiss
+/// popup can be re-dispatched to whichever host is under the pointer (`resolve_context_host_at`).
+struct ContextHostEntry {
+    key: usize,
+    canvas: windows::core::Weak<Canvas>,
+    tree: Weak<RefCell<Option<Rc<dyn UIElementExt>>>>,
+    keyboard: Weak<KeyboardDispatcher>,
+    active_popup: Weak<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
+    active: Weak<Cell<bool>>,
+}
+
+/// Live handles of a registered host that is active and has a tree.
+struct ContextHostHandles {
+    canvas: Canvas,
+    tree: Rc<dyn UIElementExt>,
+    keyboard: Rc<KeyboardDispatcher>,
+    active_popup: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
+}
+
+impl ContextHostEntry {
+    /// `false` once the host's tree slot (and so the host) has been dropped.
+    fn is_alive(&self) -> bool {
+        Weak::<RefCell<Option<Rc<dyn UIElementExt>>>>::strong_count(&self.tree) > 0
+    }
+
+    /// `None` once the host is destroyed, inactive (a non-selected tab) or has no tree.
+    fn upgrade(&self) -> Option<ContextHostHandles> {
+        let active: Rc<Cell<bool>> = self.active.upgrade()?;
+        if !active.get() {
+            return None;
+        }
+        let tree_slot: Rc<RefCell<Option<Rc<dyn UIElementExt>>>> = self.tree.upgrade()?;
+        let tree = tree_slot.borrow().clone()?;
+        Some(ContextHostHandles {
+            canvas: self.canvas.upgrade()?,
+            tree,
+            keyboard: self.keyboard.upgrade()?,
+            active_popup: self.active_popup.upgrade()?,
+        })
+    }
+}
+
+thread_local! {
+    static CONTEXT_HOSTS: RefCell<Vec<ContextHostEntry>> = const { RefCell::new(Vec::new()) };
+    /// Incremented by every context dispatch; a deferred re-dispatch is dropped if it changed.
+    static CONTEXT_REQUEST_GENERATION: Cell<u64> = const { Cell::new(0) };
+}
+
+/// `true` if a live host other than `host` currently publishes `content` as its tree.
+fn published_by_other_host(host: &TreeHost, content: &Rc<dyn UIElementExt>) -> bool {
+    let own_key = popup_canvas_key(&host.canvas);
+    CONTEXT_HOSTS.with(|hosts| {
+        hosts.borrow().iter().any(|entry: &ContextHostEntry| {
+            if entry.key == own_key {
+                return false;
+            }
+            let slot: Option<Rc<RefCell<Option<Rc<dyn UIElementExt>>>>> = entry.tree.upgrade();
+            slot.is_some_and(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .is_some_and(|published| Rc::ptr_eq(published, content))
+            })
+        })
+    })
+}
+
+fn register_context_host(host: &TreeHost) {
+    let Ok(canvas) = host.canvas.downgrade() else {
+        return;
+    };
+    let entry = ContextHostEntry {
+        key: popup_canvas_key(&host.canvas),
+        canvas,
+        tree: Rc::downgrade(&host.tree),
+        keyboard: Rc::downgrade(&host.keyboard),
+        active_popup: Rc::downgrade(&host.active_popup),
+        active: Rc::downgrade(&host.active),
+    };
+    CONTEXT_HOSTS.with(|hosts| {
+        let mut hosts = hosts.borrow_mut();
+        // Destroyed hosts are pruned here, so the registry never outgrows the live host count.
+        hosts.retain(ContextHostEntry::is_alive);
+        hosts.push(entry);
+    });
+}
+
+/// The live context host owning `element`: the nearest ancestor (or `element` itself) that is a
+/// registered host canvas. Walks `VisualTreeHelper::GetParent`, falling back to
+/// `FrameworkElement.Parent`.
+fn registered_context_host_of(element: &UIElement) -> Option<ContextHostHandles> {
+    use crate::bindings::Microsoft::UI::Xaml::Media::VisualTreeHelper;
+    nearest_registered_context_host(element.cast().ok(), |node| {
+        VisualTreeHelper::GetParent(node).ok().or_else(|| {
+            node.cast::<FrameworkElement>()
+                .ok()
+                .and_then(|element| element.Parent().ok())
+        })
+    })
+}
+
+/// [`registered_context_host_of`] over an explicit parent relation (tests supply their own,
+/// because XAML reports parents only for elements in a live tree).
+fn nearest_registered_context_host(
+    start: Option<crate::bindings::Microsoft::UI::Xaml::DependencyObject>,
+    parent: impl Fn(
+        &crate::bindings::Microsoft::UI::Xaml::DependencyObject,
+    ) -> Option<crate::bindings::Microsoft::UI::Xaml::DependencyObject>,
+) -> Option<ContextHostHandles> {
+    let mut current = start;
+    while let Some(node) = current {
+        if let Ok(canvas) = node.cast::<Canvas>() {
+            let key = popup_canvas_key(&canvas);
+            let found = CONTEXT_HOSTS.with(|hosts| {
+                hosts
+                    .borrow()
+                    .iter()
+                    .find(|entry: &&ContextHostEntry| entry.key == key && entry.is_alive())
+                    .map(ContextHostEntry::upgrade)
+            });
+            if let Some(found) = found {
+                // A registered but inactive / empty host is not a target, and neither is any
+                // host it is nested in.
+                return found;
+            }
+        }
+        current = parent(&node);
+    }
+    None
+}
+
+thread_local! {
+    /// Popup content canvases (by COM identity) and their popup's XAML-root offset — see
+    /// `TreeHost::popup_offset`.
+    static POPUP_CANVAS_OFFSETS: RefCell<HashMap<usize, (f32, f32)>> =
+        RefCell::new(HashMap::new());
+}
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
@@ -359,6 +531,17 @@ pub struct TreeHost {
     /// Keeps track of an active standalone custom popup surface, if any, ensuring single-popup ownership.
     pub(crate) active_popup:
         Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
+    /// Hosted content transition state; see `set_hosted_tree` / `run_hosted_transition`.
+    hosted_phase: Rc<Cell<HostedPhase>>,
+    /// Set when the owner retires this host during (or by starting) a transition.
+    hosted_terminal: Rc<Cell<bool>>,
+    /// Latest `set_hosted_tree` request made during a transition.
+    pending_hosted: Rc<RefCell<Option<HostedRequest>>>,
+    /// Contents this host has unmounted (published trees it retired, superseded and rejected
+    /// requests). Such a content is torn down for good and is never attached again.
+    retired_hosted: Rc<RefCell<Vec<Weak<dyn elwindui_core::ui::UIElementExt>>>>,
+    /// Requested contents that lost to a later request and still await their single unmount.
+    superseded_hosted: Rc<RefCell<Vec<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
     /// Keeps every FFI callback registered by this host alive for exactly this host's lifetime.
     callback_owner: UiCallbackRegistryOwner,
     animation_runtime: Rc<AnimationRuntime>,
@@ -1067,6 +1250,11 @@ impl TreeHost {
             viewport: Rc::new(Cell::new(None)),
             active: Rc::new(Cell::new(true)),
             active_popup: Rc::new(RefCell::new(None)),
+            hosted_phase: Rc::new(Cell::new(HostedPhase::Idle)),
+            hosted_terminal: Rc::new(Cell::new(false)),
+            pending_hosted: Rc::new(RefCell::new(None)),
+            superseded_hosted: Rc::new(RefCell::new(Vec::new())),
+            retired_hosted: Rc::new(RefCell::new(Vec::new())),
             callback_owner: UiCallbackRegistryOwner::default(),
             animation_runtime: AnimationRuntime::new(),
             rendering: Rc::new(WinUI3RenderingState::default()),
@@ -1099,27 +1287,9 @@ impl TreeHost {
                     Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
                 > = active_for_key.upgrade();
                 if let (Some(tree), Some(kb), Some(active)) = (tree_ref, kb_ref, active_ref) {
-                    let screen_anchor = if let Some(focused) = kb.as_ref().focus.focused() {
-                        let offset = focused
-                            .arranged_offset()
-                            .unwrap_or(Point { x: 0.0, y: 0.0 });
-                        let w = focused.arranged_width().unwrap_or(0.0);
-                        let h = focused.arranged_height().unwrap_or(0.0);
-                        Self::canvas_to_screen_point(&canvas_for_context_key, offset).map(
-                            |screen_pt| {
-                                elwindui_core::ui::popup::PopupAnchor::Rect(
-                                    elwindui_core::base::Rect {
-                                        x: screen_pt.x,
-                                        y: screen_pt.y,
-                                        width: w,
-                                        height: h,
-                                    },
-                                )
-                            },
-                        )
-                    } else {
-                        None
-                    };
+                    let screen_anchor = kb.as_ref().focus.focused().and_then(|focused| {
+                        Self::focused_screen_anchor(&canvas_for_context_key, &focused)
+                    });
                     if let Some(screen_anchor) = screen_anchor {
                         let request =
                             elwindui_core::ui::ContextRequest::keyboard(Some(screen_anchor));
@@ -1558,41 +1728,18 @@ impl TreeHost {
                     let is_pointer = args
                         .TryGetPosition(&canvas_for_ctx, &mut pt)
                         .unwrap_or(false);
+                    // A pointer-originated request is dispatched by the `RightTapped` handler
+                    // above; WinUI raises both events for one secondary click, and dispatching
+                    // here too opened the context popup twice (build, replace, rebuild).
                     let request = if is_pointer {
-                        let local_pt = elwindui_core::base::Point { x: pt.X, y: pt.Y };
-                        TreeHost::canvas_to_screen_point(&canvas_for_ctx, local_pt).map(
-                            |screen_pt| {
-                                elwindui_core::ui::ContextRequest::pointer(local_pt, screen_pt)
-                            },
-                        )
+                        None
                     } else {
                         let keyboard: Option<Rc<KeyboardDispatcher>> = keyboard_for_ctx.upgrade();
-                        let screen_anchor = if let Some(keyboard) = keyboard {
-                            if let Some(focused) = keyboard.as_ref().focus.focused() {
-                                let offset = focused
-                                    .arranged_offset()
-                                    .unwrap_or(Point { x: 0.0, y: 0.0 });
-                                let w = focused.arranged_width().unwrap_or(0.0);
-                                let h = focused.arranged_height().unwrap_or(0.0);
-                                TreeHost::canvas_to_screen_point(&canvas_for_ctx, offset).map(
-                                    |screen_pt| {
-                                        elwindui_core::ui::popup::PopupAnchor::Rect(
-                                            elwindui_core::base::Rect {
-                                                x: screen_pt.x,
-                                                y: screen_pt.y,
-                                                width: w,
-                                                height: h,
-                                            },
-                                        )
-                                    },
-                                )
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                        screen_anchor
+                        keyboard
+                            .and_then(|keyboard| keyboard.as_ref().focus.focused())
+                            .and_then(|focused| {
+                                TreeHost::focused_screen_anchor(&canvas_for_ctx, &focused)
+                            })
                             .map(|anchor| elwindui_core::ui::ContextRequest::keyboard(Some(anchor)))
                     };
                     if let Some(request) = request {
@@ -1637,6 +1784,7 @@ impl TreeHost {
                 },
             ));
         }
+        register_context_host(&this);
         this
     }
 
@@ -2065,6 +2213,8 @@ impl TreeHost {
 
     /// Clears this host's tree, cleans up native composition and children, and closes any active popup.
     pub(crate) fn clear_tree(&self) {
+        #[cfg(test)]
+        hosted_context_lifecycle_tests::record_event("native children detach");
         self.cancel_and_unregister_current_tree();
         if let Some(old) = self.active_popup.borrow_mut().take() {
             old.close();
@@ -2110,6 +2260,236 @@ impl TreeHost {
     /// path (`native_ui::window.rs`).
     pub(crate) fn close_active_popup(&self) {
         close_active_popup_slot(&self.active_popup);
+    }
+
+    /// Attaches `content` as the tree of a nested host owned by a native control (a `TabView` tab
+    /// or `ScrollView` content), linking `content`'s logical parent to that control. The nested
+    /// host's root has no Visual parent, so without the link `effective_environment()` stopped at
+    /// the nested root and resolved a fresh root Environment instead of the control's ancestors.
+    ///
+    /// Replacing different content first retires the previous tree completely
+    /// ([`Self::unmount_hosted_tree`]: its popup closes, then it unmounts exactly once and loses
+    /// its logical parent) before the new tree is attached.
+    ///
+    /// Hosted content changes run as one transition (`HostedPhase`, see
+    /// `docs/design/runtime/popup_context_menu_design.md`, nested content retirement): while a
+    /// transition runs, every reentrant `set_hosted_tree` (from any `on_unmount` hook) only becomes
+    /// the pending request; nothing is attached until all teardown — the previous tree and every
+    /// superseded request, including requests their own hooks make — has completed. Then the latest
+    /// request is attached exactly once. On a host whose owner has retired it
+    /// ([`Self::unmount_hosted_tree`]) the request is rejected: the content is never attached and
+    /// is unmounted once.
+    pub(crate) fn set_hosted_tree(
+        &self,
+        content: Rc<dyn elwindui_core::ui::UIElementExt>,
+        owner: Option<Rc<dyn elwindui_core::ui::UIElementExt>>,
+    ) {
+        match self.hosted_phase.get() {
+            HostedPhase::Closed => {
+                self.superseded_hosted.borrow_mut().push(content);
+                self.unmount_superseded_now(None);
+            }
+            HostedPhase::Transition => {
+                let replaced = self.pending_hosted.replace(Some((content, owner)));
+                if let Some((replaced, _)) = replaced {
+                    self.superseded_hosted.borrow_mut().push(replaced);
+                }
+            }
+            HostedPhase::Idle => {
+                let published = self.tree.borrow().clone();
+                if published.is_some_and(|published| Rc::ptr_eq(&published, &content)) {
+                    return;
+                }
+                // A request for content this host already tore down is rejected outright: the
+                // current content stays, and the dead content is not unmounted again.
+                if self.was_retired(&content) {
+                    return;
+                }
+                // Content another live owner has adopted stays with that owner: the request is
+                // rejected, the current content stays, and the adopted content is not touched.
+                if self.owned_elsewhere(&content, owner.as_ref()) {
+                    return;
+                }
+                *self.pending_hosted.borrow_mut() = Some((content, owner));
+                self.run_hosted_transition(false);
+            }
+        }
+    }
+
+    /// Retires this host for good when the control owning it unmounts or drops it (a removed tab,
+    /// an unmounted ScrollView): the published tree and any requested content are torn down and
+    /// the host ends `Closed` — empty, with no native children — and accepts no content again.
+    /// `unmount_subtree` only follows Visual children, which never include a nested host's tree,
+    /// so the owning control calls this from its own unmount; the popup closes before the content
+    /// it was opened from. Called during a running transition, it turns that transition terminal;
+    /// called again afterwards, it is a no-op.
+    pub(crate) fn unmount_hosted_tree(&self) {
+        match self.hosted_phase.get() {
+            HostedPhase::Closed => {}
+            HostedPhase::Transition => self.hosted_terminal.set(true),
+            HostedPhase::Idle => self.run_hosted_transition(true),
+        }
+    }
+
+    /// The single hosted-content transition: `retiring` (the published tree) → `superseded
+    /// cleanup` (repeated until no new request appears) → `commit newest` (Idle) or `terminal
+    /// closed` (Closed). Reentrant hooks can only add requests; they never publish a tree while
+    /// this runs.
+    fn run_hosted_transition(&self, terminal: bool) {
+        self.hosted_phase.set(HostedPhase::Transition);
+        if terminal {
+            self.hosted_terminal.set(true);
+        }
+        let published = self.tree.borrow().clone();
+        if let Some(published) = published {
+            self.mark_retired(&published);
+            self.retire_published_tree(&published);
+        }
+        // Superseded cleanup, one content at a time: every unmount can run hooks that make a
+        // newer request (or close the host), so the candidate and the next content to retire are
+        // re-decided after each single unmount — a content that became the newest request while
+        // waiting in the superseded queue is kept, never torn down.
+        let mut candidate: Option<HostedRequest> = None;
+        loop {
+            let newer = self.pending_hosted.take();
+            if let Some(newer) = newer {
+                if let Some((previous, _)) = candidate.take() {
+                    if !Rc::ptr_eq(&previous, &newer.0) {
+                        self.superseded_hosted.borrow_mut().push(previous);
+                    }
+                }
+                candidate = Some(newer);
+            }
+            if self.hosted_terminal.get() {
+                if let Some((dropped, _)) = candidate.take() {
+                    self.superseded_hosted.borrow_mut().push(dropped);
+                }
+            }
+            let next = self.next_superseded_to_retire(candidate.as_ref().map(|(c, _)| c));
+            match next {
+                Some(content) => {
+                    self.mark_retired(&content);
+                    elwindui_core::ui::unmount_subtree(&content);
+                }
+                None if self.pending_hosted.borrow().is_none() => break,
+                None => {}
+            }
+        }
+        if self.hosted_terminal.get() {
+            self.hosted_phase.set(HostedPhase::Closed);
+            return;
+        }
+        self.hosted_phase.set(HostedPhase::Idle);
+        // The newest request may name content that was torn down earlier in this transition (or
+        // before): it is rejected and the host stays empty — earlier candidates were superseded
+        // and are torn down as well, so there is nothing valid to fall back to.
+        //
+        // Likewise, a newest request naming content another live owner adopted meanwhile (for
+        // example from an `on_unmount` hook) is rejected: this host never overwrites that owner's
+        // logical parent or host wiring, and does not unmount the content.
+        let candidate = candidate.filter(|(content, owner)| {
+            !self.was_retired(content) && !self.owned_elsewhere(content, owner.as_ref())
+        });
+        if let Some((content, owner)) = candidate {
+            if let Some(owner) = owner {
+                *content.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&owner));
+            }
+            self.set_tree(content);
+        }
+    }
+
+    /// Removes and returns the next queued superseded content that still has to be torn down,
+    /// discarding entries that need nothing: the current candidate (it is live and kept), content
+    /// already torn down, and content another owner adopted (logical parent set).
+    fn next_superseded_to_retire(
+        &self,
+        candidate: Option<&Rc<dyn elwindui_core::ui::UIElementExt>>,
+    ) -> Option<Rc<dyn elwindui_core::ui::UIElementExt>> {
+        loop {
+            let content = {
+                let mut queue = self.superseded_hosted.borrow_mut();
+                if queue.is_empty() {
+                    return None;
+                }
+                queue.remove(0)
+            };
+            let keep = candidate.is_some_and(|candidate| Rc::ptr_eq(candidate, &content));
+            let adopted = content.as_ui_element().parent.borrow().is_some();
+            if !keep && !adopted && !self.was_retired(&content) {
+                return Some(content);
+            }
+        }
+    }
+
+    /// Outside any transition (a closed host rejecting a request): unmount queued superseded
+    /// content once, skipping adopted content.
+    fn unmount_superseded_now(&self, kept: Option<&Rc<dyn elwindui_core::ui::UIElementExt>>) {
+        let superseded = std::mem::take(&mut *self.superseded_hosted.borrow_mut());
+        for content in superseded {
+            if kept.is_some_and(|kept| Rc::ptr_eq(kept, &content))
+                || content.as_ui_element().parent.borrow().is_some()
+                || self.was_retired(&content)
+            {
+                continue;
+            }
+            self.mark_retired(&content);
+            elwindui_core::ui::unmount_subtree(&content);
+        }
+    }
+
+    /// `true` if `content` belongs to someone else: a live owner other than `owner` adopted it
+    /// ([`adopted_elsewhere`]), or another live host publishes it. The second check matters when
+    /// several hosts share one owner (each `TabView` tab has its own host, all owned by the
+    /// TabView): the shared owner pointer cannot tell those hosts apart, so ownership is decided
+    /// per host — a single `UIElement` root is published by at most one host.
+    fn owned_elsewhere(
+        &self,
+        content: &Rc<dyn elwindui_core::ui::UIElementExt>,
+        owner: Option<&Rc<dyn elwindui_core::ui::UIElementExt>>,
+    ) -> bool {
+        adopted_elsewhere(content, owner) || published_by_other_host(self, content)
+    }
+
+    /// Records `content` as torn down by this host (before its unmount starts, so its own hooks
+    /// already see it as retired). Dead entries are pruned here.
+    fn mark_retired(&self, content: &Rc<dyn elwindui_core::ui::UIElementExt>) {
+        let mut retired = self.retired_hosted.borrow_mut();
+        retired.retain(|entry: &Weak<dyn elwindui_core::ui::UIElementExt>| {
+            Weak::<dyn elwindui_core::ui::UIElementExt>::strong_count(entry) > 0
+        });
+        retired.push(Rc::downgrade(content));
+    }
+
+    fn was_retired(&self, content: &Rc<dyn elwindui_core::ui::UIElementExt>) -> bool {
+        let target = Rc::as_ptr(content) as *const ();
+        self.retired_hosted.borrow().iter().any(
+            |entry: &Weak<dyn elwindui_core::ui::UIElementExt>| {
+                Weak::as_ptr(entry) as *const () == target
+                    && Weak::<dyn elwindui_core::ui::UIElementExt>::strong_count(entry) > 0
+            },
+        )
+    }
+
+    /// Retires the published `tree`: popup close → `unmount_subtree` (every `on_unmount` hook) →
+    /// logical parent cleared → native children / composition detached (`clear_tree`), so the
+    /// native detach always follows the last hook.
+    fn retire_published_tree(&self, tree: &Rc<dyn elwindui_core::ui::UIElementExt>) {
+        self.close_active_popup();
+        #[cfg(test)]
+        hosted_context_lifecycle_tests::record_event("content retire");
+        elwindui_core::ui::unmount_subtree(tree);
+        *tree.as_ui_element().parent.borrow_mut() = None;
+        self.clear_tree();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_active_for_test(&self) -> bool {
+        self.active.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hosted_tree_for_test(&self) -> Option<Rc<dyn elwindui_core::ui::UIElementExt>> {
+        self.tree.borrow().clone()
     }
 
     /// Focuses the specified element within this host's focus tracker.
@@ -2213,13 +2593,22 @@ impl TreeHost {
         // be read back as this host's own layout input (that self-observation is exactly the
         // same-host feedback loop `set_viewport`'s own doc comment describes) — this host has no
         // `canvas.SizeChanged` listener, so it structurally cannot be.
+        // The natural size is the root's measured (desired) size, which includes its margin;
+        // the arranged size excludes it, so using it clipped the root's right/bottom margin.
+        let natural = tree.measured_size();
         let final_width = if unconstrained_width {
-            tree.arranged_width().unwrap_or(0.0) as f64
+            natural
+                .map(|size| size.width)
+                .or_else(|| tree.arranged_width())
+                .unwrap_or(0.0) as f64
         } else {
             available.width as f64
         };
         let final_height = if unconstrained_height {
-            tree.arranged_height().unwrap_or(0.0) as f64
+            natural
+                .map(|size| size.height)
+                .or_else(|| tree.arranged_height())
+                .unwrap_or(0.0) as f64
         } else {
             available.height as f64
         };
@@ -2770,6 +3159,49 @@ impl TreeHost {
         }
     }
 
+    /// Records (or with `None`, forgets) the XAML-root offset of the windowed `Popup` hosting
+    /// `canvas` — see [`Self::popup_offset`]. Called by the popup surface whenever it positions
+    /// the popup and when it closes.
+    pub(crate) fn set_popup_canvas_offset(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        offset: Option<(f32, f32)>,
+    ) {
+        let key = popup_canvas_key(canvas);
+        POPUP_CANVAS_OFFSETS.with(|offsets| match offset {
+            Some(offset) => {
+                offsets.borrow_mut().insert(key, offset);
+            }
+            None => {
+                offsets.borrow_mut().remove(&key);
+            }
+        });
+    }
+
+    /// XAML-root offset of the windowed `Popup` hosting `canvas` (a popup content host), or zero.
+    /// For a windowed popup's child, `TransformToVisual` yields popup-local coordinates without the
+    /// popup's own offset, and the child's `Parent` does not lead back to the `Popup`, so the
+    /// popup surface registers its offset here and the canvas/screen conversions add it back
+    /// (UIA bounds and anchors inside popups).
+    fn popup_offset(canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas) -> (f32, f32) {
+        let key = popup_canvas_key(canvas);
+        POPUP_CANVAS_OFFSETS
+            .with(|offsets| offsets.borrow().get(&key).copied())
+            .unwrap_or((0.0, 0.0))
+    }
+
+    /// [`Self::popup_offset`] in physical pixels.
+    pub(crate) fn popup_offset_physical(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+    ) -> (f32, f32) {
+        let (x, y) = Self::popup_offset(canvas);
+        let scale = canvas
+            .XamlRoot()
+            .and_then(|root| root.RasterizationScale())
+            .unwrap_or(1.0);
+        let scale = if scale <= 0.0 { 1.0 } else { scale as f32 };
+        (x * scale, y * scale)
+    }
+
     /// Converts canvas-local logical DIPs to desktop screen physical coordinates.
     ///
     /// The XAML root/content transform and ContentCoordinateConverter are the only source of
@@ -2787,7 +3219,10 @@ impl TreeHost {
             X: canvas_point.x,
             Y: canvas_point.y,
         };
-        let local_dip = transform.TransformPoint(pt).ok()?;
+        let mut local_dip = transform.TransformPoint(pt).ok()?;
+        let (offset_x, offset_y) = Self::popup_offset(canvas);
+        local_dip.X += offset_x;
+        local_dip.Y += offset_y;
 
         let island = xaml_root.ContentIslandEnvironment().ok()?;
         let app_window_id = island.AppWindowId().ok()?;
@@ -2827,10 +3262,11 @@ impl TreeHost {
         let xaml_local = Self::screen_logical_to_xaml_local(canvas, screen_point)?;
         let canvas_element: crate::bindings::Microsoft::UI::Xaml::UIElement = canvas.cast().ok()?;
         let transform = content.TransformToVisual(&canvas_element).ok()?;
+        let (offset_x, offset_y) = Self::popup_offset(canvas);
         let canvas_local = transform
             .TransformPoint(windows::Foundation::Point {
-                X: xaml_local.x,
-                Y: xaml_local.y,
+                X: xaml_local.x - offset_x,
+                Y: xaml_local.y - offset_y,
             })
             .ok()?;
         Some(Point {
@@ -2964,19 +3400,147 @@ impl TreeHost {
         None
     }
 
+    /// Screen-logical anchor rectangle of the keyboard-focused element for a keyboard context
+    /// request. `arranged_offset()` is relative to the visual parent, so the offsets are summed up
+    /// the visual-parent chain to get the element's position in this host's root Canvas.
+    fn focused_screen_anchor(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        focused: &Rc<dyn UIElementExt>,
+    ) -> Option<elwindui_core::ui::popup::PopupAnchor> {
+        let mut origin = Point { x: 0.0, y: 0.0 };
+        let mut current = Some(Rc::clone(focused));
+        while let Some(element) = current {
+            let offset = element
+                .arranged_offset()
+                .unwrap_or(Point { x: 0.0, y: 0.0 });
+            origin.x += offset.x;
+            origin.y += offset.y;
+            current = element.visual_parent();
+        }
+        let screen_pt = Self::canvas_to_screen_point(canvas, origin)?;
+        Some(elwindui_core::ui::popup::PopupAnchor::Rect(
+            elwindui_core::base::Rect {
+                x: screen_pt.x,
+                y: screen_pt.y,
+                width: focused.arranged_width().unwrap_or(0.0),
+                height: focused.arranged_height().unwrap_or(0.0),
+            },
+        ))
+    }
+
+    /// Finds the visible, active `TreeHost` that owns the element under `screen_pt` in the window
+    /// of `origin_canvas`, and returns its handles plus the point in that host's canvas DIPs.
+    ///
+    /// Hit testing goes through XAML (`VisualTreeHelper::FindElementsInHostCoordinates`), so only
+    /// elements that are actually visible and hit-testable at that point count — collapsed tabs,
+    /// clipped ScrollView content and removed hosts never match. The topmost hit element decides:
+    /// its nearest ancestor canvas registered as a context host is the target. If that element is
+    /// not inside any live host (window chrome, outside the window), there is no target.
+    fn resolve_context_host_at(
+        origin_canvas: &Canvas,
+        screen_pt: Point,
+    ) -> Option<(ContextHostHandles, Point)> {
+        use crate::bindings::Microsoft::UI::Xaml::Media::VisualTreeHelper;
+        let xaml_local = Self::screen_logical_to_xaml_local(origin_canvas, screen_pt)?;
+        let root = origin_canvas.XamlRoot().ok()?.Content().ok()?;
+        let hits = VisualTreeHelper::FindElementsInHostCoordinatesPoint(
+            windows::Foundation::Point {
+                X: xaml_local.x,
+                Y: xaml_local.y,
+            },
+            &root,
+        )
+        .ok()?;
+        let topmost = hits.First().ok()?;
+        if !topmost.HasCurrent().unwrap_or(false) {
+            return None;
+        }
+        let element: UIElement = topmost.Current().ok()?;
+        let handles = registered_context_host_of(&element)?;
+        let local = Self::screen_to_canvas_point(&handles.canvas, screen_pt)?;
+        Some((handles, local))
+    }
+
+    /// Hook run after a context popup or flyout opened from `canvas` was dismissed by WinUI.
+    /// Native light dismiss consumes the pointer press that dismissed it, so when that press was a
+    /// secondary click the context request the user made never reaches the element under the
+    /// pointer. Like a Win32 context menu re-posting `WM_CONTEXTMENU`, re-dispatch it on the next
+    /// dispatcher turn to whichever host is under the cursor then — which need not be the host
+    /// that opened the popup (`docs/specs/ui_spec.md`, popup replacement by secondary click).
+    fn secondary_dismiss_hook(canvas: &Canvas) -> Rc<dyn Fn()> {
+        let origin = canvas
+            .downgrade()
+            .unwrap_or_else(|_| windows::core::Weak::new());
+        Rc::new(move || {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_RBUTTON};
+            // High bit set: the secondary button is down right now, i.e. the dismissal came
+            // from a secondary-button press rather than a primary click, Escape or focus loss.
+            if unsafe { GetAsyncKeyState(VK_RBUTTON.0 as i32) } >= 0 {
+                return;
+            }
+            let mut cursor = windows::Win32::Foundation::POINT::default();
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut cursor) }
+                .is_err()
+            {
+                return;
+            }
+            let generation = CONTEXT_REQUEST_GENERATION.with(Cell::get);
+            let origin = origin.clone();
+            elwindui_core::task::spawn_local(async move {
+                // Nothing may be re-dispatched once the opening host (and with it its window) is
+                // gone, or if any context request was already dispatched since the dismissal —
+                // e.g. WinUI delivered this click to the target itself.
+                let Some(origin) = origin.upgrade() else {
+                    return;
+                };
+                if CONTEXT_REQUEST_GENERATION.with(Cell::get) != generation {
+                    return;
+                }
+                let scale = origin
+                    .XamlRoot()
+                    .and_then(|root| root.RasterizationScale())
+                    .unwrap_or(1.0);
+                let scale = if scale <= 0.0 { 1.0 } else { scale };
+                let screen_pt = Point {
+                    x: (cursor.x as f64 / scale) as f32,
+                    y: (cursor.y as f64 / scale) as f32,
+                };
+                let Some((target, local_pt)) = Self::resolve_context_host_at(&origin, screen_pt)
+                else {
+                    return;
+                };
+                let request = elwindui_core::ui::ContextRequest::pointer(local_pt, screen_pt);
+                Self::dispatch_context_request(
+                    &Some(target.tree),
+                    &target.keyboard,
+                    &target.canvas,
+                    &target.active_popup,
+                    &request,
+                );
+            });
+        })
+    }
+
     pub(crate) fn dispatch_context_request(
         tree: &Option<Rc<dyn UIElementExt>>,
-        keyboard: &crate::host::KeyboardDispatcher,
+        keyboard: &Rc<crate::host::KeyboardDispatcher>,
         canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
         active_popup: &RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>,
         request: &elwindui_core::ui::ContextRequest,
     ) -> bool {
+        CONTEXT_REQUEST_GENERATION.with(|generation| generation.set(generation.get() + 1));
+        let on_dismissed = Self::secondary_dismiss_hook(canvas);
         let Some(tree) = tree.as_ref() else {
             return false;
         };
         let Some((resolved, anchor)) =
             elwindui_core::ui::ContextMenuService::process_request(tree, &keyboard.focus, request)
         else {
+            // A secondary click that reached this host (WinUI did not consume it for light
+            // dismiss) still dismisses this host's open popup, even where nothing has a menu.
+            if request.source == elwindui_core::ui::popup::ContextRequestSource::Pointer {
+                close_active_popup_slot(active_popup);
+            }
             return false;
         };
         match resolved.definition {
@@ -2989,7 +3553,19 @@ impl TreeHost {
                             if let Ok(flyout) = winui_menu.create_flyout() {
                                 let fe: FrameworkElement =
                                     canvas.cast().expect("Canvas as FrameworkElement");
-                                if flyout.show_at(&fe).is_ok() {
+                                // A pointer request opens at the pointer; a keyboard request
+                                // (anchor = target bounds) opens at the target's bottom-left.
+                                let anchor_screen = match &anchor {
+                                    elwindui_core::ui::popup::PopupAnchor::Point(pt) => *pt,
+                                    elwindui_core::ui::popup::PopupAnchor::Rect(r) => {
+                                        elwindui_core::base::Point {
+                                            x: r.x,
+                                            y: r.y + r.height,
+                                        }
+                                    }
+                                };
+                                let local = Self::screen_to_canvas_point(canvas, anchor_screen);
+                                if flyout.show_at(&fe, local, Some(on_dismissed)).is_ok() {
                                     return true;
                                 }
                             }
@@ -3009,7 +3585,8 @@ impl TreeHost {
                         if let Some(old) = active_popup.borrow_mut().take() {
                             old.close();
                         }
-                        let host = crate::inner::WinUI3PopupHost::new(canvas.clone());
+                        let host = crate::inner::WinUI3PopupHost::new(canvas.clone())
+                            .with_on_native_dismiss(on_dismissed);
                         let handle = elwindui_core::ui::ContextMenuService::open_custom_menu(
                             &host, &*menu, &anchor, work_area,
                         );
@@ -3032,7 +3609,8 @@ impl TreeHost {
                 if let Some(old) = active_popup.borrow_mut().take() {
                     old.close();
                 }
-                let host = crate::inner::WinUI3PopupHost::new(canvas.clone());
+                let host = crate::inner::WinUI3PopupHost::new(canvas.clone())
+                    .with_on_native_dismiss(on_dismissed);
                 let handle = elwindui_core::ui::ContextMenuService::open_custom_popup(
                     &host,
                     &resolved.owner,
@@ -4015,5 +4593,349 @@ mod tests {
         assert!(contents.contains("\"native_capture_release_success\":false"));
         assert!(!contents.contains("CoreCancellation"));
         let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Live XAML assertion helpers for nested-host lifecycle and secondary-click re-dispatch
+/// (Issue #157). Run inside the one hosted `Application` session by
+/// `inner::button::hosted_xaml_regression_tests`.
+#[cfg(test)]
+pub(crate) mod hosted_context_lifecycle_tests {
+    use super::*;
+    use elwindui_core::ui::popup::PopupSurfaceHandle;
+
+    pub(crate) type Log = Rc<RefCell<Vec<String>>>;
+
+    thread_local! {
+        /// When set, backend lifecycle steps (`record_event`) are appended to this log too, so a
+        /// test can see where native detach happens relative to popup close / content unmount.
+        static EVENT_LOG: RefCell<Option<Log>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn record_event(event: &str) {
+        EVENT_LOG.with(|log| {
+            if let Some(log) = log.borrow().as_ref() {
+                log.borrow_mut().push(event.to_owned());
+            }
+        });
+    }
+
+    /// Routes `record_event` into `log` until the returned guard is dropped.
+    pub(crate) fn capture_events(log: &Log) -> impl Drop {
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                EVENT_LOG.with(|log| *log.borrow_mut() = None);
+            }
+        }
+        EVENT_LOG.with(|slot| *slot.borrow_mut() = Some(Rc::clone(log)));
+        Guard
+    }
+
+    struct RecordingPopup {
+        log: Log,
+        name: String,
+    }
+
+    impl PopupSurfaceHandle for RecordingPopup {
+        fn close(&self) {
+            self.log
+                .borrow_mut()
+                .push(format!("{} popup close", self.name));
+        }
+    }
+
+    /// Content whose unmount is recorded in `log` as `"<name> unmount"`.
+    pub(crate) fn probe_content(log: &Log, name: &str) -> Rc<dyn UIElementExt> {
+        let content: Rc<dyn UIElementExt> = elwindui_core::ui::VerticalLayout::new();
+        let (log, name) = (Rc::clone(log), name.to_owned());
+        content.add_unmount_hook(Box::new(move || {
+            log.borrow_mut().push(format!("{name} unmount"));
+        }));
+        content
+    }
+
+    /// Installs a popup in `host`'s active slot whose close is recorded as `"<name> popup close"`.
+    pub(crate) fn open_recording_popup(host: &TreeHost, log: &Log, name: &str) {
+        *host.active_popup.borrow_mut() = Some(Rc::new(RecordingPopup {
+            log: Rc::clone(log),
+            name: name.to_owned(),
+        }));
+    }
+
+    /// What one `on_unmount` hook does in the exhaustive transition test.
+    #[derive(Clone, Copy, Debug)]
+    enum HookAction {
+        Nothing,
+        Request(usize),
+        Close,
+    }
+
+    const POOL: [&str; 4] = ["A", "B", "C", "D"];
+    const ACTIONS: [HookAction; 6] = [
+        HookAction::Nothing,
+        HookAction::Request(0),
+        HookAction::Request(1),
+        HookAction::Request(2),
+        HookAction::Request(3),
+        HookAction::Close,
+    ];
+
+    /// Exhaustive check of the hosted-content transition (`TreeHost::set_hosted_tree` /
+    /// `unmount_hosted_tree`) against its invariants, over every combination of: the outer action
+    /// (request B, or owner close) on a host publishing A with an open popup; two `on_unmount`
+    /// hook actions on A; one hook action on each of B, C and D — each action being nothing, a
+    /// request for any of A..D, or owner close. For every scenario:
+    ///
+    /// 1. no content is unmounted more than once, and A's popup closes once, before A unmounts;
+    /// 2. the published content (if any) has never been unmounted, is linked to the owner, and
+    ///    is wired to the host; no other content keeps a logical parent;
+    /// 3. latest request wins: unless the host was closed, the published content is the content
+    ///    of the last request made — or nothing only if that content had already been torn down
+    ///    when it was requested (the transition itself must never tear down the newest request);
+    /// 4. after a final owner close, the host is empty and every content that was ever published
+    ///    or requested is unmounted exactly once; untouched contents never are.
+    pub(crate) fn hosted_content_transition_invariants_hold_exhaustively() {
+        let mut scenarios = 0usize;
+        for outer_close in [false, true] {
+            for a_first in ACTIONS {
+                for a_second in ACTIONS {
+                    for b in ACTIONS {
+                        for c in ACTIONS {
+                            for d in ACTIONS {
+                                check_scenario(outer_close, [a_first, a_second], [b, c, d]);
+                                scenarios += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(scenarios, 2 * 6 * 6 * 6 * 6 * 6);
+    }
+
+    fn check_scenario(outer_close: bool, a_hooks: [HookAction; 2], others: [HookAction; 3]) {
+        let label = format!("outer_close={outer_close} A={a_hooks:?} B,C,D={others:?}");
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let host = TreeHost::new();
+        let owner: Rc<dyn UIElementExt> = elwindui_core::ui::VerticalLayout::new();
+        let contents: Vec<Rc<dyn UIElementExt>> =
+            POOL.iter().map(|name| probe_content(&log, name)).collect();
+        // Requests in the order they are made: (pool index, already torn down when requested).
+        let requests: Rc<RefCell<Vec<(usize, bool)>>> = Rc::new(RefCell::new(Vec::new()));
+        let closed = Rc::new(Cell::new(false));
+
+        let install = |index: usize, action: HookAction| {
+            let host = host.clone();
+            let owner = Rc::clone(&owner);
+            let pool: Vec<Weak<dyn UIElementExt>> = contents.iter().map(Rc::downgrade).collect();
+            let requests = Rc::clone(&requests);
+            let closed = Rc::clone(&closed);
+            let log = Rc::clone(&log);
+            contents[index].add_unmount_hook(Box::new(move || match action {
+                HookAction::Nothing => {}
+                HookAction::Request(target) => {
+                    let target: Option<Rc<dyn UIElementExt>> = pool[target].upgrade();
+                    if let Some(target) = target {
+                        let target_index = index_of(&pool, &target);
+                        let dead = count(&log, &format!("{} unmount", POOL[target_index])) > 0;
+                        requests.borrow_mut().push((target_index, dead));
+                        host.set_hosted_tree(target, Some(Rc::clone(&owner)));
+                    }
+                }
+                HookAction::Close => {
+                    closed.set(true);
+                    host.unmount_hosted_tree();
+                }
+            }));
+        };
+        host.set_hosted_tree(Rc::clone(&contents[0]), Some(Rc::clone(&owner)));
+        open_recording_popup(&host, &log, "A");
+        install(0, a_hooks[0]);
+        install(0, a_hooks[1]);
+        for (offset, action) in others.into_iter().enumerate() {
+            install(offset + 1, action);
+        }
+
+        if outer_close {
+            closed.set(true);
+            host.unmount_hosted_tree();
+        } else {
+            requests.borrow_mut().push((1, false));
+            host.set_hosted_tree(Rc::clone(&contents[1]), Some(Rc::clone(&owner)));
+        }
+
+        // 1.
+        for name in POOL {
+            assert!(
+                count(&log, &format!("{name} unmount")) <= 1,
+                "{label}: {name} twice"
+            );
+        }
+        assert_eq!(count(&log, "A popup close"), 1, "{label}: popup once");
+        let events = log.borrow().clone();
+        let popup = events.iter().position(|e| e == "A popup close");
+        let a_unmount = events.iter().position(|e| e == "A unmount");
+        assert!(popup < a_unmount, "{label}: popup before A");
+
+        // 2. and 3.
+        let published = host.hosted_tree_for_test();
+        let unmounted = |index: usize| count(&log, &format!("{} unmount", POOL[index])) > 0;
+        let expected = if closed.get() {
+            None
+        } else {
+            requests
+                .borrow()
+                .last()
+                .copied()
+                .and_then(|(index, dead_when_requested)| (!dead_when_requested).then_some(index))
+        };
+        let published_index = published.as_ref().map(|tree| index_of_rc(&contents, tree));
+        assert_eq!(published_index, expected, "{label}: latest request wins");
+        for (index, content) in contents.iter().enumerate() {
+            let is_published = published_index == Some(index);
+            assert_eq!(
+                content.parent().is_some(),
+                is_published,
+                "{label}: parent link of {}",
+                POOL[index]
+            );
+            if is_published {
+                assert!(!unmounted(index), "{label}: published content is live");
+                assert!(
+                    content.as_ui_element().invalidate_host.borrow().is_some(),
+                    "{label}: published content wired to the host"
+                );
+            }
+        }
+
+        // 4.
+        closed.set(true);
+        host.unmount_hosted_tree();
+        assert!(
+            host.hosted_tree_for_test().is_none(),
+            "{label}: closed host is empty"
+        );
+        let involved: Vec<usize> = std::iter::once(0)
+            .chain(requests.borrow().iter().map(|&(index, _)| index))
+            .collect();
+        for (index, name) in POOL.iter().enumerate() {
+            let expected = usize::from(involved.contains(&index));
+            assert_eq!(
+                count(&log, &format!("{name} unmount")),
+                expected,
+                "{label}: {name} unmounted exactly once iff involved"
+            );
+        }
+    }
+
+    fn index_of(pool: &[Weak<dyn UIElementExt>], target: &Rc<dyn UIElementExt>) -> usize {
+        pool.iter()
+            .position(|entry| std::ptr::addr_eq(entry.as_ptr(), Rc::as_ptr(target)))
+            .expect("pool member")
+    }
+
+    fn index_of_rc(pool: &[Rc<dyn UIElementExt>], target: &Rc<dyn UIElementExt>) -> usize {
+        pool.iter()
+            .position(|entry| Rc::ptr_eq(entry, target))
+            .expect("pool member")
+    }
+
+    pub(crate) fn count(log: &Log, entry: &str) -> usize {
+        log.borrow().iter().filter(|line| *line == entry).count()
+    }
+
+    /// The re-dispatch target is the nearest live, active host around the hit element — the
+    /// nested host for its own content, the outer host for its own content — and never an inactive
+    /// host or anything outside a host.
+    pub(crate) fn context_host_resolution_follows_nearest_active_host() {
+        let outer = TreeHost::new();
+        let inner = TreeHost::new();
+        outer.set_tree(elwindui_core::ui::VerticalLayout::new());
+        inner.set_tree(elwindui_core::ui::VerticalLayout::new());
+        outer
+            .canvas
+            .Children()
+            .unwrap()
+            .Append(&inner.as_element())
+            .unwrap();
+        let in_inner = Rectangle::new().unwrap();
+        inner.canvas.Children().unwrap().Append(&in_inner).unwrap();
+        let in_outer = Rectangle::new().unwrap();
+        outer.canvas.Children().unwrap().Append(&in_outer).unwrap();
+        // XAML reports parents only inside a live tree, so the chain is supplied explicitly:
+        // in_inner -> inner canvas -> outer canvas; in_outer -> outer canvas. Canvas identity is
+        // compared by COM identity (an upgraded weak reference may return another interface).
+        let key_of = |node: &crate::bindings::Microsoft::UI::Xaml::DependencyObject| {
+            node.cast::<windows::core::IUnknown>()
+                .map(|unknown| unknown.as_raw() as usize)
+                .unwrap_or(0)
+        };
+        let dep = |element: &UIElement| {
+            element
+                .cast::<crate::bindings::Microsoft::UI::Xaml::DependencyObject>()
+                .unwrap()
+        };
+        let inner_element: UIElement = inner.canvas.cast().unwrap();
+        let outer_element: UIElement = outer.canvas.cast().unwrap();
+        let (in_inner_key, inner_key, in_outer_key, outer_key) = (
+            key_of(&dep(&in_inner.cast().unwrap())),
+            popup_canvas_key(&inner.canvas),
+            key_of(&dep(&in_outer.cast().unwrap())),
+            popup_canvas_key(&outer.canvas),
+        );
+        let parent = |node: &crate::bindings::Microsoft::UI::Xaml::DependencyObject| {
+            let key = key_of(node);
+            if key == in_inner_key {
+                Some(dep(&inner_element))
+            } else if key == inner_key || key == in_outer_key {
+                Some(dep(&outer_element))
+            } else {
+                None
+            }
+        };
+        let resolve = |element: &Rectangle| {
+            nearest_registered_context_host(Some(dep(&element.cast().unwrap())), parent)
+                .map(|handles| popup_canvas_key(&handles.canvas))
+        };
+        assert_eq!(
+            resolve(&in_inner),
+            Some(inner_key),
+            "nested content -> inner host"
+        );
+        assert_eq!(
+            resolve(&in_outer),
+            Some(outer_key),
+            "outer content -> outer host"
+        );
+
+        inner.set_active(false);
+        assert!(
+            resolve(&in_inner).is_none(),
+            "an inactive host (and the hosts around it) is never a re-dispatch target"
+        );
+        inner.set_active(true);
+
+        inner.clear_tree();
+        assert!(
+            resolve(&in_inner).is_none(),
+            "a host without a tree is not a target"
+        );
+
+        let detached = Rectangle::new().unwrap();
+        assert!(
+            resolve(&detached).is_none(),
+            "an element outside every host has no target"
+        );
+
+        let gone_key = popup_canvas_key(&inner.canvas);
+        drop(inner);
+        let live = CONTEXT_HOSTS.with(|hosts| {
+            hosts
+                .borrow()
+                .iter()
+                .any(|entry| entry.key == gone_key && entry.upgrade().is_some())
+        });
+        assert!(!live, "a destroyed host is never resolved");
     }
 }

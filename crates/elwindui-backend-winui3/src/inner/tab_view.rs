@@ -162,6 +162,20 @@ impl InnerTabView {
         *self.on_select.borrow_mut() = Some(callback);
     }
 
+    /// The native `SelectedIndex` (-1 when nothing is selected).
+    #[cfg(test)]
+    pub(crate) fn native_selected_index_for_test(&self) -> i32 {
+        self.xaml.SelectedIndex().unwrap_or(-1)
+    }
+
+    /// Invokes the selection callback as a native `SelectionChanged` would.
+    #[cfg(test)]
+    pub(crate) fn emit_select_for_test(&self, index: usize) {
+        if let Some(callback) = self.on_select.borrow().as_ref() {
+            callback(index);
+        }
+    }
+
     pub(crate) fn set_on_close(&self, callback: Box<dyn Fn(usize)>) {
         *self.on_close.borrow_mut() = Some(callback);
     }
@@ -229,6 +243,8 @@ impl InnerTabView {
     }
 
     pub(crate) fn remove_tab_at(&self, index: usize) {
+        #[cfg(test)]
+        crate::host::hosted_context_lifecycle_tests::record_event("tab item remove");
         if let Ok(items) = self.xaml.TabItems() {
             let _ = items.RemoveAt(index as u32);
         }

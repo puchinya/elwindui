@@ -848,6 +848,34 @@ mod hosted_xaml_regression_tests {
                     create_flyout_snapshots_icon_onto_a_distinct_realization();
                 crate::inner::menu::live_menu_item_icon_tests::
                     failed_icon_conversion_does_not_remove_the_action();
+                crate::host::hosted_context_lifecycle_tests::
+                    context_host_resolution_follows_nearest_active_host();
+                crate::native_ui::tab_view::hosted_lifecycle_tests::
+                    tab_removal_retires_content_popup_first_exactly_once();
+                crate::native_ui::scroll_view::hosted_lifecycle_tests::
+                    content_replacement_retires_previous_content();
+                crate::native_ui::scroll_view::hosted_lifecycle_tests::
+                    reentrant_replacement_keeps_the_latest_content();
+                crate::native_ui::scroll_view::hosted_lifecycle_tests::
+                    reentrant_same_content_is_not_unmounted();
+                crate::native_ui::scroll_view::hosted_lifecycle_tests::
+                    superseded_hooks_cannot_override_the_newest_request();
+                crate::native_ui::scroll_view::hosted_lifecycle_tests::
+                    owner_close_never_reattaches_reentrant_requests();
+                crate::native_ui::scroll_view::hosted_lifecycle_tests::
+                    retired_content_is_never_republished();
+                crate::native_ui::scroll_view::hosted_lifecycle_tests::
+                    queued_superseded_content_becoming_newest_is_kept();
+                crate::native_ui::scroll_view::hosted_lifecycle_tests::
+                    content_adopted_by_another_owner_is_not_taken_over();
+                crate::native_ui::tab_view::hosted_lifecycle_tests::
+                    shared_content_is_published_by_one_tab_host_only();
+                crate::host::hosted_context_lifecycle_tests::
+                    hosted_content_transition_invariants_hold_exhaustively();
+                crate::native_ui::tab_view::hosted_lifecycle_tests::
+                    tab_removal_never_reattaches_reentrant_requests();
+                crate::native_ui::tab_view::hosted_lifecycle_tests::
+                    removing_the_selected_tab_selects_a_consistent_replacement();
                 crate::app::reset_window_lifecycle_test_state();
                 // Issue #254: `InnerWindow` stores only the final owner's `Weak<dyn WindowExt>`;
                 // the application registry becomes the strong lifetime authority after show().

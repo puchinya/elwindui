@@ -70,27 +70,30 @@ impl InnerMenuItem {
         self.xaml.IsEnabled().unwrap_or(true)
     }
 
-    /// A bare key character (e.g. `"s"`), matching AppKit's `set_shortcut` convention — mapped to
-    /// a `Ctrl`-modifier `KeyboardAccelerator` (WinUI3 has no single-string key-equivalent setter
-    /// the way `NSMenuItem.keyEquivalent` does).
-    pub(crate) fn set_shortcut(&self, key_equivalent: &str) {
-        *self.shortcut.borrow_mut() = if key_equivalent.is_empty() {
+    /// Installs the `KeyboardAccelerator` for a `MenuItem.shortcut` string (grammar in
+    /// [`parse_shortcut`]). A string that does not parse installs no accelerator — WinUI then shows
+    /// no accelerator text, and the context-flyout realization shows the string verbatim — so the
+    /// menu never advertises a key combination other than the one specified. Replaces any
+    /// accelerator a previous call installed.
+    pub(crate) fn set_shortcut(&self, shortcut: &str) {
+        *self.shortcut.borrow_mut() = if shortcut.is_empty() {
             None
         } else {
-            Some(key_equivalent.to_string())
+            Some(shortcut.to_string())
         };
-        let Some(key) = key_equivalent.chars().next() else {
+        let Ok(accelerators) = self.xaml.KeyboardAccelerators() else {
+            return;
+        };
+        let _ = accelerators.Clear();
+        let Some(parsed) = parse_shortcut(shortcut) else {
             return;
         };
         let Ok(accelerator) = KeyboardAccelerator::new() else {
             return;
         };
-        let _ = accelerator.SetModifiers(VirtualKeyModifiers::Control);
-        let virtual_key = VirtualKey(key.to_ascii_uppercase() as i32);
-        let _ = accelerator.SetKey(virtual_key);
-        if let Ok(accelerators) = self.xaml.KeyboardAccelerators() {
-            let _ = accelerators.Append(&accelerator);
-        }
+        let _ = accelerator.SetModifiers(parsed.modifiers);
+        let _ = accelerator.SetKey(VirtualKey(parsed.key as i32));
+        let _ = accelerators.Append(&accelerator);
     }
 
     pub(crate) fn shortcut(&self) -> Option<String> {
@@ -124,6 +127,82 @@ impl InnerMenuItem {
         let icon_element = icon.and_then(|icon| icon_source_to_icon_element(&icon));
         let _ = self.xaml.SetIcon(icon_element.as_ref());
     }
+}
+
+/// A `MenuItem.shortcut` string resolved to a WinUI accelerator.
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedShortcut {
+    modifiers: VirtualKeyModifiers,
+    /// Upper-case ASCII letter or digit; its code is the `VirtualKey` value.
+    key: char,
+}
+
+impl ParsedShortcut {
+    /// Windows accelerator text, modifiers in `Ctrl`, `Alt`, `Shift` order (e.g. `"Ctrl+Shift+S"`).
+    fn display_text(&self) -> String {
+        let mut text = String::new();
+        for (flag, name) in [
+            (VirtualKeyModifiers::Control, "Ctrl"),
+            (VirtualKeyModifiers::Menu, "Alt"),
+            (VirtualKeyModifiers::Shift, "Shift"),
+        ] {
+            if self.modifiers.0 & flag.0 != 0 {
+                text.push_str(name);
+                text.push('+');
+            }
+        }
+        text.push(self.key);
+        text
+    }
+}
+
+/// `docs/specs/ui_spec.md` §9 `MenuItem.shortcut` grammar, as realized on Windows:
+///
+/// - a single ASCII letter or digit (`"s"`) is the platform primary modifier plus that key —
+///   `Ctrl+S` here, `Cmd+S` on macOS;
+/// - otherwise `Modifier+...+Key`, case-insensitive, where each modifier is `Cmd`/`Command`/`Ctrl`/
+///   `Control` (all the primary modifier, `Ctrl` on Windows), `Shift`, or `Alt`/`Option`, and `Key`
+///   is a single ASCII letter or digit.
+///
+/// Anything else (unknown modifier, multi-character key, empty part) is unsupported: `None`.
+fn parse_shortcut(shortcut: &str) -> Option<ParsedShortcut> {
+    let parts: Vec<&str> = shortcut.split('+').map(str::trim).collect();
+    let (key_part, modifier_parts) = parts.split_last()?;
+    let mut key_chars = key_part.chars();
+    let key = key_chars.next()?;
+    if key_chars.next().is_some() || !key.is_ascii_alphanumeric() {
+        return None;
+    }
+    let mut modifiers = VirtualKeyModifiers::None.0;
+    if modifier_parts.is_empty() {
+        modifiers = VirtualKeyModifiers::Control.0;
+    }
+    for part in modifier_parts {
+        let flag = match part.to_ascii_lowercase().as_str() {
+            "cmd" | "command" | "ctrl" | "control" => VirtualKeyModifiers::Control,
+            "shift" => VirtualKeyModifiers::Shift,
+            "alt" | "option" => VirtualKeyModifiers::Menu,
+            _ => return None,
+        };
+        modifiers |= flag.0;
+    }
+    Some(ParsedShortcut {
+        modifiers: VirtualKeyModifiers(modifiers),
+        key: key.to_ascii_uppercase(),
+    })
+}
+
+/// Text a context-flyout realization shows for a shortcut: the parsed accelerator text, or the
+/// specified string verbatim when it is unsupported (never a different key combination).
+fn shortcut_display_text(shortcut: &str) -> Option<String> {
+    if shortcut.is_empty() {
+        return None;
+    }
+    Some(
+        parse_shortcut(shortcut)
+            .map(|parsed| parsed.display_text())
+            .unwrap_or_else(|| shortcut.to_string()),
+    )
 }
 
 /// Exact mapping fixed by `docs/design/runtime/icon_source_design.md` §2 — every `SystemIcon`
@@ -337,9 +416,18 @@ impl InnerMenuFlyout {
     /// Shows this realization and keeps it alive through the native flyout's terminal `Closed`
     /// event. The close callback captures only its numeric registry id in the generated WinRT
     /// delegate; the UI-thread-local lifetime state remains in the TLS callback registry.
+    ///
+    /// `point` is the context request anchor in `target`-local DIPs. With it, the flyout opens at
+    /// that point (`MenuFlyout.ShowAt(UIElement, Point)`); without it, WinUI places the flyout
+    /// relative to the whole `target` element, which for the root Canvas is unrelated to where the
+    /// context request happened.
+    ///
+    /// `on_closed` runs after the realization is released on the flyout's `Closed` event.
     pub(crate) fn show_at(
         self,
         target: &crate::bindings::Microsoft::UI::Xaml::FrameworkElement,
+        point: Option<elwindui_core::base::Point>,
+        on_closed: Option<Rc<dyn Fn()>>,
     ) -> windows::core::Result<()> {
         let lifetime = Rc::new(FlyoutLifetime {
             realization: RefCell::new(Some(self)),
@@ -355,6 +443,9 @@ impl InnerMenuFlyout {
         let lifetime_for_callback = Rc::clone(&lifetime);
         let closed_callback_id = owner.register_event(Rc::new(move || {
             lifetime_for_callback.release();
+            if let Some(on_closed) = on_closed.as_ref() {
+                on_closed();
+            }
         }));
         drop(owner);
 
@@ -387,7 +478,19 @@ impl InnerMenuFlyout {
                 .expect("flyout realization must exist")
                 .flyout
                 .clone();
-            flyout.ShowAt(target)
+            match point {
+                Some(point) => {
+                    let element: crate::bindings::Microsoft::UI::Xaml::UIElement = target.cast()?;
+                    flyout.ShowAt2(
+                        &element,
+                        windows::Foundation::Point {
+                            X: point.x,
+                            Y: point.y,
+                        },
+                    )
+                }
+                None => flyout.ShowAt(target),
+            }
         };
         if let Err(error) = show_result {
             lifetime.release();
@@ -460,10 +563,12 @@ impl InnerMenu {
             let flyout_item = MenuFlyoutItem::new()?;
             flyout_item.SetText(&windows::core::HSTRING::from(item.text().as_str()))?;
             flyout_item.SetIsEnabled(item.enabled())?;
-            if let Some(shortcut) = item.shortcut() {
-                let _ = flyout_item.SetKeyboardAcceleratorTextOverride(
-                    &windows::core::HSTRING::from(shortcut.as_str()),
-                );
+            // Display-only: no live accelerator is attached to a temporary context realization.
+            // The text matches what WinUI renders for the MenuBar-side accelerator that
+            // `InnerMenuItem::set_shortcut` installs (e.g. "c" -> "Ctrl+C").
+            if let Some(text) = item.shortcut().as_deref().and_then(shortcut_display_text) {
+                let _ = flyout_item
+                    .SetKeyboardAcceleratorTextOverride(&windows::core::HSTRING::from(text));
             }
             // §2.13/§8.14: this Context Menu realization is a brand-new `MenuFlyoutItem` distinct
             // from `item`'s own live `xaml` (PR #156's realization-ownership separation) — so the
@@ -556,6 +661,58 @@ impl InnerMenuBar {
 #[cfg(test)]
 mod icon_tests {
     use super::*;
+
+    #[test]
+    fn bare_key_shortcut_uses_the_primary_modifier() {
+        assert_eq!(shortcut_display_text("x").as_deref(), Some("Ctrl+X"));
+        assert_eq!(shortcut_display_text("S").as_deref(), Some("Ctrl+S"));
+        assert_eq!(shortcut_display_text("1").as_deref(), Some("Ctrl+1"));
+        assert_eq!(shortcut_display_text(""), None);
+    }
+
+    #[test]
+    fn modifier_shortcuts_display_exactly_what_was_specified() {
+        // The ui_spec.md example and the review's counter-examples: never "Ctrl+C".
+        assert_eq!(shortcut_display_text("Cmd+S").as_deref(), Some("Ctrl+S"));
+        assert_eq!(shortcut_display_text("Ctrl+X").as_deref(), Some("Ctrl+X"));
+        assert_eq!(
+            shortcut_display_text("shift+ctrl+n").as_deref(),
+            Some("Ctrl+Shift+N")
+        );
+        assert_eq!(
+            shortcut_display_text("Option+Cmd+P").as_deref(),
+            Some("Ctrl+Alt+P")
+        );
+        assert_eq!(
+            parse_shortcut("Ctrl+Shift+S"),
+            Some(ParsedShortcut {
+                modifiers: VirtualKeyModifiers(
+                    VirtualKeyModifiers::Control.0 | VirtualKeyModifiers::Shift.0
+                ),
+                key: 'S',
+            })
+        );
+    }
+
+    #[test]
+    fn unsupported_shortcuts_install_nothing_and_display_verbatim() {
+        for unsupported in [
+            "Hyper+S",
+            "Ctrl+F5",
+            "Ctrl+",
+            "+",
+            "Ctrl++",
+            "Ctrl+Space",
+            "?",
+        ] {
+            assert_eq!(parse_shortcut(unsupported), None, "{unsupported}");
+            assert_eq!(
+                shortcut_display_text(unsupported).as_deref(),
+                Some(unsupported),
+                "{unsupported}"
+            );
+        }
+    }
 
     /// §8.12: every `SystemIcon` variant maps to exactly one WinUI `Symbol`, matching
     /// `docs/design/runtime/icon_source_design.md` §2's table exactly, no variant omitted. Pure

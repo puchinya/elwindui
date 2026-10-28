@@ -297,6 +297,8 @@ fn main() {
         "Microsoft.UI.Xaml.Media.Transform".to_owned(),
         "Microsoft.UI.Xaml.Media.CompositeTransform".to_owned(),
         "Microsoft.UI.Xaml.Controls.Primitives.Popup".to_owned(),
+        // Secondary-click re-dispatch resolves the host under the pointer (Issue #157).
+        "Microsoft.UI.Xaml.Media.VisualTreeHelper".to_owned(),
         "Microsoft.UI.Xaml.Controls.Primitives.FlyoutBase".to_owned(),
         "Microsoft.UI.Xaml.Input.ContextRequestedEventArgs".to_owned(),
         "Microsoft.UI.Xaml.Input.RightTappedEventHandler".to_owned(),

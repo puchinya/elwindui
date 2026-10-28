@@ -126,6 +126,24 @@ thread_local! {
     static CONTEXT_REQUEST_GENERATION: Cell<u64> = const { Cell::new(0) };
 }
 
+/// `true` if a live host other than `host` currently publishes `content` as its tree.
+fn published_by_other_host(host: &TreeHost, content: &Rc<dyn UIElementExt>) -> bool {
+    let own_key = popup_canvas_key(&host.canvas);
+    CONTEXT_HOSTS.with(|hosts| {
+        hosts.borrow().iter().any(|entry: &ContextHostEntry| {
+            if entry.key == own_key {
+                return false;
+            }
+            let slot: Option<Rc<RefCell<Option<Rc<dyn UIElementExt>>>>> = entry.tree.upgrade();
+            slot.is_some_and(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .is_some_and(|published| Rc::ptr_eq(published, content))
+            })
+        })
+    })
+}
+
 fn register_context_host(host: &TreeHost) {
     let Ok(canvas) = host.canvas.downgrade() else {
         return;
@@ -2289,7 +2307,7 @@ impl TreeHost {
                 }
                 // Content another live owner has adopted stays with that owner: the request is
                 // rejected, the current content stays, and the adopted content is not touched.
-                if adopted_elsewhere(&content, owner.as_ref()) {
+                if self.owned_elsewhere(&content, owner.as_ref()) {
                     return;
                 }
                 *self.pending_hosted.borrow_mut() = Some((content, owner));
@@ -2370,7 +2388,7 @@ impl TreeHost {
         // example from an `on_unmount` hook) is rejected: this host never overwrites that owner's
         // logical parent or host wiring, and does not unmount the content.
         let candidate = candidate.filter(|(content, owner)| {
-            !self.was_retired(content) && !adopted_elsewhere(content, owner.as_ref())
+            !self.was_retired(content) && !self.owned_elsewhere(content, owner.as_ref())
         });
         if let Some((content, owner)) = candidate {
             if let Some(owner) = owner {
@@ -2417,6 +2435,19 @@ impl TreeHost {
             self.mark_retired(&content);
             elwindui_core::ui::unmount_subtree(&content);
         }
+    }
+
+    /// `true` if `content` belongs to someone else: a live owner other than `owner` adopted it
+    /// ([`adopted_elsewhere`]), or another live host publishes it. The second check matters when
+    /// several hosts share one owner (each `TabView` tab has its own host, all owned by the
+    /// TabView): the shared owner pointer cannot tell those hosts apart, so ownership is decided
+    /// per host — a single `UIElement` root is published by at most one host.
+    fn owned_elsewhere(
+        &self,
+        content: &Rc<dyn elwindui_core::ui::UIElementExt>,
+        owner: Option<&Rc<dyn elwindui_core::ui::UIElementExt>>,
+    ) -> bool {
+        adopted_elsewhere(content, owner) || published_by_other_host(self, content)
     }
 
     /// Records `content` as torn down by this host (before its unmount starts, so its own hooks

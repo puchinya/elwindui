@@ -809,4 +809,92 @@ pub(crate) mod hosted_lifecycle_tests {
         assert_eq!(count(&log, "keep unmount"), 0, "the other tab is untouched");
         assert!(contents[0].parent().is_none() && b.parent().is_none() && c.parent().is_none());
     }
+
+    /// One `Rc` set as the content of two tabs of the same TabView (one owner, two hosts): only
+    /// the first tab's host publishes it; the second host stays empty. Selection works; removing
+    /// either tab first leaves no host publishing an unmounted tree, and B unmounts exactly once.
+    pub(crate) fn shared_content_is_published_by_one_tab_host_only() {
+        for remove_owning_first in [true, false] {
+            let label = if remove_owning_first {
+                "remove owner tab first"
+            } else {
+                "remove other tab first"
+            };
+            let log: Log = Rc::new(RefCell::new(Vec::new()));
+            let tab_view = TabView::new();
+            let b = probe_content(&log, "B");
+            for name in ["T1", "T2"] {
+                let item = TabViewItem::new();
+                item.set_header(name);
+                item.set_content(Rc::clone(&b));
+                tab_view.add(item as Rc<dyn TabViewItemExt>);
+            }
+            let hosts: Vec<TreeHost> = tab_view.content_hosts.borrow().clone();
+            let publishes_b = |host: &TreeHost| {
+                host.hosted_tree_for_test()
+                    .is_some_and(|tree| Rc::ptr_eq(&tree, &b))
+            };
+            assert!(publishes_b(&hosts[0]), "{label}: first tab host owns B");
+            assert!(
+                hosts[1].hosted_tree_for_test().is_none(),
+                "{label}: second host stays empty"
+            );
+            let owner: Rc<dyn UIElementExt> = tab_view.clone();
+            assert!(
+                b.parent().is_some_and(|parent| std::ptr::addr_eq(
+                    Rc::as_ptr(&parent),
+                    Rc::as_ptr(&owner)
+                )),
+                "{label}: B linked to the TabView"
+            );
+            assert!(
+                b.as_ui_element().invalidate_host.borrow().is_some(),
+                "{label}: B wired"
+            );
+            tab_view.inner.emit_select_for_test(1);
+            assert!(
+                hosts[1].is_active_for_test(),
+                "{label}: selecting the second tab works"
+            );
+            tab_view.inner.emit_select_for_test(0);
+            assert!(
+                hosts[0].is_active_for_test(),
+                "{label}: back to the owning tab"
+            );
+
+            if remove_owning_first {
+                tab_view.remove_at(0);
+                assert_eq!(
+                    count(&log, "B unmount"),
+                    1,
+                    "{label}: B unmounts with its tab"
+                );
+                assert!(hosts[0].hosted_tree_for_test().is_none());
+                assert!(
+                    hosts[1].hosted_tree_for_test().is_none(),
+                    "{label}: no dead tree left"
+                );
+                tab_view.remove_at(0);
+            } else {
+                tab_view.remove_at(1);
+                assert_eq!(
+                    count(&log, "B unmount"),
+                    0,
+                    "{label}: other tab never touches B"
+                );
+                assert!(publishes_b(&hosts[0]), "{label}: owning tab keeps B");
+                tab_view.remove_at(0);
+            }
+            assert_eq!(
+                count(&log, "B unmount"),
+                1,
+                "{label}: B unmounts exactly once"
+            );
+            assert!(
+                hosts
+                    .iter()
+                    .all(|host| host.hosted_tree_for_test().is_none())
+            );
+        }
+    }
 }

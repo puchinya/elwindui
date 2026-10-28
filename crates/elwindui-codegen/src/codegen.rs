@@ -11161,6 +11161,9 @@ fn emit_for_item_subscriptions(
     let mut out = TokenStream::new();
     for node in plan {
         let Some(info) = table.resolve(from, &node.type_path) else {
+            out.extend(emit_external_for_item_subscriptions(
+                node, &parameter, ctx, from, table,
+            ));
             continue;
         };
         let binding = &node.binding;
@@ -11218,6 +11221,91 @@ fn emit_for_item_subscriptions(
         }
     }
     out
+}
+
+/// `emit_for_item_subscriptions`' counterpart for an item-template element with no local
+/// `TypeInfo` — every real builtin (`TextBlock`, `Button`, ...) and every external generated
+/// component in an actual proc-macro compilation. Its construction already goes through the
+/// exported props macro (`emit_external_construction`), so the item-local observer re-applies the
+/// same attribute values through that macro's `@set_with_environment` protocol. Only attributes
+/// that read the item and nothing else are observed: the observer is owned by the item's
+/// `DynamicChild`, so it can capture neither `self` nor a templated parent. The mount environment
+/// a semantic value resolves against is cloned into the observer for the same reason.
+fn emit_external_for_item_subscriptions(
+    node: &PlannedNode,
+    parameter: &syn::Ident,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    if node.dynamic.is_some()
+        || node.type_path == DYNAMIC_CHILD_SLOT_MARKER
+        || node.type_path == ENVIRONMENT_SCOPE_MARKER
+    {
+        return TokenStream::new();
+    }
+    let parameter_name = parameter.to_string();
+    let values = external_attribute_values(node, ctx, from, table);
+    let observed: Vec<_> = node
+        .attributes
+        .iter()
+        .filter(|attribute| {
+            !attribute.name.starts_with("on_")
+                && attribute.kind != AssignmentKind::Once
+                && !matches!(
+                    attribute.value,
+                    ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_)
+                )
+                && view_expr_references_closure_parameter(&attribute.value, &parameter_name)
+        })
+        .filter_map(|attribute| {
+            values
+                .iter()
+                .find(|value| value.name == attribute.name.as_str())
+        })
+        .filter(|value| !value.synthesized && !tokens_reference_receiver(&value.value))
+        .collect();
+    if observed.is_empty() {
+        return TokenStream::new();
+    }
+    let binding = &node.binding;
+    let props_macro = dsl_props_macro_path(&node.type_path, None);
+    let ext_path = dsl_ext_path(&node.type_path, None);
+    let environment = semantic_brush_construction_environment(node, ctx);
+    let sets = observed.iter().map(|attribute| {
+        let name = &attribute.name;
+        let value = &attribute.value;
+        quote! {
+            #props_macro!(@set_with_environment item, #name, #value, &__elwindui_item_environment);
+        }
+    });
+    quote! {
+        {
+            #[allow(unused_imports)]
+            use elwindui::ui::*;
+            #[allow(unused_imports)]
+            use #ext_path as _;
+            let source = std::rc::Rc::clone(#parameter);
+            let subscription_source = std::rc::Rc::clone(&source);
+            let weak_item: std::rc::Weak<_> = std::rc::Rc::downgrade(&#binding);
+            let __elwindui_item_environment = (*#environment).clone();
+            __dynamic_item_subscriptions.push(source.subscribe_property_changed(move |_| {
+                if let Some(item) = weak_item.upgrade() {
+                    let #parameter = &subscription_source;
+                    #(#sets)*
+                }
+            }));
+        }
+    }
+}
+
+/// Whether emitted value tokens read a non-item receiver (`self` or a template's `this`).
+fn tokens_reference_receiver(tokens: &TokenStream) -> bool {
+    tokens.clone().into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Ident(ident) => ident == "self" || ident == "this",
+        proc_macro2::TokenTree::Group(group) => tokens_reference_receiver(&group.stream()),
+        _ => false,
+    })
 }
 
 fn view_expr_references_closure_parameter(expr: &ViewExpr, parameter: &str) -> bool {

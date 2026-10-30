@@ -2988,6 +2988,10 @@ fn template_capability_macro_ident(bare_name: &str) -> Ident {
 /// types, and writable membership. A component shadow can therefore forward inherited builtin
 /// capabilities without a compiler-side builtin registry or a runtime implementation. Parent
 /// forwarding uses the same `$crate`/external-path rules as the existing exported property macros.
+///
+/// `@if_control { .. }` answers "is this class in the Control family?" from the declared hierarchy
+/// alone: `Control` expands the tokens, any other class asks its parent, and a root class drops
+/// them. A component shadow uses it to mirror `generate_view`'s Control-only template bridge.
 fn build_template_capability_macro(
     bare_name: &str,
     shape: &PropDecls,
@@ -3043,6 +3047,20 @@ fn build_template_capability_macro(
             #parent_macro!(@impl $target);
         }
     });
+    let if_control_body = if bare_name == "Control" {
+        quote! { $($tokens)* }
+    } else {
+        parent
+            .map(|(parent_bare, parent_ty)| {
+                let parent_macro = inherit_macro_self_ref_path(
+                    parent_bare,
+                    parent_ty,
+                    template_capability_macro_ident(parent_bare),
+                );
+                quote! { #parent_macro!(@if_control { $($tokens)* }); }
+            })
+            .unwrap_or_default()
+    };
 
     quote! {
         #[doc(hidden)]
@@ -3054,6 +3072,9 @@ fn build_template_capability_macro(
             (@impl $target:ty) => {
                 #own_impls
                 #parent_impls
+            };
+            (@if_control { $($tokens:tt)* }) => {
+                #if_control_body
             };
         }
     }

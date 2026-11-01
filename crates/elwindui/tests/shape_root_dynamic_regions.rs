@@ -456,3 +456,50 @@ fn t7_wrapped_for_matches_the_root_direct_form() {
     assert_eq!(child_labels(probe.as_ref()), labels(&["head", "<other>"]));
     assert_eq!(Rc::strong_count(&b), 1);
 }
+
+// ---------------------------------------------------------------------------
+// T9. `for` over a plain `Rc<T>` that publishes no changes (PR #307 review).
+// ---------------------------------------------------------------------------
+
+struct PlainRow(String);
+
+impl PlainRow {
+    fn label(&self) -> String {
+        self.0.clone()
+    }
+}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct ShapeRootPlainFor {
+    #[prop(default = Vec::new())]
+    rows: Vec<Rc<PlainRow>>,
+
+    body: view! {
+        for row in rows {
+            TextBlock { text: row.label }
+        }
+    },
+}
+
+#[elwindui::component]
+impl ShapeRootPlainFor {}
+
+#[test]
+fn t9_plain_rc_items_render_and_reorder_without_any_subscription() {
+    let probe = ShapeRootPlainFor::new();
+    let a = Rc::new(PlainRow("a".to_string()));
+    let b = Rc::new(PlainRow("b".to_string()));
+    let c = Rc::new(PlainRow("c".to_string()));
+
+    probe.set_rows(vec![a.clone(), b.clone(), c.clone()]);
+    assert_eq!(child_labels(probe.as_ref()), labels(&["a", "b", "c"]));
+    let before = probe.visual_children();
+
+    probe.set_rows(vec![c.clone(), a.clone()]);
+    assert_eq!(child_labels(probe.as_ref()), labels(&["c", "a"]));
+    assert!(Rc::ptr_eq(&probe.visual_children()[0], &before[2]));
+    assert!(Rc::ptr_eq(&probe.visual_children()[1], &before[0]));
+
+    // Nothing but the slot's key and this test holds an item: no observer retained `b`.
+    assert_eq!(Rc::strong_count(&b), 1);
+}

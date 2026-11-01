@@ -1379,6 +1379,7 @@ fn build_constructor_macro(
                 compile_error!(#message);
             };
             (@resync_set $recv:expr, #name, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_item_set $recv:expr, #name, $value:expr, $environment:expr) => {};
         });
     }
     let mut resync_prop_arms = TokenStream::new();
@@ -1413,6 +1414,9 @@ fn build_constructor_macro(
                 #set
             };
             (@resync_set $recv:expr, #name, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_item_set $recv:expr, #name, $value:expr, $environment:expr) => {
+                #set
+            };
         });
     }
     let resync_fallback = match &props_macro {
@@ -1428,6 +1432,9 @@ fn build_constructor_macro(
                 #props_macro!(@set_with_environment $recv, $name, $value, $environment);
             };
             (@resync_set $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_item_set $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                #props_macro!(@set_with_environment $recv, $name, $value, $environment);
+            };
         },
         None => quote! {
             (@resync_named $recv:expr, $name:literal, $value:expr, $environment:expr, reactive = true) => {
@@ -1446,6 +1453,14 @@ fn build_constructor_macro(
                 ));
             };
             (@resync_set $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_item_set $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                compile_error!(concat!(
+                    "field ",
+                    stringify!($name),
+                    " is not an externally writable property of ",
+                    #type_name
+                ));
+            };
         },
     };
     let mut semantic_brush_named_arms = TokenStream::new();
@@ -11231,6 +11246,12 @@ fn emit_for_item_subscriptions(
 /// that read the item and nothing else are observed: the observer is owned by the item's
 /// `DynamicChild`, so it can capture neither `self` nor a templated parent. The mount environment
 /// a semantic value resolves against is cloned into the observer for the same reason.
+///
+/// Neither fact needed here is decidable at this expansion, so both are deferred to where the
+/// compiler can answer them. `ItemObservation` dispatches on whether the item actually implements
+/// `ObservableExt` (`for` also accepts plain `Rc<T>` items), and an external generated component's
+/// `@resync_item_set` arm decides per field whether it is runtime-writable: a fixed `#[param]` was
+/// consumed by the constructor and expands to nothing.
 fn emit_external_for_item_subscriptions(
     node: &PlannedNode,
     parameter: &syn::Ident,
@@ -11269,34 +11290,47 @@ fn emit_external_for_item_subscriptions(
         return TokenStream::new();
     }
     let binding = &node.binding;
-    let props_macro = dsl_props_macro_path(&node.type_path, None);
     let ext_path = dsl_ext_path(&node.type_path, None);
     let environment = semantic_brush_construction_environment(node, ctx);
-    let sets = observed.iter().map(|attribute| {
-        let name = &attribute.name;
-        let value = &attribute.value;
-        quote! {
-            #props_macro!(@set_with_environment item, #name, #value, &__elwindui_item_environment);
-        }
-    });
+    let sets = observed
+        .iter()
+        .map(|attribute| external_item_set(node, &attribute.name, &attribute.value));
     quote! {
         {
             #[allow(unused_imports)]
             use elwindui::ui::*;
             #[allow(unused_imports)]
             use #ext_path as _;
+            #[allow(unused_imports)]
+            use elwindui::core::reactive::{ObservableItem as _, PlainItem as _};
             let source = std::rc::Rc::clone(#parameter);
             let subscription_source = std::rc::Rc::clone(&source);
             let weak_item: std::rc::Weak<_> = std::rc::Rc::downgrade(&#binding);
             let __elwindui_item_environment = (*#environment).clone();
-            __dynamic_item_subscriptions.push(source.subscribe_property_changed(move |_| {
-                if let Some(item) = weak_item.upgrade() {
-                    let #parameter = &subscription_source;
-                    #(#sets)*
-                }
-            }));
+            let subscription = (&elwindui::core::reactive::ItemObservation(&*source))
+                .observe_item(move |_| {
+                    if let Some(item) = weak_item.upgrade() {
+                        let #parameter = &subscription_source;
+                        let _ = (&item, #parameter, &__elwindui_item_environment);
+                        #(#sets)*
+                    }
+                });
+            if let Some(subscription) = subscription {
+                __dynamic_item_subscriptions.push(subscription);
+            }
         }
     }
+}
+
+/// One item-observer write. A generated component's ctor macro owns which fields are writable; a
+/// builtin has no ctor macro and no fixed fields, so its props macro is the setter directly.
+fn external_item_set(node: &PlannedNode, name: &syn::Ident, value: &TokenStream) -> TokenStream {
+    let environment = quote! { &__elwindui_item_environment };
+    if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
+        return quote! { #ctor_macro!(@resync_item_set item, #name, #value, #environment); };
+    }
+    let props_macro = dsl_props_macro_path(&node.type_path, None);
+    quote! { #props_macro!(@set_with_environment item, #name, #value, #environment); }
 }
 
 /// Whether emitted value tokens read a non-item receiver (`self` or a template's `this`).

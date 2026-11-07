@@ -606,3 +606,59 @@ fn external_dynamic_reconciliation_publishes_one_children_commit_and_updates_dep
     assert_eq!(children_commits.get(), 2);
     assert_eq!(ExternalProbeTabsExt::child_count(tabs), 1);
 }
+
+#[elwindui::viewmodel]
+mod external_card_row {
+    struct ExternalCardRow {
+        #[observable(default = String::new())]
+        title: String,
+        #[observable(default = String::new())]
+        label: String,
+        #[observable(default = String::new())]
+        tag: String,
+    }
+}
+
+#[component(inherits VerticalLayout)]
+struct ExternalParamItemList {
+    #[prop(default = Vec::new())]
+    rows: Vec<Rc<ExternalCardRow>>,
+
+    body: view! {
+        for row in rows {
+            elwindui_external_component_fixture::RequiredExternalCard {
+                title: row.title,
+                count: 1,
+                optional: row.tag,
+                mutable_label: row.label,
+            }
+        }
+    },
+}
+
+#[component]
+impl ExternalParamItemList {}
+
+/// A fixed `#[param]` fed from an observable `for` item is construction input only: it compiles,
+/// keeps its constructed value through an item change, and the sibling `#[prop]` still follows.
+#[test]
+fn for_item_change_updates_external_props_and_leaves_fixed_params_alone() {
+    let row = ExternalCardRow::new();
+    row.set_title(String::from("first title"));
+    row.set_label(String::from("first label"));
+
+    let list = ExternalParamItemList::new();
+    list.set_rows(vec![Rc::clone(&row)]);
+    let children = list.visual_children();
+    let card = children[0]
+        .as_any()
+        .downcast_ref::<elwindui_external_component_fixture::RequiredExternalCard>()
+        .expect("item root is the external card");
+    assert_eq!(RequiredExternalCardExt::title(card), "first title");
+    assert_eq!(RequiredExternalCardExt::mutable_label(card), "first label");
+
+    row.set_title(String::from("second title"));
+    row.set_label(String::from("second label"));
+    assert_eq!(RequiredExternalCardExt::title(card), "first title");
+    assert_eq!(RequiredExternalCardExt::mutable_label(card), "second label");
+}

@@ -351,9 +351,21 @@ pub(crate) fn build_component_struct_shadow(
             #path!(@impl $target);
         }
     });
-    let parent_capability_invocation = parent_capability_macro.as_ref().map(|path| {
+    // `generate_view` gives only the Control family a template bridge: an ordinary layout's private
+    // `#[state]` type must never become a public associated `Value`. Whether `base` is in that
+    // family is not source-local, so the class hierarchy's own `@if_control` arm decides.
+    let control_gated_capabilities = match &parent_capability_macro {
+        Some(path) => quote! {
+            #path!(@if_control {
+                #direct_capability_impls
+                #path!(@impl #ident);
+            });
+        },
+        None => TokenStream::new(),
+    };
+    let parent_if_control_in_macro = parent_capability_macro_self_ref.as_ref().map(|path| {
         quote! {
-            #path!(@impl #ident);
+            #path!(@if_control { $($tokens)* });
         }
     });
     let capability_macro = quote! {
@@ -364,6 +376,9 @@ pub(crate) fn build_component_struct_shadow(
             (@impl $target:ty) => {
                 #macro_capability_impls
                 #parent_capability_in_macro
+            };
+            (@if_control { $($tokens:tt)* }) => {
+                #parent_if_control_in_macro
             };
         }
     };
@@ -497,8 +512,7 @@ pub(crate) fn build_component_struct_shadow(
         #component_extension_shadow
         #base_hierarchy_shadow
         #component_inherit_macro
-        #direct_capability_impls
-        #parent_capability_invocation
+        #control_gated_capabilities
         #capability_macro
     })
 }
@@ -1037,6 +1051,75 @@ mod tests {
             "computed capability must stay read-only: {shadow}"
         );
         parses_as_items(&shadow.parse().expect("shadow string should tokenize"));
+    }
+
+    /// A shadow's capability impls exist only inside its base's `@if_control` gate, so an ordinary
+    /// layout's private `#[state]` type cannot reach a public associated `Value`, while the
+    /// component's own capability macro still forwards the question to its base.
+    #[test]
+    fn struct_shadow_gates_capabilities_on_the_control_family() {
+        let mut component = demo_component(Some("HorizontalLayout"));
+        component.fields.push(FieldDef {
+            name: "cache".to_string(),
+            ty: "PrivateCache".to_string(),
+            kind: FieldKind::State,
+            attrs: Vec::new(),
+            initializer: Some(Initializer::Expr(syn::parse_quote!(PrivateCache::new()))),
+        });
+        let item_struct: syn::ItemStruct = syn::parse_quote! {
+            pub(crate) struct ShadowDemo {
+                #[state(default = PrivateCache::new())]
+                cache: PrivateCache,
+            }
+        };
+        let shadow =
+            build_component_struct_shadow(Some("HorizontalLayout"), &item_struct, &component, None)
+                .expect("struct shadow should build")
+                .to_string();
+        let gate = "__elwindui_template_capabilities_HorizontalLayout ! (@ if_control {";
+        let gate_start = shadow.find(gate).expect("capabilities must be gated");
+        let macro_start = shadow
+            .find("macro_rules ! __elwindui_template_capabilities_ShadowDemo")
+            .expect("capability macro must be exported");
+        let key = crate::template_property_key("cache");
+        let direct_impl = format!("TemplateProperty < {key}u64 > for ShadowDemo");
+        let direct_start = shadow.find(&direct_impl).expect("own capability is kept");
+        assert!(
+            gate_start < direct_start && direct_start < macro_start,
+            "{shadow}"
+        );
+        assert!(
+            shadow[macro_start..].contains("(@ if_control { $ ($ tokens) * })"),
+            "the capability macro must forward the family question: {shadow}"
+        );
+        parses_as_items(&shadow.parse().expect("shadow string should tokenize"));
+    }
+
+    /// A component without a base is never in the Control family, so it has no capability impls.
+    #[test]
+    fn struct_shadow_without_base_emits_no_direct_capabilities() {
+        let mut component = demo_component(None);
+        component.fields.push(FieldDef {
+            name: "label".to_string(),
+            ty: "String".to_string(),
+            kind: FieldKind::Prop,
+            attrs: Vec::new(),
+            initializer: Some(Initializer::Expr(syn::parse_quote!(String::new()))),
+        });
+        let item_struct: syn::ItemStruct = syn::parse_quote! {
+            pub struct ShadowDemo {
+                #[prop]
+                label: String,
+            }
+        };
+        let shadow = build_component_struct_shadow(None, &item_struct, &component, None)
+            .expect("struct shadow should build")
+            .to_string();
+        let key = crate::template_property_key("label");
+        assert!(
+            !shadow.contains(&format!("TemplateProperty < {key}u64 > for ShadowDemo")),
+            "{shadow}"
+        );
     }
 
     /// T3: the impl shadow builds from `item_impl` alone, independent of the struct registry.

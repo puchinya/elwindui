@@ -4,6 +4,7 @@
 //! [`DynamicChild`] machinery the generated `if`/`for` view code drives.
 
 use super::*;
+use std::collections::{HashMap, HashSet};
 
 /// The Visual tree's actual child storage (the low-level
 /// counterpart to `Panel.Children`'s `UIElementCollection` below) — a plain, runtime-mutable
@@ -564,14 +565,17 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
     ) {
         let previous_keys = self.keys.borrow();
         let previous_items = self.items.borrow();
+        let mut previous_indices = HashMap::with_capacity(previous_keys.len());
+        for (index, key) in previous_keys.iter().enumerate() {
+            previous_indices.entry(*key).or_insert(index);
+        }
         let mut next_keys = Vec::with_capacity(items.len());
         let mut next_items = Vec::with_capacity(items.len());
         for item in items {
             let key = Rc::as_ptr(item) as usize;
-            let rendered = previous_keys
-                .iter()
-                .position(|previous| *previous == key)
-                .map(|index| Rc::clone(&previous_items[index]))
+            let rendered = previous_indices
+                .get(&key)
+                .map(|index| Rc::clone(&previous_items[*index]))
                 .unwrap_or_else(|| Rc::new(render(item)));
             next_keys.push(key);
             next_items.push(rendered);
@@ -641,6 +645,9 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
         }
     }
 
+    /// Expected cost for `p` previous and `n` next children: `O(p + n)` when the sequence is
+    /// unchanged or only appended to, plus `O(n)` per retained child that actually moves and per
+    /// `Vec` shift the host performs. Identity membership is hashed, so only a real reorder scans.
     fn replace_at<H: DynamicChildHost<T> + ?Sized>(
         &self,
         host: &H,
@@ -670,48 +677,92 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
             || previous_children
                 .iter()
                 .zip(next_children.iter())
-                .any(|((previous, _), (next, _))| !Rc::ptr_eq(previous, next));
+                .any(|((previous, _), (next, _))| !same_child(previous, next));
+        if !host_changed {
+            *self.keys.borrow_mut() = keys;
+            *self.items.borrow_mut() = items;
+            return;
+        }
         let transaction = current_transaction();
         let transition_animation = transaction
             .animation
             .filter(|_| !transaction.disables_animations);
-        let shared = previous_children.len().min(next_children.len());
-        for index in 0..shared {
-            if !Rc::ptr_eq(&previous_children[index].0, &next_children[index].0) {
-                retire_dynamic_child(
-                    &previous_children[index].0,
-                    previous_children[index].1.as_ref(),
-                    transition_animation,
-                );
+        let identities = |children: &[(Rc<T>, Option<crate::ui::Transition>)]| {
+            children
+                .iter()
+                .map(|(child, _)| child_identity(child))
+                .collect::<HashSet<_>>()
+        };
+        let previous_identities = identities(&previous_children);
+        let next_identities = identities(&next_children);
+        // `current` mirrors this slot's range of `host` while it is rewritten. A child retained
+        // across the update (an unchanged `Rc` item) is only *moved* — never retired and
+        // re-activated, which would unmount a live subtree — and is never inserted while it is
+        // still attached at its old index.
+        let mut current: Vec<Rc<T>> = Vec::with_capacity(previous_children.len());
+        for (child, _) in &previous_children {
+            current.push(Rc::clone(child));
+        }
+        for index in (0..previous_children.len()).rev() {
+            let (child, transition) = &previous_children[index];
+            if !next_identities.contains(&child_identity(child)) {
+                retire_dynamic_child(child, transition.as_ref(), transition_animation);
                 host.remove_at(start + index);
-                host.insert(start + index, Rc::clone(&next_children[index].0));
-                activate_dynamic_child(
-                    &next_children[index].0,
-                    next_children[index].1.as_ref(),
-                    transition_animation,
-                );
+                current.remove(index);
             }
         }
-        for (child, transition) in previous_children.iter().skip(next_children.len()) {
-            retire_dynamic_child(child, transition.as_ref(), transition_animation);
-            host.remove_at(start + next_children.len());
-        }
-        for (index, (child, transition)) in next_children
-            .iter()
-            .enumerate()
-            .skip(previous_children.len())
-        {
-            host.insert(start + index, Rc::clone(child));
-            activate_dynamic_child(child, transition.as_ref(), transition_animation);
+        for (index, (child, transition)) in next_children.iter().enumerate() {
+            if current
+                .get(index)
+                .is_some_and(|existing| same_child(existing, child))
+            {
+                continue;
+            }
+            let retained_offset = previous_identities
+                .contains(&child_identity(child))
+                .then(|| {
+                    current
+                        .iter()
+                        .skip(index + 1)
+                        .position(|existing| same_child(existing, child))
+                })
+                .flatten();
+            match retained_offset {
+                Some(offset) => {
+                    let from = index + 1 + offset;
+                    let moved = host.remove_at(start + from);
+                    host.insert(start + index, moved);
+                    let moved = current.remove(from);
+                    current.insert(index, moved);
+                }
+                None => {
+                    host.insert(start + index, Rc::clone(child));
+                    current.insert(index, Rc::clone(child));
+                    activate_dynamic_child(child, transition.as_ref(), transition_animation);
+                }
+            }
         }
         {
             *self.keys.borrow_mut() = keys;
             *self.items.borrow_mut() = items;
         }
-        if host_changed {
-            host.commit_dynamic_update();
-        }
+        host.commit_dynamic_update();
     }
+}
+
+fn child_identity<T: ?Sized>(child: &Rc<T>) -> *const () {
+    Rc::as_ptr(child) as *const ()
+}
+
+#[cfg(test)]
+thread_local! {
+    static CHILD_COMPARISONS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn same_child<T: ?Sized>(left: &Rc<T>, right: &Rc<T>) -> bool {
+    #[cfg(test)]
+    CHILD_COMPARISONS.with(|comparisons| comparisons.set(comparisons.get() + 1));
+    Rc::ptr_eq(left, right)
 }
 
 fn teardown_dynamic_child<T: ?Sized + 'static>(child: &Rc<T>) {
@@ -1049,6 +1100,153 @@ mod tests {
             panic!("an empty replacement has no item to render")
         });
         assert_eq!(host.commits.get(), 2);
+    }
+
+    #[test]
+    fn dynamic_child_slot_unchanged_and_appended_lists_stay_linear() {
+        #[derive(Default)]
+        struct OperationHost {
+            items: RefCell<Vec<Rc<String>>>,
+            operations: Cell<usize>,
+            commits: Cell<usize>,
+        }
+
+        impl DynamicChildHost<String> for OperationHost {
+            fn insert(&self, index: usize, item: Rc<String>) {
+                self.operations.set(self.operations.get() + 1);
+                self.items.borrow_mut().insert(index, item);
+            }
+
+            fn remove(&self, _item: &Rc<String>) -> bool {
+                unreachable!("replace_at removes by index")
+            }
+
+            fn remove_at(&self, index: usize) -> Rc<String> {
+                self.operations.set(self.operations.get() + 1);
+                self.items.borrow_mut().remove(index)
+            }
+
+            fn commit_dynamic_update(&self) {
+                self.commits.set(self.commits.get() + 1);
+            }
+        }
+
+        const COUNT: usize = 1_000;
+        let host = OperationHost::default();
+        let slot = DynamicChildSlot::<String>::default();
+        let mut items: Vec<_> = (0..COUNT).map(|index| Rc::new(index.to_string())).collect();
+        let render = |item: &Rc<String>| DynamicChild::new(Rc::new(format!("child:{item}")));
+        slot.replace_rc_items(&host, 0, &items, render);
+        let before: Vec<_> = host.items.borrow().iter().map(Rc::clone).collect();
+        host.operations.set(0);
+        host.commits.set(0);
+
+        CHILD_COMPARISONS.with(|comparisons| comparisons.set(0));
+        slot.replace_rc_items(&host, 0, &items, |_| {
+            panic!("an unchanged list must not render")
+        });
+        assert!(CHILD_COMPARISONS.with(Cell::get) <= COUNT);
+        assert_eq!(host.operations.get(), 0);
+        assert_eq!(host.commits.get(), 0);
+
+        items.push(Rc::new("appended".to_owned()));
+        CHILD_COMPARISONS.with(|comparisons| comparisons.set(0));
+        slot.replace_rc_items(&host, 0, &items, render);
+        assert!(CHILD_COMPARISONS.with(Cell::get) <= 2 * COUNT);
+        assert_eq!(host.operations.get(), 1);
+        assert_eq!(host.commits.get(), 1);
+        let after = host.items.borrow();
+        assert_eq!(after.len(), COUNT + 1);
+        assert!(
+            before
+                .iter()
+                .zip(after.iter())
+                .all(|(previous, next)| Rc::ptr_eq(previous, next))
+        );
+    }
+
+    #[test]
+    fn dynamic_child_slot_moves_retained_children_without_double_insertion() {
+        // Mirrors a real parent collection: a child can be attached at most once.
+        struct UniqueHost(RefCell<Vec<Rc<String>>>);
+
+        impl DynamicChildHost<String> for UniqueHost {
+            fn insert(&self, index: usize, item: Rc<String>) {
+                assert!(
+                    !self
+                        .0
+                        .borrow()
+                        .iter()
+                        .any(|current| Rc::ptr_eq(current, &item)),
+                    "{item} inserted while still attached"
+                );
+                self.0.borrow_mut().insert(index, item);
+            }
+
+            fn remove(&self, item: &Rc<String>) -> bool {
+                let index = self
+                    .0
+                    .borrow()
+                    .iter()
+                    .position(|current| Rc::ptr_eq(current, item));
+                index
+                    .map(|index| self.0.borrow_mut().remove(index))
+                    .is_some()
+            }
+
+            fn remove_at(&self, index: usize) -> Rc<String> {
+                self.0.borrow_mut().remove(index)
+            }
+        }
+
+        let host = UniqueHost(RefCell::new(vec![
+            Rc::new("leading".to_owned()),
+            Rc::new("trailing".to_owned()),
+        ]));
+        let slot = DynamicChildSlot::<String>::default();
+        let items: Vec<_> = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|label| Rc::new(label.to_owned()))
+            .collect();
+        let renders = Cell::new(0);
+        let render = |item: &Rc<String>| {
+            renders.set(renders.get() + 1);
+            DynamicChild::new(Rc::new(format!("child:{item}")))
+        };
+        let labels = || {
+            host.0
+                .borrow()
+                .iter()
+                .map(|child| child.as_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let pick = |indices: &[usize]| {
+            indices
+                .iter()
+                .map(|index| Rc::clone(&items[*index]))
+                .collect::<Vec<_>>()
+        };
+
+        slot.replace_rc_items(&host, 1, &pick(&[0, 1, 2, 3]), render);
+        let retained_c = Rc::clone(&host.0.borrow()[3]);
+        slot.replace_rc_items(&host, 1, &pick(&[0, 2, 3]), render);
+        assert_eq!(
+            labels(),
+            ["leading", "child:a", "child:c", "child:d", "trailing"]
+        );
+        slot.replace_rc_items(&host, 1, &pick(&[3, 0, 2]), render);
+        assert_eq!(
+            labels(),
+            ["leading", "child:d", "child:a", "child:c", "trailing"]
+        );
+        slot.replace_rc_items(&host, 1, &pick(&[2, 1, 3]), render);
+        assert_eq!(
+            labels(),
+            ["leading", "child:c", "child:b", "child:d", "trailing"]
+        );
+        assert_eq!(renders.get(), 5, "only the re-added item renders again");
+        assert!(Rc::ptr_eq(&retained_c, &host.0.borrow()[1]));
+        assert_eq!(slot.len(), 3);
     }
 
     #[test]

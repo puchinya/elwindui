@@ -52,6 +52,33 @@ pub trait ObservableExt {
     fn subscribe_property_changed(&self, f: impl Fn(&'static str) + 'static) -> Subscription;
 }
 
+/// Autoref dispatch for a `for` item's generated observer: `for` accepts any `Rc<T>`, so whether
+/// `T` publishes changes is only known once the item type is, not when codegen runs.
+/// `(&ItemObservation(item)).observe_item(..)` selects `ObservableItem` for an `ObservableExt` item
+/// and otherwise autorefs once more into `PlainItem`, which never subscribes.
+#[doc(hidden)]
+pub struct ItemObservation<'a, T: ?Sized>(pub &'a T);
+
+#[doc(hidden)]
+pub trait ObservableItem {
+    fn observe_item(&self, f: impl Fn(&'static str) + 'static) -> Option<Subscription>;
+}
+
+impl<T: ObservableExt + ?Sized> ObservableItem for ItemObservation<'_, T> {
+    fn observe_item(&self, f: impl Fn(&'static str) + 'static) -> Option<Subscription> {
+        Some(self.0.subscribe_property_changed(f))
+    }
+}
+
+#[doc(hidden)]
+pub trait PlainItem {
+    fn observe_item(&self, _f: impl Fn(&'static str) + 'static) -> Option<Subscription> {
+        None
+    }
+}
+
+impl<T: ?Sized> PlainItem for &ItemObservation<'_, T> {}
+
 /// The value of a `#[async_computed]` field — what its generated getter returns instead of the
 /// bare declared type `T`. See docs/design/runtime/state_management_design.md "Async work",
 /// docs/specs/dsl_spec.md §3 "`viewmodel`と`store`:宣言構文".

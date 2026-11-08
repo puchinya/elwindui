@@ -1961,6 +1961,51 @@ fn build_props_macro(
         })
         .collect();
 
+    // Issue #166: `@inherited_get`/`@inherited_set` let a derived generated Component's raw Rust
+    // (`on_*` handler bodies, `format!` arguments, lifecycle hooks) address an ancestor-declared
+    // writable property by its bare name without the consumer macro having to know the ancestor's
+    // schema — the same "ask the declaring class's own shape macro" transport `@field_type` uses,
+    // so it works identically for same-crate and cross-crate ancestors. A declared property routes
+    // to the declaring class's own getter/setter on `$recv` (the derived Component's immediate base
+    // value, which owns the storage chain); a name no class in the chain declares falls through to
+    // the terminal arm, which leaves the original bare name untouched (an ordinary local, constant,
+    // or function — or a genuine rustc "cannot find value" error), never a guessed property.
+    let inherited_access_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .filter(|p| takes_set_arm(p) && !p.routed)
+        .map(|p| {
+            let name = &p.name;
+            let setter = format_ident!("set_{}", name);
+            quote! {
+                (@inherited_get_from $origin:ident, $recv:expr, #name) => { $recv.#name() };
+                (@inherited_set_from $origin:ident, $recv:expr, #name, $value:expr) => {
+                    $recv.#setter($value)
+                };
+            }
+        })
+        .collect();
+    let inherited_access_fallback = match parent {
+        Some((parent_bare, parent_ty)) => {
+            let parent_macro =
+                inherit_macro_self_ref_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
+            quote! {
+                (@inherited_get_from $origin:ident, $recv:expr, $name:ident) => {
+                    #parent_macro!(@inherited_get_from $origin, $recv, $name)
+                };
+                (@inherited_set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                    #parent_macro!(@inherited_set_from $origin, $recv, $name, $value)
+                };
+            }
+        }
+        None => quote! {
+            (@inherited_get_from $origin:ident, $recv:expr, $name:ident) => { $name };
+            (@inherited_set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                $name = $value
+            };
+        },
+    };
+
     let set_arms: Vec<TokenStream2> = shape
         .props
         .iter()
@@ -2932,6 +2977,14 @@ fn build_props_macro(
             (@field_type $name:ident) => {
                 $crate::#macro_ident!(@field_type_from #bare_ident, $name)
             };
+            (@inherited_get $recv:expr, $name:ident) => {
+                $crate::#macro_ident!(@inherited_get_from #bare_ident, $recv, $name)
+            };
+            (@inherited_set $recv:expr, $name:ident, $value:expr) => {
+                $crate::#macro_ident!(@inherited_set_from #bare_ident, $recv, $name, $value)
+            };
+            #(#inherited_access_arms)*
+            #inherited_access_fallback
             #(#field_type_arms)*
             #field_type_fallback
             (@routed $recv:expr, $name:ident, $value:expr) => {

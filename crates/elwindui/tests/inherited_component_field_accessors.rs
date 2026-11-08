@@ -1,0 +1,327 @@
+//! Issue #166: a derived Component's own `view!` reads and writes fields declared by a
+//! user-defined ancestor through one unambiguous accessor path (Model A — the declaring Component
+//! owns storage, accessors and notification), compiled by real rustc.
+
+#![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+
+use elwindui::core::base::Point;
+use elwindui::core::reactive::ObservableExt;
+use elwindui::core::ui::UIElementExt;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+#[elwindui::component(inherits VerticalLayout)]
+struct InheritBase {
+    #[prop(default = "before".to_string())]
+    heading: String,
+    #[prop(default = 1)]
+    count: i32,
+
+    body: view! {
+        #[id("base_label")]
+        let base_label = TextBlock { text: heading };
+
+        base_label
+    },
+}
+
+#[elwindui::component]
+impl InheritBase {}
+
+/// One hop: reads `heading` from a DSL value position and from raw Rust (`format!`), writes it
+/// from an event handler, and compound-assigns the inherited `count`.
+#[elwindui::component(inherits crate::InheritBase)]
+struct InheritDerived {
+    #[prop(default = "own".to_string())]
+    own_label: String,
+
+    body: view! {
+        #[id("read_label")]
+        let read_label = TextBlock {
+            text: heading,
+            on_tapped: |_event| {
+                heading = "after".to_string();
+                count += 10;
+            },
+        };
+        #[id("format_label")]
+        let format_label = TextBlock { text: format!("{heading}/{}", count) };
+        #[id("own_text")]
+        let own_text = TextBlock { text: own_label };
+
+        VerticalLayout {
+            read_label
+            format_label
+            own_text
+        }
+    },
+}
+
+#[elwindui::component]
+impl InheritDerived {}
+
+#[elwindui::component(inherits crate::InheritBase)]
+struct InheritMiddle {
+    #[prop(default = 0)]
+    middle_only: i32,
+}
+
+#[elwindui::component]
+impl InheritMiddle {}
+
+/// Multi-hop: `heading` is declared only on `InheritBase`.
+#[elwindui::component(inherits crate::InheritMiddle)]
+struct InheritLeaf {
+    body: view! {
+        #[id("leaf_label")]
+        let leaf_label = TextBlock {
+            text: heading,
+            on_tapped: |_event| {
+                heading = format!("{heading}!");
+            },
+        };
+
+        leaf_label
+    },
+}
+
+#[elwindui::component]
+impl InheritLeaf {}
+
+fn text_of(block: &elwindui::ui::TextBlock) -> String {
+    block.text.borrow().clone()
+}
+
+fn tap(target: Rc<dyn UIElementExt>) {
+    let routed_args = elwindui::core::input::RoutedEventArgs::default();
+    elwindui::core::ui::dispatch_routed(
+        &target,
+        "on_tapped",
+        &elwindui::core::input::TappedEventArgs {
+            position: Point { x: 1.0, y: 1.0 },
+            modifiers: elwindui::core::input::KeyModifiers::default(),
+        },
+        &routed_args,
+    );
+}
+
+#[test]
+fn t1_derived_view_reads_inherited_prop() {
+    let derived = InheritDerived::new();
+    assert_eq!(derived.heading(), "before");
+    assert_eq!(text_of(&derived.read_label()), "before");
+    assert_eq!(text_of(&derived.format_label()), "before/1");
+}
+
+#[test]
+fn t2_derived_handler_writes_inherited_prop_through_declaring_setter() {
+    let derived = InheritDerived::new();
+    let notified = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+    let sink = Rc::clone(&notified);
+    let _subscription = ObservableExt::subscribe_property_changed(&derived.base, move |property| {
+        sink.borrow_mut().push(property);
+    });
+
+    tap(derived.read_label());
+
+    assert_eq!(derived.heading(), "after");
+    assert_eq!(derived.base.heading(), "after");
+    assert_eq!(derived.count(), 11);
+    assert_eq!(*notified.borrow(), vec!["heading", "count"]);
+    assert_eq!(text_of(&derived.read_label()), "after");
+    assert_eq!(text_of(&derived.format_label()), "after/11");
+}
+
+#[test]
+fn t2_external_inherited_write_resyncs_derived_view() {
+    let derived = InheritDerived::new();
+    derived.base.set_heading("external".to_string());
+    assert_eq!(derived.heading(), "external");
+    assert_eq!(text_of(&derived.read_label()), "external");
+}
+
+#[test]
+fn t3_multi_hop_reads_and_writes_ancestor_prop() {
+    let leaf = InheritLeaf::new();
+    assert_eq!(text_of(&leaf.leaf_label()), "before");
+    tap(leaf.leaf_label());
+    assert_eq!(leaf.heading(), "before!");
+    assert_eq!(leaf.base.base.heading(), "before!");
+    assert_eq!(text_of(&leaf.leaf_label()), "before!");
+
+    leaf.base.base.set_heading("from base".to_string());
+    assert_eq!(text_of(&leaf.leaf_label()), "from base");
+}
+
+#[test]
+fn t3_observable_ext_reports_ancestor_properties_on_descendant() {
+    let leaf = InheritLeaf::new();
+    let names = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+    let sink = Rc::clone(&names);
+    let _subscription =
+        ObservableExt::subscribe_property_changed(&*leaf, move |name| sink.borrow_mut().push(name));
+    leaf.base.base.set_heading("x".to_string());
+    leaf.base.set_middle_only(3);
+    assert_eq!(*names.borrow(), vec!["heading", "middle_only"]);
+}
+
+#[test]
+fn t4_derived_own_prop_is_unaffected() {
+    let derived = InheritDerived::new();
+    assert_eq!(text_of(&derived.own_text()), "own");
+    derived.set_own_label("changed".to_string());
+    assert_eq!(text_of(&derived.own_text()), "changed");
+    assert_eq!(derived.heading(), "before");
+}
+
+// Cross-crate (D6): the declaring ancestor lives in another crate. The consumer macro does not
+// classify `heading`; the defining crate's shape macro / rustc resolve it.
+use elwindui_external_component_fixture::ExternalInheritBaseExt as _;
+
+#[elwindui::component(inherits elwindui_external_component_fixture::ExternalInheritBase)]
+struct CrossCrateDerived {
+    body: view! {
+        #[id("cross_label")]
+        let cross_label = TextBlock {
+            text: heading,
+            on_tapped: |_event| {
+                heading = format!("{heading}+tap");
+            },
+        };
+
+        cross_label
+    },
+}
+
+#[elwindui::component]
+impl CrossCrateDerived {}
+
+#[elwindui::component(inherits elwindui_external_component_fixture::ExternalInheritMiddle)]
+struct CrossCrateLeaf {
+    body: view! {
+        #[id("leaf_cross_label")]
+        let leaf_cross_label = TextBlock {
+            text: format!("[{heading}]"),
+            on_tapped: |_event| {
+                heading = "leaf".to_string();
+            },
+        };
+
+        leaf_cross_label
+    },
+}
+
+#[elwindui::component]
+impl CrossCrateLeaf {}
+
+#[test]
+fn cross_crate_derived_reads_and_writes_external_ancestor_prop() {
+    let derived = CrossCrateDerived::new();
+    assert_eq!(text_of(&derived.cross_label()), "external-before");
+    tap(derived.cross_label());
+    assert_eq!(derived.base.heading(), "external-before+tap");
+    assert_eq!(text_of(&derived.cross_label()), "external-before+tap");
+}
+
+#[test]
+fn cross_crate_multi_hop_through_external_middle() {
+    let leaf = CrossCrateLeaf::new();
+    assert_eq!(text_of(&leaf.leaf_cross_label()), "[external-before]");
+    tap(leaf.leaf_cross_label());
+    assert_eq!(leaf.base.base.heading(), "leaf");
+    assert_eq!(text_of(&leaf.leaf_cross_label()), "[leaf]");
+}
+
+// T6: DeferredView is a regression consumer of the general fix — a derived Component's
+// `context_popup: view!` handler writes a Prop declared by its user-defined ancestor.
+#[elwindui::component(inherits crate::InheritBase)]
+struct InheritPopupDerived {
+    body: view! {
+        #[id("popup_target")]
+        let popup_target = TextBlock {
+            text: heading,
+            context_popup: view! {
+                TextBlock {
+                    text: "popup",
+                    on_tapped: |_event| {
+                        heading = "from popup".to_string();
+                    },
+                }
+            },
+        };
+
+        popup_target
+    },
+}
+
+#[elwindui::component]
+impl InheritPopupDerived {}
+
+struct T6PopupHandle;
+
+impl elwindui::core::ui::popup::PopupSurfaceHandle for T6PopupHandle {
+    fn close(&self) {}
+}
+
+struct T6PopupHost {
+    shown: RefCell<Vec<Rc<dyn UIElementExt>>>,
+}
+
+impl elwindui::core::ui::popup::PopupHost for T6PopupHost {
+    fn show_popup(
+        &self,
+        request: elwindui::core::ui::popup::PopupRequest,
+    ) -> Option<Rc<dyn elwindui::core::ui::popup::PopupSurfaceHandle>> {
+        self.shown.borrow_mut().push(Rc::clone(&request.content));
+        Some(Rc::new(T6PopupHandle))
+    }
+}
+
+#[test]
+fn t6_derived_context_popup_writes_inherited_prop() {
+    use elwindui::core::base::Rect;
+    use elwindui::core::ui::popup::{
+        ContextMenuService, ContextRequest, PopupAnchor, ResolvedContextDefinition,
+    };
+
+    let derived = InheritPopupDerived::new();
+    let target: Rc<dyn UIElementExt> = derived.popup_target();
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+    let host = T6PopupHost {
+        shown: RefCell::new(Vec::new()),
+    };
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 600.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &template,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, deferred view should build");
+
+    let content = Rc::clone(&host.shown.borrow()[0]);
+    let inner = content
+        .visual_children()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| content.clone());
+    tap(inner);
+
+    assert_eq!(derived.heading(), "from popup");
+    assert_eq!(text_of(&derived.popup_target()), "from popup");
+
+    elwindui::ui::unmount_subtree(&content);
+    handle.close();
+}

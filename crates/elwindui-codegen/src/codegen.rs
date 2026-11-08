@@ -5463,6 +5463,8 @@ fn generate_view(
         closure_param_type: None,
         own_fields,
         mutable_own_fields: HashSet::new(),
+        inherited_fields: HashSet::new(),
+        inherited_props_macro: None,
         property_dependencies: own_dependents_of.clone(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
@@ -5543,6 +5545,49 @@ fn generate_view(
         .iter()
         .map(|f| f.name.as_str())
         .collect();
+    // Issue #166 (Model A): a shape-composed Component with its own authored view reads and writes
+    // inherited fields through its concrete `base` value — the declaring ancestor keeps sole
+    // ownership of storage, accessors and change notification. `ctx.inherited_fields` is the
+    // DSL-value-position half (names the effective field set already carries, including the
+    // cross-crate `synthesize_external_base_fields` ones, whose existence/type stay deferred to
+    // rustc); `ctx.inherited_props_macro` is the raw-Rust half (see its doc comment). A same-name
+    // bare forward on the composition root (`padding: padding`) keeps its existing forwarding
+    // semantics and is not treated as an inherited read. Template bodies and lowered deferred views
+    // have their own parent/owner resolution and are excluded.
+    if is_shape_composition && !view.is_template && view.implicit_owner.is_none() {
+        let root_forwards: HashSet<&str> = view
+            .root
+            .attributes
+            .iter()
+            .filter(|attribute| {
+                matches!(&attribute.value, ViewExpr::Path(path)
+                    if path.len() == 1 && path[0] == attribute.name)
+            })
+            .map(|attribute| attribute.name.as_str())
+            .collect();
+        ctx.inherited_fields = component
+            .fields
+            .iter()
+            .filter(|f| {
+                !declared_own_field_names.contains(f.name.as_str())
+                    && f.kind != FieldKind::State
+                    && !f.name.starts_with("on_")
+                    && !crate::attr_frontend::is_event_schema_field(f)
+                    && !root_forwards.contains(f.name.as_str())
+                    && view_references_bare_name(view, &f.name)
+            })
+            .map(|f| f.name.clone())
+            .collect();
+        let inherited_fields = ctx.inherited_fields.clone();
+        ctx.own_fields
+            .retain(|name, _| !inherited_fields.contains(name.as_str()));
+        if let Some(base) = component.base.as_deref() {
+            ctx.inherited_props_macro = Some(dsl_props_macro_path(
+                component.base_path.as_deref().unwrap_or(base),
+                table.resolve(from, base),
+            ));
+        }
+    }
     // A shape-composed component delegates inherited fields to its concrete `base` value. They
     // remain in the effective field map above so authored expressions can resolve them, but must
     // not be re-stored or re-exposed as a second set of accessors on the derived type.
@@ -5787,17 +5832,26 @@ fn generate_view(
     // reports that case as a real diagnostic; this is a second, codegen-level guarantee that holds
     // even if this function is ever called on unvalidated input (mirrors `is_abstract`'s own
     // `continue` in `generate_module` just above).
-    let resolved_root = resolve_view_root_element(
-        &view.root,
-        component.base.as_deref(),
-        is_composed,
-    )
-    .unwrap_or_else(|| {
-        panic!(
-            "{}: view root must be exactly one element unless it inherits a composable base",
-            component.name
-        )
-    });
+    // Issue #166: a base with no local `TypeInfo` that the author named through a qualified path
+    // (`inherits other_crate::Base`) is an *external generated Component*. Its synthesized root
+    // keeps that qualified spelling so every downstream emission site (`dsl_type_origin`,
+    // shape/ctor macro paths, `*Ext` trait paths) resolves it in its defining crate rather than
+    // falling back to the builtin `elwindui::core`/`elwindui::ui` namespace.
+    let composed_root_type =
+        component
+            .base
+            .as_deref()
+            .map(|base| match component.base_path.as_deref() {
+                Some(base_path) if table.resolve(from, base).is_none() => base_path,
+                _ => base,
+            });
+    let resolved_root = resolve_view_root_element(&view.root, composed_root_type, is_composed)
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: view root must be exactly one element unless it inherits a composable base",
+                component.name
+            )
+        });
 
     // Property/content lowering is selected by the effective root/base props macro. Local-vs-
     // external resolution only determines where that macro is exported; template presentation is
@@ -7240,7 +7294,7 @@ fn generate_view(
     let component_root_invalidation = if is_host_composition {
         None
     } else if is_shape_composition || is_inherited_view_composition {
-        Some(quote! { self.invalidate(); })
+        Some(quote! { elwindui::core::ui::UIElementExt::invalidate(self); })
     } else {
         Some(quote! {
             if let Some(root) = self.#root_binding.get() {
@@ -8258,6 +8312,31 @@ fn generate_view(
             }
         })
         .collect();
+    // Issue #166 (D4): Model A keeps an inherited property's storage and notifications on the
+    // declaring ancestor, so this Component observes its own `base` value by property name (the
+    // ancestor chain is folded into each generated Component's `ObservableExt`, see
+    // `component_observable_impl`) and re-syncs its authored view. `ItemObservation`'s autoref
+    // dispatch makes this a no-op for a hand-written base with no `ObservableExt`.
+    let inherited_base_subscription = if ctx.inherited_props_macro.is_some() {
+        quote! {
+            {
+                #[allow(unused_imports)]
+                use elwindui::core::reactive::{ObservableItem as _, PlainItem as _};
+                let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
+                let observation = elwindui::core::reactive::ItemObservation(&this.base);
+                if let Some(subscription) = (&observation).observe_item(move |_property| {
+                    if let Some(this) = weak.upgrade() {
+                        this.resync();
+                        <#target as #target_ext>::__refresh_dynamic_regions(&*this);
+                    }
+                }) {
+                    this.__property_changed_subscriptions.borrow_mut().push(subscription);
+                }
+            }
+        }
+    } else {
+        TokenStream::new()
+    };
     let component_self_subscription = if component_property_variants.is_empty() {
         TokenStream::new()
     } else {
@@ -8410,22 +8489,59 @@ fn generate_view(
         .iter()
         .map(ToString::to_string)
         .collect();
-    let component_observable_impl = quote! {
-        impl elwindui::core::reactive::ObservableExt for #target {
-            #[allow(unreachable_code)]
-            fn subscribe_property_changed(
-                &self,
-                f: impl Fn(&'static str) + 'static,
-            ) -> elwindui::core::reactive::Subscription {
-                #target::subscribe_property_changed(self, move |property| {
-                    let property_name = match property {
-                        #(
-                            #component_property_enum::#component_property_variants =>
-                                #component_property_names,
-                        )*
-                    };
-                    f(property_name);
-                })
+    // Issue #166 (D4, approved behavior): a descendant instance also *is* each of its ancestors, so
+    // the name-keyed `ObservableExt` surface of a Component composed over a `base` value reports the
+    // ancestors' property names too (chained through `base`'s own `ObservableExt`, recursively;
+    // `ItemObservation` makes a hand-written base without one a no-op). The typed
+    // `subscribe_property_changed(<Target>Property)` API is unchanged.
+    let component_observable_impl = if is_shape_composition || is_inherited_view_composition {
+        quote! {
+            impl elwindui::core::reactive::ObservableExt for #target {
+                #[allow(unreachable_code)]
+                fn subscribe_property_changed(
+                    &self,
+                    f: impl Fn(&'static str) + 'static,
+                ) -> elwindui::core::reactive::Subscription {
+                    #[allow(unused_imports)]
+                    use elwindui::core::reactive::{ObservableItem as _, PlainItem as _};
+                    let f: std::rc::Rc<dyn Fn(&'static str)> = std::rc::Rc::new(f);
+                    let own_f = std::rc::Rc::clone(&f);
+                    let own = #target::subscribe_property_changed(self, move |property| {
+                        let property_name = match property {
+                            #(
+                                #component_property_enum::#component_property_variants =>
+                                    #component_property_names,
+                            )*
+                        };
+                        own_f(property_name);
+                    });
+                    let observation = elwindui::core::reactive::ItemObservation(&self.base);
+                    let inherited = (&observation).observe_item(move |property| f(property));
+                    elwindui::core::reactive::Subscription::new(move || {
+                        drop(own);
+                        drop(inherited);
+                    })
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl elwindui::core::reactive::ObservableExt for #target {
+                #[allow(unreachable_code)]
+                fn subscribe_property_changed(
+                    &self,
+                    f: impl Fn(&'static str) + 'static,
+                ) -> elwindui::core::reactive::Subscription {
+                    #target::subscribe_property_changed(self, move |property| {
+                        let property_name = match property {
+                            #(
+                                #component_property_enum::#component_property_variants =>
+                                    #component_property_names,
+                            )*
+                        };
+                        f(property_name);
+                    })
+                }
             }
         }
     };
@@ -8554,6 +8670,7 @@ fn generate_view(
                 self.resync();
                 if let Some(this) = __most_derived {
                     #component_self_subscription
+                    #inherited_base_subscription
                     #subscribe_stmts
                     #own_environment_subscribe_stmts
                     #semantic_brush_subscribe_stmts
@@ -8899,8 +9016,9 @@ fn generate_view(
                     }
                     #wiring_stmts
                     self.resync();
-                    self.__refresh_dynamic_regions();
+                    <Self as #target_ext>::__refresh_dynamic_regions(self);
                     #component_self_subscription
+                    #inherited_base_subscription
                     #subscribe_stmts
                     #own_environment_subscribe_stmts
                     #semantic_brush_subscribe_stmts
@@ -9032,6 +9150,18 @@ struct ViewCtx {
     /// own field uses). Empty at `Construction` time's own use (`emit_expr`'s `EmitMode::
     /// Construction` reads the raw constructor-argument local instead, always bare regardless).
     mutable_own_fields: HashSet<String>,
+    /// Issue #166: fields a shape-composed Component with its own view inherits from an ancestor
+    /// and references by bare name from a DSL value position (effective fields minus the
+    /// Component's source-local declarations; ancestor `#[state]` is never present). Model A: the
+    /// declaring ancestor owns storage and accessors, so a read lowers to `<recv>.base.<name>()`
+    /// and a write to `<recv>.base.set_<name>(..)` — never to own storage of this Component.
+    inherited_fields: HashSet<String>,
+    /// Issue #166: the immediate base's `__elwindui_props_<Base>!` shape macro. When set, an
+    /// otherwise-unresolved bare snake_case name in raw Rust (handler bodies, `format!` arguments)
+    /// is routed through its `@inherited_get`/`@inherited_set` arms, which resolve the name against
+    /// the declaring ancestor's shape (same-crate and cross-crate alike) and leave any undeclared
+    /// name untouched for rustc.
+    inherited_props_macro: Option<TokenStream>,
     /// Component fields explicitly marked `#[bindable]`; only their direct properties are
     /// reactive owner dependencies in ordinary view expressions.
     bindable_owners: HashSet<String>,
@@ -9224,6 +9354,16 @@ impl ViewCtx {
         }
     }
 
+    /// Issue #166: every generated Component with its own view declares `__refresh_dynamic_regions`
+    /// in its own `{Target}Ext` trait, and a derived Component also implements each ancestor's
+    /// `*Ext` trait through `#[class]` forwarding — so unqualified method-call syntax on a derived
+    /// receiver is ambiguous (E0034). Always name this Component's own trait explicitly.
+    fn refresh_call(&self, receiver: TokenStream) -> TokenStream {
+        let target = &self.target;
+        let target_ext = format_ident!("{}Ext", target);
+        quote! { <#target as #target_ext>::__refresh_dynamic_regions(&*#receiver); }
+    }
+
     fn refresh_statement(&self) -> TokenStream {
         if let Some(cell) = self.template_refresh_cell() {
             quote! {
@@ -9234,7 +9374,7 @@ impl ViewCtx {
                 }
             }
         } else {
-            quote! { this.__refresh_dynamic_regions(); }
+            self.refresh_call(quote! { this })
         }
     }
 
@@ -9325,6 +9465,8 @@ pub(crate) fn lower_template_body(
         closure_param_type: None,
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
+        inherited_fields: HashSet::new(),
+        inherited_props_macro: None,
         property_dependencies: HashMap::new(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
@@ -10962,6 +11104,7 @@ fn emit_for_item_wiring(
     }
     let self_mode = EmitMode::WithSelf(quote! { __elwindui_for_item_this });
     let mut out = TokenStream::new();
+    let for_item_refresh = ctx.refresh_call(quote! { __elwindui_for_item_this });
     if has_event_wiring {
         let target = &ctx.target;
         out.extend(quote! {
@@ -11055,7 +11198,7 @@ fn emit_for_item_wiring(
                         let __elwindui_for_item_this = std::rc::Rc::clone(&__elwindui_for_item_this);
                         #props_macro!(@set widget, #name_ident, move |#(#annotated_params),*| {
                             #call;
-                            __elwindui_for_item_this.__refresh_dynamic_regions();
+                            #for_item_refresh
                         });
                     }
                 });
@@ -11123,7 +11266,7 @@ fn emit_for_item_wiring(
                         let __elwindui_for_item_this = std::rc::Rc::clone(&__elwindui_for_item_this);
                         widget.#setter(Box::new(move || {
                             #call;
-                            __elwindui_for_item_this.__refresh_dynamic_regions();
+                            #for_item_refresh
                         }));
                     }
                 });
@@ -11152,7 +11295,7 @@ fn emit_for_item_wiring(
                         let __elwindui_for_item_this = std::rc::Rc::clone(&__elwindui_for_item_this);
                         widget.#setter(Box::new(move |#(#param_decls),*| {
                             #call;
-                            __elwindui_for_item_this.__refresh_dynamic_regions();
+                            #for_item_refresh
                         }));
                     }
                 });
@@ -16436,6 +16579,55 @@ impl<'a> ViewClosureRewriter<'a> {
         Some(quote! { #base.#setter })
     }
 
+    /// Issue #166: whether an unresolved bare name in raw Rust may be an inherited property that
+    /// the immediate base's shape macro should resolve. Property names are snake_case identifiers;
+    /// path keywords, generated `__` names, and UpperCamel/SCREAMING items (types, variants,
+    /// constants) are never routed.
+    fn is_inherited_candidate(&self, name: &str) -> bool {
+        !self.is_shadowed(name)
+            && self.ctx.closure_param.as_deref() != Some(name)
+            && !matches!(name, "self" | "Self" | "crate" | "super")
+            && !name.starts_with("__")
+            && name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+    }
+
+    /// Issue #166 (Model A): a bare read of an inherited property in raw Rust. A name already known
+    /// as an inherited field from a DSL value position reads `<recv>.base.<name>()` directly; any
+    /// other unresolved candidate is resolved by the immediate base's shape macro chain
+    /// (`@inherited_get`), which reaches the declaring ancestor's getter or leaves the bare name
+    /// untouched when no ancestor declares it.
+    fn resolved_inherited_read(&self, name: &str) -> Option<TokenStream> {
+        if !self.is_inherited_candidate(name) {
+            return None;
+        }
+        if self.ctx.inherited_fields.contains(name) {
+            return Some(inherited_field_read(self.mode, name));
+        }
+        let props_macro = self.ctx.inherited_props_macro.as_ref()?;
+        let receiver = inherited_field_receiver(self.mode);
+        let ident = format_ident!("{}", name);
+        Some(quote! { #props_macro!(@inherited_get #receiver.base, #ident) })
+    }
+
+    /// Issue #166 (Model A): the write-side counterpart to `resolved_inherited_read` — the
+    /// declaring ancestor's own setter on `<recv>.base`, so storage and notification stay single.
+    fn resolved_inherited_write(&self, name: &str, value: TokenStream) -> Option<TokenStream> {
+        if !self.is_inherited_candidate(name) {
+            return None;
+        }
+        let receiver = inherited_field_receiver(self.mode);
+        let ident = format_ident!("{}", name);
+        if self.ctx.inherited_fields.contains(name) {
+            let setter = format_ident!("set_{}", name);
+            return Some(quote! { #receiver.base.#setter(#value) });
+        }
+        let props_macro = self.ctx.inherited_props_macro.as_ref()?;
+        Some(quote! { #props_macro!(@inherited_set #receiver.base, #ident, #value) })
+    }
+
     /// PR #165 post-final rereview remediation, A8: the 2-segment (`vm.label`, `vm.save`) raw-Rust
     /// counterpart to `resolved_implicit_owner_field` — reached only after `resolved_owner(owner)`
     /// has already failed to resolve `owner` as a real field of the *current* generated Component
@@ -16566,6 +16758,32 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
         // other assignment (a genuine local variable, `+=`-style compound assignment which `syn`
         // represents as `Expr::Binary` and never reaches here, ...) falls through to the default
         // recursive visit at the bottom, unchanged.
+        // Issue #166: `name op= rhs` on an inherited property (syn represents compound assignment
+        // as `Expr::Binary`) becomes `set(get() op rhs)` through the same declaring-ancestor
+        // accessors; for a name no ancestor declares, the shape macro's fallback arms reproduce
+        // the original `name = name op rhs` exactly.
+        if let syn::Expr::Binary(binary) = node {
+            if let Some(op) = compound_assign_binary_op(&binary.op) {
+                if let syn::Expr::Path(p) = binary.left.as_ref() {
+                    if let (Some(ident), None) = (p.path.get_ident(), &p.qself) {
+                        let name = ident.to_string();
+                        let is_own = self.ctx.mutable_own_fields.contains(&name)
+                            || self.ctx.own_fields.contains_key(&name);
+                        if !is_own {
+                            if let Some(current) = self.resolved_inherited_read(&name) {
+                                let mut rhs = (*binary.right).clone();
+                                self.visit_expr_mut(&mut rhs);
+                                let value = quote! { (#current) #op (#rhs) };
+                                if let Some(write) = self.resolved_inherited_write(&name, value) {
+                                    *node = syn::parse_quote! { #write };
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if let syn::Expr::Assign(assign) = node {
             if let syn::Expr::Path(p) = assign.left.as_ref() {
                 if let Some(ident) = p.path.get_ident() {
@@ -16613,6 +16831,14 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                             self.visit_expr_mut(&mut assign.right);
                             let rhs = &assign.right;
                             *node = syn::parse_quote! { #setter(#rhs) };
+                            return;
+                        }
+                    }
+                    if !is_mutable_own_field && !is_template_parent_field {
+                        let mut rhs = (*assign.right).clone();
+                        self.visit_expr_mut(&mut rhs);
+                        if let Some(write) = self.resolved_inherited_write(&name, quote! { #rhs }) {
+                            *node = syn::parse_quote! { #write };
                             return;
                         }
                     }
@@ -16787,6 +17013,12 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                 }
                 if let Some(value) = self.resolved_implicit_owner_field(only) {
                     *node = syn::parse_quote! { #value };
+                    return;
+                }
+                if p.qself.is_none() {
+                    if let Some(value) = self.resolved_inherited_read(only) {
+                        *node = syn::parse_quote! { #value };
+                    }
                 }
                 return;
             }
@@ -16852,6 +17084,7 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                             .resolved_mutable_field_read(&name)
                             .or_else(|| self.resolved_owner(&name))
                             .or_else(|| self.resolved_implicit_owner_field(&name))
+                            .or_else(|| self.resolved_inherited_read(&name))
                         else {
                             continue;
                         };
@@ -17082,6 +17315,19 @@ fn is_implicit_reactive_field(ctx: &ViewCtx, name: &str) -> bool {
     ctx.implicit_owner
         .as_ref()
         .is_some_and(|implicit| implicit.reactive_fields.contains(name))
+        || is_inherited_reactive_name(ctx, name)
+}
+
+/// Issue #166: an inherited property can change after construction (its declaring ancestor's
+/// setter), so an expression reading it is reactive. A name the immediate base's shape macro may
+/// resolve (`ViewCtx::inherited_props_macro`) is conservatively treated as reactive too — an
+/// over-approximation only costs a redundant re-evaluation on resync.
+fn is_inherited_reactive_name(ctx: &ViewCtx, name: &str) -> bool {
+    ctx.inherited_fields.contains(name)
+        || (ctx.inherited_props_macro.is_some()
+            && !ctx.own_fields.contains_key(name)
+            && !name.starts_with("__")
+            && name.chars().next().is_some_and(|c| c.is_ascii_lowercase()))
 }
 
 /// Whether `name` is a source-Component `#[bindable]` field reachable through this hidden
@@ -17282,11 +17528,10 @@ fn property_resync_methods_for(
                             &mut statements,
                         );
                     }
-                    let refresh =
-                        include_refresh.then(|| quote! { self.__refresh_dynamic_regions(); });
+                    let refresh = include_refresh.then(|| ctx.refresh_call(quote! { self }));
                     let invalidate = if invalidate_component {
                         if root_is_self {
-                            Some(quote! { self.invalidate(); })
+                            Some(quote! { elwindui::core::ui::UIElementExt::invalidate(self); })
                         } else if let Some(root_binding) = &root_binding {
                             Some(quote! {
                                 if let Some(root) = self.#root_binding.get() {
@@ -17936,6 +18181,9 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                     }
                     return mode.owner_tokens(only);
                 }
+                if ctx.inherited_fields.contains(only) {
+                    return inherited_field_read(mode, only);
+                }
                 if ctx.template_parent.is_some() && ctx.template_bare_parent_fields.contains(only) {
                     let parent_alias = ctx
                         .template_parent_alias
@@ -17960,6 +18208,16 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                         let owner_path = [owner.field_name.clone(), only.clone()];
                         return emit_path_get(&owner_path, ctx, mode);
                     }
+                }
+                // Issue #166: any other bare name in a Component that inherits through a `base`
+                // value is resolved by the immediate base's shape macro chain — the declaring
+                // ancestor's getter, or the untouched bare name (a real rustc "cannot find value"
+                // diagnostic) when no ancestor declares it. Ancestor `#[state]` is never declared
+                // to that chain, so it can never be read through it.
+                if let Some(props_macro) = &ctx.inherited_props_macro {
+                    let receiver = inherited_field_receiver(mode);
+                    let ident = format_ident!("{}", only);
+                    return quote! { #props_macro!(@inherited_get #receiver.base, #ident) };
                 }
             }
             emit_path_get(path, ctx, mode)
@@ -17986,6 +18244,42 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
             )
         }
     }
+}
+
+/// Issue #166: `+=` -> `+`, etc. `None` for any non-assigning operator.
+fn compound_assign_binary_op(op: &syn::BinOp) -> Option<TokenStream> {
+    use syn::BinOp;
+    Some(match op {
+        BinOp::AddAssign(_) => quote! { + },
+        BinOp::SubAssign(_) => quote! { - },
+        BinOp::MulAssign(_) => quote! { * },
+        BinOp::DivAssign(_) => quote! { / },
+        BinOp::RemAssign(_) => quote! { % },
+        BinOp::BitXorAssign(_) => quote! { ^ },
+        BinOp::BitAndAssign(_) => quote! { & },
+        BinOp::BitOrAssign(_) => quote! { | },
+        BinOp::ShlAssign(_) => quote! { << },
+        BinOp::ShrAssign(_) => quote! { >> },
+        _ => return None,
+    })
+}
+
+/// Issue #166: the receiver whose `base` field owns an inherited field's storage chain. Inherited
+/// reads only occur in this Component's own `__build_view()` (`Construction`, where `self` exists)
+/// or in post-construction code (`WithSelf`).
+fn inherited_field_receiver(mode: &EmitMode) -> TokenStream {
+    match mode {
+        EmitMode::Construction => quote! { self },
+        EmitMode::WithSelf(self_tok) => self_tok.clone(),
+    }
+}
+
+/// Issue #166 (Model A): an inherited field is read through the declaring ancestor's own getter on
+/// this Component's immediate `base` value — never a second accessor on this Component.
+fn inherited_field_read(mode: &EmitMode, name: &str) -> TokenStream {
+    let receiver = inherited_field_receiver(mode);
+    let getter = format_ident!("{}", name);
+    quote! { #receiver.base.#getter() }
 }
 
 /// A resolved `["vm", "content"]`-style path -> `vm.content()` (construction) /
@@ -18160,6 +18454,8 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
         closure_param_type: None,
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
+        inherited_fields: HashSet::new(),
+        inherited_props_macro: None,
         property_dependencies: HashMap::new(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
@@ -23381,6 +23677,114 @@ struct NotepadWindow {
         assert!(
             generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "column" , 2)"#),
             "{generated_str}"
+        );
+    }
+
+    /// Issue #166 negative regression: ancestor `#[state]` is private and non-inherited. A derived
+    /// Component with its own view must not acquire it as an inherited field, must not re-expose
+    /// it through any accessor, and its bare use must resolve only through the base shape-macro
+    /// chain (to which `#[state]` is never declared), so rustc reports it as an unknown value.
+    /// Model A is asserted alongside: the inherited Prop `heading` gets no derived-owned accessor
+    /// or `{Derived}Property` variant either, and is read/written through the base value.
+    #[test]
+    fn issue_166_inherited_state_is_not_exposed_and_prop_uses_declaring_accessors() {
+        let module = crate::test_module(&[
+            (
+                Some("VerticalLayout"),
+                r#"
+                struct I166Base {
+                    #[prop(default = String::new())]
+                    heading: String,
+                    #[state(default = 0)]
+                    secret: i32,
+                    body: view! {
+                        TextBlock { text: format!("{heading}{secret}") }
+                    },
+                }
+                "#,
+                None,
+            ),
+            (
+                Some("I166Base"),
+                r#"
+                struct I166Derived {
+                    body: view! {
+                        VerticalLayout {
+                            TextBlock {
+                                text: heading,
+                                on_tapped: |_event| {
+                                    heading = "x".to_string();
+                                },
+                            }
+                            TextBlock { text: secret }
+                        }
+                    },
+                }
+                "#,
+                None,
+            ),
+        ])
+        .expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+
+        let derived = table
+            .resolve(&module, "I166Derived")
+            .expect("derived TypeInfo");
+        assert!(
+            derived.effective_fields.iter().any(|f| f.name == "heading"),
+            "the inherited Prop is part of the derived effective fields"
+        );
+        assert!(
+            !derived.effective_fields.iter().any(|f| f.name == "secret"),
+            "ancestor #[state] must never be an inherited effective field: {:?}",
+            derived
+                .effective_fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("issue_166_inherited_state", &generated);
+        let rendered = generated.to_string();
+        let derived_start = rendered
+            .find("pub enum I166DerivedProperty")
+            .expect("derived property enum is generated");
+        let derived_src = &rendered[derived_start..];
+        let derived_enum_end = derived_src.find('}').expect("enum body closes");
+        let derived_enum = &derived_src[..derived_enum_end];
+        for name in ["heading", "secret"] {
+            assert!(
+                !derived_enum.contains(name),
+                "Derived must not own a `{name}` property variant: {derived_enum}"
+            );
+        }
+        for forbidden in ["fn heading", "fn set_heading", "fn secret", "fn set_secret"] {
+            assert!(
+                !derived_src.contains(forbidden),
+                "Derived must not generate `{forbidden}` (Model A / private #[state])"
+            );
+        }
+        assert!(
+            derived_src.contains("self . base . heading ()"),
+            "inherited Prop read goes through the declaring ancestor's getter on `base`"
+        );
+        assert!(
+            derived_src.contains("this . base . set_heading"),
+            "inherited Prop write goes through the declaring ancestor's setter on `base`"
+        );
+        assert!(
+            derived_src.contains("@ inherited_get self . base , secret"),
+            "a bare ancestor-#[state] name is left to the base shape-macro chain (never declared \
+             there), not resolved as a field"
+        );
+        let base_class_props: Vec<&str> = rendered
+            .match_indices("# [prop (owned ,")
+            .map(|(index, _)| &rendered[index..index + 60])
+            .collect();
+        assert!(
+            base_class_props.iter().all(|decl| !decl.contains("secret")),
+            "#[state] must never be declared to the #[class] shape chain: {base_class_props:?}"
         );
     }
 }

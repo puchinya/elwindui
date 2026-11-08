@@ -320,6 +320,36 @@ shapeのexported `@set` protocolへ渡し、generated componentが`__mount`す�
 値のtrait-object化は宣言側shape macroの型情報で一度だけ行うため、consumer側にreflectionや別の
 content-binding engineは導入しない。
 
+#### Inherited field access from a derived view (#166)
+
+自前の`view`を持つshape合成component(`is_shape_composition`)は、祖先が宣言したフィールドを
+**宣言元が唯一所有する**(Model A)。派生側は継承フィールドについてgetter/setter・
+`{Derived}Property` variant・constructor引数・格納領域を生成せず、`base`値経由で宣言元の
+accessorを呼ぶ。
+
+- `ViewCtx::inherited_fields`: effective fieldsからsource-localな宣言を除き、DSLの値位置で裸参照
+  されている名前(祖先`#[state]`は`resolve_effective_fields`の時点で除外済み、root上の同名転送
+  `padding: padding`は既存の転送意味論を保つため除外)。読み取りは`<recv>.base.<name>()`、書き込みは
+  `<recv>.base.set_<name>(..)`に lower する。
+- `ViewCtx::inherited_props_macro`: 直近のbaseの`__elwindui_props_<Base>!`。生のRust
+  (イベントハンドラ本体・`format!`引数・hook)やDSLの値位置で他の規則で解決できなかった裸の
+  snake_case名は、`@inherited_get`/`@inherited_set`へ渡す。shape macro連鎖が宣言元の
+  getter/setterへ到達し、どの祖先も宣言していなければ元の裸の名前をそのまま返す。consumer側は
+  同一クレート・別クレートを問わず祖先のschemaを分類しない(`@field_type`と同じ「rustcに委ねる」境界)。
+  複合代入`name op= rhs`は`set(get() op rhs)`へ、未宣言名の場合はfallbackで元の式と等価になる。
+- 変更伝播: 派生componentはmount時に`ItemObservation(&this.base)`経由で`base`の名前付き
+  `ObservableExt`を購読し、通知で`resync()`と`__refresh_dynamic_regions`を行う。`base`を持つ生成
+  componentの`ObservableExt`は自分の`{Component}Property`購読と`base`の`ObservableExt`購読を
+  1つの`Subscription`に束ねるため、祖先のプロパティ名も多段に伝わる(hand-writtenなbaseは
+  `ItemObservation`のautorefで無購読)。継承フィールドを読む式は依存解析上reactiveとして扱う。
+- 各生成componentは自分の`*Ext`に`__refresh_dynamic_regions`を持ち、派生型は祖先の`*Ext`も
+  実装するため、生成コードの内部呼び出しは`<Target as TargetExt>::__refresh_dynamic_regions(..)`
+  (`ViewCtx::refresh_call`)と`elwindui::core::ui::UIElementExt::invalidate(..)`で明示的に修飾する。
+- 修飾パスで書かれ、ローカル`TypeInfo`を持たない外部生成componentを`inherits`した場合、合成rootの
+  型パスは修飾パス(`ComponentDef::base_path`)のまま保持し、shape/ctor macro・`*Ext`パスを
+  定義側クレートで解決させる(裸名のままだとbuiltinの`elwindui::core`/`elwindui::ui`へ誤って
+  解決される)。
+
 #### Component override bridge
 
 `#[elwindui::component]` の companion `impl` にある `#[overridable]` / `#[overrides]` は

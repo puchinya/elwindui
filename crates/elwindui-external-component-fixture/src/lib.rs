@@ -187,3 +187,30 @@ pub mod nested {
     #[component]
     impl NestedExternalProbe {}
 }
+
+/// Issue #166: an external base whose writable Prop and ancestor-private `#[state]` a downstream
+/// derived Component's own view addresses by bare name.
+#[component(inherits VerticalLayout)]
+pub struct ExternalInheritBase {
+    #[prop(default = String::from("external-before"))]
+    heading: String,
+    #[state(default = 7)]
+    secret: i32,
+    body: view! {
+        TextBlock { text: format!("{heading}:{secret}") }
+    },
+}
+
+#[component]
+impl ExternalInheritBase {}
+
+/// Issue #166: a view-less middle ancestor in the defining crate; `heading` stays declared only on
+/// `ExternalInheritBase`, two hops above a downstream leaf.
+#[component(inherits crate::ExternalInheritBase)]
+pub struct ExternalInheritMiddle {
+    #[prop(default = 0)]
+    middle_only: i32,
+}
+
+#[component]
+impl ExternalInheritMiddle {}

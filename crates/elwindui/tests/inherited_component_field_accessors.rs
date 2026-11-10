@@ -325,3 +325,85 @@ fn t6_derived_context_popup_writes_inherited_prop() {
     elwindui::ui::unmount_subtree(&content);
     handle.close();
 }
+
+// View-less local middle over a qualified external generated base: it is itself an inheritable
+// composition hop, and `heading` (declared in the external crate) stays reachable two hops down.
+#[elwindui::component(inherits elwindui_external_component_fixture::ExternalInheritBase)]
+struct LocalViewlessMiddle {
+    #[prop(default = 5)]
+    local_only: i32,
+}
+
+#[elwindui::component]
+impl LocalViewlessMiddle {}
+
+#[elwindui::component(inherits crate::LocalViewlessMiddle)]
+struct LocalViewlessLeaf {
+    body: view! {
+        #[id("viewless_leaf_label")]
+        let viewless_leaf_label = TextBlock {
+            text: format!("{heading}/{local_only}"),
+            on_tapped: |_event| {
+                heading = "viewless".to_string();
+                local_only += 1;
+            },
+        };
+
+        viewless_leaf_label
+    },
+}
+
+#[elwindui::component]
+impl LocalViewlessLeaf {}
+
+#[test]
+fn cross_crate_multi_hop_through_local_viewless_middle() {
+    let middle = LocalViewlessMiddle::new();
+    assert_eq!(middle.heading(), "external-before");
+    assert_eq!(middle.local_only(), 5);
+
+    let leaf = LocalViewlessLeaf::new();
+    assert_eq!(text_of(&leaf.viewless_leaf_label()), "external-before/5");
+    tap(leaf.viewless_leaf_label());
+    assert_eq!(leaf.base.heading(), "viewless");
+    assert_eq!(leaf.base.local_only(), 6);
+    assert_eq!(text_of(&leaf.viewless_leaf_label()), "viewless/6");
+}
+
+/// Per-property inherited resync: changing an unrelated inherited property must not re-apply an
+/// attribute that depends only on `heading`. A sentinel written straight into the widget survives
+/// a `count` change only if the `heading` attribute was not re-evaluated.
+#[elwindui::component(inherits crate::InheritBase)]
+struct InheritSelectiveDerived {
+    body: view! {
+        #[id("heading_view")]
+        let heading_view = TextBlock { text: heading };
+        #[id("count_view")]
+        let count_view = TextBlock { text: format!("{count}") };
+
+        VerticalLayout {
+            heading_view
+            count_view
+        }
+    },
+}
+
+#[elwindui::component]
+impl InheritSelectiveDerived {}
+
+#[test]
+fn inherited_change_resyncs_only_dependent_attributes() {
+    let derived = InheritSelectiveDerived::new();
+    *derived.heading_view().text.borrow_mut() = "sentinel".to_string();
+
+    derived.base.set_count(42);
+    assert_eq!(text_of(&derived.count_view()), "42");
+    assert_eq!(
+        text_of(&derived.heading_view()),
+        "sentinel",
+        "a `count` change must not re-apply the `heading`-only attribute"
+    );
+
+    derived.base.set_heading("selective".to_string());
+    assert_eq!(text_of(&derived.heading_view()), "selective");
+}

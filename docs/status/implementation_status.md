@@ -24,7 +24,7 @@ Legend: ✅ implemented, 🚧 partial, ⬜ not implemented.
 
 Qualified external components in `view!` and named `elwindui::new!` construction are implemented across ordinary, template, dynamic, event, two-way, semantic-brush, and resync lowering. The downstream fixture covers external properties/content, inherited scalar content, reactive resync, nested paths, Cargo aliases, constructor defaults, required inputs, and `Option` Props.
 
-A derived Component's own view reads and writes ancestor-declared Props by bare name through the declaring ancestor's accessors, including multi-hop and qualified external (cross-crate) generated bases (Issue #166). A view-less local Component that inherits a qualified external generated Component is not yet supported.
+A derived Component's own view reads and writes ancestor-declared Props by bare name through the declaring ancestor's accessors, including multi-hop and qualified external (cross-crate) generated bases, and a view-less local Component inheriting a qualified external generated Component as an intermediate hop (Issue #166).
 
 The inherited generated `Vec<Rc<T>>` content-forwarding boundary remains follow-up Issue [#194](https://github.com/puchinya/elwindui/issues/194). Generated-component shape identity is currently basename-based within a crate; distinct same-basename components in different modules remain tracked by [#196](https://github.com/puchinya/elwindui/issues/196). Unqualified imported shorthand and a defining-crate `pub mod ui` facade are not promised.
 

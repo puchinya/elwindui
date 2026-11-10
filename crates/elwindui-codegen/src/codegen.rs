@@ -8317,25 +8317,129 @@ fn generate_view(
     // ancestor chain is folded into each generated Component's `ObservableExt`, see
     // `component_observable_impl`) and re-syncs its authored view. `ItemObservation`'s autoref
     // dispatch makes this a no-op for a hand-written base with no `ObservableExt`.
-    let inherited_base_subscription = if ctx.inherited_props_macro.is_some() {
+    //
+    // Per-property, exactly like this Component's own fields (`component_property_resync_methods`):
+    // each inherited name gets an inherent `__resync_inherited_<name>` that re-applies only the
+    // attributes depending on it, and the name-keyed notification dispatches to it. A name that no
+    // attribute or dynamic region depends on gets neither a method nor a dispatch arm, so an
+    // unrelated ancestor property change does no work at all.
+    let inherited_dependency_names: Vec<String> = if ctx.inherited_props_macro.is_some() {
+        let mut candidates = std::collections::BTreeSet::new();
+        for node in plan
+            .iter()
+            .chain(lazy_leaves_for_own_resync.iter().map(|(_, leaf)| *leaf))
+        {
+            for attribute in &node.attributes {
+                if attribute.kind != AssignmentKind::Once && !attribute.name.starts_with("on_") {
+                    collect_inherited_dependency_names(&attribute.value, &ctx, &mut candidates);
+                }
+            }
+            match node.dynamic.as_ref() {
+                Some(DynamicPlan::If { condition, .. }) => {
+                    collect_inherited_dependency_names(condition, &ctx, &mut candidates);
+                }
+                Some(DynamicPlan::Match { value, .. }) => {
+                    collect_inherited_dependency_names(value, &ctx, &mut candidates);
+                }
+                Some(DynamicPlan::For { collection, .. }) => {
+                    collect_inherited_dependency_names(collection, &ctx, &mut candidates);
+                }
+                None => {}
+            }
+        }
+        candidates.into_iter().collect()
+    } else {
+        Vec::new()
+    };
+    let mut inherited_resync_methods = TokenStream::new();
+    let mut inherited_dispatch_arms = TokenStream::new();
+    for property_name in &inherited_dependency_names {
+        let mut statements = TokenStream::new();
+        for node in &plan {
+            let self_is_node = (is_shape_composition || is_host_composition)
+                && node.binding == plan[root_index].binding;
+            emit_resync(
+                node,
+                &ctx,
+                from,
+                table,
+                ResyncFilter::Property("", property_name),
+                &mut statements,
+                self_is_node,
+            );
+        }
+        for (cache_field, leaf) in &lazy_leaves_for_own_resync {
+            emit_lazy_branch_resync(
+                cache_field,
+                leaf,
+                &ctx,
+                from,
+                table,
+                ResyncFilter::Property("", property_name),
+                &mut statements,
+            );
+        }
+        let drives_dynamic_region = plan.iter().any(|node| match node.dynamic.as_ref() {
+            Some(DynamicPlan::If { condition, .. }) => {
+                view_expr_depends_on(condition, &ctx, "", property_name)
+            }
+            Some(DynamicPlan::Match { value, .. }) => {
+                view_expr_depends_on(value, &ctx, "", property_name)
+            }
+            Some(DynamicPlan::For { collection, .. }) => {
+                view_expr_depends_on(collection, &ctx, "", property_name)
+            }
+            None => false,
+        });
+        if statements.is_empty() && !drives_dynamic_region {
+            continue;
+        }
+        let property_literal = syn::LitStr::new(property_name, proc_macro2::Span::call_site());
+        let refresh = drives_dynamic_region
+            .then(|| quote! { <#target as #target_ext>::__refresh_dynamic_regions(&*this); });
+        if statements.is_empty() {
+            inherited_dispatch_arms.extend(quote! {
+                #property_literal => { #refresh }
+            });
+            continue;
+        }
+        let method = format_ident!("__resync_inherited_{}", property_name);
+        inherited_resync_methods.extend(quote! {
+            #[doc(hidden)]
+            fn #method(&self) {
+                #statements
+                #invalidate_component_resync
+            }
+        });
+        inherited_dispatch_arms.extend(quote! {
+            #property_literal => {
+                this.#method();
+                #refresh
+            }
+        });
+    }
+    let inherited_resync_methods = mark_inherent(inherited_resync_methods);
+    let inherited_base_subscription = if inherited_dispatch_arms.is_empty() {
+        TokenStream::new()
+    } else {
         quote! {
             {
                 #[allow(unused_imports)]
                 use elwindui::core::reactive::{ObservableItem as _, PlainItem as _};
                 let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
                 let observation = elwindui::core::reactive::ItemObservation(&this.base);
-                if let Some(subscription) = (&observation).observe_item(move |_property| {
+                if let Some(subscription) = (&observation).observe_item(move |property| {
                     if let Some(this) = weak.upgrade() {
-                        this.resync();
-                        <#target as #target_ext>::__refresh_dynamic_regions(&*this);
+                        match property {
+                            #inherited_dispatch_arms
+                            _ => {}
+                        }
                     }
                 }) {
                     this.__property_changed_subscriptions.borrow_mut().push(subscription);
                 }
             }
         }
-    } else {
-        TokenStream::new()
     };
     let component_self_subscription = if component_property_variants.is_empty() {
         TokenStream::new()
@@ -8889,6 +8993,7 @@ fn generate_view(
                 #resync_method
                 #property_resync_methods
                 #component_property_resync_methods
+                #inherited_resync_methods
                 #own_computed_recompute_methods
                 #own_environment_recompute_methods
                 #dynamic_region_refresh_method
@@ -9034,6 +9139,7 @@ fn generate_view(
                 #plain_unmount_method
                 #property_resync_methods
                 #component_property_resync_methods
+                #inherited_resync_methods
                 #own_computed_recompute_methods
                 #own_environment_recompute_methods
                 #dynamic_region_refresh_method
@@ -17318,6 +17424,68 @@ fn is_implicit_reactive_field(ctx: &ViewCtx, name: &str) -> bool {
         || is_inherited_reactive_name(ctx, name)
 }
 
+/// Issue #166: every bare name an expression reads that may be an inherited property
+/// (`is_inherited_reactive_name`) — the candidates for per-property inherited resync methods.
+/// Over-collection is harmless: a candidate no attribute actually depends on produces no method.
+fn collect_inherited_dependency_names(
+    expr: &ViewExpr,
+    ctx: &ViewCtx,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        ViewExpr::Path(path) => {
+            if let [only] = path.as_slice() {
+                if is_inherited_reactive_name(ctx, only) {
+                    out.insert(only.clone());
+                }
+            }
+        }
+        ViewExpr::TFluent(_, args) => {
+            for (_, value) in args {
+                collect_inherited_dependency_names(value, ctx, out);
+            }
+        }
+        ViewExpr::Expr(expr) => {
+            struct Collector<'a> {
+                ctx: &'a ViewCtx,
+                out: &'a mut std::collections::BTreeSet<String>,
+            }
+            impl<'ast> Visit<'ast> for Collector<'_> {
+                fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+                    if node.qself.is_none() {
+                        if let Some(ident) = node.path.get_ident() {
+                            let name = ident.to_string();
+                            if is_inherited_reactive_name(self.ctx, &name) {
+                                self.out.insert(name);
+                            }
+                        }
+                    }
+                    syn::visit::visit_expr_path(self, node);
+                }
+
+                fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+                    if let Some(arguments) = supported_macro_expr_arguments(node) {
+                        if is_format_macro(node) {
+                            if let Some(fmt) = arguments.first().and_then(expr_as_lit_str) {
+                                for name in format_str_inline_idents(&fmt.value()) {
+                                    if is_inherited_reactive_name(self.ctx, &name) {
+                                        self.out.insert(name);
+                                    }
+                                }
+                            }
+                        }
+                        for argument in &arguments {
+                            self.visit_expr(argument);
+                        }
+                    }
+                }
+            }
+            Collector { ctx, out }.visit_expr(expr);
+        }
+        ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_) => {}
+    }
+}
+
 /// Issue #166: an inherited property can change after construction (its declaring ancestor's
 /// setter), so an expression reading it is reactive. A name the immediate base's shape macro may
 /// resolve (`ViewCtx::inherited_props_macro`) is conservatively treated as reactive too — an
@@ -23768,6 +23936,14 @@ struct NotepadWindow {
         assert!(
             derived_src.contains("self . base . heading ()"),
             "inherited Prop read goes through the declaring ancestor's getter on `base`"
+        );
+        assert!(
+            derived_src.contains("fn __resync_inherited_heading"),
+            "an inherited dependency gets its own per-property resync method"
+        );
+        assert!(
+            derived_src.contains("\"heading\" => { this . __resync_inherited_heading ()"),
+            "the base notification dispatches by property name, not to a full resync()"
         );
         assert!(
             derived_src.contains("this . base . set_heading"),

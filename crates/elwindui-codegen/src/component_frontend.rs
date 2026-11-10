@@ -136,6 +136,34 @@ pub fn component_and_view_from_item_struct(
             })
         })
         .transpose()?;
+    // Issue #166: a view-less Component that inherits a qualified *external* generated Component
+    // (`inherits other_crate::Base`) has no local `ComponentDef` for its base, so it can neither
+    // inherit the base's view the same-crate way (`codegen::resolve_view_for`) nor be recognized
+    // as composable. Give it the empty implicit composition body (`view! {}`): the composed root
+    // is the external base itself, whose own view/content stay owned by the defining crate, and
+    // this Component becomes an ordinary shape-composed `#[class]` participant (shape macros,
+    // ancestor forwarding) that further Components can inherit.
+    let view_def = view_def.or_else(|| {
+        base_path
+            .as_deref()
+            .is_some_and(is_external_generated_component_path)
+            .then(|| ViewDef {
+                target: name.clone(),
+                is_template: false,
+                on_mount: None,
+                on_unmount: None,
+                template_header: None,
+                on_update: None,
+                lets: Vec::new(),
+                root: ast::ViewBody {
+                    attributes: Vec::new(),
+                    attached: Vec::new(),
+                    attribute_shortcuts: Vec::new(),
+                    children: Vec::new(),
+                },
+                implicit_owner: None,
+            })
+    });
 
     let mut non_view_struct = item_struct.clone();
     if let syn::Fields::Named(named) = &mut non_view_struct.fields {
@@ -169,6 +197,14 @@ pub fn component_and_view_from_item_struct(
     };
 
     Ok((component_def, view_def))
+}
+
+/// Issue #166: whether a qualified `inherits` path names a generated Component defined in another
+/// crate — anything not rooted at this crate (`crate`/`self`/`super`) or at the framework
+/// (`elwindui`, whose builtins are written with bare names).
+fn is_external_generated_component_path(path: &str) -> bool {
+    let first = path.split("::").next().unwrap_or(path).trim();
+    !matches!(first, "" | "crate" | "self" | "super" | "elwindui")
 }
 
 /// Splits a raw `inherits` argument string (as `elwindui_macros::path_to_string` produced it) into

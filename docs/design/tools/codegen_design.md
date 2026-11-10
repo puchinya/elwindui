@@ -338,7 +338,11 @@ accessorを呼ぶ。
   同一クレート・別クレートを問わず祖先のschemaを分類しない(`@field_type`と同じ「rustcに委ねる」境界)。
   複合代入`name op= rhs`は`set(get() op rhs)`へ、未宣言名の場合はfallbackで元の式と等価になる。
 - 変更伝播: 派生componentはmount時に`ItemObservation(&this.base)`経由で`base`の名前付き
-  `ObservableExt`を購読し、通知で`resync()`と`__refresh_dynamic_regions`を行う。`base`を持つ生成
+  `ObservableExt`を購読し、プロパティ名で振り分ける。自分のフィールドの`__resync_<name>`と同じく、
+  継承名ごとにinherentな`__resync_inherited_<name>`(その名前に依存する属性だけを再適用)を生成し、
+  動的領域の条件・値・collectionが依存する名前のときだけ`__refresh_dynamic_regions`も呼ぶ。依存する
+  属性・動的領域を持たない名前にはmethodも分岐も生成しないため、無関係な祖先プロパティの変更では
+  何も再評価しない。依存候補は`collect_inherited_dependency_names`で集め、実際に依存のある名前だけを残す。`base`を持つ生成
   componentの`ObservableExt`は自分の`{Component}Property`購読と`base`の`ObservableExt`購読を
   1つの`Subscription`に束ねるため、祖先のプロパティ名も多段に伝わる(hand-writtenなbaseは
   `ItemObservation`のautorefで無購読)。継承フィールドを読む式は依存解析上reactiveとして扱う。
@@ -348,7 +352,11 @@ accessorを呼ぶ。
 - 修飾パスで書かれ、ローカル`TypeInfo`を持たない外部生成componentを`inherits`した場合、合成rootの
   型パスは修飾パス(`ComponentDef::base_path`)のまま保持し、shape/ctor macro・`*Ext`パスを
   定義側クレートで解決させる(裸名のままだとbuiltinの`elwindui::core`/`elwindui::ui`へ誤って
-  解決される)。
+  解決される)。そのような外部生成componentを`inherits`する**`view`を持たない**componentには、
+  frontend(`component_frontend::component_and_view_from_item_struct`)が空の暗黙合成body
+  (`view! {}`)を補う。同一クレートの基底なら`resolve_view_for`で基底のviewを継承できるが、外部基底の
+  `ComponentDef`は見えないため、空bodyで外部基底そのものを合成rootにし(基底のview/contentは定義側が
+  所有)、shape macroを持つ通常のshape合成`#[class]`参加者として、さらに継承できる中間hopにする。
 
 #### Component override bridge
 

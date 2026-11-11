@@ -16734,6 +16734,31 @@ impl<'a> ViewClosureRewriter<'a> {
         Some(quote! { #props_macro!(@inherited_set #receiver.base, #ident, #value) })
     }
 
+    /// Issue #166: compound assignment (`name op= value`) on an inherited property. See the
+    /// `Expr::Binary` handling in `visit_expr_mut` for why the authored operator is preserved.
+    fn resolved_inherited_op_assign(
+        &self,
+        name: &str,
+        op: TokenStream,
+        value: TokenStream,
+    ) -> Option<TokenStream> {
+        if !self.is_inherited_candidate(name) {
+            return None;
+        }
+        let receiver = inherited_field_receiver(self.mode);
+        let ident = format_ident!("{}", name);
+        if self.ctx.inherited_fields.contains(name) {
+            let setter = format_ident!("set_{}", name);
+            return Some(quote! {{
+                let mut __elwindui_inherited_value = #receiver.base.#ident();
+                __elwindui_inherited_value #op #value;
+                #receiver.base.#setter(__elwindui_inherited_value)
+            }});
+        }
+        let props_macro = self.ctx.inherited_props_macro.as_ref()?;
+        Some(quote! { #props_macro!(@inherited_op_assign #receiver.base, #ident, #op, #value) })
+    }
+
     /// PR #165 post-final rereview remediation, A8: the 2-segment (`vm.label`, `vm.save`) raw-Rust
     /// counterpart to `resolved_implicit_owner_field` — reached only after `resolved_owner(owner)`
     /// has already failed to resolve `owner` as a real field of the *current* generated Component
@@ -16865,25 +16890,29 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
         // represents as `Expr::Binary` and never reaches here, ...) falls through to the default
         // recursive visit at the bottom, unchanged.
         // Issue #166: `name op= rhs` on an inherited property (syn represents compound assignment
-        // as `Expr::Binary`) becomes `set(get() op rhs)` through the same declaring-ancestor
-        // accessors; for a name no ancestor declares, the shape macro's fallback arms reproduce
-        // the original `name = name op rhs` exactly.
+        // as `Expr::Binary`) keeps the authored compound operator: the declaring ancestor's value
+        // is fetched into a temporary, the original `op=` is applied to it, and the result is
+        // stored back through the declaring setter — so the value type needs exactly the trait the
+        // author wrote (`AddAssign<Rhs>`), never `Add`. For a name no ancestor declares, the shape
+        // macro's fallback arm reproduces the original `name op= rhs` verbatim.
         if let syn::Expr::Binary(binary) = node {
-            if let Some(op) = compound_assign_binary_op(&binary.op) {
+            if is_compound_assign_op(&binary.op) {
                 if let syn::Expr::Path(p) = binary.left.as_ref() {
                     if let (Some(ident), None) = (p.path.get_ident(), &p.qself) {
                         let name = ident.to_string();
                         let is_own = self.ctx.mutable_own_fields.contains(&name)
                             || self.ctx.own_fields.contains_key(&name);
                         if !is_own {
-                            if let Some(current) = self.resolved_inherited_read(&name) {
-                                let mut rhs = (*binary.right).clone();
-                                self.visit_expr_mut(&mut rhs);
-                                let value = quote! { (#current) #op (#rhs) };
-                                if let Some(write) = self.resolved_inherited_write(&name, value) {
-                                    *node = syn::parse_quote! { #write };
-                                    return;
-                                }
+                            let op = binary.op;
+                            let mut rhs = (*binary.right).clone();
+                            self.visit_expr_mut(&mut rhs);
+                            if let Some(update) = self.resolved_inherited_op_assign(
+                                &name,
+                                quote! { #op },
+                                quote! { #rhs },
+                            ) {
+                                *node = syn::parse_quote! { #update };
+                                return;
                             }
                         }
                     }
@@ -18414,22 +18443,22 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
     }
 }
 
-/// Issue #166: `+=` -> `+`, etc. `None` for any non-assigning operator.
-fn compound_assign_binary_op(op: &syn::BinOp) -> Option<TokenStream> {
+/// Issue #166: whether `op` is a compound assignment operator (`+=`, `<<=`, ...).
+fn is_compound_assign_op(op: &syn::BinOp) -> bool {
     use syn::BinOp;
-    Some(match op {
-        BinOp::AddAssign(_) => quote! { + },
-        BinOp::SubAssign(_) => quote! { - },
-        BinOp::MulAssign(_) => quote! { * },
-        BinOp::DivAssign(_) => quote! { / },
-        BinOp::RemAssign(_) => quote! { % },
-        BinOp::BitXorAssign(_) => quote! { ^ },
-        BinOp::BitAndAssign(_) => quote! { & },
-        BinOp::BitOrAssign(_) => quote! { | },
-        BinOp::ShlAssign(_) => quote! { << },
-        BinOp::ShrAssign(_) => quote! { >> },
-        _ => return None,
-    })
+    matches!(
+        op,
+        BinOp::AddAssign(_)
+            | BinOp::SubAssign(_)
+            | BinOp::MulAssign(_)
+            | BinOp::DivAssign(_)
+            | BinOp::RemAssign(_)
+            | BinOp::BitXorAssign(_)
+            | BinOp::BitAndAssign(_)
+            | BinOp::BitOrAssign(_)
+            | BinOp::ShlAssign(_)
+            | BinOp::ShrAssign(_)
+    )
 }
 
 /// Issue #166: the receiver whose `base` field owns an inherited field's storage chain. Inherited
@@ -23882,6 +23911,8 @@ struct NotepadWindow {
                                 text: heading,
                                 on_tapped: |_event| {
                                     heading = "x".to_string();
+                                    heading += "!";
+                                    undeclared_total += 1;
                                 },
                             }
                             TextBlock { text: secret }
@@ -23948,6 +23979,18 @@ struct NotepadWindow {
         assert!(
             derived_src.contains("this . base . set_heading"),
             "inherited Prop write goes through the declaring ancestor's setter on `base`"
+        );
+        assert!(
+            derived_src.contains("__elwindui_inherited_value += \"!\""),
+            "compound assignment on an inherited Prop applies the authored `+=` to a temporary"
+        );
+        assert!(
+            !derived_src.contains("__elwindui_inherited_value) +"),
+            "compound assignment must never be rewritten into a binary `+`"
+        );
+        assert!(
+            derived_src.contains("@ inherited_op_assign this . base , undeclared_total , += , 1"),
+            "a name not known as inherited keeps its authored operator through the shape macro"
         );
         assert!(
             derived_src.contains("@ inherited_get self . base , secret"),

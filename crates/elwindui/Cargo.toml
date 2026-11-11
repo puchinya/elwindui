@@ -49,6 +49,10 @@ elwindui-external-component-fixture = { path = "../elwindui-external-component-f
 # The alias is intentional coverage for the external props-macro ABI: the macro path uses the
 # first authored path segment, which may be a Cargo dependency alias rather than the package name.
 external_component_fixture_alias = { package = "elwindui-external-component-alias-fixture", path = "../elwindui-external-component-alias-fixture" }
+# Issue #166 (PR #311 review A/P2): real compile-fail fixtures with exact rustc diagnostics.
+# Stable rustdoc `compile_fail,E....` doctests do not check the error code, so the private,
+# non-inherited ancestor `#[state]` contract is verified against the compiler's own output.
+trybuild = "1"
 
 [features]
 default = []

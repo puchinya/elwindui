@@ -407,3 +407,118 @@ fn inherited_change_resyncs_only_dependent_attributes() {
     derived.base.set_heading("selective".to_string());
     assert_eq!(text_of(&derived.heading_view()), "selective");
 }
+
+/// A value type that supports only compound assignment (`AddAssign<i32>`) — no `Add`, no `Copy`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Meters(pub i32);
+
+impl std::fmt::Display for Meters {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::ops::AddAssign<i32> for Meters {
+    fn add_assign(&mut self, rhs: i32) {
+        self.0 += rhs;
+    }
+}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct OpAssignBase {
+    #[prop(default = crate::Meters(1))]
+    distance: crate::Meters,
+
+    body: view! {
+        TextBlock { text: format!("{distance}") }
+    },
+}
+
+#[elwindui::component]
+impl OpAssignBase {}
+
+/// Receives a `Meters` through a DSL value position, which makes `distance` a DSL-known inherited
+/// field of the derived view (the direct `base.distance()`/`base.set_distance(..)` route).
+#[elwindui::component(inherits VerticalLayout)]
+struct MetersView {
+    #[prop(default = crate::Meters(0))]
+    value: crate::Meters,
+
+    body: view! {
+        TextBlock { text: format!("{value}") }
+    },
+}
+
+#[elwindui::component]
+impl MetersView {}
+
+/// `distance += 2` on an inherited Prop whose type implements only `AddAssign<i32>` — through the
+/// direct DSL-known route (`OpAssignDerived`, `MetersView { value: distance }`) and through the
+/// shape-macro route (`OpAssignRawDerived`, raw-Rust-only reference).
+#[elwindui::component(inherits crate::OpAssignBase)]
+struct OpAssignDerived {
+    body: view! {
+        #[id("op_label")]
+        let op_label = TextBlock {
+            text: format!("{distance}"),
+            on_tapped: |_event| {
+                distance += 2;
+            },
+        };
+        #[id("meters_view")]
+        let meters_view = crate::MetersView { value: distance };
+
+        VerticalLayout {
+            op_label
+            meters_view
+        }
+    },
+}
+
+#[elwindui::component]
+impl OpAssignDerived {}
+
+#[elwindui::component(inherits crate::OpAssignBase)]
+struct OpAssignRawDerived {
+    body: view! {
+        #[id("raw_op_label")]
+        let raw_op_label = TextBlock {
+            text: format!("{distance}"),
+            on_tapped: |_event| {
+                distance += 2;
+            },
+        };
+
+        raw_op_label
+    },
+}
+
+#[elwindui::component]
+impl OpAssignRawDerived {}
+
+#[test]
+fn compound_assignment_on_inherited_prop_keeps_add_assign_requirement() {
+    let derived = OpAssignDerived::new();
+    tap(derived.op_label());
+    assert_eq!(derived.base.distance(), Meters(3));
+    assert_eq!(text_of(&derived.op_label()), "3");
+    assert_eq!(derived.meters_view().value(), Meters(3));
+
+    let raw = OpAssignRawDerived::new();
+    tap(raw.raw_op_label());
+    assert_eq!(raw.base.distance(), Meters(3));
+    assert_eq!(text_of(&raw.raw_op_label()), "3");
+}
+
+#[test]
+fn compound_assignment_fallback_preserves_original_operator_for_undeclared_names() {
+    // A name no ancestor declares expands back to the authored `name op= value` verbatim, so a
+    // local whose type implements only `AddAssign<i32>` still compiles and mutates in place.
+    let base = OpAssignBase::new();
+    let mut walked = Meters(10);
+    crate::__elwindui_props_OpAssignBase!(@inherited_op_assign base, walked, +=, 5);
+    assert_eq!(walked, Meters(15));
+    // A declared property through the same arm keeps `AddAssign` too.
+    crate::__elwindui_props_OpAssignBase!(@inherited_op_assign base, distance, +=, 4);
+    assert_eq!(base.distance(), Meters(5));
+}

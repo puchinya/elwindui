@@ -1970,6 +1970,10 @@ fn build_props_macro(
     // value, which owns the storage chain); a name no class in the chain declares falls through to
     // the terminal arm, which leaves the original bare name untouched (an ordinary local, constant,
     // or function — or a genuine rustc "cannot find value" error), never a guessed property.
+    // `@inherited_op_assign` keeps the authored compound operator (`$op` is the single `+=`-style
+    // token): a declared property applies it to a fetched temporary and stores that back through
+    // the setter, so the value type needs exactly the trait the author used (`AddAssign<Rhs>`, not
+    // `Add`); an undeclared name expands back to the identical `name op= value`.
     let inherited_access_arms: Vec<TokenStream2> = shape
         .props
         .iter()
@@ -1982,6 +1986,11 @@ fn build_props_macro(
                 (@inherited_set_from $origin:ident, $recv:expr, #name, $value:expr) => {
                     $recv.#setter($value)
                 };
+                (@inherited_op_assign_from $origin:ident, $recv:expr, #name, $op:tt, $value:expr) => {{
+                    let mut __elwindui_inherited_value = $recv.#name();
+                    __elwindui_inherited_value $op $value;
+                    $recv.#setter(__elwindui_inherited_value)
+                }};
             }
         })
         .collect();
@@ -1996,12 +2005,18 @@ fn build_props_macro(
                 (@inherited_set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
                     #parent_macro!(@inherited_set_from $origin, $recv, $name, $value)
                 };
+                (@inherited_op_assign_from $origin:ident, $recv:expr, $name:ident, $op:tt, $value:expr) => {
+                    #parent_macro!(@inherited_op_assign_from $origin, $recv, $name, $op, $value)
+                };
             }
         }
         None => quote! {
             (@inherited_get_from $origin:ident, $recv:expr, $name:ident) => { $name };
             (@inherited_set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
                 $name = $value
+            };
+            (@inherited_op_assign_from $origin:ident, $recv:expr, $name:ident, $op:tt, $value:expr) => {
+                $name $op $value
             };
         },
     };
@@ -2982,6 +2997,9 @@ fn build_props_macro(
             };
             (@inherited_set $recv:expr, $name:ident, $value:expr) => {
                 $crate::#macro_ident!(@inherited_set_from #bare_ident, $recv, $name, $value)
+            };
+            (@inherited_op_assign $recv:expr, $name:ident, $op:tt, $value:expr) => {
+                $crate::#macro_ident!(@inherited_op_assign_from #bare_ident, $recv, $name, $op, $value)
             };
             #(#inherited_access_arms)*
             #inherited_access_fallback

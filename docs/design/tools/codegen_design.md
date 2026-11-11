@@ -336,7 +336,9 @@ accessorを呼ぶ。
   snake_case名は、`@inherited_get`/`@inherited_set`へ渡す。shape macro連鎖が宣言元の
   getter/setterへ到達し、どの祖先も宣言していなければ元の裸の名前をそのまま返す。consumer側は
   同一クレート・別クレートを問わず祖先のschemaを分類しない(`@field_type`と同じ「rustcに委ねる」境界)。
-  複合代入`name op= rhs`は`set(get() op rhs)`へ、未宣言名の場合はfallbackで元の式と等価になる。
+  複合代入`name op= rhs`は、宣言元のgetterで取得した一時値へ**元の`op=`をそのまま**適用してから
+  setterへ渡す(`@inherited_op_assign`)。値型に要求されるtraitは作者が書いたもの(`AddAssign<Rhs>`)の
+  ままで、`Add`へ変わらない。未宣言名はfallbackで元の`name op= rhs`そのものに戻る。
 - 変更伝播: 派生componentはmount時に`ItemObservation(&this.base)`経由で`base`の名前付き
   `ObservableExt`を購読し、プロパティ名で振り分ける。自分のフィールドの`__resync_<name>`と同じく、
   継承名ごとにinherentな`__resync_inherited_<name>`(その名前に依存する属性だけを再適用)を生成し、

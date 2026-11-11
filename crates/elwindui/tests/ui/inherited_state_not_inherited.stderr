@@ -1,0 +1,11 @@
+error[E0425]: cannot find value `secret` in this scope
+  --> tests/ui/inherited_state_not_inherited.rs:37:1
+   |
+37 | #[elwindui::component]
+   | ^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+   |
+   = note: this error originates in the attribute macro `elwindui::component` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider importing this unit variant
+   |
+10 + use crate::StateOwnerProperty::secret;
+   |

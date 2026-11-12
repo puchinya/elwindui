@@ -144,3 +144,52 @@ fn cross_crate_multi_hop_through_local_viewless_middle() {
     assert_eq!(leaf.base.local_only(), 6);
     assert_eq!(text_of(&leaf.viewless_leaf_label()), "viewless/6");
 }
+
+fn visual_texts(root: &dyn elwindui::core::ui::UIElementExt) -> Vec<String> {
+    elwindui::core::ui::UIElementExt::visual_children(root)
+        .iter()
+        .filter_map(|child| {
+            child
+                .as_any()
+                .downcast_ref::<elwindui::ui::TextBlock>()
+                .map(text_of)
+        })
+        .collect()
+}
+
+/// The external base's own view keeps re-syncing while it is embedded as a downstream derived
+/// Component's `base`, and the derived root region lands after the base-owned child.
+#[elwindui::component(inherits elwindui_external_component_fixture::ExternalInheritBase)]
+struct CrossCrateRegionDerived {
+    #[prop(default = false)]
+    show_extra: bool,
+
+    body: view! {
+        TextBlock { text: "own" }
+        if show_extra {
+            TextBlock { text: "extra" }
+        }
+    },
+}
+
+#[elwindui::component]
+impl CrossCrateRegionDerived {}
+
+#[test]
+fn cross_crate_embedded_base_view_and_root_region_order() {
+    let derived = CrossCrateRegionDerived::new();
+    assert_eq!(
+        visual_texts(&*derived),
+        vec!["external-before:7".to_string(), "own".to_string()]
+    );
+    set_external_heading(&derived.base, "changed");
+    derived.set_show_extra(true);
+    assert_eq!(
+        visual_texts(&*derived),
+        vec![
+            "changed:7".to_string(),
+            "own".to_string(),
+            "extra".to_string()
+        ]
+    );
+}

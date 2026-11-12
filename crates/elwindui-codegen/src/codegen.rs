@@ -5465,6 +5465,7 @@ fn generate_view(
         mutable_own_fields: HashSet::new(),
         inherited_fields: HashSet::new(),
         inherited_props_macro: None,
+        composition_base_prefix_root: None,
         property_dependencies: own_dependents_of.clone(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
@@ -7028,6 +7029,17 @@ fn generate_view(
     // `create_<snake case>(..)` factory (below), so none of `plan`'s nodes are constructed or wired
     // here at all.
     let root_index = plan.len() - 1;
+    // Issue #166: a composed `base` value that is itself a generated Component (local or
+    // external) may have a view of its own that places children and needs re-syncing.
+    let base_is_generated_component = (is_shape_composition || is_inherited_view_composition)
+        && component.base.as_deref().is_some_and(|base| {
+            table
+                .resolve(from, base)
+                .map_or(component.base_path.is_some(), |info| !info.is_builtin)
+        });
+    if is_shape_composition && base_is_generated_component {
+        ctx.composition_base_prefix_root = Some(plan[root_index].binding.clone());
+    }
     for node in &plan {
         if node.dynamic.is_none() {
             continue;
@@ -8419,28 +8431,121 @@ fn generate_view(
         });
     }
     let inherited_resync_methods = mark_inherent(inherited_resync_methods);
-    let inherited_base_subscription = if inherited_dispatch_arms.is_empty() {
-        TokenStream::new()
-    } else {
+    // Issue #166: an embedded generated `base` cannot subscribe to itself (no `Rc` of its own
+    // type), so the observer of `base` relays each notification to it first — the base re-syncs
+    // its own view (and relays further down its own chain) before this view re-syncs.
+    let embedded_forward = base_is_generated_component.then(|| {
         quote! {
             {
                 #[allow(unused_imports)]
-                use elwindui::core::reactive::{ObservableItem as _, PlainItem as _};
-                let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
-                let observation = elwindui::core::reactive::ItemObservation(&this.base);
-                if let Some(subscription) = (&observation).observe_item(move |property| {
-                    if let Some(this) = weak.upgrade() {
-                        match property {
-                            #inherited_dispatch_arms
-                            _ => {}
-                        }
+                use elwindui::core::reactive::{EmbeddedNotifyForward as _, EmbeddedNotifyIgnore as _};
+                (&elwindui::core::reactive::EmbeddedNotify(&this.base)).notify_embedded(property);
+            }
+        }
+    });
+    let embedded_own_arms: TokenStream = component_property_variants
+        .iter()
+        .map(|property| {
+            let literal = syn::LitStr::new(&property.to_string(), proc_macro2::Span::call_site());
+            let method = format_ident!("__resync_{}", property);
+            quote! {
+                #literal => {
+                    this.#method();
+                    <#target as #target_ext>::__refresh_dynamic_regions(this);
+                }
+            }
+        })
+        .collect();
+    // Issue #166: wiring (event handlers, two-way bindings) of an embedded level runs through an
+    // `EmbeddedHandle` projected from the outermost Component's `Rc`, then continues down to that
+    // level's own generated `base`.
+    let embedded_wire_forward = base_is_generated_component.then(|| {
+        quote! {
+            {
+                #[allow(unused_imports)]
+                use elwindui::core::reactive::{EmbeddedNotifyForward as _, EmbeddedNotifyIgnore as _};
+                (&elwindui::core::reactive::EmbeddedNotify(&this.base))
+                    .wire_embedded(this.map(|__elwindui_level| &__elwindui_level.base));
+            }
+        }
+    });
+    let embedded_own_wiring = is_shape_composition.then(|| wiring_stmts.clone());
+    let embedded_base_span = if base_is_generated_component {
+        quote! {
+            ({
+                #[allow(unused_imports)]
+                use elwindui::core::reactive::{EmbeddedNotifyForward as _, EmbeddedNotifyIgnore as _};
+                (&elwindui::core::reactive::EmbeddedNotify(&self.base)).embedded_span()
+            })
+        }
+    } else {
+        quote! { 0usize }
+    };
+    // This level's own root children in the shared content collection (static children count 1,
+    // dynamic regions their live span). Only a shape-composed root places children of its own.
+    let embedded_own_span = if is_shape_composition {
+        let root = &plan[root_index];
+        let span = total_span(&plan, &root.child_bindings, &ctx);
+        quote! { (#span) }
+    } else {
+        quote! { 0usize }
+    };
+    let embedded_view_sync_impl = (!view.is_template).then(|| {
+        quote! {
+            impl elwindui::core::reactive::EmbeddedViewSync for #target {
+                fn __elwindui_embedded_property_changed(&self, property: &'static str) {
+                    let this = self;
+                    #embedded_forward
+                    match property {
+                        #embedded_own_arms
+                        #inherited_dispatch_arms
+                        _ => {}
                     }
-                }) {
-                    this.__property_changed_subscriptions.borrow_mut().push(subscription);
+                }
+
+                fn __elwindui_wire_embedded(this: elwindui::core::reactive::EmbeddedHandle<Self>) {
+                    #embedded_own_wiring
+                    #embedded_wire_forward
+                }
+
+                fn __elwindui_root_content_span(&self) -> usize {
+                    #embedded_base_span + #embedded_own_span
                 }
             }
         }
-    };
+    });
+    let most_derived_wire_forward = embedded_wire_forward.as_ref().map(|forward| {
+        quote! {
+            {
+                let this = elwindui::core::reactive::EmbeddedHandle::new(std::rc::Rc::clone(&this));
+                #forward
+            }
+        }
+    });
+    let inherited_base_subscription =
+        if inherited_dispatch_arms.is_empty() && embedded_forward.is_none() {
+            TokenStream::new()
+        } else {
+            quote! {
+                {
+                    #[allow(unused_imports)]
+                    use elwindui::core::reactive::{ObservableItem as _, PlainItem as _};
+                    let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
+                    let observation = elwindui::core::reactive::ItemObservation(&this.base);
+                    if let Some(subscription) = (&observation).observe_item(move |property| {
+                        if let Some(this) = weak.upgrade() {
+                            #embedded_forward
+                            match property {
+                                #inherited_dispatch_arms
+                                _ => {}
+                            }
+                        }
+                    }) {
+                        this.__property_changed_subscriptions.borrow_mut().push(subscription);
+                    }
+                }
+            }
+        };
     let component_self_subscription = if component_property_variants.is_empty() {
         TokenStream::new()
     } else {
@@ -8762,6 +8867,7 @@ fn generate_view(
                     .ok();
                 if let Some(this) = __most_derived.clone() {
                     #wiring_stmts
+                    #most_derived_wire_forward
                     #unmount_hook_attach
                 }
                 <Self as #target_ext>::__refresh_dynamic_regions(self);
@@ -9010,6 +9116,7 @@ fn generate_view(
             }
 
             #component_observable_impl
+            #embedded_view_sync_impl
             #template_property_impls
             #generated_dynamic_host_impl
         }
@@ -9170,6 +9277,7 @@ fn generate_view(
             }
 
             #component_observable_impl
+            #embedded_view_sync_impl
             #template_property_impls
             #generated_dynamic_host_impl
         }
@@ -9268,6 +9376,11 @@ struct ViewCtx {
     /// the declaring ancestor's shape (same-crate and cross-crate alike) and leave any undeclared
     /// name untouched for rustc.
     inherited_props_macro: Option<TokenStream>,
+    /// Issue #166: the composition root's binding when this Component composes over a
+    /// user-defined (generated) base, whose own view may already have placed children in the
+    /// shared content collection. Root-direct dynamic regions then start after that base-owned
+    /// prefix (`dynamic_region_start`). `None` for builtin bases, which start empty.
+    composition_base_prefix_root: Option<syn::Ident>,
     /// Component fields explicitly marked `#[bindable]`; only their direct properties are
     /// reactive owner dependencies in ordinary view expressions.
     bindable_owners: HashSet<String>,
@@ -9573,6 +9686,7 @@ pub(crate) fn lower_template_body(
         mutable_own_fields: HashSet::new(),
         inherited_fields: HashSet::new(),
         inherited_props_macro: None,
+        composition_base_prefix_root: None,
         property_dependencies: HashMap::new(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
@@ -12319,6 +12433,22 @@ fn preceding_span(
     quote! { 0usize #( + (#preceding) )* }
 }
 
+/// The total current span of `siblings` (static children count 1, dynamic slots their live span).
+fn total_span(
+    plan: &[PlannedNode],
+    siblings: &[(syn::Ident, String)],
+    ctx: &ViewCtx,
+) -> TokenStream {
+    let spans = siblings.iter().map(|(binding, ty)| {
+        if ty == DYNAMIC_CHILD_SLOT_MARKER {
+            slot_span(plan, binding, ctx)
+        } else {
+            quote! { 1usize }
+        }
+    });
+    quote! { 0usize #( + (#spans) )* }
+}
+
 /// Finds the nearest real (non-dynamic) ancestor *element* of a dynamic `PlannedNode`, walking
 /// through any number of enclosing dynamic regions (nested `if`/`match`/`for`, Phase 1). A dynamic
 /// node's binding appears either directly in a real element's own `child_bindings` (a top-level
@@ -12358,7 +12488,22 @@ fn dynamic_region_start(plan: &[PlannedNode], target: &syn::Ident, ctx: &ViewCtx
             .iter()
             .any(|(child, _)| child == target)
     }) {
-        return preceding_span(plan, &parent.child_bindings, target, ctx);
+        let preceding = preceding_span(plan, &parent.child_bindings, target, ctx);
+        // Issue #166: over a user-defined base, every level below this one (the base, its own
+        // base, ...) has already placed its root children at the front of the shared collection;
+        // this Component's root children follow them in authored order, and any further-derived
+        // level's children follow these. The prefix is the base chain's current root span, read
+        // live at each refresh (`EmbeddedViewSync::__elwindui_root_content_span`).
+        if ctx.composition_base_prefix_root.as_ref() == Some(&parent.binding) {
+            return quote! {
+                ({
+                    #[allow(unused_imports)]
+                    use elwindui::core::reactive::{EmbeddedNotifyForward as _, EmbeddedNotifyIgnore as _};
+                    (&elwindui::core::reactive::EmbeddedNotify(&self.base)).embedded_span()
+                }) + (#preceding)
+            };
+        }
+        return preceding;
     }
     let enclosing = plan
         .iter()
@@ -16169,7 +16314,7 @@ fn emit_wiring_with_widget(
                         use #ext_path as _;
                         let widget = #widget_binding;
                         #refresh_capture
-                        let this = std::rc::Rc::clone(&this);
+                        let this = ::core::clone::Clone::clone(&this);
                         #props_macro!(@set widget, #name_ident, move |#(#annotated_params),*| {
                             #call;
                             #refresh_statement
@@ -16230,7 +16375,7 @@ fn emit_wiring_with_widget(
                         use elwindui::core::ui::UIElementExt as _;
                         let widget = #widget_binding;
                         #refresh_capture
-                        let this = std::rc::Rc::clone(&this);
+                        let this = ::core::clone::Clone::clone(&this);
                         #registration
                         #shortcut_registration
                     }
@@ -16259,7 +16404,7 @@ fn emit_wiring_with_widget(
                     {
                         let widget = #widget_binding;
                         #refresh_capture
-                        let this = std::rc::Rc::clone(&this);
+                        let this = ::core::clone::Clone::clone(&this);
                         widget.#setter(Box::new(move || {
                             #call;
                             // An action can mutate a collection used by a dynamic child range.
@@ -16296,7 +16441,7 @@ fn emit_wiring_with_widget(
                     {
                         let widget = #widget_binding;
                         #refresh_capture
-                        let this = std::rc::Rc::clone(&this);
+                        let this = ::core::clone::Clone::clone(&this);
                         widget.#setter(Box::new(move |#(#param_decls),*| {
                             #call;
                         }));
@@ -16362,7 +16507,7 @@ fn emit_wiring_with_widget(
                 out.extend(quote! {
                     {
                         let widget = #widget_binding;
-                        let this = std::rc::Rc::clone(&this);
+                        let this = ::core::clone::Clone::clone(&this);
                         widget.#change_setter(#on_change);
                     }
                 });
@@ -16390,7 +16535,7 @@ fn emit_wiring_with_widget(
                             use elwindui::ui::*;
                             use #ext_path as _;
                             let widget = #widget_binding;
-                            let this = std::rc::Rc::clone(&this);
+                            let this = ::core::clone::Clone::clone(&this);
                             #props_macro!(@set_on_change #name_ident, widget, #on_change);
                         }
                     }
@@ -16887,6 +17032,24 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                         let name = ident.to_string();
                         let is_own = self.ctx.mutable_own_fields.contains(&name)
                             || self.ctx.own_fields.contains_key(&name);
+                        // An own mutable Prop gets the same treatment through its own accessors
+                        // (the plain `name op= rhs` would otherwise target the getter call — E0067).
+                        if !self.is_shadowed(&name) && self.ctx.mutable_own_fields.contains(&name) {
+                            if let EmitMode::WithSelf(self_tok) = self.mode {
+                                let op = binary.op;
+                                let mut rhs = (*binary.right).clone();
+                                self.visit_expr_mut(&mut rhs);
+                                let getter = format_ident!("{}", name);
+                                let setter = format_ident!("set_{}", name);
+                                let self_tok = self_tok.clone();
+                                *node = syn::parse_quote! {{
+                                    let mut __elwindui_own_value = #self_tok.#getter();
+                                    __elwindui_own_value #op #rhs;
+                                    #self_tok.#setter(__elwindui_own_value)
+                                }};
+                                return;
+                            }
+                        }
                         if !is_own {
                             let op = binary.op;
                             let mut rhs = (*binary.right).clone();
@@ -18643,6 +18806,7 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
         mutable_own_fields: HashSet::new(),
         inherited_fields: HashSet::new(),
         inherited_props_macro: None,
+        composition_base_prefix_root: None,
         property_dependencies: HashMap::new(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),

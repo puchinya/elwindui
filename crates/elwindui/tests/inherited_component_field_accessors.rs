@@ -591,3 +591,257 @@ fn inherited_prop_drives_derived_match_and_for_regions() {
     derived.base.set_rows(Vec::new());
     assert_eq!(child_texts(regions), strings(&["first"]));
 }
+
+// ---------------------------------------------------------------------------
+// Root-direct dynamic regions over a user-defined base (with and without its own view). The
+// base's own children come first in the shared collection; the derived Component's root
+// children (static and dynamic) follow them in authored order.
+// ---------------------------------------------------------------------------
+
+#[elwindui::component(inherits VerticalLayout)]
+struct ViewlessRegionBase {
+    #[prop(default = false)]
+    show: bool,
+    #[prop(default = Vec::new())]
+    rows: Vec<Rc<InheritedDynRow>>,
+}
+
+#[elwindui::component]
+impl ViewlessRegionBase {}
+
+#[elwindui::component(inherits crate::DynamicRegionBase)]
+struct RootIfOverViewBase {
+    body: view! {
+        TextBlock { text: "static-before" }
+        if show {
+            TextBlock { text: "shown" }
+        } else {
+            TextBlock { text: "hidden" }
+        }
+        TextBlock { text: "static-after" }
+    },
+}
+
+#[elwindui::component]
+impl RootIfOverViewBase {}
+
+#[elwindui::component(inherits crate::DynamicRegionBase)]
+struct RootMatchForOverViewBase {
+    body: view! {
+        match mode {
+            DynMode::First => TextBlock { text: "first" },
+            DynMode::Second => TextBlock { text: "second" },
+        }
+        for row in rows {
+            TextBlock { text: row.label }
+        }
+    },
+}
+
+#[elwindui::component]
+impl RootMatchForOverViewBase {}
+
+#[elwindui::component(inherits crate::ViewlessRegionBase)]
+struct RootIfForOverViewlessBase {
+    body: view! {
+        if show {
+            TextBlock { text: "shown" }
+        }
+        for row in rows {
+            TextBlock { text: row.label }
+        }
+    },
+}
+
+#[elwindui::component]
+impl RootIfForOverViewlessBase {}
+
+#[test]
+fn root_direct_if_over_base_with_view_follows_inherited_prop() {
+    let derived = RootIfOverViewBase::new();
+    let names = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+    let sink = Rc::clone(&names);
+    let _subscription = ObservableExt::subscribe_property_changed(&*derived, move |name| {
+        sink.borrow_mut().push(name)
+    });
+    assert_eq!(
+        child_texts(derived.as_ref()),
+        strings(&["base", "static-before", "hidden", "static-after"])
+    );
+    derived.base.set_show(true);
+    assert_eq!(
+        child_texts(derived.as_ref()),
+        strings(&["base", "static-before", "shown", "static-after"])
+    );
+    derived.base.set_show(false);
+    assert_eq!(
+        child_texts(derived.as_ref()),
+        strings(&["base", "static-before", "hidden", "static-after"])
+    );
+    assert_eq!(*names.borrow(), vec!["show", "show"]);
+
+    let before = derived.visual_children();
+    derived.base.set_unrelated(3);
+    let after = derived.visual_children();
+    assert_eq!(before.len(), after.len());
+    assert!(before.iter().zip(&after).all(|(x, y)| Rc::ptr_eq(x, y)));
+}
+
+#[test]
+fn root_direct_match_and_for_over_base_with_view_follow_inherited_props() {
+    let derived = RootMatchForOverViewBase::new();
+    assert_eq!(child_texts(derived.as_ref()), strings(&["base", "first"]));
+    derived.base.set_mode(DynMode::Second);
+    let (a, b) = (dyn_row("a"), dyn_row("b"));
+    derived.base.set_rows(vec![a.clone(), b.clone()]);
+    assert_eq!(
+        child_texts(derived.as_ref()),
+        strings(&["base", "second", "a", "b"])
+    );
+    derived.base.set_rows(vec![b.clone()]);
+    derived.base.set_mode(DynMode::First);
+    assert_eq!(
+        child_texts(derived.as_ref()),
+        strings(&["base", "first", "b"])
+    );
+    derived.base.set_rows(Vec::new());
+    assert_eq!(child_texts(derived.as_ref()), strings(&["base", "first"]));
+}
+
+#[test]
+fn root_direct_if_and_for_over_viewless_base_follow_inherited_props() {
+    // The view-less base composes over `VerticalLayout` like an empty `body`: it is a real UI
+    // element whose props, content collection and accessors its derived Components inherit.
+    let base = ViewlessRegionBase::new();
+    assert!(!base.show());
+    assert!(base.visual_children().is_empty());
+
+    let derived = RootIfForOverViewlessBase::new();
+    assert_eq!(child_texts(derived.as_ref()), Vec::<String>::new());
+    derived.base.set_show(true);
+    assert_eq!(child_texts(derived.as_ref()), strings(&["shown"]));
+    let (a, b) = (dyn_row("a"), dyn_row("b"));
+    derived.base.set_rows(vec![a.clone(), b.clone()]);
+    assert_eq!(child_texts(derived.as_ref()), strings(&["shown", "a", "b"]));
+    derived.base.set_show(false);
+    assert_eq!(child_texts(derived.as_ref()), strings(&["a", "b"]));
+    derived.base.set_rows(vec![b.clone(), a.clone()]);
+    assert_eq!(child_texts(derived.as_ref()), strings(&["b", "a"]));
+}
+
+// ---------------------------------------------------------------------------
+// A base's own view keeps working when it is embedded as a derived Component's `base`.
+// ---------------------------------------------------------------------------
+
+#[elwindui::component(inherits VerticalLayout)]
+struct LivePrefixBase {
+    #[prop(default = Vec::new())]
+    base_rows: Vec<Rc<InheritedDynRow>>,
+    #[prop(default = "base-label".to_string())]
+    base_label: String,
+    #[prop(default = 0)]
+    base_taps: i32,
+
+    body: view! {
+        #[id("base_text")]
+        let base_text = TextBlock {
+            text: base_label,
+            on_tapped: |_event| {
+                base_taps += 1;
+            },
+        };
+        base_text
+        for row in base_rows {
+            TextBlock { text: row.label }
+        }
+    },
+}
+
+#[elwindui::component]
+impl LivePrefixBase {}
+
+#[elwindui::component(inherits crate::LivePrefixBase)]
+struct LivePrefixDerived {
+    #[prop(default = false)]
+    show_tail: bool,
+
+    body: view! {
+        TextBlock { text: "d-static" }
+        if show_tail {
+            TextBlock { text: "d-dyn" }
+        }
+    },
+}
+
+#[elwindui::component]
+impl LivePrefixDerived {}
+
+#[elwindui::component(inherits crate::LivePrefixDerived)]
+struct LivePrefixLeaf {
+    body: view! {
+        TextBlock { text: "leaf" }
+    },
+}
+
+#[elwindui::component]
+impl LivePrefixLeaf {}
+
+#[test]
+fn embedded_base_view_keeps_its_own_bindings_regions_and_handlers() {
+    let derived = LivePrefixDerived::new();
+    assert_eq!(
+        child_texts(derived.as_ref()),
+        strings(&["base-label", "d-static"])
+    );
+
+    // The base's own attribute binding re-syncs on its own setter.
+    derived.base.set_base_label("relabeled".to_string());
+    assert_eq!(
+        child_texts(derived.as_ref()),
+        strings(&["relabeled", "d-static"])
+    );
+
+    // The base's own dynamic region refreshes, and the derived root region stays after it.
+    let (a, b) = (dyn_row("a"), dyn_row("b"));
+    derived.base.set_base_rows(vec![a.clone(), b.clone()]);
+    assert_eq!(
+        child_texts(derived.as_ref()),
+        strings(&["relabeled", "a", "b", "d-static"])
+    );
+    derived.set_show_tail(true);
+    assert_eq!(
+        child_texts(derived.as_ref()),
+        strings(&["relabeled", "a", "b", "d-static", "d-dyn"])
+    );
+    derived.base.set_base_rows(vec![b.clone()]);
+    assert_eq!(
+        child_texts(derived.as_ref()),
+        strings(&["relabeled", "b", "d-static", "d-dyn"])
+    );
+    derived.set_show_tail(false);
+    derived.set_show_tail(true);
+    assert_eq!(
+        child_texts(derived.as_ref()),
+        strings(&["relabeled", "b", "d-static", "d-dyn"])
+    );
+
+    // The base's own event handler is wired.
+    tap(derived.base.base_text());
+    assert_eq!(derived.base.base_taps(), 1);
+}
+
+#[test]
+fn twice_embedded_base_view_keeps_its_own_regions() {
+    let leaf = LivePrefixLeaf::new();
+    leaf.base.base.set_base_rows(vec![dyn_row("x")]);
+    leaf.base.set_show_tail(true);
+    assert_eq!(
+        child_texts(leaf.as_ref()),
+        strings(&["base-label", "x", "d-static", "d-dyn", "leaf"])
+    );
+    leaf.base.base.set_base_label("deep".to_string());
+    assert_eq!(
+        child_texts(leaf.as_ref()),
+        strings(&["deep", "x", "d-static", "d-dyn", "leaf"])
+    );
+}

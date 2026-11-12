@@ -79,6 +79,114 @@ pub trait PlainItem {
 
 impl<T: ?Sized> PlainItem for &ItemObservation<'_, T> {}
 
+/// Issue #166: a generated Component embedded as another Component's `base` value has no `Rc` of
+/// its own type, so it cannot install its own property-change subscription. The outermost
+/// Component (which does observe its `base` by name) relays every notification down the chain
+/// through this hook, and each embedded level re-syncs its own view bindings and dynamic regions.
+#[doc(hidden)]
+pub trait EmbeddedViewSync {
+    fn __elwindui_embedded_property_changed(&self, property: &'static str);
+
+    /// Installs this embedded level's own view wiring (event handlers, two-way bindings) through
+    /// `this`, a handle to it projected out of the outermost Component's `Rc`.
+    fn __elwindui_wire_embedded(this: EmbeddedHandle<Self>)
+    where
+        Self: Sized;
+
+    /// How many children this level and every level below it currently place at the front of the
+    /// shared root content collection. A further-derived level's root-direct dynamic regions
+    /// start after this prefix.
+    fn __elwindui_root_content_span(&self) -> usize;
+}
+
+/// A strong, cloneable handle to a value embedded inside an `Rc`-owned outer value: the owner
+/// `Rc` plus a projection to the embedded part. It dereferences to the embedded value, so
+/// generated wiring written against `this: Rc<Self>` (method calls, `&*this`, `Clone::clone`)
+/// works unchanged for an embedded `base`.
+#[doc(hidden)]
+pub struct EmbeddedHandle<T: ?Sized + 'static> {
+    owner: std::rc::Rc<dyn std::any::Any>,
+    project: std::rc::Rc<dyn Fn(&dyn std::any::Any) -> &T>,
+}
+
+impl<T: 'static> EmbeddedHandle<T> {
+    pub fn new(owner: std::rc::Rc<T>) -> Self {
+        Self {
+            owner,
+            project: std::rc::Rc::new(|owner: &dyn std::any::Any| {
+                owner
+                    .downcast_ref::<T>()
+                    .expect("EmbeddedHandle: owner type is fixed at construction")
+            }),
+        }
+    }
+}
+
+impl<T: ?Sized + 'static> EmbeddedHandle<T> {
+    pub fn map<U: ?Sized + 'static>(
+        &self,
+        f: impl for<'a> Fn(&'a T) -> &'a U + 'static,
+    ) -> EmbeddedHandle<U> {
+        let project = std::rc::Rc::clone(&self.project);
+        EmbeddedHandle {
+            owner: std::rc::Rc::clone(&self.owner),
+            project: std::rc::Rc::new(move |owner: &dyn std::any::Any| f(project(owner))),
+        }
+    }
+}
+
+impl<T: ?Sized + 'static> Clone for EmbeddedHandle<T> {
+    fn clone(&self) -> Self {
+        Self {
+            owner: std::rc::Rc::clone(&self.owner),
+            project: std::rc::Rc::clone(&self.project),
+        }
+    }
+}
+
+impl<T: ?Sized + 'static> std::ops::Deref for EmbeddedHandle<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        (self.project)(&*self.owner)
+    }
+}
+
+/// Autoref dispatch for [`EmbeddedViewSync`], mirroring [`ItemObservation`]:
+/// `(&EmbeddedNotify(base)).notify_embedded(..)` relays to a generated base and is a no-op for a
+/// hand-written/builtin base.
+#[doc(hidden)]
+pub struct EmbeddedNotify<'a, T: ?Sized>(pub &'a T);
+
+#[doc(hidden)]
+pub trait EmbeddedNotifyForward<T: ?Sized + 'static> {
+    fn notify_embedded(&self, property: &'static str);
+    fn wire_embedded(&self, this: EmbeddedHandle<T>);
+    fn embedded_span(&self) -> usize;
+}
+
+impl<T: EmbeddedViewSync + 'static> EmbeddedNotifyForward<T> for EmbeddedNotify<'_, T> {
+    fn notify_embedded(&self, property: &'static str) {
+        self.0.__elwindui_embedded_property_changed(property);
+    }
+    fn wire_embedded(&self, this: EmbeddedHandle<T>) {
+        T::__elwindui_wire_embedded(this);
+    }
+    fn embedded_span(&self) -> usize {
+        self.0.__elwindui_root_content_span()
+    }
+}
+
+#[doc(hidden)]
+pub trait EmbeddedNotifyIgnore<T: ?Sized + 'static> {
+    fn notify_embedded(&self, _property: &'static str) {}
+    fn wire_embedded(&self, _this: EmbeddedHandle<T>) {}
+    fn embedded_span(&self) -> usize {
+        0
+    }
+}
+
+impl<T: ?Sized + 'static> EmbeddedNotifyIgnore<T> for &EmbeddedNotify<'_, T> {}
+
 /// The value of a `#[async_computed]` field — what its generated getter returns instead of the
 /// bare declared type `T`. See docs/design/runtime/state_management_design.md "Async work",
 /// docs/specs/dsl_spec.md §3 "`viewmodel`と`store`:宣言構文".

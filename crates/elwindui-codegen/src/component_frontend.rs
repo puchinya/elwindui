@@ -144,25 +144,26 @@ pub fn component_and_view_from_item_struct(
     // this Component becomes an ordinary shape-composed `#[class]` participant (shape macros,
     // ancestor forwarding) that further Components can inherit.
     let view_def = view_def.or_else(|| {
-        base_path
+        (base_path
             .as_deref()
             .is_some_and(is_external_generated_component_path)
-            .then(|| ViewDef {
-                target: name.clone(),
-                is_template: false,
-                on_mount: None,
-                on_unmount: None,
-                template_header: None,
-                on_update: None,
-                lets: Vec::new(),
-                root: ast::ViewBody {
-                    attributes: Vec::new(),
-                    attached: Vec::new(),
-                    attribute_shortcuts: Vec::new(),
-                    children: Vec::new(),
-                },
-                implicit_owner: None,
-            })
+            || base.as_deref().is_some_and(is_layout_builtin_base))
+        .then(|| ViewDef {
+            target: name.clone(),
+            is_template: false,
+            on_mount: None,
+            on_unmount: None,
+            template_header: None,
+            on_update: None,
+            lets: Vec::new(),
+            root: ast::ViewBody {
+                attributes: Vec::new(),
+                attached: Vec::new(),
+                attribute_shortcuts: Vec::new(),
+                children: Vec::new(),
+            },
+            implicit_owner: None,
+        })
     });
 
     let mut non_view_struct = item_struct.clone();
@@ -197,6 +198,15 @@ pub fn component_and_view_from_item_struct(
     };
 
     Ok((component_def, view_def))
+}
+
+/// Issue #166: a view-less Component written directly over a layout builtin
+/// (`struct Panel { #[prop] .. }` with `inherits VerticalLayout`) composes over that layout like a
+/// Component with an empty `body`, so it is a real UI element and an inheritable composition hop
+/// (its derived Components get its props, its content collection and its dynamic regions) rather
+/// than a plain non-UI data struct. Only the content-hosting layout primitives qualify.
+fn is_layout_builtin_base(base: &str) -> bool {
+    matches!(base, "VerticalLayout" | "HorizontalLayout" | "Grid")
 }
 
 /// Issue #166: whether a qualified `inherits` path names a generated Component defined in another

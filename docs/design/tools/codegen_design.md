@@ -102,7 +102,8 @@ setter parameterが`String`の場合だけ著者値を`.to_string()`へ変換す
 fallbackを適用しない。
 
 `Vec<Rc<T>>`をcontentとして公開する生成componentでは、dynamic `if`/`for`/`match`のslot item typeは
-`T`をそのまま保持し、生成component自身がframework-owned `DynamicChildHost<T>`を実装する。getterが返す
+`T`をそのまま保持し、生成component自身がframework-owned `DynamicChildHost<T>`(`insert`/`remove`/
+`remove_at`/`dynamic_len`)を実装する。getterが返す
 typed `Vec`を`ListExt`として扱ったり、`dyn Vec<...>`へ変換したりしない。framework classのlive collection
 は従来通りgetterと`ListExt`を使う。このcollection shape queryも同じresolver/props macro protocolから
 得られる。生成componentのhostはraw insert/removeをreconcile中だけ行い、slot stateのborrowを解放した後に
@@ -362,6 +363,28 @@ accessorを呼ぶ。
   (`view! {}`)を補う。同一クレートの基底なら`resolve_view_for`で基底のviewを継承できるが、外部基底の
   `ComponentDef`は見えないため、空bodyで外部基底そのものを合成rootにし(基底のview/contentは定義側が
   所有)、shape macroを持つ通常のshape合成`#[class]`参加者として、さらに継承できる中間hopにする。
+  layout builtin(`VerticalLayout`/`HorizontalLayout`/`Grid`、`component_frontend::is_layout_builtin_base`)を
+  直接`inherits`する`view`を持たないcomponentにも同じ空bodyを補う。補わないと`generate_component`の
+  非UIなdata structとして生成され、`{Name}Ext`もshape macroも持たないため派生の基底になれない。
+- 派生`view`のroot直下の子(静的・動的とも)は、基底の`view`がすでに置いた子の**後ろ**へ記述順に並び、
+  さらに派生した階層の子はその後ろに続く。ユーザー定義(生成)componentを基底とするshape合成では
+  `ViewCtx::composition_base_prefix_root`を設定し、root直下の動的領域の開始位置(`dynamic_region_start`)を
+  「基底チェーンの現在のroot寄与数(`EmbeddedViewSync::__elwindui_root_content_span`) + 先行する自分の子の幅」
+  として毎回計算する。各階層のroot寄与数は「自分の`base`の寄与数 + 自分のroot直下の子の幅(`total_span`)」。
+  builtinを基底とする場合はprefixが常に0なので従来どおり。動的領域のhost取得(`@content_dynamic_host_into`)は
+  宣言元classの`{Class}Ext`をUFCSで呼ぶため、基底のcontentが祖先(`Layout`の`children`)で宣言されていても
+  派生側のtrait importに依存しない。
+- **埋め込まれた基底の`view`**: 基底の`view`は自分の`__build_view`で構築されるが、派生の`base`値として
+  埋め込まれていると`__self_weak`は最派生型を指すため、自分の型への`Rc`を得られず自身の購読・配線を
+  張れない。そこで生成component(テンプレート以外)は`elwindui::core::reactive::EmbeddedViewSync`を実装する:
+  `__elwindui_embedded_property_changed(name)`は自分のプロパティ・継承プロパティの再同期と動的領域の更新を
+  行ってから自分の`base`へ中継し、`__elwindui_wire_embedded(EmbeddedHandle<Self>)`は最派生の`Rc`から射影した
+  ハンドル経由で自分の配線(イベントハンドラ等)を張って`base`へ中継する。最派生componentは`base`の名前付き
+  `ObservableExt`購読の中で先に`base`へ中継し、`__build_view`の配線時にハンドルを作って`base`へ配線を
+  中継する。基底がbuiltin/手書きの場合は`EmbeddedNotify`のautoref dispatchで何もしない。配線コード中の
+  `this`の複製は`Clone::clone`で書き、`Rc<Self>`と`EmbeddedHandle<Self>`の両方で同じコードを使う。
+- 自分の可変Propへの複合代入(`count += 1`)は、継承Propと同じく自分のgetterで取った一時値へ元の`op=`を
+  適用してsetterへ渡す。
 
 #### Component override bridge
 

@@ -2550,7 +2550,11 @@ fn build_props_macro(
             let name = &p.name;
             let host = match attach_kind(&p.ty) {
                 AttachKind::VecProperty => quote! { $recv },
-                AttachKind::Collection => quote! { $recv.#name() },
+                // The getter is declared by this class, so call it through this class's own `Ext`
+                // (UFCS): the consumer (a derived Component whose content is inherited through a
+                // user-defined base) has no reason to have the declaring trait in scope. No block
+                // wrapper, so the returned host keeps the caller's temporary-lifetime rules.
+                AttachKind::Collection => quote! { #own_ext::#name(&*$recv) },
                 AttachKind::SingleSlot => quote! {
                     compile_error!(concat!(
                         "`",

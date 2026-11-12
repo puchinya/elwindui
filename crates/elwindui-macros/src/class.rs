@@ -1974,6 +1974,10 @@ fn build_props_macro(
     // token): a declared property applies it to a fetched temporary and stores that back through
     // the setter, so the value type needs exactly the trait the author used (`AddAssign<Rhs>`, not
     // `Add`); an undeclared name expands back to the identical `name op= value`.
+    // Each declared arm imports the declaring class's own `{Class}Ext` trait into the expansion's
+    // block scope, so the accessor resolves wherever the derived Component lives (another crate
+    // included) without the DSL author importing generated traits.
+    let own_ext = exported_own_ext_path(&format_ident!("{bare_name}Ext"));
     let inherited_access_arms: Vec<TokenStream2> = shape
         .props
         .iter()
@@ -1982,11 +1986,19 @@ fn build_props_macro(
             let name = &p.name;
             let setter = format_ident!("set_{}", name);
             quote! {
-                (@inherited_get_from $origin:ident, $recv:expr, #name) => { $recv.#name() };
-                (@inherited_set_from $origin:ident, $recv:expr, #name, $value:expr) => {
+                (@inherited_get_from $origin:ident, $recv:expr, #name) => {{
+                    #[allow(unused_imports)]
+                    use #own_ext as _;
+                    $recv.#name()
+                }};
+                (@inherited_set_from $origin:ident, $recv:expr, #name, $value:expr) => {{
+                    #[allow(unused_imports)]
+                    use #own_ext as _;
                     $recv.#setter($value)
-                };
+                }};
                 (@inherited_op_assign_from $origin:ident, $recv:expr, #name, $op:tt, $value:expr) => {{
+                    #[allow(unused_imports)]
+                    use #own_ext as _;
                     let mut __elwindui_inherited_value = $recv.#name();
                     __elwindui_inherited_value $op $value;
                     $recv.#setter(__elwindui_inherited_value)

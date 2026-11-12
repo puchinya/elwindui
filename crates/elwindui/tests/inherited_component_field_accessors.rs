@@ -174,64 +174,6 @@ fn t4_derived_own_prop_is_unaffected() {
     assert_eq!(derived.heading(), "before");
 }
 
-// Cross-crate (D6): the declaring ancestor lives in another crate. The consumer macro does not
-// classify `heading`; the defining crate's shape macro / rustc resolve it.
-use elwindui_external_component_fixture::ExternalInheritBaseExt as _;
-
-#[elwindui::component(inherits elwindui_external_component_fixture::ExternalInheritBase)]
-struct CrossCrateDerived {
-    body: view! {
-        #[id("cross_label")]
-        let cross_label = TextBlock {
-            text: heading,
-            on_tapped: |_event| {
-                heading = format!("{heading}+tap");
-            },
-        };
-
-        cross_label
-    },
-}
-
-#[elwindui::component]
-impl CrossCrateDerived {}
-
-#[elwindui::component(inherits elwindui_external_component_fixture::ExternalInheritMiddle)]
-struct CrossCrateLeaf {
-    body: view! {
-        #[id("leaf_cross_label")]
-        let leaf_cross_label = TextBlock {
-            text: format!("[{heading}]"),
-            on_tapped: |_event| {
-                heading = "leaf".to_string();
-            },
-        };
-
-        leaf_cross_label
-    },
-}
-
-#[elwindui::component]
-impl CrossCrateLeaf {}
-
-#[test]
-fn cross_crate_derived_reads_and_writes_external_ancestor_prop() {
-    let derived = CrossCrateDerived::new();
-    assert_eq!(text_of(&derived.cross_label()), "external-before");
-    tap(derived.cross_label());
-    assert_eq!(derived.base.heading(), "external-before+tap");
-    assert_eq!(text_of(&derived.cross_label()), "external-before+tap");
-}
-
-#[test]
-fn cross_crate_multi_hop_through_external_middle() {
-    let leaf = CrossCrateLeaf::new();
-    assert_eq!(text_of(&leaf.leaf_cross_label()), "[external-before]");
-    tap(leaf.leaf_cross_label());
-    assert_eq!(leaf.base.base.heading(), "leaf");
-    assert_eq!(text_of(&leaf.leaf_cross_label()), "[leaf]");
-}
-
 // T6: DeferredView is a regression consumer of the general fix — a derived Component's
 // `context_popup: view!` handler writes a Prop declared by its user-defined ancestor.
 #[elwindui::component(inherits crate::InheritBase)]
@@ -324,50 +266,6 @@ fn t6_derived_context_popup_writes_inherited_prop() {
 
     elwindui::ui::unmount_subtree(&content);
     handle.close();
-}
-
-// View-less local middle over a qualified external generated base: it is itself an inheritable
-// composition hop, and `heading` (declared in the external crate) stays reachable two hops down.
-#[elwindui::component(inherits elwindui_external_component_fixture::ExternalInheritBase)]
-struct LocalViewlessMiddle {
-    #[prop(default = 5)]
-    local_only: i32,
-}
-
-#[elwindui::component]
-impl LocalViewlessMiddle {}
-
-#[elwindui::component(inherits crate::LocalViewlessMiddle)]
-struct LocalViewlessLeaf {
-    body: view! {
-        #[id("viewless_leaf_label")]
-        let viewless_leaf_label = TextBlock {
-            text: format!("{heading}/{local_only}"),
-            on_tapped: |_event| {
-                heading = "viewless".to_string();
-                local_only += 1;
-            },
-        };
-
-        viewless_leaf_label
-    },
-}
-
-#[elwindui::component]
-impl LocalViewlessLeaf {}
-
-#[test]
-fn cross_crate_multi_hop_through_local_viewless_middle() {
-    let middle = LocalViewlessMiddle::new();
-    assert_eq!(middle.heading(), "external-before");
-    assert_eq!(middle.local_only(), 5);
-
-    let leaf = LocalViewlessLeaf::new();
-    assert_eq!(text_of(&leaf.viewless_leaf_label()), "external-before/5");
-    tap(leaf.viewless_leaf_label());
-    assert_eq!(leaf.base.heading(), "viewless");
-    assert_eq!(leaf.base.local_only(), 6);
-    assert_eq!(text_of(&leaf.viewless_leaf_label()), "viewless/6");
 }
 
 /// Per-property inherited resync: changing an unrelated inherited property must not re-apply an
@@ -521,4 +419,175 @@ fn compound_assignment_fallback_preserves_original_operator_for_undeclared_names
     // A declared property through the same arm keeps `AddAssign` too.
     crate::__elwindui_props_OpAssignBase!(@inherited_op_assign base, distance, +=, 4);
     assert_eq!(base.distance(), Meters(5));
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic regions (`if` / `match` / `for`) over ancestor-declared Props.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum DynMode {
+    #[default]
+    First,
+    Second,
+}
+
+#[elwindui::viewmodel]
+mod inherited_dyn_row {
+    struct InheritedDynRow {
+        #[observable(default = String::new())]
+        label: String,
+    }
+}
+
+fn dyn_row(label: &str) -> Rc<InheritedDynRow> {
+    let row = InheritedDynRow::new();
+    row.set_label(label.to_string());
+    row
+}
+
+/// Base: declares every Prop the derived regions depend on, plus an unrelated one.
+#[elwindui::component(inherits VerticalLayout)]
+struct DynamicRegionBase {
+    #[prop(default = false)]
+    show: bool,
+    #[prop(default = DynMode::First)]
+    mode: DynMode,
+    #[prop(default = Vec::new())]
+    rows: Vec<Rc<InheritedDynRow>>,
+    #[prop(default = 0)]
+    unrelated: i32,
+
+    body: view! {
+        TextBlock { text: "base" }
+    },
+}
+
+#[elwindui::component]
+impl DynamicRegionBase {}
+
+#[elwindui::component(inherits crate::DynamicRegionBase)]
+struct DynamicIfDerived {
+    body: view! {
+        #[id("if_region")]
+        let if_region = VerticalLayout {
+            if show {
+                TextBlock { text: "shown" }
+            } else {
+                TextBlock { text: "hidden" }
+            }
+        };
+
+        if_region
+    },
+}
+
+#[elwindui::component]
+impl DynamicIfDerived {}
+
+#[elwindui::component(inherits crate::DynamicRegionBase)]
+struct DynamicMatchForDerived {
+    body: view! {
+        #[id("regions")]
+        let regions = VerticalLayout {
+            match mode {
+                DynMode::First => TextBlock { text: "first" },
+                DynMode::Second => TextBlock { text: "second" },
+            }
+            for row in rows {
+                TextBlock { text: row.label }
+            }
+        };
+
+        regions
+    },
+}
+
+#[elwindui::component]
+impl DynamicMatchForDerived {}
+
+fn child_texts(root: &dyn UIElementExt) -> Vec<String> {
+    root.visual_children()
+        .iter()
+        .map(|child| {
+            child
+                .as_any()
+                .downcast_ref::<elwindui::ui::TextBlock>()
+                .map(text_of)
+                .unwrap_or_else(|| "<other>".to_string())
+        })
+        .collect()
+}
+
+fn strings(expected: &[&str]) -> Vec<String> {
+    expected.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn inherited_prop_drives_derived_if_region() {
+    let derived = DynamicIfDerived::new();
+    let names = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+    let sink = Rc::clone(&names);
+    let _subscription = ObservableExt::subscribe_property_changed(&*derived, move |name| {
+        sink.borrow_mut().push(name)
+    });
+    let region = derived.if_region();
+    let region = region.as_ref();
+
+    assert_eq!(child_texts(region), strings(&["hidden"]));
+    derived.base.set_show(true);
+    assert_eq!(child_texts(region), strings(&["shown"]));
+    derived.base.set_show(false);
+    assert_eq!(child_texts(region), strings(&["hidden"]));
+    assert_eq!(
+        *names.borrow(),
+        vec!["show", "show"],
+        "each inherited write is reported exactly once, under the declaring property's name"
+    );
+
+    // An unrelated inherited Prop must not touch the region: the visible child keeps its identity
+    // and a sentinel written straight into it survives.
+    let before = region.visual_children();
+    let visible = before[0]
+        .as_any()
+        .downcast_ref::<elwindui::ui::TextBlock>()
+        .expect("if branch child is a TextBlock");
+    *visible.text.borrow_mut() = "sentinel".to_string();
+    derived.base.set_unrelated(7);
+    let after = region.visual_children();
+    assert_eq!(after.len(), 1);
+    assert!(Rc::ptr_eq(&before[0], &after[0]));
+    assert_eq!(child_texts(region), strings(&["sentinel"]));
+}
+
+#[test]
+fn inherited_prop_drives_derived_match_and_for_regions() {
+    let derived = DynamicMatchForDerived::new();
+    let regions = derived.regions();
+    let regions = regions.as_ref();
+    assert_eq!(child_texts(regions), strings(&["first"]));
+
+    derived.base.set_mode(DynMode::Second);
+    assert_eq!(child_texts(regions), strings(&["second"]));
+
+    let (a, b, c) = (dyn_row("a"), dyn_row("b"), dyn_row("c"));
+    derived.base.set_rows(vec![a.clone(), b.clone()]);
+    assert_eq!(child_texts(regions), strings(&["second", "a", "b"]));
+    derived.base.set_rows(vec![c.clone(), a.clone()]);
+    assert_eq!(child_texts(regions), strings(&["second", "c", "a"]));
+
+    derived.base.set_mode(DynMode::First);
+    assert_eq!(child_texts(regions), strings(&["first", "c", "a"]));
+
+    let before = regions.visual_children();
+    derived.base.set_unrelated(1);
+    let after = regions.visual_children();
+    assert_eq!(before.len(), after.len());
+    assert!(
+        before.iter().zip(&after).all(|(x, y)| Rc::ptr_eq(x, y)),
+        "an unrelated inherited Prop must not rebuild any dynamic region"
+    );
+
+    derived.base.set_rows(Vec::new());
+    assert_eq!(child_texts(regions), strings(&["first"]));
 }

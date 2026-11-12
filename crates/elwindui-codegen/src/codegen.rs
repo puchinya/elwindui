@@ -16709,13 +16709,10 @@ impl<'a> ViewClosureRewriter<'a> {
         if !self.is_inherited_candidate(name) {
             return None;
         }
-        if self.ctx.inherited_fields.contains(name) {
-            return Some(inherited_field_read(self.mode, name));
+        if self.ctx.inherited_props_macro.is_none() {
+            return None;
         }
-        let props_macro = self.ctx.inherited_props_macro.as_ref()?;
-        let receiver = inherited_field_receiver(self.mode);
-        let ident = format_ident!("{}", name);
-        Some(quote! { #props_macro!(@inherited_get #receiver.base, #ident) })
+        Some(inherited_field_read(self.ctx, self.mode, name))
     }
 
     /// Issue #166 (Model A): the write-side counterpart to `resolved_inherited_read` — the
@@ -16726,10 +16723,6 @@ impl<'a> ViewClosureRewriter<'a> {
         }
         let receiver = inherited_field_receiver(self.mode);
         let ident = format_ident!("{}", name);
-        if self.ctx.inherited_fields.contains(name) {
-            let setter = format_ident!("set_{}", name);
-            return Some(quote! { #receiver.base.#setter(#value) });
-        }
         let props_macro = self.ctx.inherited_props_macro.as_ref()?;
         Some(quote! { #props_macro!(@inherited_set #receiver.base, #ident, #value) })
     }
@@ -16747,14 +16740,6 @@ impl<'a> ViewClosureRewriter<'a> {
         }
         let receiver = inherited_field_receiver(self.mode);
         let ident = format_ident!("{}", name);
-        if self.ctx.inherited_fields.contains(name) {
-            let setter = format_ident!("set_{}", name);
-            return Some(quote! {{
-                let mut __elwindui_inherited_value = #receiver.base.#ident();
-                __elwindui_inherited_value #op #value;
-                #receiver.base.#setter(__elwindui_inherited_value)
-            }});
-        }
         let props_macro = self.ctx.inherited_props_macro.as_ref()?;
         Some(quote! { #props_macro!(@inherited_op_assign #receiver.base, #ident, #op, #value) })
     }
@@ -18379,7 +18364,7 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                     return mode.owner_tokens(only);
                 }
                 if ctx.inherited_fields.contains(only) {
-                    return inherited_field_read(mode, only);
+                    return inherited_field_read(ctx, mode, only);
                 }
                 if ctx.template_parent.is_some() && ctx.template_bare_parent_fields.contains(only) {
                     let parent_alias = ctx
@@ -18411,10 +18396,8 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                 // ancestor's getter, or the untouched bare name (a real rustc "cannot find value"
                 // diagnostic) when no ancestor declares it. Ancestor `#[state]` is never declared
                 // to that chain, so it can never be read through it.
-                if let Some(props_macro) = &ctx.inherited_props_macro {
-                    let receiver = inherited_field_receiver(mode);
-                    let ident = format_ident!("{}", only);
-                    return quote! { #props_macro!(@inherited_get #receiver.base, #ident) };
+                if ctx.inherited_props_macro.is_some() {
+                    return inherited_field_read(ctx, mode, only);
                 }
             }
             emit_path_get(path, ctx, mode)
@@ -18472,11 +18455,18 @@ fn inherited_field_receiver(mode: &EmitMode) -> TokenStream {
 }
 
 /// Issue #166 (Model A): an inherited field is read through the declaring ancestor's own getter on
-/// this Component's immediate `base` value — never a second accessor on this Component.
-fn inherited_field_read(mode: &EmitMode, name: &str) -> TokenStream {
+/// this Component's immediate `base` value — never a second accessor on this Component. Every
+/// inherited access (read, write, compound assignment) goes through the immediate base's shape
+/// macro chain rather than a direct `<recv>.base.<name>()` method call: the declaring class's arm
+/// brings its own `{Declarer}Ext` trait into scope at the call, so a derived Component in another
+/// crate never needs a manual `use ..Ext as _` import for its generated code to resolve.
+fn inherited_field_read(ctx: &ViewCtx, mode: &EmitMode, name: &str) -> TokenStream {
     let receiver = inherited_field_receiver(mode);
     let getter = format_ident!("{}", name);
-    quote! { #receiver.base.#getter() }
+    match &ctx.inherited_props_macro {
+        Some(props_macro) => quote! { #props_macro!(@inherited_get #receiver.base, #getter) },
+        None => quote! { #receiver.base.#getter() },
+    }
 }
 
 /// A resolved `["vm", "content"]`-style path -> `vm.content()` (construction) /
@@ -23965,8 +23955,13 @@ struct NotepadWindow {
             );
         }
         assert!(
-            derived_src.contains("self . base . heading ()"),
-            "inherited Prop read goes through the declaring ancestor's getter on `base`"
+            derived_src.contains("@ inherited_get self . base , heading"),
+            "inherited Prop read goes through the declaring ancestor's getter on `base`, via the              base shape macro (which imports the declaring `Ext` trait)"
+        );
+        assert!(
+            !derived_src.contains(". base . heading ()")
+                && !derived_src.contains(". base . set_heading"),
+            "no direct method call that would need the declaring `Ext` trait imported by the author"
         );
         assert!(
             derived_src.contains("fn __resync_inherited_heading"),
@@ -23977,15 +23972,15 @@ struct NotepadWindow {
             "the base notification dispatches by property name, not to a full resync()"
         );
         assert!(
-            derived_src.contains("this . base . set_heading"),
+            derived_src.contains("@ inherited_set this . base , heading ,"),
             "inherited Prop write goes through the declaring ancestor's setter on `base`"
         );
         assert!(
-            derived_src.contains("__elwindui_inherited_value += \"!\""),
-            "compound assignment on an inherited Prop applies the authored `+=` to a temporary"
+            derived_src.contains("@ inherited_op_assign this . base , heading , += , \"!\""),
+            "compound assignment on an inherited Prop keeps the authored `+=` operator"
         );
         assert!(
-            !derived_src.contains("__elwindui_inherited_value) +"),
+            !derived_src.contains("heading ()) +") && !derived_src.contains("heading) +"),
             "compound assignment must never be rewritten into a binary `+`"
         );
         assert!(

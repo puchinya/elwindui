@@ -329,8 +329,11 @@ accessorを呼ぶ。
 
 - `ViewCtx::inherited_fields`: effective fieldsからsource-localな宣言を除き、DSLの値位置で裸参照
   されている名前(祖先`#[state]`は`resolve_effective_fields`の時点で除外済み、root上の同名転送
-  `padding: padding`は既存の転送意味論を保つため除外)。読み取りは`<recv>.base.<name>()`、書き込みは
-  `<recv>.base.set_<name>(..)`に lower する。
+  `padding: padding`は既存の転送意味論を保つため除外)。読み書きとも下の`inherited_props_macro`経由
+  (`@inherited_get`/`@inherited_set`/`@inherited_op_assign`)へ lower し、`<recv>.base.<name>()`の
+  直接呼び出しは生成しない。宣言元classのarmが自分の`{Declarer}Ext`をblock scopeへimportするため、
+  別クレートの派生componentでも生成コード(独立したinherentの`__resync_inherited_<name>`を含む)が
+  DSL作者のtrait importに依存しない。
 - `ViewCtx::inherited_props_macro`: 直近のbaseの`__elwindui_props_<Base>!`。生のRust
   (イベントハンドラ本体・`format!`引数・hook)やDSLの値位置で他の規則で解決できなかった裸の
   snake_case名は、`@inherited_get`/`@inherited_set`へ渡す。shape macro連鎖が宣言元の

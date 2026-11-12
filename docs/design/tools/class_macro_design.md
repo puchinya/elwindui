@@ -99,7 +99,8 @@ Only `@set`'s `wrap_prop_value` knows how to shape a value into a declared prope
 
 `@inherited_get $recv, name` / `@inherited_set $recv, name, value` /
 `@inherited_op_assign $recv, name, op, value` は、派生生成componentの`view`内の裸名を宣言元の祖先へ
-解決するためのarmである。このclassが`@set`対象として宣言した(`routed`以外の)propertyは
+解決するためのarmである。宣言した側のarmは自classの`{Class}Ext`(`exported_own_ext_path`)を
+展開先のblock scopeへ`use .. as _`し、呼び出し側のtrait importに依存しない。このclassが`@set`対象として宣言した(`routed`以外の)propertyは
 `$recv.name()` / `$recv.set_name(value)` / 「getterで取得した一時値へ元の`op=`(単一token`$op:tt`)を
 適用してsetterへ渡す」へ展開し、それ以外の名前は親classのshape macroへ転送する。親を持たない終端では、
 元の裸の名前(`name` / `name = value` / `name op= value`)をそのまま返し、未宣言名をpropertyとして

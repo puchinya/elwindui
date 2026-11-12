@@ -321,15 +321,16 @@ impl ContentWrapper {}
 
 `Control`派生componentのvisual chromeは`body: view!`ではなく`template: template_view!`で宣言する。これは内部の`__prepare_template_presentation()`/`__set_template_root()`経路へ接続される型レベルの既定templateであり、hiddenなbody-presentation metadataではない。EnvironmentContextの`set_control_template::<ContentWrapper>(...)`でmount前または最初の適用前にoverrideを指定でき、lookupは対象型のTypeIdに対して完全一致する。`ContentPresenter`をtemplate内に静的に1つ置いた場合だけ、callerのlogical contentがそのvisual subtreeへpresentされる。`on_mount`はtemplate rootの実体化を保証せず、実体化後の処理は通常の`#[overridable]`/`#[overrides]`による`on_apply_template`で記述する。
 
-継承したフィールドは、派生component自身の`view`が**同名のまま裸で参照**している場合のみ、派生側の実効フィールド(＝コンストラクタ引数)になる。リテラル値で上書きしている場合(例:`Rectangle { fill: "#3a3a3c" }`)や、そもそも参照していない場合は、その基底フィールドは派生側の公開APIには現れない。
+継承したフィールドは、派生component自身の`view`のroot要素が**同名の属性へ裸の同名で転送**している場合(例:rootの`padding: padding`)のみ、派生側の実効フィールド(＝コンストラクタ引数)になる。これは従来どおりのコンストラクタ転送であり、このABIは変わらない。リテラル値で上書きしている場合(例:`Rectangle { fill: "#3a3a3c" }`)や、そもそも参照していない場合は、その基底フィールドは派生側の公開APIには現れない。root要素の同名転送以外の位置(他の要素の属性値・式・イベントハンドラ・ライフサイクルフック)での裸参照は、次段落の継承フィールドアクセスであり、派生側のコンストラクタ引数を増やさない。
 
 **祖先が宣言したフィールドへの派生`view`からのアクセス(Issue #166)。** 自前の`view`を持つ派生componentは、祖先(ユーザー定義component・builtinのいずれも、同一クレートでも別クレートでもよい)が宣言した公開フィールドを、`view`の属性値・`format!`等の式・イベントハンドラ本体・ライフサイクルフックの中から**裸の名前のまま**読み書きできる。
 
-- 読み取り(`TextBlock { text: heading }`、`format!("{heading}")`)は、そのフィールドを**宣言した祖先**のgetterで行われる。書き込み(`heading = value`、`count += 1`のような複合代入を含む)は宣言した祖先のsetterで行われ、値の格納先・型付き通知(`{Declarer}Property`)は宣言した祖先の1か所だけにある。派生componentはそのフィールドのgetter/setter・`{Derived}Property`のvariant・コンストラクタ引数・格納領域を生成しない(継承フィールドのアクセサは常に宣言元の1経路で、`E0034`の曖昧さは生じない)。多段継承(`Base -> Middle -> Derived`)でも同じである。
+- 読み取り(`TextBlock { text: heading }`、`format!("{heading}")`)は、そのフィールドを**宣言した祖先**のgetterで行われる。書き込み(`heading = value`、`count += 1`のような複合代入を含む)は宣言した祖先のsetterで行われ、値の格納先・型付き通知(`{Declarer}Property`)は宣言した祖先の1か所だけにある。派生componentはそのフィールドのgetter/setter・`{Derived}Property`のvariant・コンストラクタ引数・格納領域を生成しない(前段落のroot同名転送だけは従来どおりコンストラクタ引数になる)(継承フィールドのアクセサは常に宣言元の1経路で、`E0034`の曖昧さは生じない)。多段継承(`Base -> Middle -> Derived`)でも同じである。
 - 祖先のフィールドが変更されると(派生側からの代入でも、祖先・外部からのsetter呼び出しでも)、派生`view`のそのフィールドに依存する箇所が再同期される。
 - 祖先の`#[state]`は§4のとおり宣言したcomponent専用であり、継承されない。派生側から裸の名前で参照しても祖先のフィールドとしては解決されず、通常のRustの未解決名としてコンパイルエラーになる。
 - 祖先がどのフィールドを宣言しているかは、宣言した側のクレートが生成する型情報(shape macro)とrustcに委ねて解決する。存在しない名前・書き込めないフィールドへの代入は、派生側の使用箇所でのコンパイルエラーになる。祖先のどれも宣言していない裸の名前は、ローカル変数・定数・関数など通常のRustの名前として扱われる。
-- DSL作者がUFCS・トレイトのimport・名前の変更などの回避策を書く必要はない。
+- DSL作者がUFCS・トレイトのimport・名前の変更などの回避策を書く必要はない。宣言元が別クレートでも、派生側で`use ..Ext as _`等の生成トレイトのimportは不要である。
+- 祖先のフィールドに依存する動的領域(`if`/`match`/`for`)も、そのフィールドの変更時にだけ再評価される。
 
 **メソッド継承とオーバーライド**(C#の`virtual`/`override`/`base.Method()`相当)。
 

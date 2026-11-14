@@ -95,6 +95,18 @@ Every class also emits a `__elwindui_props_{Name}!` declarative macro carrying i
 
 Only `@set`'s `wrap_prop_value` knows how to shape a value into a declared property's real setter; a bare-forwarded field whose own value already carries that exact shape (rather than the bare/literal shape every ordinary call site supplies) is `elwindui-codegen`'s own responsibility to normalize before calling `@set` — see `emit_resync`/`emit_external_attribute_sets`/`build_component_args`'s own `ty.contains('!')` branches in `codegen.rs`.
 
+### Inherited property access arms (#166)
+
+`@inherited_get $recv, name` / `@inherited_set $recv, name, value` /
+`@inherited_op_assign $recv, name, op, value` は、派生生成componentの`view`内の裸名を宣言元の祖先へ
+解決するためのarmである。宣言した側のarmは自classの`{Class}Ext`(`exported_own_ext_path`)を
+展開先のblock scopeへ`use .. as _`し、呼び出し側のtrait importに依存しない。このclassが`@set`対象として宣言した(`routed`以外の)propertyは
+`$recv.name()` / `$recv.set_name(value)` / 「getterで取得した一時値へ元の`op=`(単一token`$op:tt`)を
+適用してsetterへ渡す」へ展開し、それ以外の名前は親classのshape macroへ転送する。親を持たない終端では、
+元の裸の名前(`name` / `name = value` / `name op= value`)をそのまま返し、未宣言名をpropertyとして
+推測しない。生成componentは公開writable Propだけをclass propertyとして
+宣言するため、`#[state]`・computed・paramはこの経路では解決されない。
+
 ## Validation boundary
 
 Publicly observable accepted/rejected forms remain in the specification. Parser representation, token generation, registry layout, shadow expansion, and debugging strategy belong only here.

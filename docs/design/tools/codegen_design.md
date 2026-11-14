@@ -102,7 +102,8 @@ setter parameterが`String`の場合だけ著者値を`.to_string()`へ変換す
 fallbackを適用しない。
 
 `Vec<Rc<T>>`をcontentとして公開する生成componentでは、dynamic `if`/`for`/`match`のslot item typeは
-`T`をそのまま保持し、生成component自身がframework-owned `DynamicChildHost<T>`を実装する。getterが返す
+`T`をそのまま保持し、生成component自身がframework-owned `DynamicChildHost<T>`(`insert`/`remove`/
+`remove_at`/`dynamic_len`)を実装する。getterが返す
 typed `Vec`を`ListExt`として扱ったり、`dyn Vec<...>`へ変換したりしない。framework classのlive collection
 は従来通りgetterと`ListExt`を使う。このcollection shape queryも同じresolver/props macro protocolから
 得られる。生成componentのhostはraw insert/removeをreconcile中だけ行い、slot stateのborrowを解放した後に
@@ -319,6 +320,95 @@ component自身のeffective field listに重複してコピーしない。使用
 shapeのexported `@set` protocolへ渡し、generated componentが`__mount`する前にlogical contentを設定する。
 値のtrait-object化は宣言側shape macroの型情報で一度だけ行うため、consumer側にreflectionや別の
 content-binding engineは導入しない。
+
+#### Inherited field access from a derived view (#166)
+
+自前の`view`を持つshape合成component(`is_shape_composition`)は、祖先が宣言したフィールドを
+**宣言元が唯一所有する**(Model A)。派生側は継承フィールドについてgetter/setter・
+`{Derived}Property` variant・constructor引数・格納領域を生成せず、`base`値経由で宣言元の
+accessorを呼ぶ。
+
+- `ViewCtx::inherited_fields`: effective fieldsからsource-localな宣言を除き、DSLの値位置で裸参照
+  されている名前(祖先`#[state]`は`resolve_effective_fields`の時点で除外済み、root上の同名転送
+  `padding: padding`は既存の転送意味論を保つため除外)。読み書きとも下の`inherited_props_macro`経由
+  (`@inherited_get`/`@inherited_set`/`@inherited_op_assign`)へ lower し、`<recv>.base.<name>()`の
+  直接呼び出しは生成しない。宣言元classのarmが自分の`{Declarer}Ext`をblock scopeへimportするため、
+  別クレートの派生componentでも生成コード(独立したinherentの`__resync_inherited_<name>`を含む)が
+  DSL作者のtrait importに依存しない。
+- `ViewCtx::inherited_props_macro`: 直近のbaseの`__elwindui_props_<Base>!`。生のRust
+  (イベントハンドラ本体・`format!`引数・hook)やDSLの値位置で他の規則で解決できなかった裸の
+  snake_case名は、`@inherited_get`/`@inherited_set`へ渡す。shape macro連鎖が宣言元の
+  getter/setterへ到達し、どの祖先も宣言していなければ元の裸の名前をそのまま返す。consumer側は
+  同一クレート・別クレートを問わず祖先のschemaを分類しない(`@field_type`と同じ「rustcに委ねる」境界)。
+  複合代入`name op= rhs`は、宣言元のgetterで取得した一時値へ**元の`op=`をそのまま**適用してから
+  setterへ渡す(`@inherited_op_assign`)。値型に要求されるtraitは作者が書いたもの(`AddAssign<Rhs>`)の
+  ままで、`Add`へ変わらない。未宣言名はfallbackで元の`name op= rhs`そのものに戻る。
+- 変更伝播: 派生componentはmount時に`ItemObservation(&this.base)`経由で`base`の名前付き
+  `ObservableExt`を購読し、プロパティ名で振り分ける。自分のフィールドの`__resync_<name>`と同じく、
+  継承名ごとにinherentな`__resync_inherited_<name>`(その名前に依存する属性だけを再適用)を生成し、
+  動的領域の条件・値・collectionが依存する名前のときだけ`__refresh_dynamic_regions`も呼ぶ。依存する
+  属性・動的領域を持たない名前にはmethodも分岐も生成しないため、無関係な祖先プロパティの変更では
+  何も再評価しない。依存候補は`collect_inherited_dependency_names`で集め、実際に依存のある名前だけを残す。`base`を持つ生成
+  componentの`ObservableExt`は自分の`{Component}Property`購読と`base`の`ObservableExt`購読を
+  1つの`Subscription`に束ねるため、祖先のプロパティ名も多段に伝わる(hand-writtenなbaseは
+  `ItemObservation`のautorefで無購読)。継承フィールドを読む式は依存解析上reactiveとして扱う。
+- 各生成componentは自分の`*Ext`に`__refresh_dynamic_regions`を持ち、派生型は祖先の`*Ext`も
+  実装するため、生成コードの内部呼び出しは`<Target as TargetExt>::__refresh_dynamic_regions(..)`
+  (`ViewCtx::refresh_call`)と`elwindui::core::ui::UIElementExt::invalidate(..)`で明示的に修飾する。
+- 修飾パスで書かれ、ローカル`TypeInfo`を持たない外部生成componentを`inherits`した場合、合成rootの
+  型パスは修飾パス(`ComponentDef::base_path`)のまま保持し、shape/ctor macro・`*Ext`パスを
+  定義側クレートで解決させる(裸名のままだとbuiltinの`elwindui::core`/`elwindui::ui`へ誤って
+  解決される)。そのような外部生成componentを`inherits`する**`view`を持たない**componentには、
+  frontend(`component_frontend::component_and_view_from_item_struct`)が空の暗黙合成body
+  (`view! {}`)を補う。同一クレートの基底なら`resolve_view_for`で基底のviewを継承できるが、外部基底の
+  `ComponentDef`は見えないため、空bodyで外部基底そのものを合成rootにし(基底のview/contentは定義側が
+  所有)、shape macroを持つ通常のshape合成`#[class]`参加者として、さらに継承できる中間hopにする。
+  layout builtin(`VerticalLayout`/`HorizontalLayout`/`Grid`、`component_frontend::is_layout_builtin_base`)を
+  直接`inherits`する`view`を持たないcomponentにも同じ空bodyを補う。補わないと`generate_component`の
+  非UIなdata structとして生成され、`{Name}Ext`もshape macroも持たないため派生の基底になれない。
+- 派生`view`のroot直下の子(静的・動的とも)は、基底の`view`がすでに置いた子の**後ろ**へ記述順に並び、
+  さらに派生した階層の子はその後ろに続く。ユーザー定義(生成)componentを基底とするshape合成では
+  `ViewCtx::composition_base_prefix_root`を設定し、root直下の動的領域の開始位置(`dynamic_region_start`)を
+  「基底チェーンの現在のroot寄与数(`EmbeddedViewSync::__elwindui_root_content_span`) + 先行する自分の子の幅」
+  として毎回計算する。各階層のroot寄与数は「自分の`base`の寄与数 + 自分のroot直下の子の幅(`total_span`)」。
+  builtinを基底とする場合はprefixが常に0なので従来どおり。動的領域のhost取得(`@content_dynamic_host_into`)は
+  宣言元classの`{Class}Ext`をUFCSで呼ぶため、基底のcontentが祖先(`Layout`の`children`)で宣言されていても
+  派生側のtrait importに依存しない。
+- **埋め込まれた基底の`view`**: 派生の`base`値として埋め込まれた生成componentは`__self_weak`が最派生型を指すため、
+  自分の型への`Rc`を持たない。そこで生成componentは`elwindui::core::reactive::EmbeddedViewSync`を実装し、
+  最派生componentが基底チェーンを1階層ずつ駆動する。各階層には最派生の`Rc`から射影した`EmbeddedHandle<Self>`
+  (保持用には弱参照の`WeakEmbeddedHandle<Self>`)を渡す。
+  - **mount**: 埋め込まれた基底は自分の`on_constructed`ではmountしない(最派生でないことを`__self_weak`で判定)。
+    埋め込む側の`mount`が先頭で`__elwindui_mount_as_base(弱ハンドル, environment)`を呼び、基底は弱ハンドルを
+    `__elwindui_embedded_self`へ記録してから自分をmountする。以後その階層は`__elwindui_self_handle()`で
+    自分へのハンドルを得られるので、mount中に作る`for`要素の配線や遅延構築分岐の配線も埋め込み時に動く。
+    `__new_unmounted`+明示`mount`の経路でも基底は同じ順でmountされる。
+  - **配線とunmount hook**: 最派生の`__build_view`は自分の配線・unmount hookの登録の後で
+    `__elwindui_wire_embedded`を中継し、各階層は自分の配線とunmount hookを登録してから`base`へ中継する。
+    unmount hookは登録順に実行されるので、`on_unmount`は最派生から基底へ順に一度ずつ実行される。
+  - **購読と`on_mount`**: 最派生は自分の購読(`#[bindable]`・Environment・semantic brush・`on_update`)と
+    `on_mount`の前に`__elwindui_mount_embedded`を中継し、各階層は先に`base`へ中継してから自分の購読と
+    `on_mount`を実行する。よって`on_mount`は基底から最派生へ順に一度ずつ実行される。購読は各階層の
+    `__property_changed_subscriptions`に入り、その階層の`__unmount_local`で解放される。
+  - **プロパティ変更**: `__elwindui_embedded_property_changed(name)`は自分の`base`へ中継してから自分の
+    プロパティ・継承プロパティの再同期と動的領域の更新を行う。最派生は`base`の名前付き`ObservableExt`購読の
+    中でこれを呼ぶ。
+  - 基底がbuiltin/手書きの場合は`EmbeddedNotify`のautoref dispatchで何もしない。viewを持たない派生
+    (inherited view composition)は基底の`view`と同じhookを持つため、自分では`on_mount`/`on_update`/
+    `on_unmount`を展開せず基底側の実行に一本化する。生成componentを基底とするshape合成で
+    `base::on_mount()`/`base::on_unmount()`を書くと二重実行になるため`compile_error!`にする。検出は`rewrite_base_calls`をprobe receiverで適用し、`__base_<hook>`呼び出しへlowerされた箇所(AST上の`ExprMethodCall`とマクロ引数token)だけを見る(`block_calls_base_hook`)。文字列リテラルや無関係なpathは検出しない。
+- **保存されるcallbackの所有**: shape合成・inherited view compositionのcomponentは自分自身がUI treeの
+  ノードなので、子要素に保存するイベントハンドラ・双方向バインディング・`for`要素のハンドラは
+  `ViewCtx::weak_wiring`により所有者を弱参照(`WiringOwner::downgrade_wiring`)で捕捉し、実行時に
+  `WiringWeak::upgrade_wiring`で取り直す(所有者が無ければ何もしない)。強参照で捕捉すると
+  `所有者 → 子 → ハンドラ → 所有者`の循環で、drop・unmountの後も解放されない。購読・unmount hookの
+  弱参照も同じtraitを使い、`Rc<Self>`と`EmbeddedHandle<Self>`の両方で同じ生成コードが動く。rootウィジェット
+  だけをtreeへ渡すshape合成以外のcomponentは、component自身を保持する経路が他に無い場合があるため従来どおり。
+- `for`のitem factoryは計画(`plan_dynamic_entry`)の時点で生成されるため、計画の前に暫定の
+  `ViewCtx::mutable_own_fields`を設定し、`for`要素のハンドラからも自分の可変Propを読み書きできるようにする。
+  item購読内でウィジェットを束縛する名前は`__elwindui_item_widget`で、ループ変数名`item`と衝突しない。
+- 自分の可変Propへの複合代入(`count += 1`)は、継承Propと同じく自分のgetterで取った一時値へ元の`op=`を
+  適用してsetterへ渡す。
 
 #### Component override bridge
 

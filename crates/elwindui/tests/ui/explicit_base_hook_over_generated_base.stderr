@@ -1,0 +1,15 @@
+error: `base::on_mount()`: `HookDerived` inherits a generated component, whose own `on_mount` already runs automatically when it is embedded as this component's base; remove the explicit call
+  --> tests/ui/explicit_base_hook_over_generated_base.rs:39:1
+   |
+39 | #[elwindui::component]
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `elwindui::component` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: `base::on_unmount()`: `HookDerived` inherits a generated component, whose own `on_unmount` already runs automatically when it is embedded as this component's base; remove the explicit call
+  --> tests/ui/explicit_base_hook_over_generated_base.rs:39:1
+   |
+39 | #[elwindui::component]
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `elwindui::component` (in Nightly builds, run with -Z macro-backtrace for more info)

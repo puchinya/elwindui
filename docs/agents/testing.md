@@ -94,6 +94,8 @@ When proc-macro, codegen, or rust-analyzer-shadow behavior changes, also run:
 RUSTFLAGS="--cfg rust_analyzer" cargo check --workspace
 ```
 
+Compile-fail fixtures live in `crates/elwindui/tests/ui/*.rs` and run through `crates/elwindui/tests/compile_fail.rs` (trybuild), which compares each fixture's rustc output with its checked-in `.stderr`. Stable rustdoc `compile_fail,E....` doctests do not check error codes, so use these fixtures when a diagnostic itself must be asserted. After an intentional diagnostic change, regenerate snapshots with `TRYBUILD=overwrite` and review the `.stderr` diff.
+
 ## Visual & UI Verification
 
 - Run relevant examples when UI behavior requires live/visual evidence.

@@ -321,7 +321,20 @@ impl ContentWrapper {}
 
 `Control`派生componentのvisual chromeは`body: view!`ではなく`template: template_view!`で宣言する。これは内部の`__prepare_template_presentation()`/`__set_template_root()`経路へ接続される型レベルの既定templateであり、hiddenなbody-presentation metadataではない。EnvironmentContextの`set_control_template::<ContentWrapper>(...)`でmount前または最初の適用前にoverrideを指定でき、lookupは対象型のTypeIdに対して完全一致する。`ContentPresenter`をtemplate内に静的に1つ置いた場合だけ、callerのlogical contentがそのvisual subtreeへpresentされる。`on_mount`はtemplate rootの実体化を保証せず、実体化後の処理は通常の`#[overridable]`/`#[overrides]`による`on_apply_template`で記述する。
 
-継承したフィールドは、派生component自身の`view`が**同名のまま裸で参照**している場合のみ、派生側の実効フィールド(＝コンストラクタ引数)になる。リテラル値で上書きしている場合(例:`Rectangle { fill: "#3a3a3c" }`)や、そもそも参照していない場合は、その基底フィールドは派生側の公開APIには現れない。
+継承したフィールドは、派生component自身の`view`のroot要素が**同名の属性へ裸の同名で転送**している場合(例:rootの`padding: padding`)のみ、派生側の実効フィールド(＝コンストラクタ引数)になる。これは従来どおりのコンストラクタ転送であり、このABIは変わらない。リテラル値で上書きしている場合(例:`Rectangle { fill: "#3a3a3c" }`)や、そもそも参照していない場合は、その基底フィールドは派生側の公開APIには現れない。root要素の同名転送以外の位置(他の要素の属性値・式・イベントハンドラ・ライフサイクルフック)での裸参照は、次段落の継承フィールドアクセスであり、派生側のコンストラクタ引数を増やさない。
+
+**祖先が宣言したフィールドへの派生`view`からのアクセス(Issue #166)。** 自前の`view`を持つ派生componentは、祖先(ユーザー定義component・builtinのいずれも、同一クレートでも別クレートでもよい)が宣言した公開フィールドを、`view`の属性値・`format!`等の式・イベントハンドラ本体・ライフサイクルフックの中から**裸の名前のまま**読み書きできる。
+
+- 読み取り(`TextBlock { text: heading }`、`format!("{heading}")`)は、そのフィールドを**宣言した祖先**のgetterで行われる。書き込み(`heading = value`、`count += 1`のような複合代入を含む)は宣言した祖先のsetterで行われ、値の格納先・型付き通知(`{Declarer}Property`)は宣言した祖先の1か所だけにある。派生componentはそのフィールドのgetter/setter・`{Derived}Property`のvariant・コンストラクタ引数・格納領域を生成しない(前段落のroot同名転送だけは従来どおりコンストラクタ引数になる)(継承フィールドのアクセサは常に宣言元の1経路で、`E0034`の曖昧さは生じない)。多段継承(`Base -> Middle -> Derived`)でも同じである。
+- 祖先のフィールドが変更されると(派生側からの代入でも、祖先・外部からのsetter呼び出しでも)、派生`view`のそのフィールドに依存する箇所が再同期される。
+- 祖先の`#[state]`は§4のとおり宣言したcomponent専用であり、継承されない。派生側から裸の名前で参照しても祖先のフィールドとしては解決されず、通常のRustの未解決名としてコンパイルエラーになる。
+- 祖先がどのフィールドを宣言しているかは、宣言した側のクレートが生成する型情報(shape macro)とrustcに委ねて解決する。存在しない名前・書き込めないフィールドへの代入は、派生側の使用箇所でのコンパイルエラーになる。祖先のどれも宣言していない裸の名前は、ローカル変数・定数・関数など通常のRustの名前として扱われる。
+- DSL作者がUFCS・トレイトのimport・名前の変更などの回避策を書く必要はない。宣言元が別クレートでも、派生側で`use ..Ext as _`等の生成トレイトのimportは不要である。
+- 祖先のフィールドに依存する動的領域(`if`/`match`/`for`)も、そのフィールドの変更時にだけ再評価される。動的領域は派生`view`のroot直下に直接書いてもよい。
+- 派生`view`のroot直下の子(静的な子・動的領域とも)は、基底の`view`が置いた子の後ろに、記述した順で並ぶ(さらに派生したcomponentの子はその後ろ)。
+- 基底の`view`は、派生componentに埋め込まれても単体のときと同じく動作する(自分のプロパティへの依存の再同期・動的領域・イベントハンドラ・`#[bindable]`/Environment/semantic brushの購読・lifecycle hook)。lifecycle hookの順序は§3「Lifecycle hooks」を参照。
+- `inherits`した基底のUI要素そのものになるcomponent(継承による合成)では、子要素に保存されたイベントハンドラや購読はcomponent自身を延命しない。最後の強参照が無くなれば、明示的なunmountの有無にかかわらず解放される。
+- `view`を持たずにlayout builtin(`VerticalLayout`/`HorizontalLayout`/`Grid`)を直接継承するcomponentは、空の`body`を持つcomponentと同じくそのlayoutを合成したUI要素になり、さらに継承の基底として使える(派生側はそのプロパティ・子要素の格納先・動的領域を引き継ぐ)。
 
 **メソッド継承とオーバーライド**(C#の`virtual`/`override`/`base.Method()`相当)。
 
@@ -386,7 +399,7 @@ body: view! {
 - 引数なしの`on_update`は任意の`#[prop]`変更を監視する
 - 初期構築時の値設定は`on_update`として数えない
 - hookは通常のRust blockであり、副作用を実行できる
-- 派生componentは`base::on_mount()`と`base::on_unmount()`を明示して直接の基底hookを呼べる
+- 基底がユーザー定義(生成)componentの場合、基底の`on_mount`/`on_update`/`on_unmount`は派生componentに埋め込まれても基底自身のhookとして自動で一度ずつ実行される。`on_mount`は基底から派生の順、`on_unmount`は派生から基底の順である。このため派生側で`base::on_mount()`/`base::on_unmount()`を書くと二重実行になり、コンパイルエラーになる。対象はhook本体(マクロ引数内を含む)での`base::on_mount(..)`/`base::on_unmount(..)`という実際の呼び出しのみで、文字列リテラル中の記述や`database::on_mount()`のような別パスは対象外
 - `#[param]`はhook内でも再代入できない
 
 attach/detach、subscription、backend resourceの内部順序は
@@ -1079,10 +1092,11 @@ impl VolumeSlider {}
 
 ### 変更の伝搬:2つの仕組み
 
-OneWayの再評価・TwoWayの model→widget 方向の反映は、参照先がどこにあるかによって2つの異なる仕組みで実現される。いずれも**componentの`view`全体を再構築せず、依存する属性・動的領域だけを更新する**という結果は同じだが、実現方法が違う:
+OneWayの再評価・TwoWayの model→widget 方向の反映は、参照先がどこにあるかによって次の仕組みで実現される。いずれも**componentの`view`全体を再構築せず、依存する属性・動的領域だけを更新する**という結果は同じだが、実現方法が違う:
 
 1. **同一component自身の`#[prop]`/`#[state]`/`#[computed]`フィールドの変更**: これらのフィールドを変更するsetterは、コンパイル時に静的決定された、そのcomponent専用の型付き通知(`{Component}Property`——viewmodelの`PropertyChanged`と同型の設計)を直接発火し、依存する`view`の該当箇所・依存する`#[computed]`だけを再計算する。ランタイムの購読オブジェクトを経由しない——`elwindui-codegen`が`view`の式を静的解析して依存関係を洗い出し済みだからこそ、setterから直接呼び出せる
-2. **`#[bindable]`で保持しているviewmodelの変更**: viewmodel側は別の`#[elwindui::viewmodel]`マクロ展開で生成されるため、component側はコンパイル時にその内部構造を知らない。そのため`#[observable]`のsetterは代入後に型付き`PropertyChanged`を発火し、component側は`Subscription`によるランタイム購読でそれを受け取り、該当する属性・動的領域だけを更新する。表示領域が破棄されると`Subscription`はDropにより解除される。例えば`TextArea { text <=> doc.content }`の入力は、その`TextArea`と`doc.content`に依存する表示だけを更新し、親の`TabView`の`children`コレクションを再同期しない
+2. **祖先componentが宣言したフィールドの変更**(§3「祖先が宣言したフィールドへの派生`view`からのアクセス」): 格納先と通知は宣言した祖先にある。派生componentは自分の`base`値の名前付き変更通知(`ObservableExt`)を購読し、変更されたプロパティに依存する`view`の属性・動的領域だけを再同期する(無関係なプロパティの変更では何も再評価しない)。生成componentの`ObservableExt::subscribe_property_changed`は、自分自身のプロパティに加えて祖先が宣言したプロパティ名の変更も通知する(派生インスタンスは祖先のプロパティも持つため)。型付きの`subscribe_property_changed({Component}Property)`は自分自身のプロパティだけを通知し、この点は変わらない
+3. **`#[bindable]`で保持しているviewmodelの変更**: viewmodel側は別の`#[elwindui::viewmodel]`マクロ展開で生成されるため、component側はコンパイル時にその内部構造を知らない。そのため`#[observable]`のsetterは代入後に型付き`PropertyChanged`を発火し、component側は`Subscription`によるランタイム購読でそれを受け取り、該当する属性・動的領域だけを更新する。表示領域が破棄されると`Subscription`はDropにより解除される。例えば`TextArea { text <=> doc.content }`の入力は、その`TextArea`と`doc.content`に依存する表示だけを更新し、親の`TabView`の`children`コレクションを再同期しない
 
 `for` itemのTwoWayコールバックも(2)と同じ`DynamicChild`の寿命に属し、itemが置換・削除されると購読とともに解放される。`for`/`if`/`match`の構造変更(§5参照)は親view全体ではなく対応する動的領域だけを差し替える。依存プロパティを静的に特定できない任意のRust式はビルド時エラーとなり、必要な計算は`#[computed]`または解析可能なprop参照へ分解する。
 

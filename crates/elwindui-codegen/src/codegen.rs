@@ -3306,6 +3306,72 @@ fn rewrite_base_calls(mut block: syn::Block, receiver: &syn::Ident) -> syn::Bloc
     block
 }
 
+/// Issue #166 (PR #311 A/P2): whether `block` really calls `base::<hook>(..)`. Detection reuses
+/// `rewrite_base_calls` with a probe receiver, so it matches exactly the calls that would be lowered
+/// to `__base_<hook>` — a `syn::ExprCall` whose callee is the `base::<hook>` path, including inside
+/// macro arguments — and then looks for `<probe>.__base_<hook>(..)` structurally (`ExprMethodCall`
+/// in the AST, `Ident . Ident (..)` in macro tokens). String literals stay opaque `Lit`/`Literal`
+/// tokens and unrelated paths such as `database::on_mount()` are different identifiers, so neither
+/// is reported.
+fn block_calls_base_hook(block: &syn::Block, hook: &str) -> bool {
+    let probe = format_ident!("__elwindui_base_hook_probe");
+    let method = format_ident!("__base_{}", hook);
+    let rewritten = rewrite_base_calls(block.clone(), &probe);
+
+    fn tokens_call(
+        tokens: proc_macro2::TokenStream,
+        probe: &syn::Ident,
+        method: &syn::Ident,
+    ) -> bool {
+        use proc_macro2::{Delimiter, TokenTree};
+        let flat: Vec<TokenTree> = tokens.into_iter().collect();
+        flat.iter().enumerate().any(|(i, tt)| {
+            let direct = matches!(
+                (tt, flat.get(i + 1), flat.get(i + 2), flat.get(i + 3)),
+                (
+                    TokenTree::Ident(recv),
+                    Some(TokenTree::Punct(dot)),
+                    Some(TokenTree::Ident(name)),
+                    Some(TokenTree::Group(args)),
+                ) if recv == probe
+                    && dot.as_char() == '.'
+                    && name == method
+                    && args.delimiter() == Delimiter::Parenthesis
+            );
+            direct || matches!(tt, TokenTree::Group(g) if tokens_call(g.stream(), probe, method))
+        })
+    }
+
+    struct Finder<'a> {
+        probe: &'a syn::Ident,
+        method: &'a syn::Ident,
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for Finder<'_> {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if node.method == *self.method
+                && matches!(&*node.receiver, syn::Expr::Path(p) if p.path.is_ident(self.probe))
+            {
+                self.found = true;
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            if tokens_call(node.tokens.clone(), self.probe, self.method) {
+                self.found = true;
+            }
+            syn::visit::visit_macro(self, node);
+        }
+    }
+    let mut finder = Finder {
+        probe: &probe,
+        method: &method,
+        found: false,
+    };
+    finder.visit_block(&rewritten);
+    finder.found
+}
+
 /// Token-level counterpart of `rewrite_base_calls`' `syn` visitor, for macro argument streams —
 /// see `Rewriter::visit_macro_mut`. Matches the four-token prefix `base`, `::`, `<name>`,
 /// `(<args>)` and rewrites it to `<receiver> . __base_<name> (<args>)`, recursing into the
@@ -5463,6 +5529,10 @@ fn generate_view(
         closure_param_type: None,
         own_fields,
         mutable_own_fields: HashSet::new(),
+        inherited_fields: HashSet::new(),
+        inherited_props_macro: None,
+        composition_base_prefix_root: None,
+        weak_wiring: is_shape_composition || is_inherited_view_composition,
         property_dependencies: own_dependents_of.clone(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
@@ -5543,6 +5613,49 @@ fn generate_view(
         .iter()
         .map(|f| f.name.as_str())
         .collect();
+    // Issue #166 (Model A): a shape-composed Component with its own authored view reads and writes
+    // inherited fields through its concrete `base` value — the declaring ancestor keeps sole
+    // ownership of storage, accessors and change notification. `ctx.inherited_fields` is the
+    // DSL-value-position half (names the effective field set already carries, including the
+    // cross-crate `synthesize_external_base_fields` ones, whose existence/type stay deferred to
+    // rustc); `ctx.inherited_props_macro` is the raw-Rust half (see its doc comment). A same-name
+    // bare forward on the composition root (`padding: padding`) keeps its existing forwarding
+    // semantics and is not treated as an inherited read. Template bodies and lowered deferred views
+    // have their own parent/owner resolution and are excluded.
+    if is_shape_composition && !view.is_template && view.implicit_owner.is_none() {
+        let root_forwards: HashSet<&str> = view
+            .root
+            .attributes
+            .iter()
+            .filter(|attribute| {
+                matches!(&attribute.value, ViewExpr::Path(path)
+                    if path.len() == 1 && path[0] == attribute.name)
+            })
+            .map(|attribute| attribute.name.as_str())
+            .collect();
+        ctx.inherited_fields = component
+            .fields
+            .iter()
+            .filter(|f| {
+                !declared_own_field_names.contains(f.name.as_str())
+                    && f.kind != FieldKind::State
+                    && !f.name.starts_with("on_")
+                    && !crate::attr_frontend::is_event_schema_field(f)
+                    && !root_forwards.contains(f.name.as_str())
+                    && view_references_bare_name(view, &f.name)
+            })
+            .map(|f| f.name.clone())
+            .collect();
+        let inherited_fields = ctx.inherited_fields.clone();
+        ctx.own_fields
+            .retain(|name, _| !inherited_fields.contains(name.as_str()));
+        if let Some(base) = component.base.as_deref() {
+            ctx.inherited_props_macro = Some(dsl_props_macro_path(
+                component.base_path.as_deref().unwrap_or(base),
+                table.resolve(from, base),
+            ));
+        }
+    }
     // A shape-composed component delegates inherited fields to its concrete `base` value. They
     // remain in the effective field map above so authored expressions can resolve them, but must
     // not be re-stored or re-exposed as a second set of accessors on the derived type.
@@ -5729,6 +5842,25 @@ fn generate_view(
     let is_template_or_deferred_scope =
         is_control_template_enabled || view.implicit_owner.is_some();
 
+    // Planning already renders the item factories of `for` regions (`plan_dynamic_entry`), whose
+    // event handlers read and write this component's own Cell-backed fields; they must see the
+    // same mutable-field set as every other handler (a `for` item handler writing `count += 1`
+    // otherwise targeted the raw `Cell`). The authoritative set is assigned again below, once the
+    // required-field analysis has run.
+    ctx.mutable_own_fields = own_stored_fields
+        .iter()
+        .chain(own_computed_fields.iter())
+        .chain(own_environment_fields.iter())
+        .map(|field| field.name.clone())
+        .chain(
+            own_field_shape
+                .writable_fields
+                .iter()
+                .map(|(name, _, _)| name.clone())
+                .filter(|name| declared_own_field_names.contains(name.as_str())),
+        )
+        .collect();
+
     // Every node that has a callback or a value that can change after construction gets a
     // generated field name and is stored on the component so `resync`/closures can reach it later.
     let mut plan = Vec::new();
@@ -5787,17 +5919,26 @@ fn generate_view(
     // reports that case as a real diagnostic; this is a second, codegen-level guarantee that holds
     // even if this function is ever called on unvalidated input (mirrors `is_abstract`'s own
     // `continue` in `generate_module` just above).
-    let resolved_root = resolve_view_root_element(
-        &view.root,
-        component.base.as_deref(),
-        is_composed,
-    )
-    .unwrap_or_else(|| {
-        panic!(
-            "{}: view root must be exactly one element unless it inherits a composable base",
-            component.name
-        )
-    });
+    // Issue #166: a base with no local `TypeInfo` that the author named through a qualified path
+    // (`inherits other_crate::Base`) is an *external generated Component*. Its synthesized root
+    // keeps that qualified spelling so every downstream emission site (`dsl_type_origin`,
+    // shape/ctor macro paths, `*Ext` trait paths) resolves it in its defining crate rather than
+    // falling back to the builtin `elwindui::core`/`elwindui::ui` namespace.
+    let composed_root_type =
+        component
+            .base
+            .as_deref()
+            .map(|base| match component.base_path.as_deref() {
+                Some(base_path) if table.resolve(from, base).is_none() => base_path,
+                _ => base,
+            });
+    let resolved_root = resolve_view_root_element(&view.root, composed_root_type, is_composed)
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: view root must be exactly one element unless it inherits a composable base",
+                component.name
+            )
+        });
 
     // Property/content lowering is selected by the effective root/base props macro. Local-vs-
     // external resolution only determines where that macro is exported; template presentation is
@@ -6874,13 +7015,13 @@ fn generate_view(
             quote! {
                 {
                     #key_type_preamble
-                    let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
+                    let weak = elwindui::core::reactive::WiringOwner::downgrade_wiring(&this);
                     let subscription = this
                         .__mount_environment
                         .get()
                         .expect("subscribe: component is not yet mounted")
                         .subscribe::<#key_type>(move || {
-                            if let Some(this) = weak.upgrade() {
+                            if let Some(this) = elwindui::core::reactive::WiringWeak::upgrade_wiring(&weak) {
                                 this.#recompute();
                                 this.on_property_changed(#component_property_enum::#name);
                                 #target_ext::__refresh_dynamic_regions(&*this);
@@ -6918,9 +7059,9 @@ fn generate_view(
     let semantic_brush_subscribe_stmts = quote! {
         if false #(|| #semantic_brush_queries)* {
             {
-                let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
+                let weak = elwindui::core::reactive::WiringOwner::downgrade_wiring(&this);
                 let listener: std::rc::Rc<dyn Fn()> = std::rc::Rc::new(move || {
-                    if let Some(this) = weak.upgrade() {
+                    if let Some(this) = elwindui::core::reactive::WiringWeak::upgrade_wiring(&weak) {
                         this.resync();
                         #target_ext::__refresh_dynamic_regions(&*this);
                     }
@@ -6974,6 +7115,17 @@ fn generate_view(
     // `create_<snake case>(..)` factory (below), so none of `plan`'s nodes are constructed or wired
     // here at all.
     let root_index = plan.len() - 1;
+    // Issue #166: a composed `base` value that is itself a generated Component (local or
+    // external) may have a view of its own that places children and needs re-syncing.
+    let base_is_generated_component = (is_shape_composition || is_inherited_view_composition)
+        && component.base.as_deref().is_some_and(|base| {
+            table
+                .resolve(from, base)
+                .map_or(component.base_path.is_some(), |info| !info.is_builtin)
+        });
+    if is_shape_composition && base_is_generated_component {
+        ctx.composition_base_prefix_root = Some(plan[root_index].binding.clone());
+    }
     for node in &plan {
         if node.dynamic.is_none() {
             continue;
@@ -7240,7 +7392,7 @@ fn generate_view(
     let component_root_invalidation = if is_host_composition {
         None
     } else if is_shape_composition || is_inherited_view_composition {
-        Some(quote! { self.invalidate(); })
+        Some(quote! { elwindui::core::ui::UIElementExt::invalidate(self); })
     } else {
         Some(quote! {
             if let Some(root) = self.#root_binding.get() {
@@ -7364,10 +7516,10 @@ fn generate_view(
             };
             quote! {
                 {
-                    let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
+                    let weak = elwindui::core::reactive::WiringOwner::downgrade_wiring(&this);
                     #owner
                     let subscription = elwindui::core::reactive::ObservableExt::subscribe_property_changed(&*owner, move |property: &'static str| {
-                        if let Some(this) = weak.upgrade() { this.#method(property); }
+                        if let Some(this) = elwindui::core::reactive::WiringWeak::upgrade_wiring(&weak) { this.#method(property); }
                     });
                     this.__property_changed_subscriptions.borrow_mut().push(subscription);
                 }
@@ -7398,11 +7550,11 @@ fn generate_view(
             );
             quote! {
                 {
-                    let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
+                    let weak = elwindui::core::reactive::WiringOwner::downgrade_wiring(&this);
                     let __source_owner = this.#implicit_field.upgrade().expect(#upgrade_panic_message);
                     let owner = __source_owner.#owner_ident();
                     let subscription = elwindui::core::reactive::ObservableExt::subscribe_property_changed(&*owner, move |property: &'static str| {
-                        if let Some(this) = weak.upgrade() { this.#method(property); }
+                        if let Some(this) = elwindui::core::reactive::WiringWeak::upgrade_wiring(&weak) { this.#method(property); }
                     });
                     this.__property_changed_subscriptions.borrow_mut().push(subscription);
                 }
@@ -7588,10 +7740,42 @@ fn generate_view(
     // mechanism, not duplicating it for lifecycle hooks specifically.
     let self_ident = format_ident!("self");
     let hook_mode = EmitMode::WithSelf(quote! { #self_ident });
-    let on_mount_stmt = view.on_mount.as_ref().map(|block| {
-        let rewritten = rewrite_base_calls(block.clone(), &self_ident);
-        rewrite_view_closure_block(rewritten, &[], &ctx, &hook_mode)
-    });
+    // Issue #166 (PR #311 A/P1-2): a view-less component reuses its base's view, whose hooks the
+    // embedded base now runs itself (`EmbeddedViewSync::__elwindui_mount_embedded` / its own
+    // unmount hook). Splicing the same blocks here as well would run them twice.
+    let reuses_base_hooks = is_inherited_view_composition;
+    let on_mount_stmt = (!reuses_base_hooks)
+        .then_some(view.on_mount.as_ref())
+        .flatten()
+        .map(|block| {
+            let rewritten = rewrite_base_calls(block.clone(), &self_ident);
+            rewrite_view_closure_block(rewritten, &[], &ctx, &hook_mode)
+        });
+    // Issue #166 (PR #311 A/P1-2): a generated base embedded in this component runs its own
+    // `on_mount`/`on_unmount` automatically (mount: base first; unmount: this level first), so an
+    // explicit `base::on_mount()`/`base::on_unmount()` would run the base hook a second time.
+    let explicit_base_hook_error = if base_is_generated_component && is_shape_composition {
+        let calls_base_hook = |block: Option<&syn::Block>, hook: &str| {
+            block.is_some_and(|block| block_calls_base_hook(block, hook))
+        };
+        let mut errors = TokenStream::new();
+        for (block, hook) in [
+            (view.on_mount.as_ref(), "on_mount"),
+            (view.on_unmount.as_ref(), "on_unmount"),
+        ] {
+            if calls_base_hook(block, hook) {
+                let message = format!(
+                    "`base::{hook}()`: `{target_name}` inherits a generated component, whose own `{hook}` \
+                     already runs automatically when it is embedded as this component's base; \
+                     remove the explicit call"
+                );
+                errors.extend(quote! { compile_error!(#message); });
+            }
+        }
+        errors
+    } else {
+        TokenStream::new()
+    };
 
     let mut shadow_hooks = TokenStream::new();
     if let Some(block) = &base_on_mount_block {
@@ -7600,7 +7784,7 @@ fn generate_view(
     if let Some(block) = &base_on_unmount_block {
         shadow_hooks.extend(quote! { #[allow(dead_code)] fn __base_on_unmount(&self) #block });
     }
-    let on_unmount_method = (!is_control_template_enabled)
+    let on_unmount_method = (!is_control_template_enabled && !reuses_base_hooks)
         .then(|| view.on_unmount.as_ref())
         .flatten()
         .map(|block| {
@@ -7621,8 +7805,24 @@ fn generate_view(
     // propagation generically in `#[class]` itself. `window_show_hide_close_overrides` below now
     // emits ordinary `#[overrides]` methods routed through the real ancestor-forwarding chain
     // (`self.base.show()`, not UFCS) — see that binding's own comment.
+    // Issue #166: a non-template Component embedded as a generated Component's `base` is mounted
+    // by the embedding level instead (`EmbeddedViewSync::__elwindui_mount_as_base`), once that
+    // level has handed it the weak handle it reaches itself through.
+    let embedded_mount_skip = (!view.is_template).then(|| {
+        quote! {
+            if self
+                .__self_weak
+                .borrow()
+                .upgrade()
+                .is_some_and(|__elwindui_owner| !(&*__elwindui_owner).is::<Self>())
+            {
+                return;
+            }
+        }
+    });
     let on_constructed_mount_call = (!is_host_composition).then(|| {
         quote! {
+            #embedded_mount_skip
             <Self as #target_ext>::mount(
                 self,
                 elwindui::core::environment::application_environment(),
@@ -8258,14 +8458,171 @@ fn generate_view(
             }
         })
         .collect();
+    // Issue #166 (D4): Model A keeps an inherited property's storage and notifications on the
+    // declaring ancestor, so this Component observes its own `base` value by property name (the
+    // ancestor chain is folded into each generated Component's `ObservableExt`, see
+    // `component_observable_impl`) and re-syncs its authored view. `ItemObservation`'s autoref
+    // dispatch makes this a no-op for a hand-written base with no `ObservableExt`.
+    //
+    // Per-property, exactly like this Component's own fields (`component_property_resync_methods`):
+    // each inherited name gets an inherent `__resync_inherited_<name>` that re-applies only the
+    // attributes depending on it, and the name-keyed notification dispatches to it. A name that no
+    // attribute or dynamic region depends on gets neither a method nor a dispatch arm, so an
+    // unrelated ancestor property change does no work at all.
+    let inherited_dependency_names: Vec<String> = if ctx.inherited_props_macro.is_some() {
+        let mut candidates = std::collections::BTreeSet::new();
+        for node in plan
+            .iter()
+            .chain(lazy_leaves_for_own_resync.iter().map(|(_, leaf)| *leaf))
+        {
+            for attribute in &node.attributes {
+                if attribute.kind != AssignmentKind::Once && !attribute.name.starts_with("on_") {
+                    collect_inherited_dependency_names(&attribute.value, &ctx, &mut candidates);
+                }
+            }
+            match node.dynamic.as_ref() {
+                Some(DynamicPlan::If { condition, .. }) => {
+                    collect_inherited_dependency_names(condition, &ctx, &mut candidates);
+                }
+                Some(DynamicPlan::Match { value, .. }) => {
+                    collect_inherited_dependency_names(value, &ctx, &mut candidates);
+                }
+                Some(DynamicPlan::For { collection, .. }) => {
+                    collect_inherited_dependency_names(collection, &ctx, &mut candidates);
+                }
+                None => {}
+            }
+        }
+        candidates.into_iter().collect()
+    } else {
+        Vec::new()
+    };
+    let mut inherited_resync_methods = TokenStream::new();
+    let mut inherited_dispatch_arms = TokenStream::new();
+    for property_name in &inherited_dependency_names {
+        let mut statements = TokenStream::new();
+        for node in &plan {
+            let self_is_node = (is_shape_composition || is_host_composition)
+                && node.binding == plan[root_index].binding;
+            emit_resync(
+                node,
+                &ctx,
+                from,
+                table,
+                ResyncFilter::Property("", property_name),
+                &mut statements,
+                self_is_node,
+            );
+        }
+        for (cache_field, leaf) in &lazy_leaves_for_own_resync {
+            emit_lazy_branch_resync(
+                cache_field,
+                leaf,
+                &ctx,
+                from,
+                table,
+                ResyncFilter::Property("", property_name),
+                &mut statements,
+            );
+        }
+        let drives_dynamic_region = plan.iter().any(|node| match node.dynamic.as_ref() {
+            Some(DynamicPlan::If { condition, .. }) => {
+                view_expr_depends_on(condition, &ctx, "", property_name)
+            }
+            Some(DynamicPlan::Match { value, .. }) => {
+                view_expr_depends_on(value, &ctx, "", property_name)
+            }
+            Some(DynamicPlan::For { collection, .. }) => {
+                view_expr_depends_on(collection, &ctx, "", property_name)
+            }
+            None => false,
+        });
+        if statements.is_empty() && !drives_dynamic_region {
+            continue;
+        }
+        let property_literal = syn::LitStr::new(property_name, proc_macro2::Span::call_site());
+        let refresh = drives_dynamic_region
+            .then(|| quote! { <#target as #target_ext>::__refresh_dynamic_regions(&*this); });
+        if statements.is_empty() {
+            inherited_dispatch_arms.extend(quote! {
+                #property_literal => { #refresh }
+            });
+            continue;
+        }
+        let method = format_ident!("__resync_inherited_{}", property_name);
+        inherited_resync_methods.extend(quote! {
+            #[doc(hidden)]
+            fn #method(&self) {
+                #statements
+                #invalidate_component_resync
+            }
+        });
+        inherited_dispatch_arms.extend(quote! {
+            #property_literal => {
+                this.#method();
+                #refresh
+            }
+        });
+    }
+    let inherited_resync_methods = mark_inherent(inherited_resync_methods);
+    // Issue #166: an embedded generated `base` cannot subscribe to itself (no `Rc` of its own
+    // type), so the observer of `base` relays each notification to it first — the base re-syncs
+    // its own view (and relays further down its own chain) before this view re-syncs.
+    let embedded_forward = base_is_generated_component.then(|| {
+        quote! {
+            {
+                #[allow(unused_imports)]
+                use elwindui::core::reactive::{EmbeddedNotifyForward as _, EmbeddedNotifyIgnore as _};
+                (&elwindui::core::reactive::EmbeddedNotify(&this.base)).notify_embedded(property);
+            }
+        }
+    });
+    let embedded_own_arms: TokenStream = component_property_variants
+        .iter()
+        .map(|property| {
+            let literal = syn::LitStr::new(&property.to_string(), proc_macro2::Span::call_site());
+            let method = format_ident!("__resync_{}", property);
+            quote! {
+                #literal => {
+                    this.#method();
+                    <#target as #target_ext>::__refresh_dynamic_regions(this);
+                }
+            }
+        })
+        .collect();
+    let inherited_base_subscription = if inherited_dispatch_arms.is_empty()
+        && embedded_forward.is_none()
+    {
+        TokenStream::new()
+    } else {
+        quote! {
+            {
+                #[allow(unused_imports)]
+                use elwindui::core::reactive::{ObservableItem as _, PlainItem as _};
+                let weak = elwindui::core::reactive::WiringOwner::downgrade_wiring(&this);
+                let observation = elwindui::core::reactive::ItemObservation(&this.base);
+                if let Some(subscription) = (&observation).observe_item(move |property| {
+                    if let Some(this) = elwindui::core::reactive::WiringWeak::upgrade_wiring(&weak) {
+                        #embedded_forward
+                        match property {
+                            #inherited_dispatch_arms
+                            _ => {}
+                        }
+                    }
+                }) {
+                    this.__property_changed_subscriptions.borrow_mut().push(subscription);
+                }
+            }
+        }
+    };
     let component_self_subscription = if component_property_variants.is_empty() {
         TokenStream::new()
     } else {
         quote! {
             {
-                let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
+                let weak = elwindui::core::reactive::WiringOwner::downgrade_wiring(&this);
                 let subscription = this.subscribe_property_changed(move |property| {
-                    if let Some(this) = weak.upgrade() {
+                    if let Some(this) = elwindui::core::reactive::WiringWeak::upgrade_wiring(&weak) {
                         match property { #component_property_dispatch }
                     }
                 });
@@ -8291,7 +8648,10 @@ fn generate_view(
     // (below), so `this` (not `self`, which cannot be captured into a `'static` closure by
     // reference) is the correct `EmitMode::WithSelf` receiver here.
     let on_update_hook_mode = EmitMode::WithSelf(quote! { this });
-    let own_on_update_subscription = view.on_update.as_ref().map(|hook| {
+    let own_on_update_subscription = (!reuses_base_hooks)
+        .then_some(view.on_update.as_ref())
+        .flatten()
+        .map(|hook| {
         let block = rewrite_view_closure_block(hook.block.clone(), &[], &ctx, &on_update_hook_mode);
         let match_arms = match &hook.fields {
             None => quote! { _ => #block },
@@ -8320,9 +8680,9 @@ fn generate_view(
         };
         quote! {
             {
-                let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
+                let weak = elwindui::core::reactive::WiringOwner::downgrade_wiring(&this);
                 let subscription = this.subscribe_property_changed(move |property| {
-                    if let Some(this) = weak.upgrade() {
+                    if let Some(this) = elwindui::core::reactive::WiringWeak::upgrade_wiring(&weak) {
                         match property { #match_arms }
                     }
                 });
@@ -8330,6 +8690,241 @@ fn generate_view(
             }
         }
     });
+
+    let unmount_hook_attach = (is_composed && !is_host_composition).then(|| {
+        quote! {
+            let weak_begin = elwindui::core::reactive::WiringOwner::downgrade_wiring(&this);
+            <Self as elwindui::core::ui::UIElementExt>::add_begin_unmount_hook(
+                self,
+                Box::new(move || {
+                    if let Some(this) = elwindui::core::reactive::WiringWeak::upgrade_wiring(&weak_begin) {
+                        match this.__lifecycle_state.get() {
+                            elwindui::core::ui::ComponentLifecycleState::Mounted => {
+                                this.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
+                                true
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                }),
+            );
+            let weak = elwindui::core::reactive::WiringOwner::downgrade_wiring(&this);
+            <Self as elwindui::core::ui::UIElementExt>::add_unmount_hook(
+                self,
+                Box::new(move || {
+                    if let Some(this) = elwindui::core::reactive::WiringWeak::upgrade_wiring(&weak) {
+                        this.__unmount_local();
+                    }
+                }),
+            );
+        }
+    });
+    // Issue #166 (PR #311 A/P1-1/A/P1-2): a generated `base` embedded in this component has no
+    // `Rc` of its own type, so the outermost Component drives it through `EmbeddedViewSync`, one
+    // level at a time, with an `EmbeddedHandle` projected out of its own `Rc`:
+    // - `mount_as_base` (from `mount`): records the level's weak handle, then mounts it;
+    // - `wire_embedded` (after this level's own wiring and unmount hooks): the level's event /
+    //   two-way wiring and unmount hooks, so unmount runs from the most-derived level down;
+    // - `mount_embedded` (before this level's own subscriptions and `on_mount`): the level's
+    //   bindable / Environment / semantic-brush / `on_update` subscriptions and its `on_mount`, so
+    //   `on_mount` runs from the base up.
+    // Every stored callback captures only the weak owner (`ViewCtx::weak_wiring`).
+    let embedded_dispatch_use = quote! {
+        #[allow(unused_imports)]
+        use elwindui::core::reactive::{EmbeddedNotifyForward as _, EmbeddedNotifyIgnore as _};
+    };
+    let embedded_wire_forward = base_is_generated_component.then(|| {
+        quote! {
+            {
+                #embedded_dispatch_use
+                (&elwindui::core::reactive::EmbeddedNotify(&this.base))
+                    .wire_embedded(this.map(|__elwindui_level| &__elwindui_level.base));
+            }
+        }
+    });
+    let embedded_mount_forward = base_is_generated_component.then(|| {
+        quote! {
+            {
+                #embedded_dispatch_use
+                (&elwindui::core::reactive::EmbeddedNotify(&this.base))
+                    .mount_embedded(this.map(|__elwindui_level| &__elwindui_level.base));
+            }
+        }
+    });
+    let has_embedded_self = is_composed;
+    // `__build_view` brings each stored element's own trait into scope while constructing it, and
+    // an authored hook body may rely on that (`this.tabs().set_close_button_presentation(..)`).
+    // The embedded entry points run the same hook bodies outside `__build_view`, so they import
+    // the same traits.
+    let embedded_trait_uses: TokenStream = plan
+        .iter()
+        .filter(|node| {
+            // Internal planning markers (`__environment_scope`, ...) are not element types.
+            node.stored && node.dynamic.is_none() && !node.type_path.starts_with("__")
+        })
+        .map(
+            |node| match resolve_context_info(&ctx, from, table, &node.type_path) {
+                Some(info) => builtin_trait_use(&node.type_path, Some(info)),
+                None => {
+                    let ext_path = dsl_ext_path(&node.type_path, None);
+                    quote! {
+                        #[allow(unused_imports)]
+                        use #ext_path as _;
+                    }
+                }
+            },
+        )
+        .collect();
+    let embedded_own_wiring = is_shape_composition.then(|| wiring_stmts.clone());
+    let embedded_own_mount = (is_shape_composition && !view.is_template).then(|| {
+        quote! {
+            #subscribe_stmts
+            #own_environment_subscribe_stmts
+            #semantic_brush_subscribe_stmts
+            #own_on_update_subscription
+            #on_mount_stmt
+        }
+    });
+    let embedded_base_span = if base_is_generated_component {
+        quote! {
+            ({
+                #embedded_dispatch_use
+                (&elwindui::core::reactive::EmbeddedNotify(&self.base)).embedded_span()
+            })
+        }
+    } else {
+        quote! { 0usize }
+    };
+    // This level's own root children in the shared content collection (static children count 1,
+    // dynamic regions their live span). Only a shape-composed root places children of its own.
+    let embedded_own_span = if is_shape_composition && !view.is_template {
+        let root = &plan[root_index];
+        let span = total_span(&plan, &root.child_bindings, &ctx);
+        quote! { (#span) }
+    } else {
+        quote! { 0usize }
+    };
+    let embedded_store_handle = if has_embedded_self {
+        quote! {
+            if let Some(handle) = handle {
+                *self.__elwindui_embedded_self.borrow_mut() = Some(handle);
+            }
+        }
+    } else {
+        quote! { let _ = handle; }
+    };
+    let embedded_mount_if_created = if is_composed && !is_host_composition {
+        quote! {
+            if self.__elwindui_is_created() {
+                <Self as #target_ext>::mount(self, environment);
+            }
+        }
+    } else {
+        quote! { let _ = environment; }
+    };
+    let embedded_wire_body = quote! {
+        #embedded_trait_uses
+        #embedded_own_wiring
+        #unmount_hook_attach
+        #embedded_wire_forward
+    };
+    let embedded_mount_body = quote! {
+        #embedded_trait_uses
+        #embedded_mount_forward
+        #embedded_own_mount
+    };
+    // The same two entry points with empty bodies for a template component (its own template
+    // path owns its wiring and hooks). Built without a closure so rust-analyzer's `quote!`
+    // expansion sees the interpolated bodies as used.
+    let (embedded_wire_body, embedded_mount_body) = if view.is_template {
+        (TokenStream::new(), TokenStream::new())
+    } else {
+        (embedded_wire_body, embedded_mount_body)
+    };
+    let embedded_lifecycle = quote! {
+        fn __elwindui_wire_embedded(&self, this: elwindui::core::reactive::EmbeddedHandle<Self>) {
+            let _ = self;
+            #embedded_wire_body
+            let _ = this;
+        }
+
+        fn __elwindui_mount_embedded(&self, this: elwindui::core::reactive::EmbeddedHandle<Self>) {
+            let _ = self;
+            #embedded_mount_body
+            let _ = this;
+        }
+    };
+    let embedded_property_changed = if view.is_template {
+        quote! { let _ = property; }
+    } else {
+        quote! {
+            let this = self;
+            #embedded_forward
+            match property {
+                #embedded_own_arms
+                #inherited_dispatch_arms
+                _ => {}
+            }
+        }
+    };
+    let embedded_view_sync_impl = quote! {
+        impl elwindui::core::reactive::EmbeddedViewSync for #target {
+            fn __elwindui_embedded_property_changed(&self, property: &'static str) {
+                #embedded_property_changed
+            }
+
+            fn __elwindui_mount_as_base(
+                &self,
+                handle: Option<elwindui::core::reactive::WeakEmbeddedHandle<Self>>,
+                environment: elwindui::core::environment::EnvironmentContext,
+            ) {
+                #embedded_store_handle
+                #embedded_mount_if_created
+            }
+
+            #embedded_lifecycle
+
+            fn __elwindui_root_content_span(&self) -> usize {
+                #embedded_base_span + #embedded_own_span
+            }
+        }
+    };
+    let most_derived_wire_forward = embedded_wire_forward.as_ref().map(|forward| {
+        quote! {
+            {
+                let this = elwindui::core::reactive::EmbeddedHandle::new(std::rc::Rc::clone(&this));
+                #forward
+            }
+        }
+    });
+    let most_derived_mount_forward = embedded_mount_forward.as_ref().map(|forward| {
+        quote! {
+            {
+                let this = elwindui::core::reactive::EmbeddedHandle::new(std::rc::Rc::clone(&this));
+                #forward
+            }
+        }
+    });
+    // The embedding level mounts its generated base itself (see `mount_as_base` above), after
+    // handing it the weak handle it needs, instead of the base mounting itself from its own
+    // `on_constructed`. Also covers `__new_unmounted` + explicit `mount`, which skips that hook.
+    let inherited_base_mount = (is_inherited_view_composition || base_is_generated_component)
+        .then(|| {
+            quote! {
+                {
+                    #embedded_dispatch_use
+                    let __elwindui_base_handle = self.__elwindui_self_handle().map(|__elwindui_handle| {
+                        elwindui::core::reactive::WiringOwner::downgrade_wiring(
+                            &__elwindui_handle.map(|__elwindui_level| &__elwindui_level.base),
+                        )
+                    });
+                    (&elwindui::core::reactive::EmbeddedNotify(&self.base))
+                        .mount_as_base(__elwindui_base_handle, environment.clone());
+                }
+            }
+        });
 
     let shared_template_factory = shared_template_body
         .as_ref()
@@ -8341,11 +8936,11 @@ fn generate_view(
     // performs the generated component teardown and never invokes that body a second time.
     let template_unmount_hook_attach = (!is_host_composition).then(|| {
         quote! {
-            let weak_begin: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
+            let weak_begin = elwindui::core::reactive::WiringOwner::downgrade_wiring(&this);
             <Self as elwindui::core::ui::UIElementExt>::add_begin_unmount_hook(
                 self,
                 Box::new(move || {
-                    if let Some(this) = weak_begin.upgrade() {
+                    if let Some(this) = elwindui::core::reactive::WiringWeak::upgrade_wiring(&weak_begin) {
                         match this.__lifecycle_state.get() {
                             elwindui::core::ui::ComponentLifecycleState::Mounted => {
                                 this.__lifecycle_state
@@ -8359,11 +8954,11 @@ fn generate_view(
                     }
                 }),
             );
-            let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
+            let weak = elwindui::core::reactive::WiringOwner::downgrade_wiring(&this);
             <Self as elwindui::core::ui::UIElementExt>::add_unmount_hook(
                 self,
                 Box::new(move || {
-                    if let Some(this) = weak.upgrade() {
+                    if let Some(this) = elwindui::core::reactive::WiringWeak::upgrade_wiring(&weak) {
                         this.__unmount_local();
                     }
                 }),
@@ -8410,22 +9005,59 @@ fn generate_view(
         .iter()
         .map(ToString::to_string)
         .collect();
-    let component_observable_impl = quote! {
-        impl elwindui::core::reactive::ObservableExt for #target {
-            #[allow(unreachable_code)]
-            fn subscribe_property_changed(
-                &self,
-                f: impl Fn(&'static str) + 'static,
-            ) -> elwindui::core::reactive::Subscription {
-                #target::subscribe_property_changed(self, move |property| {
-                    let property_name = match property {
-                        #(
-                            #component_property_enum::#component_property_variants =>
-                                #component_property_names,
-                        )*
-                    };
-                    f(property_name);
-                })
+    // Issue #166 (D4, approved behavior): a descendant instance also *is* each of its ancestors, so
+    // the name-keyed `ObservableExt` surface of a Component composed over a `base` value reports the
+    // ancestors' property names too (chained through `base`'s own `ObservableExt`, recursively;
+    // `ItemObservation` makes a hand-written base without one a no-op). The typed
+    // `subscribe_property_changed(<Target>Property)` API is unchanged.
+    let component_observable_impl = if is_shape_composition || is_inherited_view_composition {
+        quote! {
+            impl elwindui::core::reactive::ObservableExt for #target {
+                #[allow(unreachable_code)]
+                fn subscribe_property_changed(
+                    &self,
+                    f: impl Fn(&'static str) + 'static,
+                ) -> elwindui::core::reactive::Subscription {
+                    #[allow(unused_imports)]
+                    use elwindui::core::reactive::{ObservableItem as _, PlainItem as _};
+                    let f: std::rc::Rc<dyn Fn(&'static str)> = std::rc::Rc::new(f);
+                    let own_f = std::rc::Rc::clone(&f);
+                    let own = #target::subscribe_property_changed(self, move |property| {
+                        let property_name = match property {
+                            #(
+                                #component_property_enum::#component_property_variants =>
+                                    #component_property_names,
+                            )*
+                        };
+                        own_f(property_name);
+                    });
+                    let observation = elwindui::core::reactive::ItemObservation(&self.base);
+                    let inherited = (&observation).observe_item(move |property| f(property));
+                    elwindui::core::reactive::Subscription::new(move || {
+                        drop(own);
+                        drop(inherited);
+                    })
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl elwindui::core::reactive::ObservableExt for #target {
+                #[allow(unreachable_code)]
+                fn subscribe_property_changed(
+                    &self,
+                    f: impl Fn(&'static str) + 'static,
+                ) -> elwindui::core::reactive::Subscription {
+                    #target::subscribe_property_changed(self, move |property| {
+                        let property_name = match property {
+                            #(
+                                #component_property_enum::#component_property_variants =>
+                                    #component_property_names,
+                            )*
+                        };
+                        f(property_name);
+                    })
+                }
             }
         }
     };
@@ -8487,36 +9119,6 @@ fn generate_view(
         build_constructor_macro(&target_name, &constructor_shape, generated_props_macro);
 
     let generated = if is_composed {
-        let unmount_hook_attach = (!is_host_composition).then(|| {
-            quote! {
-                let weak_begin: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
-                <Self as elwindui::core::ui::UIElementExt>::add_begin_unmount_hook(
-                    self,
-                    Box::new(move || {
-                        if let Some(this) = weak_begin.upgrade() {
-                            match this.__lifecycle_state.get() {
-                                elwindui::core::ui::ComponentLifecycleState::Mounted => {
-                                    this.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
-                                    true
-                                }
-                                _ => false,
-                            }
-                        } else {
-                            false
-                        }
-                    }),
-                );
-                let weak: std::rc::Weak<Self> = std::rc::Rc::downgrade(&this);
-                <Self as elwindui::core::ui::UIElementExt>::add_unmount_hook(
-                    self,
-                    Box::new(move || {
-                        if let Some(this) = weak.upgrade() {
-                            this.__unmount_local();
-                        }
-                    }),
-                );
-            }
-        });
         // A component-level template takes the specialized path above and returns from
         // `__build_view`; it has no ordinary authored-view construction to emit after that path.
         // Keep the two generated statement sequences structurally separate so normal rustc never
@@ -8543,6 +9145,7 @@ fn generate_view(
                 if let Some(this) = __most_derived.clone() {
                     #wiring_stmts
                     #unmount_hook_attach
+                    #most_derived_wire_forward
                 }
                 <Self as #target_ext>::__refresh_dynamic_regions(self);
                 // Most widgets already read live model state at construction time, so this is a
@@ -8554,6 +9157,8 @@ fn generate_view(
                 self.resync();
                 if let Some(this) = __most_derived {
                     #component_self_subscription
+                    #inherited_base_subscription
+                    #most_derived_mount_forward
                     #subscribe_stmts
                     #own_environment_subscribe_stmts
                     #semantic_brush_subscribe_stmts
@@ -8604,18 +9209,6 @@ fn generate_view(
                 <Self as #target_ext>::mount(self, environment);
             }
         });
-        // `__new_unmounted` deliberately skips the class macro's `on_constructed` hook chain so
-        // constructor ABI callers can apply initial Params/Props before mounting.  A component
-        // that reuses a generated component's inherited view still has to mount that concrete
-        // base first, however; ordinary `new()` has already done so through the hook chain.  Keep
-        // the check structural and idempotent so both paths share one lifecycle implementation.
-        let inherited_base_mount = is_inherited_view_composition.then(|| {
-            quote! {
-                if self.base.__elwindui_is_created() {
-                    self.base.mount(environment.clone());
-                }
-            }
-        });
         // A generated Window composition is not itself a UIElement, so the ordinary root-element
         // environment attachment cannot reach its content tree. Attach the exact live mount
         // context after the generated content has been built on every Window mount path; this is
@@ -8635,6 +9228,24 @@ fn generate_view(
         });
         let lifecycle_state_helper = is_composed.then(|| {
             mark_inherent(quote! {
+                /// Issue #166: a handle to this level reached from the outermost Component's
+                /// `Rc` — directly when this is the most-derived object, otherwise through the
+                /// weak handle the embedding level recorded before mounting it.
+                #[doc(hidden)]
+                pub fn __elwindui_self_handle(
+                    &self,
+                ) -> Option<elwindui::core::reactive::EmbeddedHandle<Self>> {
+                    let owner = self.__self_weak.borrow().upgrade()?;
+                    match owner.downcast::<Self>() {
+                        Ok(owner) => Some(elwindui::core::reactive::EmbeddedHandle::new(owner)),
+                        Err(_) => self
+                            .__elwindui_embedded_self
+                            .borrow()
+                            .as_ref()
+                            .and_then(elwindui::core::reactive::WiringWeak::upgrade_wiring),
+                    }
+                }
+
                 #[doc(hidden)]
                 pub fn __elwindui_is_created(&self) -> bool {
                     self.__lifecycle_state.get()
@@ -8678,6 +9289,9 @@ fn generate_view(
                 __mount_environment: std::cell::OnceCell<elwindui::core::environment::EnvironmentContext>,
                 __lifecycle_state: std::cell::Cell<elwindui::core::ui::ComponentLifecycleState>,
                 __closed: std::cell::Cell<bool>,
+                // Issue #166: set by the embedding level when this Component is embedded as a
+                // generated Component's `base` (see `__elwindui_self_handle`).
+                __elwindui_embedded_self: std::cell::RefCell<Option<elwindui::core::reactive::WeakEmbeddedHandle<Self>>>,
             }
 
             #[elwindui::class]
@@ -8692,7 +9306,7 @@ fn generate_view(
                         std::rc::Rc<std::cell::Cell<bool>>,
                         std::rc::Rc<dyn Fn(#component_property_enum)>,
                     )>::new()));
-                    Self { #(#plain_required_names,)* #cell_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers, __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created), __closed: std::cell::Cell::new(false) }
+                    Self { #(#plain_required_names,)* #cell_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers, __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created), __closed: std::cell::Cell::new(false), __elwindui_embedded_self: std::cell::RefCell::new(None) }
                 }
 
                 // Runs automatically, exactly once, right after `#[class]`'s auto-generated `new()`
@@ -8714,13 +9328,9 @@ fn generate_view(
                 // (`docs/specs/macro_class_spec.md` §13.3), not necessarily `#target` itself — when this
                 // component is instead embedded as *another* generated component's own composed `base:`
                 // field (Refs #25 — a user-defined `inherits` base), the most-derived object is that
-                // outer component, and `downcast::<#target>()` correctly fails. Skip these `Rc`-needing
-                // steps rather than panic in that case.
-                //
-                // KNOWN LIMITATION (docs/status/implementation_status.md): a composed base that
-                // itself declares `on_*` wiring, bindable fields, or `on_mount` loses that wiring when
-                // embedded this way — reaching it needs a typed weak reference alongside `__self_weak`
-                // (or deferring these closures' downcast to call time), out of scope here.
+                // outer component, and `downcast::<#target>()` correctly fails. Such an embedded base
+                // does not mount itself here at all: the embedding level mounts it and then drives
+                // its wiring, subscriptions and hooks through `EmbeddedViewSync` (Issue #166).
                 fn on_constructed(&self) {
                     // `application_environment()` (CI-6 of #80,
                     // docs/design/runtime/component_lifecycle_design.md §4e) — ambient thread-local
@@ -8772,6 +9382,7 @@ fn generate_view(
                 #resync_method
                 #property_resync_methods
                 #component_property_resync_methods
+                #inherited_resync_methods
                 #own_computed_recompute_methods
                 #own_environment_recompute_methods
                 #dynamic_region_refresh_method
@@ -8788,6 +9399,8 @@ fn generate_view(
             }
 
             #component_observable_impl
+            #explicit_base_hook_error
+            #embedded_view_sync_impl
             #template_property_impls
             #generated_dynamic_host_impl
         }
@@ -8899,8 +9512,9 @@ fn generate_view(
                     }
                     #wiring_stmts
                     self.resync();
-                    self.__refresh_dynamic_regions();
+                    <Self as #target_ext>::__refresh_dynamic_regions(self);
                     #component_self_subscription
+                    #inherited_base_subscription
                     #subscribe_stmts
                     #own_environment_subscribe_stmts
                     #semantic_brush_subscribe_stmts
@@ -8916,6 +9530,7 @@ fn generate_view(
                 #plain_unmount_method
                 #property_resync_methods
                 #component_property_resync_methods
+                #inherited_resync_methods
                 #own_computed_recompute_methods
                 #own_environment_recompute_methods
                 #dynamic_region_refresh_method
@@ -8946,6 +9561,7 @@ fn generate_view(
             }
 
             #component_observable_impl
+            #embedded_view_sync_impl
             #template_property_impls
             #generated_dynamic_host_impl
         }
@@ -9032,6 +9648,29 @@ struct ViewCtx {
     /// own field uses). Empty at `Construction` time's own use (`emit_expr`'s `EmitMode::
     /// Construction` reads the raw constructor-argument local instead, always bare regardless).
     mutable_own_fields: HashSet<String>,
+    /// Issue #166: fields a shape-composed Component with its own view inherits from an ancestor
+    /// and references by bare name from a DSL value position (effective fields minus the
+    /// Component's source-local declarations; ancestor `#[state]` is never present). Model A: the
+    /// declaring ancestor owns storage and accessors, so a read lowers to `<recv>.base.<name>()`
+    /// and a write to `<recv>.base.set_<name>(..)` — never to own storage of this Component.
+    inherited_fields: HashSet<String>,
+    /// Issue #166: the immediate base's `__elwindui_props_<Base>!` shape macro. When set, an
+    /// otherwise-unresolved bare snake_case name in raw Rust (handler bodies, `format!` arguments)
+    /// is routed through its `@inherited_get`/`@inherited_set` arms, which resolve the name against
+    /// the declaring ancestor's shape (same-crate and cross-crate alike) and leave any undeclared
+    /// name untouched for rustc.
+    inherited_props_macro: Option<TokenStream>,
+    /// Issue #166: the composition root's binding when this Component composes over a
+    /// user-defined (generated) base, whose own view may already have placed children in the
+    /// shared content collection. Root-direct dynamic regions then start after that base-owned
+    /// prefix (`dynamic_region_start`). `None` for builtin bases, which start empty.
+    composition_base_prefix_root: Option<syn::Ident>,
+    /// Issue #166 (PR #311 A/P1-1): this Component is itself the tree node (shape / inherited-view
+    /// composition), so whoever holds its tree holds it. Stored view callbacks (event handlers,
+    /// two-way bindings, `for` item handlers) then capture only a weak owner and upgrade it when
+    /// they run — a strong capture forms `owner -> child -> handler -> owner` and the Component
+    /// is never released.
+    weak_wiring: bool,
     /// Component fields explicitly marked `#[bindable]`; only their direct properties are
     /// reactive owner dependencies in ordinary view expressions.
     bindable_owners: HashSet<String>,
@@ -9224,6 +9863,46 @@ impl ViewCtx {
         }
     }
 
+    /// Issue #166: every generated Component with its own view declares `__refresh_dynamic_regions`
+    /// in its own `{Target}Ext` trait, and a derived Component also implements each ancestor's
+    /// `*Ext` trait through `#[class]` forwarding — so unqualified method-call syntax on a derived
+    /// receiver is ambiguous (E0034). Always name this Component's own trait explicitly.
+    fn refresh_call(&self, receiver: TokenStream) -> TokenStream {
+        let target = &self.target;
+        let target_ext = format_ident!("{}Ext", target);
+        quote! { <#target as #target_ext>::__refresh_dynamic_regions(&*#receiver); }
+    }
+
+    /// Whether stored view callbacks capture the owner weakly (see `ViewCtx::weak_wiring`).
+    /// Template factories keep their own capture rules.
+    fn uses_weak_wiring(&self) -> bool {
+        self.weak_wiring && !self.is_template_storage()
+    }
+
+    /// Re-binds `receiver` for capture by a stored callback: the weak owner under weak wiring,
+    /// otherwise a strong clone.
+    fn wiring_capture(&self, receiver: &TokenStream) -> TokenStream {
+        if self.uses_weak_wiring() {
+            quote! { let #receiver = elwindui::core::reactive::WiringOwner::downgrade_wiring(&#receiver); }
+        } else {
+            quote! { let #receiver = ::core::clone::Clone::clone(&#receiver); }
+        }
+    }
+
+    /// Wraps a stored callback's body so it re-acquires the owner captured by `wiring_capture`,
+    /// doing nothing once the owner is gone.
+    fn wiring_guard(&self, receiver: &TokenStream, body: TokenStream) -> TokenStream {
+        if self.uses_weak_wiring() {
+            quote! {
+                if let Some(#receiver) = elwindui::core::reactive::WiringWeak::upgrade_wiring(&#receiver) {
+                    #body
+                }
+            }
+        } else {
+            body
+        }
+    }
+
     fn refresh_statement(&self) -> TokenStream {
         if let Some(cell) = self.template_refresh_cell() {
             quote! {
@@ -9234,7 +9913,7 @@ impl ViewCtx {
                 }
             }
         } else {
-            quote! { this.__refresh_dynamic_regions(); }
+            self.refresh_call(quote! { this })
         }
     }
 
@@ -9325,6 +10004,10 @@ pub(crate) fn lower_template_body(
         closure_param_type: None,
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
+        inherited_fields: HashSet::new(),
+        inherited_props_macro: None,
+        composition_base_prefix_root: None,
+        weak_wiring: false,
         property_dependencies: HashMap::new(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
@@ -10187,6 +10870,13 @@ fn emit_lazy_leaf_value(
         TokenStream::new()
     } else if ctx.is_template_storage() {
         wiring
+    } else if ctx.uses_weak_wiring() {
+        // Issue #166: also valid when this Component is embedded as another one's `base`.
+        quote! {
+            if let Some(this) = self.__elwindui_self_handle() {
+                #wiring
+            }
+        }
     } else {
         let target = &ctx.target;
         quote! {
@@ -10962,7 +11652,18 @@ fn emit_for_item_wiring(
     }
     let self_mode = EmitMode::WithSelf(quote! { __elwindui_for_item_this });
     let mut out = TokenStream::new();
-    if has_event_wiring {
+    let for_item_refresh = ctx.refresh_call(quote! { __elwindui_for_item_this });
+    let for_receiver = quote! { __elwindui_for_item_this };
+    let for_capture = ctx.wiring_capture(&for_receiver);
+    if has_event_wiring && ctx.uses_weak_wiring() {
+        // Issue #166: also valid when this Component is embedded as another one's `base` (its
+        // `__self_weak` then names the outermost Component).
+        out.extend(quote! {
+            let __elwindui_for_item_this = self
+                .__elwindui_self_handle()
+                .expect("for-loop item wiring: object must already be Rc-constructed");
+        });
+    } else if has_event_wiring {
         let target = &ctx.target;
         out.extend(quote! {
             let __elwindui_for_item_this: std::rc::Rc<#target> = self
@@ -11045,6 +11746,13 @@ fn emit_for_item_wiring(
                         _ => quote! { #p },
                     })
                     .collect();
+                let guarded = ctx.wiring_guard(
+                    &for_receiver,
+                    quote! {
+                        #call;
+                        #for_item_refresh
+                    },
+                );
                 out.extend(quote! {
                     {
                         #[allow(unused_imports)]
@@ -11052,10 +11760,9 @@ fn emit_for_item_wiring(
                         #[allow(unused_imports)]
                         use #ext_path as _;
                         let widget = #widget_binding;
-                        let __elwindui_for_item_this = std::rc::Rc::clone(&__elwindui_for_item_this);
+                        #for_capture
                         #props_macro!(@set widget, #name_ident, move |#(#annotated_params),*| {
-                            #call;
-                            __elwindui_for_item_this.__refresh_dynamic_regions();
+                            #guarded
                         });
                     }
                 });
@@ -11078,6 +11785,7 @@ fn emit_for_item_wiring(
                     ctx,
                     &self_mode,
                     &quote! { widget.as_ui_element() },
+                    &for_receiver,
                 );
                 let shortcut_registration = node
                     .attribute_shortcuts
@@ -11095,6 +11803,7 @@ fn emit_for_item_wiring(
                     {
                         use elwindui::core::ui::UIElementExt as _;
                         let widget = #widget_binding;
+                        #for_capture
                         #registration
                         #shortcut_registration
                     }
@@ -11117,13 +11826,19 @@ fn emit_for_item_wiring(
                     ),
                     other => emit_expr(other, ctx, &self_mode),
                 };
+                let guarded = ctx.wiring_guard(
+                    &for_receiver,
+                    quote! {
+                        #call;
+                        #for_item_refresh
+                    },
+                );
                 out.extend(quote! {
                     {
                         let widget = #widget_binding;
-                        let __elwindui_for_item_this = std::rc::Rc::clone(&__elwindui_for_item_this);
+                        #for_capture
                         widget.#setter(Box::new(move || {
-                            #call;
-                            __elwindui_for_item_this.__refresh_dynamic_regions();
+                            #guarded
                         }));
                     }
                 });
@@ -11146,13 +11861,19 @@ fn emit_for_item_wiring(
                     quote! { #ident: #ty }
                 });
                 let call = emit_on_event_closure_body(body, params, ctx, &self_mode);
+                let guarded = ctx.wiring_guard(
+                    &for_receiver,
+                    quote! {
+                        #call;
+                        #for_item_refresh
+                    },
+                );
                 out.extend(quote! {
                     {
                         let widget = #widget_binding;
-                        let __elwindui_for_item_this = std::rc::Rc::clone(&__elwindui_for_item_this);
+                        #for_capture
                         widget.#setter(Box::new(move |#(#param_decls),*| {
-                            #call;
-                            __elwindui_for_item_this.__refresh_dynamic_regions();
+                            #guarded
                         }));
                     }
                 });
@@ -11165,6 +11886,8 @@ fn emit_for_item_wiring(
 /// Emits observers owned by one `for` item. They update the already-created child directly;
 /// importantly, they never call the enclosing view's dynamic-range refresh method. `DynamicChild`
 /// retains the handles, so removing the item drops every observer before its UI is discarded.
+// The observed widget is bound as `__elwindui_item_widget`, never `item`: the loop's own item
+// binding (`#parameter`) is re-bound inside the same observer and may itself be called `item`.
 fn emit_for_item_subscriptions(
     plan: &[PlannedNode],
     parameter: &str,
@@ -11209,14 +11932,14 @@ fn emit_for_item_subscriptions(
             let value = emit_expr(expr, ctx, &EmitMode::Construction);
             let is_copy = is_copy_type(strip_option(field_ty).0);
             let setter_call = if is_copy {
-                quote! { item.#setter(#value); }
+                quote! { __elwindui_item_widget.#setter(#value); }
             } else if strip_option(field_ty).0.starts_with("Vec<") {
-                quote! { item.#setter((#value).to_vec()); }
+                quote! { __elwindui_item_widget.#setter((#value).to_vec()); }
             } else if node_uses_owned_setters {
                 let value = virtual_builtin_resync_value(field_ty, value);
-                quote! { item.#setter(#value); }
+                quote! { __elwindui_item_widget.#setter(#value); }
             } else {
-                quote! { item.#setter(&(#value)); }
+                quote! { __elwindui_item_widget.#setter(&(#value)); }
             };
             let trait_use = builtin_trait_use(&node.type_path, Some(info));
             out.extend(quote! {
@@ -11226,7 +11949,7 @@ fn emit_for_item_subscriptions(
                     let subscription_source = std::rc::Rc::clone(&source);
                     let weak_item: std::rc::Weak<_> = std::rc::Rc::downgrade(&#binding);
                     __dynamic_item_subscriptions.push(source.subscribe_property_changed(move |_| {
-                        if let Some(item) = weak_item.upgrade() {
+                        if let Some(__elwindui_item_widget) = weak_item.upgrade() {
                             let #parameter = &subscription_source;
                             #setter_call
                         }
@@ -11309,9 +12032,9 @@ fn emit_external_for_item_subscriptions(
             let __elwindui_item_environment = (*#environment).clone();
             let subscription = (&elwindui::core::reactive::ItemObservation(&*source))
                 .observe_item(move |_| {
-                    if let Some(item) = weak_item.upgrade() {
+                    if let Some(__elwindui_item_widget) = weak_item.upgrade() {
                         let #parameter = &subscription_source;
-                        let _ = (&item, #parameter, &__elwindui_item_environment);
+                        let _ = (&__elwindui_item_widget, #parameter, &__elwindui_item_environment);
                         #(#sets)*
                     }
                 });
@@ -11327,10 +12050,10 @@ fn emit_external_for_item_subscriptions(
 fn external_item_set(node: &PlannedNode, name: &syn::Ident, value: &TokenStream) -> TokenStream {
     let environment = quote! { &__elwindui_item_environment };
     if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
-        return quote! { #ctor_macro!(@resync_item_set item, #name, #value, #environment); };
+        return quote! { #ctor_macro!(@resync_item_set __elwindui_item_widget, #name, #value, #environment); };
     }
     let props_macro = dsl_props_macro_path(&node.type_path, None);
-    quote! { #props_macro!(@set_with_environment item, #name, #value, #environment); }
+    quote! { #props_macro!(@set_with_environment __elwindui_item_widget, #name, #value, #environment); }
 }
 
 /// Whether emitted value tokens read a non-item receiver (`self` or a template's `this`).
@@ -12070,6 +12793,22 @@ fn preceding_span(
     quote! { 0usize #( + (#preceding) )* }
 }
 
+/// The total current span of `siblings` (static children count 1, dynamic slots their live span).
+fn total_span(
+    plan: &[PlannedNode],
+    siblings: &[(syn::Ident, String)],
+    ctx: &ViewCtx,
+) -> TokenStream {
+    let spans = siblings.iter().map(|(binding, ty)| {
+        if ty == DYNAMIC_CHILD_SLOT_MARKER {
+            slot_span(plan, binding, ctx)
+        } else {
+            quote! { 1usize }
+        }
+    });
+    quote! { 0usize #( + (#spans) )* }
+}
+
 /// Finds the nearest real (non-dynamic) ancestor *element* of a dynamic `PlannedNode`, walking
 /// through any number of enclosing dynamic regions (nested `if`/`match`/`for`, Phase 1). A dynamic
 /// node's binding appears either directly in a real element's own `child_bindings` (a top-level
@@ -12109,7 +12848,22 @@ fn dynamic_region_start(plan: &[PlannedNode], target: &syn::Ident, ctx: &ViewCtx
             .iter()
             .any(|(child, _)| child == target)
     }) {
-        return preceding_span(plan, &parent.child_bindings, target, ctx);
+        let preceding = preceding_span(plan, &parent.child_bindings, target, ctx);
+        // Issue #166: over a user-defined base, every level below this one (the base, its own
+        // base, ...) has already placed its root children at the front of the shared collection;
+        // this Component's root children follow them in authored order, and any further-derived
+        // level's children follow these. The prefix is the base chain's current root span, read
+        // live at each refresh (`EmbeddedViewSync::__elwindui_root_content_span`).
+        if ctx.composition_base_prefix_root.as_ref() == Some(&parent.binding) {
+            return quote! {
+                ({
+                    #[allow(unused_imports)]
+                    use elwindui::core::reactive::{EmbeddedNotifyForward as _, EmbeddedNotifyIgnore as _};
+                    (&elwindui::core::reactive::EmbeddedNotify(&self.base)).embedded_span()
+                }) + (#preceding)
+            };
+        }
+        return preceding;
     }
     let enclosing = plan
         .iter()
@@ -15335,6 +16089,7 @@ fn emit_routed_registration(
     ctx: &ViewCtx,
     mode: &EmitMode,
     binding: &TokenStream,
+    receiver: &TokenStream,
 ) -> TokenStream {
     match param_types {
         [] => {
@@ -15349,6 +16104,7 @@ fn emit_routed_registration(
                 ),
                 other => emit_expr(other, ctx, mode),
             };
+            let call = ctx.wiring_guard(receiver, quote! { #call; });
             quote! {
                 #binding.register_routed_handler::<()>(#name, Box::new(move |_: &(), _args: &elwindui::core::input::RoutedEventArgs| {
                     #call;
@@ -15370,6 +16126,7 @@ fn emit_routed_registration(
             }
             let param_ident = format_ident!("{}", params[0]);
             let call = emit_on_event_closure_body(body, params, ctx, mode);
+            let call = ctx.wiring_guard(receiver, quote! { #call; });
             quote! {
                 #binding.register_routed_handler::<#payload_ty>(#name, Box::new(move |__payload: &#payload_ty, _args: &elwindui::core::input::RoutedEventArgs| {
                     let #param_ident = *__payload;
@@ -15852,6 +16609,8 @@ fn emit_wiring_with_widget(
     }
     let refresh_capture = ctx.refresh_capture();
     let refresh_statement = ctx.refresh_statement();
+    let this_receiver = quote! { this };
+    let this_capture = ctx.wiring_capture(&this_receiver);
     // `emit_wiring`'s own output lands in `NotepadWindowImpl::new()`, a *different* function from
     // wherever `emit_construction` ran (for a composed/host-composed target, that's the separate
     // `create_<snake case>(..)` free function — see `generate_view`'s `create_fn`/
@@ -15912,6 +16671,13 @@ fn emit_wiring_with_widget(
                         _ => quote! { #p },
                     })
                     .collect();
+                let guarded = ctx.wiring_guard(
+                    &this_receiver,
+                    quote! {
+                        #call;
+                        #refresh_statement
+                    },
+                );
                 out.extend(quote! {
                     {
                         #[allow(unused_imports)]
@@ -15920,10 +16686,9 @@ fn emit_wiring_with_widget(
                         use #ext_path as _;
                         let widget = #widget_binding;
                         #refresh_capture
-                        let this = std::rc::Rc::clone(&this);
+                        #this_capture
                         #props_macro!(@set widget, #name_ident, move |#(#annotated_params),*| {
-                            #call;
-                            #refresh_statement
+                            #guarded
                         });
                     }
                 });
@@ -15957,6 +16722,7 @@ fn emit_wiring_with_widget(
                     ctx,
                     &self_mode,
                     &quote! { widget.as_ui_element() },
+                    &this_receiver,
                 );
                 // `#[shortcut(...)]` (docs/design/runtime/input_focus_design.md) — a per-usage-
                 // site annotation on *this* element's own `on_click`/etc. attribute (`node.
@@ -15981,7 +16747,7 @@ fn emit_wiring_with_widget(
                         use elwindui::core::ui::UIElementExt as _;
                         let widget = #widget_binding;
                         #refresh_capture
-                        let this = std::rc::Rc::clone(&this);
+                        #this_capture
                         #registration
                         #shortcut_registration
                     }
@@ -16006,21 +16772,26 @@ fn emit_wiring_with_widget(
                     ),
                     other => emit_expr(other, ctx, &self_mode),
                 };
+                // An action can mutate a collection used by a dynamic child range. Observable
+                // collection helpers normally publish that change too, but the event callback is
+                // not the only supported action path (and a user-defined action need not mutate
+                // through a generated setter). Reconcile the owned child ranges here as well.
+                // `DynamicChildSlot` preserves unchanged Rc children, so this does not recreate an
+                // existing tab or reset its native editing state.
+                let call = ctx.wiring_guard(
+                    &this_receiver,
+                    quote! {
+                        #call;
+                        #refresh_statement
+                    },
+                );
                 out.extend(quote! {
                     {
                         let widget = #widget_binding;
                         #refresh_capture
-                        let this = std::rc::Rc::clone(&this);
+                        #this_capture
                         widget.#setter(Box::new(move || {
                             #call;
-                            // An action can mutate a collection used by a dynamic child range.
-                            // Observable collection helpers normally publish that change too, but
-                            // the event callback is not the only supported action path (and a
-                            // user-defined action need not mutate through a generated setter).
-                            // Reconcile the owned child ranges here as well. `DynamicChildSlot`
-                            // preserves unchanged Rc children, so this does not recreate an
-                            // existing tab or reset its native editing state.
-                            #refresh_statement
                         }));
                     }
                 });
@@ -16043,11 +16814,12 @@ fn emit_wiring_with_widget(
                     quote! { #ident: #ty }
                 });
                 let call = emit_on_event_closure_body(body, params, ctx, &self_mode);
+                let call = ctx.wiring_guard(&this_receiver, quote! { #call; });
                 out.extend(quote! {
                     {
                         let widget = #widget_binding;
                         #refresh_capture
-                        let this = std::rc::Rc::clone(&this);
+                        #this_capture
                         widget.#setter(Box::new(move |#(#param_decls),*| {
                             #call;
                         }));
@@ -16097,6 +16869,7 @@ fn emit_wiring_with_widget(
             }
             _ => continue,
         };
+        let setter = ctx.wiring_guard(&this_receiver, setter);
         let on_change = quote! {
             Box::new(move |new_value| {
                 #setter
@@ -16113,7 +16886,7 @@ fn emit_wiring_with_widget(
                 out.extend(quote! {
                     {
                         let widget = #widget_binding;
-                        let this = std::rc::Rc::clone(&this);
+                        #this_capture
                         widget.#change_setter(#on_change);
                     }
                 });
@@ -16141,7 +16914,7 @@ fn emit_wiring_with_widget(
                             use elwindui::ui::*;
                             use #ext_path as _;
                             let widget = #widget_binding;
-                            let this = std::rc::Rc::clone(&this);
+                            #this_capture
                             #props_macro!(@set_on_change #name_ident, widget, #on_change);
                         }
                     }
@@ -16436,6 +17209,65 @@ impl<'a> ViewClosureRewriter<'a> {
         Some(quote! { #base.#setter })
     }
 
+    /// Issue #166: whether an unresolved bare name in raw Rust may be an inherited property that
+    /// the immediate base's shape macro should resolve. Property names are snake_case identifiers;
+    /// path keywords, generated `__` names, and UpperCamel/SCREAMING items (types, variants,
+    /// constants) are never routed.
+    fn is_inherited_candidate(&self, name: &str) -> bool {
+        !self.is_shadowed(name)
+            && self.ctx.closure_param.as_deref() != Some(name)
+            && !matches!(name, "self" | "Self" | "crate" | "super")
+            && !name.starts_with("__")
+            && name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+    }
+
+    /// Issue #166 (Model A): a bare read of an inherited property in raw Rust. A name already known
+    /// as an inherited field from a DSL value position reads `<recv>.base.<name>()` directly; any
+    /// other unresolved candidate is resolved by the immediate base's shape macro chain
+    /// (`@inherited_get`), which reaches the declaring ancestor's getter or leaves the bare name
+    /// untouched when no ancestor declares it.
+    fn resolved_inherited_read(&self, name: &str) -> Option<TokenStream> {
+        if !self.is_inherited_candidate(name) {
+            return None;
+        }
+        if self.ctx.inherited_props_macro.is_none() {
+            return None;
+        }
+        Some(inherited_field_read(self.ctx, self.mode, name))
+    }
+
+    /// Issue #166 (Model A): the write-side counterpart to `resolved_inherited_read` — the
+    /// declaring ancestor's own setter on `<recv>.base`, so storage and notification stay single.
+    fn resolved_inherited_write(&self, name: &str, value: TokenStream) -> Option<TokenStream> {
+        if !self.is_inherited_candidate(name) {
+            return None;
+        }
+        let receiver = inherited_field_receiver(self.mode);
+        let ident = format_ident!("{}", name);
+        let props_macro = self.ctx.inherited_props_macro.as_ref()?;
+        Some(quote! { #props_macro!(@inherited_set #receiver.base, #ident, #value) })
+    }
+
+    /// Issue #166: compound assignment (`name op= value`) on an inherited property. See the
+    /// `Expr::Binary` handling in `visit_expr_mut` for why the authored operator is preserved.
+    fn resolved_inherited_op_assign(
+        &self,
+        name: &str,
+        op: TokenStream,
+        value: TokenStream,
+    ) -> Option<TokenStream> {
+        if !self.is_inherited_candidate(name) {
+            return None;
+        }
+        let receiver = inherited_field_receiver(self.mode);
+        let ident = format_ident!("{}", name);
+        let props_macro = self.ctx.inherited_props_macro.as_ref()?;
+        Some(quote! { #props_macro!(@inherited_op_assign #receiver.base, #ident, #op, #value) })
+    }
+
     /// PR #165 post-final rereview remediation, A8: the 2-segment (`vm.label`, `vm.save`) raw-Rust
     /// counterpart to `resolved_implicit_owner_field` — reached only after `resolved_owner(owner)`
     /// has already failed to resolve `owner` as a real field of the *current* generated Component
@@ -16566,6 +17398,54 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
         // other assignment (a genuine local variable, `+=`-style compound assignment which `syn`
         // represents as `Expr::Binary` and never reaches here, ...) falls through to the default
         // recursive visit at the bottom, unchanged.
+        // Issue #166: `name op= rhs` on an inherited property (syn represents compound assignment
+        // as `Expr::Binary`) keeps the authored compound operator: the declaring ancestor's value
+        // is fetched into a temporary, the original `op=` is applied to it, and the result is
+        // stored back through the declaring setter — so the value type needs exactly the trait the
+        // author wrote (`AddAssign<Rhs>`), never `Add`. For a name no ancestor declares, the shape
+        // macro's fallback arm reproduces the original `name op= rhs` verbatim.
+        if let syn::Expr::Binary(binary) = node {
+            if is_compound_assign_op(&binary.op) {
+                if let syn::Expr::Path(p) = binary.left.as_ref() {
+                    if let (Some(ident), None) = (p.path.get_ident(), &p.qself) {
+                        let name = ident.to_string();
+                        let is_own = self.ctx.mutable_own_fields.contains(&name)
+                            || self.ctx.own_fields.contains_key(&name);
+                        // An own mutable Prop gets the same treatment through its own accessors
+                        // (the plain `name op= rhs` would otherwise target the getter call — E0067).
+                        if !self.is_shadowed(&name) && self.ctx.mutable_own_fields.contains(&name) {
+                            if let EmitMode::WithSelf(self_tok) = self.mode {
+                                let op = binary.op;
+                                let mut rhs = (*binary.right).clone();
+                                self.visit_expr_mut(&mut rhs);
+                                let getter = format_ident!("{}", name);
+                                let setter = format_ident!("set_{}", name);
+                                let self_tok = self_tok.clone();
+                                *node = syn::parse_quote! {{
+                                    let mut __elwindui_own_value = #self_tok.#getter();
+                                    __elwindui_own_value #op #rhs;
+                                    #self_tok.#setter(__elwindui_own_value)
+                                }};
+                                return;
+                            }
+                        }
+                        if !is_own {
+                            let op = binary.op;
+                            let mut rhs = (*binary.right).clone();
+                            self.visit_expr_mut(&mut rhs);
+                            if let Some(update) = self.resolved_inherited_op_assign(
+                                &name,
+                                quote! { #op },
+                                quote! { #rhs },
+                            ) {
+                                *node = syn::parse_quote! { #update };
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if let syn::Expr::Assign(assign) = node {
             if let syn::Expr::Path(p) = assign.left.as_ref() {
                 if let Some(ident) = p.path.get_ident() {
@@ -16613,6 +17493,14 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                             self.visit_expr_mut(&mut assign.right);
                             let rhs = &assign.right;
                             *node = syn::parse_quote! { #setter(#rhs) };
+                            return;
+                        }
+                    }
+                    if !is_mutable_own_field && !is_template_parent_field {
+                        let mut rhs = (*assign.right).clone();
+                        self.visit_expr_mut(&mut rhs);
+                        if let Some(write) = self.resolved_inherited_write(&name, quote! { #rhs }) {
+                            *node = syn::parse_quote! { #write };
                             return;
                         }
                     }
@@ -16787,6 +17675,12 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                 }
                 if let Some(value) = self.resolved_implicit_owner_field(only) {
                     *node = syn::parse_quote! { #value };
+                    return;
+                }
+                if p.qself.is_none() {
+                    if let Some(value) = self.resolved_inherited_read(only) {
+                        *node = syn::parse_quote! { #value };
+                    }
                 }
                 return;
             }
@@ -16852,6 +17746,7 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                             .resolved_mutable_field_read(&name)
                             .or_else(|| self.resolved_owner(&name))
                             .or_else(|| self.resolved_implicit_owner_field(&name))
+                            .or_else(|| self.resolved_inherited_read(&name))
                         else {
                             continue;
                         };
@@ -17082,6 +17977,81 @@ fn is_implicit_reactive_field(ctx: &ViewCtx, name: &str) -> bool {
     ctx.implicit_owner
         .as_ref()
         .is_some_and(|implicit| implicit.reactive_fields.contains(name))
+        || is_inherited_reactive_name(ctx, name)
+}
+
+/// Issue #166: every bare name an expression reads that may be an inherited property
+/// (`is_inherited_reactive_name`) — the candidates for per-property inherited resync methods.
+/// Over-collection is harmless: a candidate no attribute actually depends on produces no method.
+fn collect_inherited_dependency_names(
+    expr: &ViewExpr,
+    ctx: &ViewCtx,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        ViewExpr::Path(path) => {
+            if let [only] = path.as_slice() {
+                if is_inherited_reactive_name(ctx, only) {
+                    out.insert(only.clone());
+                }
+            }
+        }
+        ViewExpr::TFluent(_, args) => {
+            for (_, value) in args {
+                collect_inherited_dependency_names(value, ctx, out);
+            }
+        }
+        ViewExpr::Expr(expr) => {
+            struct Collector<'a> {
+                ctx: &'a ViewCtx,
+                out: &'a mut std::collections::BTreeSet<String>,
+            }
+            impl<'ast> Visit<'ast> for Collector<'_> {
+                fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+                    if node.qself.is_none() {
+                        if let Some(ident) = node.path.get_ident() {
+                            let name = ident.to_string();
+                            if is_inherited_reactive_name(self.ctx, &name) {
+                                self.out.insert(name);
+                            }
+                        }
+                    }
+                    syn::visit::visit_expr_path(self, node);
+                }
+
+                fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+                    if let Some(arguments) = supported_macro_expr_arguments(node) {
+                        if is_format_macro(node) {
+                            if let Some(fmt) = arguments.first().and_then(expr_as_lit_str) {
+                                for name in format_str_inline_idents(&fmt.value()) {
+                                    if is_inherited_reactive_name(self.ctx, &name) {
+                                        self.out.insert(name);
+                                    }
+                                }
+                            }
+                        }
+                        for argument in &arguments {
+                            self.visit_expr(argument);
+                        }
+                    }
+                }
+            }
+            Collector { ctx, out }.visit_expr(expr);
+        }
+        ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_) => {}
+    }
+}
+
+/// Issue #166: an inherited property can change after construction (its declaring ancestor's
+/// setter), so an expression reading it is reactive. A name the immediate base's shape macro may
+/// resolve (`ViewCtx::inherited_props_macro`) is conservatively treated as reactive too — an
+/// over-approximation only costs a redundant re-evaluation on resync.
+fn is_inherited_reactive_name(ctx: &ViewCtx, name: &str) -> bool {
+    ctx.inherited_fields.contains(name)
+        || (ctx.inherited_props_macro.is_some()
+            && !ctx.own_fields.contains_key(name)
+            && !name.starts_with("__")
+            && name.chars().next().is_some_and(|c| c.is_ascii_lowercase()))
 }
 
 /// Whether `name` is a source-Component `#[bindable]` field reachable through this hidden
@@ -17282,11 +18252,10 @@ fn property_resync_methods_for(
                             &mut statements,
                         );
                     }
-                    let refresh =
-                        include_refresh.then(|| quote! { self.__refresh_dynamic_regions(); });
+                    let refresh = include_refresh.then(|| ctx.refresh_call(quote! { self }));
                     let invalidate = if invalidate_component {
                         if root_is_self {
-                            Some(quote! { self.invalidate(); })
+                            Some(quote! { elwindui::core::ui::UIElementExt::invalidate(self); })
                         } else if let Some(root_binding) = &root_binding {
                             Some(quote! {
                                 if let Some(root) = self.#root_binding.get() {
@@ -17936,6 +18905,9 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                     }
                     return mode.owner_tokens(only);
                 }
+                if ctx.inherited_fields.contains(only) {
+                    return inherited_field_read(ctx, mode, only);
+                }
                 if ctx.template_parent.is_some() && ctx.template_bare_parent_fields.contains(only) {
                     let parent_alias = ctx
                         .template_parent_alias
@@ -17961,6 +18933,14 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                         return emit_path_get(&owner_path, ctx, mode);
                     }
                 }
+                // Issue #166: any other bare name in a Component that inherits through a `base`
+                // value is resolved by the immediate base's shape macro chain — the declaring
+                // ancestor's getter, or the untouched bare name (a real rustc "cannot find value"
+                // diagnostic) when no ancestor declares it. Ancestor `#[state]` is never declared
+                // to that chain, so it can never be read through it.
+                if ctx.inherited_props_macro.is_some() {
+                    return inherited_field_read(ctx, mode, only);
+                }
             }
             emit_path_get(path, ctx, mode)
         }
@@ -17985,6 +18965,49 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                  nested inside a larger expression"
             )
         }
+    }
+}
+
+/// Issue #166: whether `op` is a compound assignment operator (`+=`, `<<=`, ...).
+fn is_compound_assign_op(op: &syn::BinOp) -> bool {
+    use syn::BinOp;
+    matches!(
+        op,
+        BinOp::AddAssign(_)
+            | BinOp::SubAssign(_)
+            | BinOp::MulAssign(_)
+            | BinOp::DivAssign(_)
+            | BinOp::RemAssign(_)
+            | BinOp::BitXorAssign(_)
+            | BinOp::BitAndAssign(_)
+            | BinOp::BitOrAssign(_)
+            | BinOp::ShlAssign(_)
+            | BinOp::ShrAssign(_)
+    )
+}
+
+/// Issue #166: the receiver whose `base` field owns an inherited field's storage chain. Inherited
+/// reads only occur in this Component's own `__build_view()` (`Construction`, where `self` exists)
+/// or in post-construction code (`WithSelf`).
+fn inherited_field_receiver(mode: &EmitMode) -> TokenStream {
+    match mode {
+        EmitMode::Construction => quote! { self },
+        EmitMode::WithSelf(self_tok) => self_tok.clone(),
+    }
+}
+
+/// Issue #166 (Model A): an inherited field is read through the declaring ancestor's own getter on
+/// this Component's immediate `base` value — never a second accessor on this Component. Every
+/// inherited access (read, write, compound assignment) goes through the immediate base's shape
+/// macro chain rather than a direct `<recv>.base.<name>()` method call: the declaring class's arm
+/// brings its own `{Declarer}Ext` trait into scope at the call, so a derived Component in another
+/// crate never needs a manual `use ..Ext as _` import for its generated code to resolve.
+fn inherited_field_read(ctx: &ViewCtx, mode: &EmitMode, name: &str) -> TokenStream {
+    let receiver = inherited_field_receiver(mode);
+    let getter = format_ident!("{}", name);
+    match &ctx.inherited_props_macro {
+        Some(props_macro) => quote! { #props_macro!(@inherited_get #receiver.base, #getter) },
+        None => quote! { #receiver.base.#getter() },
     }
 }
 
@@ -18160,6 +19183,10 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
         closure_param_type: None,
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
+        inherited_fields: HashSet::new(),
+        inherited_props_macro: None,
+        composition_base_prefix_root: None,
+        weak_wiring: false,
         property_dependencies: HashMap::new(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
@@ -21227,7 +22254,7 @@ struct NotepadWindow {
         assert!(window_str.contains("DynamicChild :: with_children"));
         assert!(window_str.contains("__dynamic_item_subscriptions"));
         assert!(window_str.contains("source . subscribe_property_changed"));
-        assert!(window_str.contains("item . set_header"));
+        assert!(window_str.contains("__elwindui_item_widget . set_header"));
         assert!(!window_str.contains("set_items_source"));
     }
 
@@ -22075,7 +23102,7 @@ struct NotepadWindow {
 
     /// `#[override] fn` + `base::name(...)` (§3): the derived's override calls into a
     /// `__base_<name>`-shadowed copy of the base body, and `on_mount { base::on_mount(); }`
-    /// is spliced into `new()` chaining into the base's own `on_mount`.
+    /// chains into the base's own `on_mount` when the base view is not embedded live.
     #[test]
     fn generates_valid_rust_for_method_override_and_on_mount_base_call() {
         let module = crate::test_module(&[
@@ -22134,17 +23161,59 @@ struct NotepadWindow {
 
         let generated_str = generated.to_string();
         assert!(generated_str.contains("fn __base_label"), "{generated_str}");
+        // This fixture's `Derived` is not a shape composition over an embedded generated base
+        // (its base view is not live inside it), so the explicit `base::on_mount()` chaining stays
+        // supported here; over an embedded generated base it is a compile error instead (see
+        // `tests/ui/explicit_base_hook_over_generated_base.rs` in the `elwindui` crate).
         assert!(
             generated_str.contains("fn __base_on_mount"),
             "{generated_str}"
         );
-        // PR #165 review remediation, A2: `on_mount`/`on_unmount`'s `base::name()` rewriting now
-        // uses `self` as the receiver (valid in every generated shape, unlike `this`, which is
-        // only ever bound in some of them) — see `generate_view`'s own comment on `self_ident`.
         assert!(
             generated_str.contains("self . __base_on_mount"),
             "{generated_str}"
         );
+        assert!(
+            !generated_str.contains("`base::on_mount()`"),
+            "{generated_str}"
+        );
+    }
+
+    /// PR #311 A/P2: the explicit-base-hook check detects only a real `base::<hook>(..)` call
+    /// (directly or inside macro arguments), never a string literal that mentions it or an
+    /// unrelated path such as `database::on_mount()`.
+    #[test]
+    fn explicit_base_hook_check_matches_only_real_base_calls() {
+        let calls = |src: &str, hook: &str| {
+            let block: syn::Block = syn::parse_str(src).expect("block");
+            block_calls_base_hook(&block, hook)
+        };
+        // Real calls.
+        assert!(calls("{ base::on_mount(); }", "on_mount"));
+        assert!(calls("{ if ready { base::on_mount() } }", "on_mount"));
+        assert!(calls("{ let _ = { base::on_unmount() }; }", "on_unmount"));
+        assert!(calls(
+            r#"{ println!("{:?}", base::on_mount()); }"#,
+            "on_mount"
+        ));
+        // Not calls of this hook.
+        assert!(!calls(
+            r#"{ log("base::on_mount() is automatic"); }"#,
+            "on_mount"
+        ));
+        assert!(!calls(
+            r#"{ let _ = format!("base::on_unmount()"); }"#,
+            "on_unmount"
+        ));
+        assert!(!calls(
+            r#"{ println!("base::on_mount() {}", 1); }"#,
+            "on_mount"
+        ));
+        assert!(!calls("{ database::on_mount(); }", "on_mount"));
+        assert!(!calls("{ my_base::on_mount(); }", "on_mount"));
+        assert!(!calls("{ base::on_mount_later(); }", "on_mount"));
+        assert!(!calls("{ base::on_unmount(); }", "on_mount"));
+        assert!(!calls("{ let f = base::on_mount; }", "on_mount"));
     }
 
     /// PR #165 review remediation, A3: a `context_popup: view! { .. }` nested inside *another*
@@ -23381,6 +24450,141 @@ struct NotepadWindow {
         assert!(
             generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "column" , 2)"#),
             "{generated_str}"
+        );
+    }
+
+    /// Issue #166 negative regression: ancestor `#[state]` is private and non-inherited. A derived
+    /// Component with its own view must not acquire it as an inherited field, must not re-expose
+    /// it through any accessor, and its bare use must resolve only through the base shape-macro
+    /// chain (to which `#[state]` is never declared), so rustc reports it as an unknown value.
+    /// Model A is asserted alongside: the inherited Prop `heading` gets no derived-owned accessor
+    /// or `{Derived}Property` variant either, and is read/written through the base value.
+    #[test]
+    fn issue_166_inherited_state_is_not_exposed_and_prop_uses_declaring_accessors() {
+        let module = crate::test_module(&[
+            (
+                Some("VerticalLayout"),
+                r#"
+                struct I166Base {
+                    #[prop(default = String::new())]
+                    heading: String,
+                    #[state(default = 0)]
+                    secret: i32,
+                    body: view! {
+                        TextBlock { text: format!("{heading}{secret}") }
+                    },
+                }
+                "#,
+                None,
+            ),
+            (
+                Some("I166Base"),
+                r#"
+                struct I166Derived {
+                    body: view! {
+                        VerticalLayout {
+                            TextBlock {
+                                text: heading,
+                                on_tapped: |_event| {
+                                    heading = "x".to_string();
+                                    heading += "!";
+                                    undeclared_total += 1;
+                                },
+                            }
+                            TextBlock { text: secret }
+                        }
+                    },
+                }
+                "#,
+                None,
+            ),
+        ])
+        .expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+
+        let derived = table
+            .resolve(&module, "I166Derived")
+            .expect("derived TypeInfo");
+        assert!(
+            derived.effective_fields.iter().any(|f| f.name == "heading"),
+            "the inherited Prop is part of the derived effective fields"
+        );
+        assert!(
+            !derived.effective_fields.iter().any(|f| f.name == "secret"),
+            "ancestor #[state] must never be an inherited effective field: {:?}",
+            derived
+                .effective_fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("issue_166_inherited_state", &generated);
+        let rendered = generated.to_string();
+        let derived_start = rendered
+            .find("pub enum I166DerivedProperty")
+            .expect("derived property enum is generated");
+        let derived_src = &rendered[derived_start..];
+        let derived_enum_end = derived_src.find('}').expect("enum body closes");
+        let derived_enum = &derived_src[..derived_enum_end];
+        for name in ["heading", "secret"] {
+            assert!(
+                !derived_enum.contains(name),
+                "Derived must not own a `{name}` property variant: {derived_enum}"
+            );
+        }
+        for forbidden in ["fn heading", "fn set_heading", "fn secret", "fn set_secret"] {
+            assert!(
+                !derived_src.contains(forbidden),
+                "Derived must not generate `{forbidden}` (Model A / private #[state])"
+            );
+        }
+        assert!(
+            derived_src.contains("@ inherited_get self . base , heading"),
+            "inherited Prop read goes through the declaring ancestor's getter on `base`, via the              base shape macro (which imports the declaring `Ext` trait)"
+        );
+        assert!(
+            !derived_src.contains(". base . heading ()")
+                && !derived_src.contains(". base . set_heading"),
+            "no direct method call that would need the declaring `Ext` trait imported by the author"
+        );
+        assert!(
+            derived_src.contains("fn __resync_inherited_heading"),
+            "an inherited dependency gets its own per-property resync method"
+        );
+        assert!(
+            derived_src.contains("\"heading\" => { this . __resync_inherited_heading ()"),
+            "the base notification dispatches by property name, not to a full resync()"
+        );
+        assert!(
+            derived_src.contains("@ inherited_set this . base , heading ,"),
+            "inherited Prop write goes through the declaring ancestor's setter on `base`"
+        );
+        assert!(
+            derived_src.contains("@ inherited_op_assign this . base , heading , += , \"!\""),
+            "compound assignment on an inherited Prop keeps the authored `+=` operator"
+        );
+        assert!(
+            !derived_src.contains("heading ()) +") && !derived_src.contains("heading) +"),
+            "compound assignment must never be rewritten into a binary `+`"
+        );
+        assert!(
+            derived_src.contains("@ inherited_op_assign this . base , undeclared_total , += , 1"),
+            "a name not known as inherited keeps its authored operator through the shape macro"
+        );
+        assert!(
+            derived_src.contains("@ inherited_get self . base , secret"),
+            "a bare ancestor-#[state] name is left to the base shape-macro chain (never declared \
+             there), not resolved as a field"
+        );
+        let base_class_props: Vec<&str> = rendered
+            .match_indices("# [prop (owned ,")
+            .map(|(index, _)| &rendered[index..index + 60])
+            .collect();
+        assert!(
+            base_class_props.iter().all(|decl| !decl.contains("secret")),
+            "#[state] must never be declared to the #[class] shape chain: {base_class_props:?}"
         );
     }
 }

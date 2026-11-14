@@ -399,7 +399,7 @@ body: view! {
 - 引数なしの`on_update`は任意の`#[prop]`変更を監視する
 - 初期構築時の値設定は`on_update`として数えない
 - hookは通常のRust blockであり、副作用を実行できる
-- 基底がユーザー定義(生成)componentの場合、基底の`on_mount`/`on_update`/`on_unmount`は派生componentに埋め込まれても基底自身のhookとして自動で一度ずつ実行される。`on_mount`は基底から派生の順、`on_unmount`は派生から基底の順である。このため派生側で`base::on_mount()`/`base::on_unmount()`を書くと二重実行になり、コンパイルエラーになる
+- 基底がユーザー定義(生成)componentの場合、基底の`on_mount`/`on_update`/`on_unmount`は派生componentに埋め込まれても基底自身のhookとして自動で一度ずつ実行される。`on_mount`は基底から派生の順、`on_unmount`は派生から基底の順である。このため派生側で`base::on_mount()`/`base::on_unmount()`を書くと二重実行になり、コンパイルエラーになる。対象はhook本体(マクロ引数内を含む)での`base::on_mount(..)`/`base::on_unmount(..)`という実際の呼び出しのみで、文字列リテラル中の記述や`database::on_mount()`のような別パスは対象外
 - `#[param]`はhook内でも再代入できない
 
 attach/detach、subscription、backend resourceの内部順序は

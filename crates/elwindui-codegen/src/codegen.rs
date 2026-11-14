@@ -3306,6 +3306,72 @@ fn rewrite_base_calls(mut block: syn::Block, receiver: &syn::Ident) -> syn::Bloc
     block
 }
 
+/// Issue #166 (PR #311 A/P2): whether `block` really calls `base::<hook>(..)`. Detection reuses
+/// `rewrite_base_calls` with a probe receiver, so it matches exactly the calls that would be lowered
+/// to `__base_<hook>` — a `syn::ExprCall` whose callee is the `base::<hook>` path, including inside
+/// macro arguments — and then looks for `<probe>.__base_<hook>(..)` structurally (`ExprMethodCall`
+/// in the AST, `Ident . Ident (..)` in macro tokens). String literals stay opaque `Lit`/`Literal`
+/// tokens and unrelated paths such as `database::on_mount()` are different identifiers, so neither
+/// is reported.
+fn block_calls_base_hook(block: &syn::Block, hook: &str) -> bool {
+    let probe = format_ident!("__elwindui_base_hook_probe");
+    let method = format_ident!("__base_{}", hook);
+    let rewritten = rewrite_base_calls(block.clone(), &probe);
+
+    fn tokens_call(
+        tokens: proc_macro2::TokenStream,
+        probe: &syn::Ident,
+        method: &syn::Ident,
+    ) -> bool {
+        use proc_macro2::{Delimiter, TokenTree};
+        let flat: Vec<TokenTree> = tokens.into_iter().collect();
+        flat.iter().enumerate().any(|(i, tt)| {
+            let direct = matches!(
+                (tt, flat.get(i + 1), flat.get(i + 2), flat.get(i + 3)),
+                (
+                    TokenTree::Ident(recv),
+                    Some(TokenTree::Punct(dot)),
+                    Some(TokenTree::Ident(name)),
+                    Some(TokenTree::Group(args)),
+                ) if recv == probe
+                    && dot.as_char() == '.'
+                    && name == method
+                    && args.delimiter() == Delimiter::Parenthesis
+            );
+            direct || matches!(tt, TokenTree::Group(g) if tokens_call(g.stream(), probe, method))
+        })
+    }
+
+    struct Finder<'a> {
+        probe: &'a syn::Ident,
+        method: &'a syn::Ident,
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for Finder<'_> {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if node.method == *self.method
+                && matches!(&*node.receiver, syn::Expr::Path(p) if p.path.is_ident(self.probe))
+            {
+                self.found = true;
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            if tokens_call(node.tokens.clone(), self.probe, self.method) {
+                self.found = true;
+            }
+            syn::visit::visit_macro(self, node);
+        }
+    }
+    let mut finder = Finder {
+        probe: &probe,
+        method: &method,
+        found: false,
+    };
+    finder.visit_block(&rewritten);
+    finder.found
+}
+
 /// Token-level counterpart of `rewrite_base_calls`' `syn` visitor, for macro argument streams —
 /// see `Rewriter::visit_macro_mut`. Matches the four-token prefix `base`, `::`, `<name>`,
 /// `(<args>)` and rewrites it to `<receiver> . __base_<name> (<args>)`, recursing into the
@@ -7690,14 +7756,7 @@ fn generate_view(
     // explicit `base::on_mount()`/`base::on_unmount()` would run the base hook a second time.
     let explicit_base_hook_error = if base_is_generated_component && is_shape_composition {
         let calls_base_hook = |block: Option<&syn::Block>, hook: &str| {
-            block.is_some_and(|block| {
-                let text: String = quote! { #block }
-                    .to_string()
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .collect();
-                text.contains(&format!("base::{hook}("))
-            })
+            block.is_some_and(|block| block_calls_base_hook(block, hook))
         };
         let mut errors = TokenStream::new();
         for (block, hook) in [
@@ -23118,6 +23177,43 @@ struct NotepadWindow {
             !generated_str.contains("`base::on_mount()`"),
             "{generated_str}"
         );
+    }
+
+    /// PR #311 A/P2: the explicit-base-hook check detects only a real `base::<hook>(..)` call
+    /// (directly or inside macro arguments), never a string literal that mentions it or an
+    /// unrelated path such as `database::on_mount()`.
+    #[test]
+    fn explicit_base_hook_check_matches_only_real_base_calls() {
+        let calls = |src: &str, hook: &str| {
+            let block: syn::Block = syn::parse_str(src).expect("block");
+            block_calls_base_hook(&block, hook)
+        };
+        // Real calls.
+        assert!(calls("{ base::on_mount(); }", "on_mount"));
+        assert!(calls("{ if ready { base::on_mount() } }", "on_mount"));
+        assert!(calls("{ let _ = { base::on_unmount() }; }", "on_unmount"));
+        assert!(calls(
+            r#"{ println!("{:?}", base::on_mount()); }"#,
+            "on_mount"
+        ));
+        // Not calls of this hook.
+        assert!(!calls(
+            r#"{ log("base::on_mount() is automatic"); }"#,
+            "on_mount"
+        ));
+        assert!(!calls(
+            r#"{ let _ = format!("base::on_unmount()"); }"#,
+            "on_unmount"
+        ));
+        assert!(!calls(
+            r#"{ println!("base::on_mount() {}", 1); }"#,
+            "on_mount"
+        ));
+        assert!(!calls("{ database::on_mount(); }", "on_mount"));
+        assert!(!calls("{ my_base::on_mount(); }", "on_mount"));
+        assert!(!calls("{ base::on_mount_later(); }", "on_mount"));
+        assert!(!calls("{ base::on_unmount(); }", "on_mount"));
+        assert!(!calls("{ let f = base::on_mount; }", "on_mount"));
     }
 
     /// PR #165 review remediation, A3: a `context_popup: view! { .. }` nested inside *another*

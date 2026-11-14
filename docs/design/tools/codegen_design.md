@@ -396,7 +396,7 @@ accessorを呼ぶ。
   - 基底がbuiltin/手書きの場合は`EmbeddedNotify`のautoref dispatchで何もしない。viewを持たない派生
     (inherited view composition)は基底の`view`と同じhookを持つため、自分では`on_mount`/`on_update`/
     `on_unmount`を展開せず基底側の実行に一本化する。生成componentを基底とするshape合成で
-    `base::on_mount()`/`base::on_unmount()`を書くと二重実行になるため`compile_error!`にする。
+    `base::on_mount()`/`base::on_unmount()`を書くと二重実行になるため`compile_error!`にする。検出は`rewrite_base_calls`をprobe receiverで適用し、`__base_<hook>`呼び出しへlowerされた箇所(AST上の`ExprMethodCall`とマクロ引数token)だけを見る(`block_calls_base_hook`)。文字列リテラルや無関係なpathは検出しない。
 - **保存されるcallbackの所有**: shape合成・inherited view compositionのcomponentは自分自身がUI treeの
   ノードなので、子要素に保存するイベントハンドラ・双方向バインディング・`for`要素のハンドラは
   `ViewCtx::weak_wiring`により所有者を弱参照(`WiringOwner::downgrade_wiring`)で捕捉し、実行時に

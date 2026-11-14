@@ -161,13 +161,27 @@ struct LifecycleDerived {
 #[elwindui::component]
 impl LifecycleDerived {}
 
+// PR #311 A/P2: the explicit-`base::` hook check must not fire on text that only *mentions* the
+// base hook (string literals, including inside macro arguments) or on an unrelated path whose
+// last segments look alike (`database::on_mount()`). These hooks do neither call, so the leaf
+// compiles and the base hooks still run exactly once.
+mod database {
+    pub fn on_mount() {}
+    pub fn on_unmount() {}
+}
+
 #[elwindui::component(inherits crate::LifecycleDerived)]
 struct LifecycleLeaf {
     body: view! {
         on_mount {
-            log("leaf mount");
+            let _note = "base::on_mount() is automatic";
+            database::on_mount();
+            log(format!("{}", "leaf mount"));
+            let _ = format!("base::on_mount() {}", "is not called here");
         }
         on_unmount {
+            let _note = "base::on_unmount() is automatic";
+            database::on_unmount();
             log("leaf unmount");
         }
 

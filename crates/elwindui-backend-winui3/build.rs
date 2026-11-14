@@ -537,10 +537,7 @@ fn copy_win2d_runtime(out_dir: &str, packages: &build_nuget::PinnedPackages) {
             .join(name);
         path.is_file().then_some(path)
     };
-    let profile_dir = std::path::Path::new(out_dir)
-        .ancestors()
-        .nth(3)
-        .expect("target profile directory");
+    let profile_dir = target_profile_dir(out_dir);
     let deps_dir = profile_dir.join("deps");
     std::fs::create_dir_all(&deps_dir).expect("create target/<profile>/deps directory");
 
@@ -703,12 +700,26 @@ fn generate_resources_pri(out_dir: &str) -> std::path::PathBuf {
     generated
 }
 
+/// The `target/<triple>/<profile>` directory the application and test binaries are written to,
+/// derived from this build script's `OUT_DIR`. The build-script directory layout under it depends
+/// on the cargo version: `<profile>/build/<pkg>-<hash>/out` up to cargo 1.99 and
+/// `<profile>/build/<pkg>/<hash>/out` from cargo 1.100, so a fixed ancestor depth lands on
+/// `<profile>/build` with the newer layout and deploys nothing beside the binaries. Take the
+/// parent of the nearest `build` ancestor instead, which is the profile directory in both layouts
+/// (neither the hash nor this package's directory is named `build`).
+#[cfg(target_os = "windows")]
+fn target_profile_dir(out_dir: &str) -> &std::path::Path {
+    std::path::Path::new(out_dir)
+        .ancestors()
+        .skip(1)
+        .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "build"))
+        .and_then(std::path::Path::parent)
+        .unwrap_or_else(|| panic!("target profile directory above OUT_DIR {out_dir}"))
+}
+
 #[cfg(target_os = "windows")]
 fn deploy_resources_pri(out_dir: &str, resources_pri: &std::path::Path) {
-    let profile_dir = std::path::Path::new(out_dir)
-        .ancestors()
-        .nth(3)
-        .expect("target profile directory");
+    let profile_dir = target_profile_dir(out_dir);
     std::fs::copy(resources_pri, profile_dir.join("resources.pri"))
         .expect("copy resources.pri beside application binary");
     // `cargo test`/`cargo bench` binaries run from `target/<profile>/deps/`, not
@@ -725,10 +736,7 @@ fn deploy_resources_pri(out_dir: &str, resources_pri: &std::path::Path) {
 
 #[cfg(target_os = "windows")]
 fn deploy_accessibility_winmd(out_dir: &str, component_winmd: &std::path::Path) {
-    let profile_dir = std::path::Path::new(out_dir)
-        .ancestors()
-        .nth(3)
-        .expect("target profile directory");
+    let profile_dir = target_profile_dir(out_dir);
     let deps_dir = profile_dir.join("deps");
     std::fs::create_dir_all(&deps_dir).expect("create target/<profile>/deps directory");
     let filename = component_winmd

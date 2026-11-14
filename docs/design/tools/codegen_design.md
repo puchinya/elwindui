@@ -426,7 +426,7 @@ accessorを呼ぶ。
     `elwindui::__component_with_base_params!`を呼び戻す。
   - 2段目(`generate_component_with_base_params`)は受け取った名前を`ExternalBaseParamsScope`に置いて通常の
     生成を行う。`synthesize_external_base_fields`はそれらを実効フィールドの先頭へ
-    基底の型エイリアス`<基底のpath>::__elwindui_required__<Base>__<name>`型で加える
+    基底の型エイリアス`<基底のpath>::__elwindui_required__<N>_<Base>_<name>`型で加える
     (`required_param_alias_path`。`{Name}Ext`などと同じく、生成componentと同じ場所にある兄弟item)。
     継承の基底になれる生成component(shape合成・inherited view composition)は自分のコンストラクタ引数ごとに
     `#[doc(hidden)] pub type`のエイリアスを生成する。公開traitの関連型(implの`type Ty`)にすると、引数の型が
@@ -436,11 +436,23 @@ accessorを呼ぶ。
     基底値は`Base::construct(..)`を直接呼び(`#[class]`の`construct`書き換えに見える形)、各引数の変換だけを
     基底ABIの`@__ctor_arg_<name>`に任せる。派生自身のconstructor ABI macroでも、エイリアス型の引数の変換は
     基底ABIへ委ねる(`forwarded_required_param_conversion`。エイリアス名から基底のpathを復元する)。
+    `<N>`は`<Base>`の文字数である。型名にもフィールド名にも`_`や`__`を含められるので、区切り文字ではなく
+    この長さで`<Base>`を一意に復元する(`required_param_alias_base`)。
   - shape合成のrootが基底の通常Prop・既定値付きParamに設定した値は、基底を構築した直後に
     `shape_root_initial_sets`で初期値として設定する(rootのresyncは`reactive = false`の値を設定しないため)。
     同一クレートの基底は`__set_initial_*`、別クレート(または2段階生成)の基底はconstructor ABIの
-    `@root_initial`を使う。`@root_initial`は通常Prop・既定値付きParam以外の名前を無視する。設定するのは
+    `@root_initial`を使う。設定するのは
     authorした通常の値だけで、reactiveな値・semantic brush・要素・closureは従来どおりmount時の経路で扱う。
+    - 中間の祖先の`view`が参照しない祖先のフィールドは、中間の実効フィールドから外れる
+      (`resolve_effective_fields`)。同一クレートでは`TypeInfo::base_key`で祖先を順にたどり、近い段に
+      ないフィールドを`<root>.base.base...`の`__set_initial_*`で設定する。constructor ABIでは、自分のarmに
+      ない名前の`@root_initial`を、生成componentの基底があればその基底ABIへ`$recv.base`として渡す
+      (なければ無視する)。名前と値は`tt`のまま渡す。`literal`/`expr`のフラグメントとして渡すと不透明になり、
+      基底側の`"flag"`や`None`のarmに一致しない。
+    - これらの文は`construct()`の中で`Self { .. }`より前に実行される。値が派生自身のコンストラクタの
+      ローカル(必須引数・既定値付きフィールド)を参照すると`Self`へ渡す前にmoveしてしまうので、
+      参照するローカルだけをブロック内で`Clone::clone`した値に束縛し直す
+      (`clone_referenced_construct_locals`)。
   - 2段目のtokenは基底クレートのmacro展開の中で作られるので、1段目のattribute展開が渡すanchor identの
     解決文脈へ付け替える(`resolve_tokens_at`)。これで生成する`macro_rules!`の`$crate`やlintの扱いが、
     直接生成した場合と同じになる。

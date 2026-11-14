@@ -10,7 +10,10 @@
 //!   case covers a view-less derived level, a two-level chain defined in the other crate, and
 //!   same-crate code that inherits or constructs such a derived Component.
 
-#![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+#![allow(
+    macro_expanded_macro_exports_accessed_by_absolute_paths,
+    non_snake_case
+)]
 
 use std::rc::Rc;
 
@@ -179,6 +182,70 @@ fn derived_root_sets_the_base_prop_and_defaulted_param() {
     assert_eq!(texts(&*derived), ["d:true:5", "defaults"]);
 }
 
+/// A middle level whose own view references neither `flag` nor `step`; a leaf's root values for
+/// them must still reach `RequiredDefaultsBase`.
+#[elwindui::component(inherits crate::RequiredDefaultsBase)]
+struct DefaultsMiddle {
+    body: view! {
+        TextBlock { text: "middle" }
+    },
+}
+
+#[elwindui::component]
+impl DefaultsMiddle {}
+
+#[elwindui::component(inherits crate::DefaultsMiddle)]
+struct DefaultsLeaf {
+    body: view! {
+        flag: true
+        step: 5
+        TextBlock { text: "leaf" }
+    },
+}
+
+#[elwindui::component]
+impl DefaultsLeaf {}
+
+#[test]
+fn leaf_root_sets_a_base_prop_and_defaulted_param_two_hops_up() {
+    let leaf = DefaultsLeaf::new("l".to_string());
+    assert_eq!(texts(&*leaf), ["l:true:5", "middle", "leaf"]);
+}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct PayloadBase {
+    #[prop(default = Rc::new(0))]
+    payload: Rc<i32>,
+
+    body: view! {
+        TextBlock { text: format!("payload {payload}") }
+    },
+}
+
+#[elwindui::component]
+impl PayloadBase {}
+
+/// Sets the base's non-`Copy` Prop from its own Param, which it also keeps.
+#[elwindui::component(inherits crate::PayloadBase)]
+struct PayloadDerived {
+    #[param]
+    source: Rc<i32>,
+
+    body: view! {
+        payload: source
+        TextBlock { text: format!("source {source}") }
+    },
+}
+
+#[elwindui::component]
+impl PayloadDerived {}
+
+#[test]
+fn a_non_copy_own_param_set_on_the_root_is_also_kept() {
+    let derived = PayloadDerived::new(Rc::new(7));
+    assert_eq!(texts(&*derived), ["payload 7", "source 7"]);
+}
+
 /// A required input type less visible than the (always `pub`) generated Component. An inheritable
 /// base must still compile with it (no E0446), and a same-crate derived still auto-forwards it.
 struct PrivateInput(String);
@@ -302,6 +369,86 @@ impl CrossCrateRootDefaults {}
 fn cross_crate_root_sets_the_base_prop_and_defaulted_param() {
     let derived = CrossCrateRootDefaults::new("d".to_string());
     assert_eq!(texts(&*derived), ["d:true:5", "cross defaults"]);
+}
+
+/// Sets the base's non-`Copy` Prop from its own Param, which it also keeps.
+#[elwindui::component(inherits elwindui_external_component_fixture::ExternalDefaultsBase)]
+struct CrossCrateNoteFromParam {
+    #[param]
+    memo: String,
+
+    body: view! {
+        note: memo
+        TextBlock { text: format!("memo {memo}") }
+    },
+}
+
+#[elwindui::component]
+impl CrossCrateNoteFromParam {}
+
+#[test]
+fn cross_crate_non_copy_own_param_set_on_the_root_is_also_kept() {
+    let derived = CrossCrateNoteFromParam::new("d".to_string(), "!".to_string());
+    assert_eq!(texts(&*derived), ["d:false:1!", "memo !"]);
+}
+
+#[elwindui::component(inherits elwindui_external_component_fixture::ExternalDefaultsMiddle)]
+struct CrossCrateDefaultsLeaf {
+    body: view! {
+        flag: true
+        step: 5
+        TextBlock { text: "cross leaf defaults" }
+    },
+}
+
+#[elwindui::component]
+impl CrossCrateDefaultsLeaf {}
+
+#[test]
+fn cross_crate_leaf_root_sets_a_base_prop_and_defaulted_param_two_hops_up() {
+    let leaf = CrossCrateDefaultsLeaf::new("d".to_string());
+    assert_eq!(
+        texts(&*leaf),
+        ["d:true:5", "defaults middle", "cross leaf defaults"]
+    );
+}
+
+/// A cross-crate base whose type and required input names both contain `__`.
+#[elwindui::component(inherits elwindui_external_component_fixture::Odd__Name)]
+struct CrossCrateOddName {
+    body: view! {
+        TextBlock { text: format!("derived {item__id}") }
+    },
+}
+
+#[elwindui::component]
+impl CrossCrateOddName {}
+
+/// Constructs that derived Component from a view, so its constructor ABI converts `item__id`
+/// through the base's (`@__ctor_arg_item__id`, found from the required-input type alias).
+#[elwindui::component(inherits VerticalLayout)]
+struct CrossCrateOddNameUser {
+    body: view! {
+        CrossCrateOddName { item__id: "used" }
+    },
+}
+
+#[elwindui::component]
+impl CrossCrateOddNameUser {}
+
+#[test]
+fn cross_crate_names_containing_double_underscores_are_forwarded() {
+    let derived = CrossCrateOddName::new("i".to_string());
+    assert_eq!(texts(&*derived), ["odd i", "derived i"]);
+
+    let user = CrossCrateOddNameUser::new();
+    let children = user.visual_children();
+    assert_eq!(children.len(), 1);
+    let inner = children[0]
+        .as_any()
+        .downcast_ref::<CrossCrateOddName>()
+        .expect("constructed derived component");
+    assert_eq!(texts(inner), ["odd used", "derived used"]);
 }
 
 #[test]

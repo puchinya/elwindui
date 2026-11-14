@@ -5,7 +5,11 @@
 //! same qualified path and defining-crate props-macro boundary as an application that depends on
 //! both crates.
 
-#![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+#![allow(
+    macro_expanded_macro_exports_accessed_by_absolute_paths,
+    non_camel_case_types,
+    non_snake_case
+)]
 
 use std::rc::Rc;
 
@@ -257,10 +261,39 @@ pub struct ExternalDefaultsBase {
     flag: bool,
     #[param(default = 1)]
     step: i32,
+    #[prop(default = String::new())]
+    note: String,
     body: view! {
-        TextBlock { text: format!("{title}:{flag}:{step}") }
+        TextBlock { text: format!("{title}:{flag}:{step}{note}") }
     },
 }
 
 #[component]
 impl ExternalDefaultsBase {}
+
+/// Issue #166 (A2): a middle level with its own view that references none of
+/// `ExternalDefaultsBase`'s ordinary Props or defaulted Params, so a downstream leaf's root values
+/// for them must still reach the base two hops up.
+#[component(inherits crate::ExternalDefaultsBase)]
+pub struct ExternalDefaultsMiddle {
+    body: view! {
+        TextBlock { text: "defaults middle" }
+    },
+}
+
+#[component]
+impl ExternalDefaultsMiddle {}
+
+/// Issue #166 (A2): a Component and a required input whose names contain `__`, so the
+/// required-input type alias naming must stay unambiguous for a downstream derived Component.
+#[component(inherits VerticalLayout)]
+pub struct Odd__Name {
+    #[param]
+    item__id: String,
+    body: view! {
+        TextBlock { text: format!("odd {item__id}") }
+    },
+}
+
+#[component]
+impl Odd__Name {}

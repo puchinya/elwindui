@@ -189,18 +189,6 @@ impl<T: ?Sized + 'static> WiringWeak for WeakEmbeddedHandle<T> {
     }
 }
 
-/// The declared type of one required constructor input (`#[param]` / `#[bindable]` without a
-/// default) of a generated Component, keyed by a stable hash of the field name
-/// (`elwindui_codegen`'s `required_param_key`). A derived Component in another crate cannot name
-/// the base's field types (they may use imports only visible in the defining module), so its
-/// auto-forwarded constructor parameters are typed `<Base as RequiredParam<KEY>>::Ty` instead,
-/// resolved where the base is defined. Generated code only; not part of the authoring API.
-#[doc(hidden)]
-pub trait RequiredParam<const KEY: u64> {
-    /// The field's declared type.
-    type Ty;
-}
-
 /// A strong, cloneable handle to a value embedded inside an `Rc`-owned outer value: the owner
 /// `Rc` plus a projection to the embedded part. It dereferences to the embedded value, so
 /// generated wiring written against `this: Rc<Self>` (method calls, `&*this`, [`WiringOwner`])

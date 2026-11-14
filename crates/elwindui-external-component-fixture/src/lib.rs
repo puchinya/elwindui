@@ -245,3 +245,22 @@ pub struct ExternalRequiredMiddle {
 
 #[component]
 impl ExternalRequiredMiddle {}
+
+/// Issue #166 (A2): an external shape-composed base with a required input next to an ordinary
+/// Prop and a defaulted Param, so a downstream derived root that sets the latter two proves they are
+/// still applied when the base is constructed through its constructor ABI.
+#[component(inherits VerticalLayout)]
+pub struct ExternalDefaultsBase {
+    #[param]
+    title: String,
+    #[prop(default = false)]
+    flag: bool,
+    #[param(default = 1)]
+    step: i32,
+    body: view! {
+        TextBlock { text: format!("{title}:{flag}:{step}") }
+    },
+}
+
+#[component]
+impl ExternalDefaultsBase {}

@@ -386,16 +386,45 @@ fn rewrite_crate_tokens(tokens: TokenStream) -> TokenStream {
 /// generated components use the same-crate registry, while builtin and unresolved-unqualified
 /// construction keep their existing builtin fallback. The macro itself is exported at the defining
 /// crate root, so a nested authored path retains only its first crate/alias segment here.
-/// Issue #166 (A2): stable key of a required constructor input for
-/// `elwindui::core::reactive::RequiredParam` — FNV-1a over the field name, so every level of an
-/// inheritance chain (and every crate) derives the same key for the same name.
-pub(crate) fn required_param_key(name: &str) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in name.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+/// Issue #166 (A2): name of the hidden type alias an inheritable Component emits beside itself for
+/// each required constructor input, so a derived Component in another crate can name the input's
+/// type. A `pub type` alias of a less visible type is only the `private_interfaces` lint (allowed
+/// on the alias), unlike a public trait impl's associated type, which is a hard E0446 error.
+const REQUIRED_PARAM_ALIAS_PREFIX: &str = "__elwindui_required__";
+
+pub(crate) fn required_param_alias_ident(type_name: &str, name: &str) -> syn::Ident {
+    format_ident!("{REQUIRED_PARAM_ALIAS_PREFIX}{type_name}__{name}")
+}
+
+/// The alias of `base_path`'s required input `name`, at the same path as the Component itself
+/// (the convention every generated sibling item, such as `{Name}Ext`, already follows).
+pub(crate) fn required_param_alias_path(base_path: &str, name: &str) -> String {
+    let type_name = dsl_type_ident(base_path).to_string();
+    let alias = required_param_alias_ident(&type_name, name);
+    match base_path.rsplit_once("::") {
+        Some((parent, _)) => format!("{parent}::{alias}"),
+        None => alias.to_string(),
     }
-    hash
+}
+
+/// Recovers the Component path from a `required_param_alias_path` type, if `ty` is one.
+fn required_param_alias_base(ty: &syn::Type) -> Option<String> {
+    let syn::Type::Path(type_path) = ty else {
+        return None;
+    };
+    if type_path.qself.is_some() {
+        return None;
+    }
+    let last = type_path.path.segments.last()?;
+    let rest = last
+        .ident
+        .to_string()
+        .strip_prefix(REQUIRED_PARAM_ALIAS_PREFIX)?
+        .to_string();
+    let (type_name, _) = rest.split_once("__")?;
+    let mut base = type_path.path.clone();
+    base.segments.last_mut()?.ident = format_ident!("{type_name}");
+    Some(quote! { #base }.to_string().replace(' ', ""))
 }
 
 thread_local! {
@@ -1030,26 +1059,12 @@ fn constructor_vec_item(ty: &syn::Type) -> Option<&syn::Type> {
 /// real `new` in its exact declaration order. Initial non-constructor assignments are routed
 /// through the defining crate's existing props-shape macro; constructor-consumed fields are
 /// deliberately no-ops there, preventing a second setter call.
-/// Issue #166 (A2): for a constructor input typed `<Base as RequiredParam<KEY>>::Ty`, the
-/// conversion of an authored value delegated to `Base`'s constructor ABI (`@__ctor_arg_<name>`),
-/// spelled for use inside this crate's exported constructor macro.
+/// Issue #166 (A2): for a constructor input typed through a base's required-input alias
+/// (`required_param_alias_path`), the conversion of an authored value delegated to that base's
+/// constructor ABI (`@__ctor_arg_<name>`), spelled for use inside this crate's exported
+/// constructor macro.
 fn forwarded_required_param_conversion(ty: &syn::Type, name: &syn::Ident) -> Option<TokenStream> {
-    let syn::Type::Path(type_path) = ty else {
-        return None;
-    };
-    let qself = type_path.qself.as_ref()?;
-    let is_required_param = type_path
-        .path
-        .segments
-        .iter()
-        .any(|segment| segment.ident == "RequiredParam");
-    if !is_required_param {
-        return None;
-    }
-    let syn::Type::Path(base) = qself.ty.as_ref() else {
-        return None;
-    };
-    let base_text = quote! { #base }.to_string().replace(' ', "");
+    let base_text = required_param_alias_base(ty)?;
     let ctor_macro = rewrite_crate_tokens(external_ctor_macro_path(&base_text));
     let helper = format_ident!("__ctor_arg_{name}");
     let name_literal = syn::LitStr::new(&name.to_string(), proc_macro2::Span::call_site());
@@ -1081,20 +1096,21 @@ fn build_constructor_macro(
         .collect();
     let required_param_idents: Vec<&syn::Ident> =
         shape.params.iter().map(|param| &param.name).collect();
-    let type_ident = format_ident!("{type_name}");
-    // Only a Component that can be an inheritance base needs its input types exported; emitting
-    // them elsewhere would turn a private input type into a private-in-public error (E0446).
-    let required_param_impls: TokenStream = shape
+    // Only a Component that can be an inheritance base needs its input types exported. The alias
+    // keeps a less visible input type a lint (allowed here), never an E0446 error; a derived
+    // Component in another crate can still only use it when the type is public there.
+    let required_param_aliases: TokenStream = shape
         .params
         .iter()
         .filter(|_| inheritable_base)
         .map(|param| {
-            let key = required_param_key(&param.name.to_string());
+            let alias = required_param_alias_ident(type_name, &param.name.to_string());
             let ty = &param.ty;
             quote! {
-                impl elwindui::core::reactive::RequiredParam<#key> for #type_ident {
-                    type Ty = #ty;
-                }
+                /// Constructor input type of an inheritable Component (Issue #166).
+                #[doc(hidden)]
+                #[allow(non_camel_case_types, dead_code, private_interfaces)]
+                pub type #alias = #ty;
             }
         })
         .collect();
@@ -1106,7 +1122,7 @@ fn build_constructor_macro(
         let name_literal =
             syn::LitStr::new(&param.name.to_string(), proc_macro2::Span::call_site());
         // Issue #166 (A2): an auto-forwarded base input is typed through the base's
-        // `RequiredParam`, so only the base's own constructor ABI knows how to convert a value.
+        // required-input alias, so only the base's own constructor ABI knows how to convert a value.
         let converted = forwarded_required_param_conversion(&param.ty, &param.name)
             .unwrap_or_else(|| generated_constructor_value(&param.ty, quote! { $value }));
         let option_some_arms = constructor_option_inner(&param.ty)
@@ -1307,6 +1323,11 @@ fn build_constructor_macro(
             }
         };
         initial_field_arms.extend(quote! {
+            (@root_initial_typed $recv:expr, #name_literal, $value:expr, $environment:expr) => {
+                #set_typed
+            };
+            (@root_initial $recv:expr, #name_literal, None, $environment:expr) => { #set_none };
+            (@root_initial $recv:expr, #name_literal, $value:expr, $environment:expr) => { #set_value };
             (@initial_named_typed $recv:expr, #name_literal, $value:expr, $environment:expr) => {
                 #set_typed
             };
@@ -1681,6 +1702,11 @@ fn build_constructor_macro(
             #initial_field_arms
             #initial_named_required_arms
             #initial_named_unknown
+            // Issue #166 (A2): a derived Component's view root sets the base's ordinary Props and
+            // defaulted Params right after constructing it. Every other name (a required input
+            // passed to the constructor, an inherited UIElement property) is applied elsewhere.
+            (@root_initial_typed $recv:expr, $name:literal, $value:expr, $environment:expr) => {};
+            (@root_initial $recv:expr, $name:literal, $value:expr, $environment:expr) => {};
             #new_initial_field_arms
             #new_initial_required_arms
             #new_initial_lookup_arms
@@ -1694,7 +1720,7 @@ fn build_constructor_macro(
             #writable_arms
             (@writable_after_construct $name:ident) => { false };
         }
-        #required_param_impls
+        #required_param_aliases
     }
 }
 
@@ -2607,7 +2633,7 @@ fn synthesize_external_base_fields(
     // Issue #166 (A2): the base's required constructor inputs, delivered by its constructor ABI
     // macro in phase two (`generate_component_with_base_params`). Each one the composed root does
     // not set to a value of its own is auto-forwarded as a constructor input of `c`, typed through
-    // the base's `RequiredParam` impl (the field's own type may not be nameable here). They lead
+    // the base's required-input alias (the field's own type may not be nameable here). They lead
     // the effective field list, so constructor order is base-first.
     let external_required: Vec<FieldDef> = external_base_params(&c.name)
         .unwrap_or_default()
@@ -2621,18 +2647,12 @@ fn synthesize_external_base_fields(
                 })
             })
         })
-        .map(|name| {
-            let key = required_param_key(&name);
-            FieldDef {
-                ty: format!(
-                    "<{} as elwindui::core::reactive::RequiredParam<{key}>>::Ty",
-                    base_path.unwrap_or(base)
-                ),
-                name,
-                kind: FieldKind::Param,
-                attrs: Vec::new(),
-                initializer: None,
-            }
+        .map(|name| FieldDef {
+            ty: required_param_alias_path(base_path.unwrap_or(base), &name),
+            name,
+            kind: FieldKind::Param,
+            attrs: Vec::new(),
+            initializer: None,
         })
         .collect();
     let Some(view) = view else {
@@ -7568,6 +7588,8 @@ fn generate_view(
                                 )
                             });
                     construct_stmts.extend(quote! { let #binding: #base_impl_ty = #value; });
+                    construct_stmts
+                        .extend(shape_root_initial_sets(node, &ctx, from, table, component));
                 }
                 continue;
             }
@@ -15281,7 +15303,8 @@ fn emit_construction(
         // list for positional arguments. Defaulted Params and ordinary Props are applied through
         // the matching pre-mount initial setters below.
         let args = build_component_args(node, ctx, from, table, info, plan, false);
-        let optional_setters = build_component_optional_setters(node, ctx, from, table, info);
+        let optional_setters =
+            build_component_optional_setters(node, ctx, from, table, info, false);
         // CI-7 of #80 (docs/design/runtime/component_lifecycle_design.md §4f): a node declared
         // inside an `EnvironmentScope` constructs via `__new_unmounted` (no automatic self-mount)
         // and is then mounted explicitly, right here, against the scope's own derived
@@ -15929,6 +15952,7 @@ fn build_component_optional_setters(
     from: &Module,
     table: &SymbolTable,
     info: &TypeInfo,
+    static_only: bool,
 ) -> Vec<TokenStream> {
     let binding = &node.binding;
     let initial_fields = info.effective_fields.iter().filter(|f| {
@@ -15942,6 +15966,19 @@ fn build_component_optional_setters(
     for field in initial_fields {
         let name = field.name.as_str();
         let ty = field.ty.as_str();
+        // `static_only` (a shape-composition root, set before `Self` exists): only an authored
+        // plain value applies here. A reactive value is pushed by the root's resync at mount, a
+        // semantic brush needs the mount environment, and content, element and closure values
+        // are wired once the view's children and `Self` exist.
+        if static_only
+            && (is_semantic_brush_property(info, name)
+                || find_attr(node, name).is_none_or(|expr| {
+                    matches!(expr, ViewExpr::Element(_) | ViewExpr::Closure { .. })
+                        || view_expr_has_reactive_dependency(expr, ctx)
+                }))
+        {
+            continue;
+        }
         let setter_ident = if field.kind == FieldKind::Param {
             format_ident!("__set_initial_param_{}", name)
         } else {
@@ -16146,6 +16183,65 @@ fn local_content_initial_setter_applies(node: &PlannedNode, info: &TypeInfo) -> 
         return false;
     }
     true
+}
+
+/// Issue #166 (A2): applies the ordinary Props and defaulted Params a shape-composition root sets on
+/// its generated base (`flag: true` in a derived view), right after `build_component_value`
+/// constructed it. Only static values are set here: a reactive one is pushed by the root's resync at
+/// mount, and that resync skips static values (`reactive = false`), so without this they would
+/// keep the base's declared defaults.
+fn shape_root_initial_sets(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    component: &ComponentDef,
+) -> TokenStream {
+    let binding = &node.binding;
+    let ctor_macro = match (
+        external_base_params(&component.name),
+        component.base_path.as_deref(),
+    ) {
+        (Some(_), Some(base_path)) => Some(external_ctor_macro_path(base_path)),
+        _ => match table.resolve(from, &node.type_path) {
+            Some(info) if !is_hand_written_native(info) => {
+                let setters = build_component_optional_setters(node, ctx, from, table, info, true);
+                return quote! { #(#setters)* };
+            }
+            Some(_) => None,
+            None => dsl_ctor_macro_path(&node.type_path, None),
+        },
+    };
+    let Some(ctor_macro) = ctor_macro else {
+        return TokenStream::new();
+    };
+    let environment = format_ident!("__elwindui_root_environment");
+    let mut sets: Vec<TokenStream> = Vec::new();
+    for attribute in external_attribute_values(node, ctx, from, table) {
+        if attribute.synthesized
+            || find_attr(node, &attribute.name.to_string()).is_none_or(|expr| {
+                matches!(expr, ViewExpr::Element(_) | ViewExpr::Closure { .. })
+                    || view_expr_has_reactive_dependency(expr, ctx)
+            })
+        {
+            continue;
+        }
+        let name_literal =
+            syn::LitStr::new(&attribute.name.to_string(), proc_macro2::Span::call_site());
+        let value = &attribute.value;
+        sets.push(if attribute.typed {
+            quote! { #ctor_macro!(@root_initial_typed #binding, #name_literal, #value, &#environment); }
+        } else {
+            quote! { #ctor_macro!(@root_initial #binding, #name_literal, #value, &#environment); }
+        });
+    }
+    if sets.is_empty() {
+        return TokenStream::new();
+    }
+    quote! {
+        let #environment = elwindui::core::environment::application_environment();
+        #(#sets)*
+    }
 }
 
 /// Builds the plain (not yet `Rc`-wrapped) `create_<snake case>(args)` call for a shape-composition
@@ -23613,40 +23709,47 @@ struct NotepadWindow {
         );
     }
 
-    /// Issue #166 (A2): every level of an inheritance chain (and every crate) must derive the same
-    /// `RequiredParam` key for the same input name, and distinct names must not collide.
+    /// Issue #166 (A2): the required-input alias sits beside the Component at the authored path, and
+    /// the Component path can be recovered from it.
     #[test]
-    fn required_param_key_is_stable_and_name_specific() {
-        assert_eq!(required_param_key("title"), required_param_key("title"));
-        assert_eq!(required_param_key(""), 0xcbf2_9ce4_8422_2325);
-        let keys: std::collections::HashSet<u64> = ["title", "count", "vm", "suffix", "extra"]
-            .into_iter()
-            .map(required_param_key)
-            .collect();
-        assert_eq!(keys.len(), 5);
+    fn required_param_alias_path_is_a_sibling_of_the_component() {
+        assert_eq!(
+            required_param_alias_path("other_crate::widgets::Base", "title"),
+            "other_crate::widgets::__elwindui_required__Base__title"
+        );
+        assert_eq!(
+            required_param_alias_path("Base", "max_count"),
+            "__elwindui_required__Base__max_count"
+        );
+        let alias: syn::Type =
+            syn::parse_str(&required_param_alias_path("crate::Middle", "max_count")).unwrap();
+        assert_eq!(
+            required_param_alias_base(&alias).as_deref(),
+            Some("crate::Middle")
+        );
+        let plain: syn::Type = syn::parse_str("String").unwrap();
+        assert!(required_param_alias_base(&plain).is_none());
     }
 
-    /// Issue #166 (A2): an auto-forwarded input keeps its opaque `RequiredParam` type, so its value
+    /// Issue #166 (A2): an auto-forwarded input keeps its base's opaque alias type, so its value
     /// conversion is delegated to the defining base's constructor ABI (`$crate`-relative for a
     /// same-crate base, crate-prefixed for another crate's).
     #[test]
     fn forwarded_required_param_conversion_delegates_to_the_base_abi() {
         let name = format_ident!("title");
         let external: syn::Type =
-            syn::parse_str("<other_crate::Base as elwindui::core::reactive::RequiredParam<7>>::Ty")
-                .unwrap();
+            syn::parse_str(&required_param_alias_path("other_crate::Base", "title")).unwrap();
         let tokens = forwarded_required_param_conversion(&external, &name)
-            .expect("RequiredParam-typed input")
+            .expect("alias-typed input")
             .to_string();
         assert!(
             tokens.contains("other_crate :: __elwindui_ctor_Base ! (@ __ctor_arg_title"),
             "{tokens}"
         );
         let local: syn::Type =
-            syn::parse_str("<crate::Middle as elwindui::core::reactive::RequiredParam<7>>::Ty")
-                .unwrap();
+            syn::parse_str(&required_param_alias_path("crate::Middle", "title")).unwrap();
         let tokens = forwarded_required_param_conversion(&local, &name)
-            .expect("RequiredParam-typed input")
+            .expect("alias-typed input")
             .to_string();
         assert!(
             tokens.contains("$ crate :: __elwindui_ctor_Middle !"),

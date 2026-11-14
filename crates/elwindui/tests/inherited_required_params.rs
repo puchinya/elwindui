@@ -140,6 +140,86 @@ fn required_base_inputs_forward_through_two_levels_with_views() {
     assert_eq!(texts(&*leaf), ["l", "vm-c", "derived l 3", "leaf"]);
 }
 
+#[elwindui::component(inherits VerticalLayout)]
+struct RequiredDefaultsBase {
+    #[param]
+    title: String,
+    #[prop(default = false)]
+    flag: bool,
+    #[param(default = 1)]
+    step: i32,
+
+    body: view! {
+        TextBlock { text: format!("{title}:{flag}:{step}") }
+    },
+}
+
+#[elwindui::component]
+impl RequiredDefaultsBase {}
+
+/// Sets the base's ordinary Prop and defaulted Param on its root while `title` is auto-forwarded.
+#[elwindui::component(inherits crate::RequiredDefaultsBase)]
+struct RootDefaultsDerived {
+    #[param]
+    extra: i32,
+
+    body: view! {
+        flag: true
+        step: extra
+        TextBlock { text: "defaults" }
+    },
+}
+
+#[elwindui::component]
+impl RootDefaultsDerived {}
+
+#[test]
+fn derived_root_sets_the_base_prop_and_defaulted_param() {
+    let derived = RootDefaultsDerived::new("d".to_string(), 5);
+    assert_eq!(texts(&*derived), ["d:true:5", "defaults"]);
+}
+
+/// A required input type less visible than the (always `pub`) generated Component. An inheritable
+/// base must still compile with it (no E0446), and a same-crate derived still auto-forwards it.
+struct PrivateInput(String);
+
+impl std::fmt::Display for PrivateInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct PrivateInputBase {
+    #[param]
+    input: Rc<PrivateInput>,
+
+    body: view! {
+        TextBlock { text: format!("{input}") }
+    },
+}
+
+#[elwindui::component]
+impl PrivateInputBase {}
+
+#[elwindui::component(inherits crate::PrivateInputBase)]
+struct PrivateInputDerived {
+    body: view! {
+        TextBlock { text: "private derived" }
+    },
+}
+
+#[elwindui::component]
+impl PrivateInputDerived {}
+
+#[test]
+fn a_less_visible_required_input_type_still_compiles_and_forwards() {
+    let base = PrivateInputBase::new(Rc::new(PrivateInput("p".to_string())));
+    assert_eq!(texts(&*base), ["p"]);
+    let derived = PrivateInputDerived::new(Rc::new(PrivateInput("q".to_string())));
+    assert_eq!(texts(&*derived), ["q", "private derived"]);
+}
+
 // ---------------------------------------------------------------------------
 // Generated base in another crate. No `use` items are needed for the base's traits.
 // ---------------------------------------------------------------------------
@@ -204,6 +284,25 @@ struct CrossCrateUser {
 
 #[elwindui::component]
 impl CrossCrateUser {}
+
+/// Sets the base's ordinary Prop and defaulted Param on its root while `title` is auto-forwarded.
+#[elwindui::component(inherits elwindui_external_component_fixture::ExternalDefaultsBase)]
+struct CrossCrateRootDefaults {
+    body: view! {
+        flag: true
+        step: 5
+        TextBlock { text: "cross defaults" }
+    },
+}
+
+#[elwindui::component]
+impl CrossCrateRootDefaults {}
+
+#[test]
+fn cross_crate_root_sets_the_base_prop_and_defaulted_param() {
+    let derived = CrossCrateRootDefaults::new("d".to_string());
+    assert_eq!(texts(&*derived), ["d:true:5", "cross defaults"]);
+}
 
 #[test]
 fn cross_crate_required_base_inputs_are_auto_forwarded() {

@@ -426,13 +426,21 @@ accessorを呼ぶ。
     `elwindui::__component_with_base_params!`を呼び戻す。
   - 2段目(`generate_component_with_base_params`)は受け取った名前を`ExternalBaseParamsScope`に置いて通常の
     生成を行う。`synthesize_external_base_fields`はそれらを実効フィールドの先頭へ
-    `<Base as elwindui::core::reactive::RequiredParam<KEY>>::Ty`型で加える(`KEY`は名前のFNV-1a、
-    `required_param_key`。継承の基底になれる生成component(shape合成・inherited view composition)は自分の
-    コンストラクタ引数ごとに`RequiredParam`をimplする。implは公開traitの関連型なので、引数の型がcomponentより
-    非公開だとE0446になる。その他のcomponentには生成しない)。
+    基底の型エイリアス`<基底のpath>::__elwindui_required__<Base>__<name>`型で加える
+    (`required_param_alias_path`。`{Name}Ext`などと同じく、生成componentと同じ場所にある兄弟item)。
+    継承の基底になれる生成component(shape合成・inherited view composition)は自分のコンストラクタ引数ごとに
+    `#[doc(hidden)] pub type`のエイリアスを生成する。公開traitの関連型(implの`type Ty`)にすると、引数の型が
+    componentより非公開なときにE0446(hard error)となり、既存のcomponentがコンパイルできなくなる。
+    エイリアスなら`private_interfaces` lintで済み、生成側で`allow`する。別クレートの派生がそのエイリアスを
+    使えるのは型が派生側から見える場合だけである。その他のcomponentにはエイリアスを生成しない。
     基底値は`Base::construct(..)`を直接呼び(`#[class]`の`construct`書き換えに見える形)、各引数の変換だけを
-    基底ABIの`@__ctor_arg_<name>`に任せる。派生自身のconstructor ABI macroでも、`RequiredParam`型の引数の変換は
-    基底ABIへ委ねる(`forwarded_required_param_conversion`)。
+    基底ABIの`@__ctor_arg_<name>`に任せる。派生自身のconstructor ABI macroでも、エイリアス型の引数の変換は
+    基底ABIへ委ねる(`forwarded_required_param_conversion`。エイリアス名から基底のpathを復元する)。
+  - shape合成のrootが基底の通常Prop・既定値付きParamに設定した値は、基底を構築した直後に
+    `shape_root_initial_sets`で初期値として設定する(rootのresyncは`reactive = false`の値を設定しないため)。
+    同一クレートの基底は`__set_initial_*`、別クレート(または2段階生成)の基底はconstructor ABIの
+    `@root_initial`を使う。`@root_initial`は通常Prop・既定値付きParam以外の名前を無視する。設定するのは
+    authorした通常の値だけで、reactiveな値・semantic brush・要素・closureは従来どおりmount時の経路で扱う。
   - 2段目のtokenは基底クレートのmacro展開の中で作られるので、1段目のattribute展開が渡すanchor identの
     解決文脈へ付け替える(`resolve_tokens_at`)。これで生成する`macro_rules!`の`$crate`やlintの扱いが、
     直接生成した場合と同じになる。

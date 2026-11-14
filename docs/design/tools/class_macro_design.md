@@ -105,7 +105,9 @@ Only `@set`'s `wrap_prop_value` knows how to shape a value into a declared prope
 適用してsetterへ渡す」へ展開し、それ以外の名前は親classのshape macroへ転送する。親を持たない終端では、
 元の裸の名前(`name` / `name = value` / `name op= value`)をそのまま返し、未宣言名をpropertyとして
 推測しない。生成componentは公開writable Propだけをclass propertyとして
-宣言するため、`#[state]`・computed・paramはこの経路では解決されない。
+宣言するため、`#[state]`・computedはこの経路では解決されない。`#[param]`は`#[fixed(name)]`(読み取り専用の
+コンストラクタ入力)として宣言され、`@inherited_get`だけが宣言元のgetterへ解決する(`@set`・`@field_type`等の
+property protocolには参加しない)。派生componentへ自動転送された基底の必須入力を裸名で読むための経路である。
 
 ## Validation boundary
 

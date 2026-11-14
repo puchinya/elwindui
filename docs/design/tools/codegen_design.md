@@ -402,13 +402,50 @@ accessorを呼ぶ。
   `ViewCtx::weak_wiring`により所有者を弱参照(`WiringOwner::downgrade_wiring`)で捕捉し、実行時に
   `WiringWeak::upgrade_wiring`で取り直す(所有者が無ければ何もしない)。強参照で捕捉すると
   `所有者 → 子 → ハンドラ → 所有者`の循環で、drop・unmountの後も解放されない。購読・unmount hookの
-  弱参照も同じtraitを使い、`Rc<Self>`と`EmbeddedHandle<Self>`の両方で同じ生成コードが動く。rootウィジェット
-  だけをtreeへ渡すshape合成以外のcomponentは、component自身を保持する経路が他に無い場合があるため従来どおり。
+  弱参照も同じtraitを使い、`Rc<Self>`と`EmbeddedHandle<Self>`の両方で同じ生成コードが動く。ホスト合成
+  (`inherits Window`)も同じく弱参照にする。表示中はアプリケーション層のWindow registry(Issue #254)が
+  所有者の強参照を持つので、`close()`後は子要素に残ったハンドラが所有者を延命しない。templateの保存先
+  (`ViewCtx::is_template_storage`)はtemplated parentへの既存の弱参照経路を使う。
 - `for`のitem factoryは計画(`plan_dynamic_entry`)の時点で生成されるため、計画の前に暫定の
   `ViewCtx::mutable_own_fields`を設定し、`for`要素のハンドラからも自分の可変Propを読み書きできるようにする。
   item購読内でウィジェットを束縛する名前は`__elwindui_item_widget`で、ループ変数名`item`と衝突しない。
 - 自分の可変Propへの複合代入(`count += 1`)は、継承Propと同じく自分のgetterで取った一時値へ元の`op=`を
   適用してsetterへ渡す。
+- **基底の必須入力の自動転送(A2)**: 既定値の無い基底の`#[param]`/`#[bindable]`のうち、派生の合成rootが
+  設定していないものは、`resolve_effective_fields`が派生の実効フィールドに残し、`generate_view`が合成rootへ
+  同名転送(`name: name`)の属性を合成する。以後は既存のroot同名転送と同じ扱いで、コンストラクタ引数には
+  なるが派生側に格納領域・getterは作らない(`ViewCtx::forwarded_inherited_fields`。構築後の読み取りは
+  `inherited_field_read`、継承した`#[bindable]`の購読は埋め込まれた基底自身)。各生成componentは自分の
+  `#[param]`を`#[fixed(name)]`として`#[class]`へ宣言し、shape macroの`@inherited_get`が宣言元のgetterへ
+  解決できるようにする。
+- **別クレートの基底の必須入力**: 派生のproc-macro展開時には別クレートの基底の必須入力が見えないため、
+  2段階で生成する。
+  - 1段目(`generate_component_impl_real`)は、基底が別クレートの生成component(`is_external_generated_base`)
+    または`TypeInfo::deferred_constructor`な同一クレートのcomponentなら生成せず、基底のconstructor ABI macroの
+    `@required_params`を呼ぶ。基底は自分のコンストラクタ引数名を順に並べて
+    `elwindui::__component_with_base_params!`を呼び戻す。
+  - 2段目(`generate_component_with_base_params`)は受け取った名前を`ExternalBaseParamsScope`に置いて通常の
+    生成を行う。`synthesize_external_base_fields`はそれらを実効フィールドの先頭へ
+    基底の型エイリアス`<基底のpath>::__elwindui_required__<Base>__<name>`型で加える
+    (`required_param_alias_path`。`{Name}Ext`などと同じく、生成componentと同じ場所にある兄弟item)。
+    継承の基底になれる生成component(shape合成・inherited view composition)は自分のコンストラクタ引数ごとに
+    `#[doc(hidden)] pub type`のエイリアスを生成する。公開traitの関連型(implの`type Ty`)にすると、引数の型が
+    componentより非公開なときにE0446(hard error)となり、既存のcomponentがコンパイルできなくなる。
+    エイリアスなら`private_interfaces` lintで済み、生成側で`allow`する。別クレートの派生がそのエイリアスを
+    使えるのは型が派生側から見える場合だけである。その他のcomponentにはエイリアスを生成しない。
+    基底値は`Base::construct(..)`を直接呼び(`#[class]`の`construct`書き換えに見える形)、各引数の変換だけを
+    基底ABIの`@__ctor_arg_<name>`に任せる。派生自身のconstructor ABI macroでも、エイリアス型の引数の変換は
+    基底ABIへ委ねる(`forwarded_required_param_conversion`。エイリアス名から基底のpathを復元する)。
+  - shape合成のrootが基底の通常Prop・既定値付きParamに設定した値は、基底を構築した直後に
+    `shape_root_initial_sets`で初期値として設定する(rootのresyncは`reactive = false`の値を設定しないため)。
+    同一クレートの基底は`__set_initial_*`、別クレート(または2段階生成)の基底はconstructor ABIの
+    `@root_initial`を使う。`@root_initial`は通常Prop・既定値付きParam以外の名前を無視する。設定するのは
+    authorした通常の値だけで、reactiveな値・semantic brush・要素・closureは従来どおりmount時の経路で扱う。
+  - 2段目のtokenは基底クレートのmacro展開の中で作られるので、1段目のattribute展開が渡すanchor identの
+    解決文脈へ付け替える(`resolve_tokens_at`)。これで生成する`macro_rules!`の`$crate`やlintの扱いが、
+    直接生成した場合と同じになる。
+  - 同一クレートでそのcomponentを使う側は`TypeInfo::deferred_constructor`を見て、継承するなら同じ2段階生成を、
+    `view`から構築するなら`crate::__elwindui_ctor_<Name>!`による名前付き構築(外部生成componentと同じ経路)を使う。
 
 #### Component override bridge
 

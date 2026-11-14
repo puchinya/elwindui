@@ -1625,6 +1625,11 @@ impl Parse for PropDecl {
 #[derive(Default)]
 struct PropDecls {
     props: Vec<PropDecl>,
+    /// Issue #166 (A2): `#[fixed(name)]` — a read-only constructor input (`#[param]`) of a
+    /// generated Component. Only readable through `@inherited_get`, so a derived Component (in any
+    /// crate) can read an inherited `#[param]` by its bare name; it has no setter, field-type or
+    /// content protocol.
+    fixed: Vec<Ident>,
     /// `#[content(children)]` — which property receives bare nested child elements. Routinely names
     /// a property an *ancestor* declares (`VerticalLayout`'s content is `Layout`'s `children`), so
     /// it is validated by the deferred `@assert_declared` probe rather than locally.
@@ -1638,7 +1643,10 @@ struct PropDecls {
 
 impl PropDecls {
     fn is_declared(&self) -> bool {
-        !self.props.is_empty() || self.content_field.is_some() || self.text_style
+        !self.props.is_empty()
+            || !self.fixed.is_empty()
+            || self.content_field.is_some()
+            || self.text_style
     }
 
     fn content_field(&self) -> Option<&Ident> {
@@ -1665,6 +1673,8 @@ fn take_prop_decls(attrs: &[syn::Attribute]) -> syn::Result<(PropDecls, Vec<syn:
                 ));
             }
             shape.content_field = Some(attr.parse_args::<Ident>()?);
+        } else if attr.path().is_ident("fixed") {
+            shape.fixed.push(attr.parse_args::<Ident>()?);
         } else if attr.path().is_ident("text_style") {
             shape.text_style = true;
         } else {
@@ -2002,6 +2012,19 @@ fn build_props_macro(
                     let mut __elwindui_inherited_value = $recv.#name();
                     __elwindui_inherited_value $op $value;
                     $recv.#setter(__elwindui_inherited_value)
+                }};
+            }
+        })
+        .collect();
+    let inherited_fixed_arms: Vec<TokenStream2> = shape
+        .fixed
+        .iter()
+        .map(|name| {
+            quote! {
+                (@inherited_get_from $origin:ident, $recv:expr, #name) => {{
+                    #[allow(unused_imports)]
+                    use #own_ext as _;
+                    $recv.#name()
                 }};
             }
         })
@@ -3018,6 +3041,7 @@ fn build_props_macro(
                 $crate::#macro_ident!(@inherited_op_assign_from #bare_ident, $recv, $name, $op, $value)
             };
             #(#inherited_access_arms)*
+            #(#inherited_fixed_arms)*
             #inherited_access_fallback
             #(#field_type_arms)*
             #field_type_fallback

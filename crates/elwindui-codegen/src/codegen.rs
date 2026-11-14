@@ -48,6 +48,11 @@ pub struct SymbolTable {
 
 #[derive(Clone)]
 pub struct TypeInfo {
+    /// Issue #166 (A2): this Component's constructor inputs are only fully known through its own
+    /// constructor ABI macro, because a base in its inheritance chain is a generated Component of
+    /// another crate (`__component_with_base_params`). Same-crate code constructs or inherits it
+    /// through that macro rather than from this table's `param_fields`.
+    pub deferred_constructor: bool,
     pub fields: HashMap<String, FieldKind>,
     /// Required fixed construction inputs (`#[param]`/`#[bindable]` without a default), in
     /// declaration order. Ordinary Props are intentionally absent: they are runtime-mutable
@@ -381,6 +386,96 @@ fn rewrite_crate_tokens(tokens: TokenStream) -> TokenStream {
 /// generated components use the same-crate registry, while builtin and unresolved-unqualified
 /// construction keep their existing builtin fallback. The macro itself is exported at the defining
 /// crate root, so a nested authored path retains only its first crate/alias segment here.
+/// Issue #166 (A2): stable key of a required constructor input for
+/// `elwindui::core::reactive::RequiredParam` — FNV-1a over the field name, so every level of an
+/// inheritance chain (and every crate) derives the same key for the same name.
+pub(crate) fn required_param_key(name: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in name.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+thread_local! {
+    /// Issue #166 (A2): required constructor inputs of a generated base from another crate, keyed
+    /// by the derived Component being generated in phase two
+    /// (`generate_component_with_base_params`). Empty outside that phase.
+    static EXTERNAL_BASE_PARAMS: std::cell::RefCell<HashMap<String, Vec<String>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// The required constructor inputs of `component`'s cross-crate generated base, when known.
+pub(crate) fn external_base_params(component: &str) -> Option<Vec<String>> {
+    EXTERNAL_BASE_PARAMS.with(|params| params.borrow().get(component).cloned())
+}
+
+/// Scope guard publishing a derived Component's cross-crate base inputs for one generation.
+pub(crate) struct ExternalBaseParamsScope {
+    component: String,
+}
+
+impl ExternalBaseParamsScope {
+    pub(crate) fn enter(component: &str, names: Vec<String>) -> Self {
+        EXTERNAL_BASE_PARAMS.with(|params| {
+            params.borrow_mut().insert(component.to_string(), names);
+        });
+        Self {
+            component: component.to_string(),
+        }
+    }
+}
+
+impl Drop for ExternalBaseParamsScope {
+    fn drop(&mut self) {
+        EXTERNAL_BASE_PARAMS.with(|params| {
+            params.borrow_mut().remove(&self.component);
+        });
+    }
+}
+
+/// Whether `base` (written as `base_path`) is a generated Component defined in another crate:
+/// not resolvable in this crate's symbol table and named through a crate-qualified path.
+pub(crate) fn is_external_generated_base(
+    table: &SymbolTable,
+    module: &Module,
+    base: &str,
+    base_path: &str,
+) -> bool {
+    table.resolve(module, base).is_none()
+        && base_path.contains("::")
+        && !matches!(
+            base_path.split("::").next().map(str::trim),
+            Some("crate" | "self" | "super" | "")
+        )
+}
+
+/// The constructor ABI macro path of a cross-crate generated base.
+pub(crate) fn external_ctor_macro_path(base_path: &str) -> TokenStream {
+    dsl_ctor_macro_path(base_path, None).unwrap_or_else(|| {
+        // A same-crate base with a deferred constructor: its ABI macro is exported at this
+        // crate's root.
+        let ident = format_ident!("__elwindui_ctor_{}", dsl_type_ident(base_path));
+        quote! { crate::#ident }
+    })
+}
+
+/// The constructor ABI macro a construction site uses for `node`: an external generated
+/// Component's, or (Issue #166, A2) a same-crate Component's whose constructor is deferred.
+fn node_ctor_macro_path(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> Option<TokenStream> {
+    dsl_ctor_macro_path(&node.type_path, None).or_else(|| {
+        resolve_context_info(ctx, from, table, &node.type_path)
+            .filter(|info| info.deferred_constructor)
+            .map(|_| external_ctor_macro_path(&node.type_path))
+    })
+}
+
 fn dsl_ctor_macro_path(type_path: &str, info: Option<&TypeInfo>) -> Option<TokenStream> {
     let ident = format_ident!("__elwindui_ctor_{}", dsl_type_ident(type_path));
     match dsl_type_origin(type_path, info) {
@@ -935,10 +1030,37 @@ fn constructor_vec_item(ty: &syn::Type) -> Option<&syn::Type> {
 /// real `new` in its exact declaration order. Initial non-constructor assignments are routed
 /// through the defining crate's existing props-shape macro; constructor-consumed fields are
 /// deliberately no-ops there, preventing a second setter call.
+/// Issue #166 (A2): for a constructor input typed `<Base as RequiredParam<KEY>>::Ty`, the
+/// conversion of an authored value delegated to `Base`'s constructor ABI (`@__ctor_arg_<name>`),
+/// spelled for use inside this crate's exported constructor macro.
+fn forwarded_required_param_conversion(ty: &syn::Type, name: &syn::Ident) -> Option<TokenStream> {
+    let syn::Type::Path(type_path) = ty else {
+        return None;
+    };
+    let qself = type_path.qself.as_ref()?;
+    let is_required_param = type_path
+        .path
+        .segments
+        .iter()
+        .any(|segment| segment.ident == "RequiredParam");
+    if !is_required_param {
+        return None;
+    }
+    let syn::Type::Path(base) = qself.ty.as_ref() else {
+        return None;
+    };
+    let base_text = quote! { #base }.to_string().replace(' ', "");
+    let ctor_macro = rewrite_crate_tokens(external_ctor_macro_path(&base_text));
+    let helper = format_ident!("__ctor_arg_{name}");
+    let name_literal = syn::LitStr::new(&name.to_string(), proc_macro2::Span::call_site());
+    Some(quote! { #ctor_macro!(@#helper props = [(#name_literal => $value)]) })
+}
+
 fn build_constructor_macro(
     type_name: &str,
     shape: &EffectiveConstructorShape,
     props_macro: Option<TokenStream>,
+    inheritable_base: bool,
 ) -> TokenStream {
     let macro_ident = format_ident!("__elwindui_ctor_{type_name}");
     let return_name = match shape.constructor_return {
@@ -957,6 +1079,25 @@ fn build_constructor_macro(
             quote! { $crate::#macro_ident!(@#helper props = [$($props)*]) }
         })
         .collect();
+    let required_param_idents: Vec<&syn::Ident> =
+        shape.params.iter().map(|param| &param.name).collect();
+    let type_ident = format_ident!("{type_name}");
+    // Only a Component that can be an inheritance base needs its input types exported; emitting
+    // them elsewhere would turn a private input type into a private-in-public error (E0446).
+    let required_param_impls: TokenStream = shape
+        .params
+        .iter()
+        .filter(|_| inheritable_base)
+        .map(|param| {
+            let key = required_param_key(&param.name.to_string());
+            let ty = &param.ty;
+            quote! {
+                impl elwindui::core::reactive::RequiredParam<#key> for #type_ident {
+                    type Ty = #ty;
+                }
+            }
+        })
+        .collect();
 
     let mut ctor_arg_arms = TokenStream::new();
     for param in &shape.params {
@@ -964,7 +1105,10 @@ fn build_constructor_macro(
         let name = &param.name;
         let name_literal =
             syn::LitStr::new(&param.name.to_string(), proc_macro2::Span::call_site());
-        let converted = generated_constructor_value(&param.ty, quote! { $value });
+        // Issue #166 (A2): an auto-forwarded base input is typed through the base's
+        // `RequiredParam`, so only the base's own constructor ABI knows how to convert a value.
+        let converted = forwarded_required_param_conversion(&param.ty, &param.name)
+            .unwrap_or_else(|| generated_constructor_value(&param.ty, quote! { $value }));
         let option_some_arms = constructor_option_inner(&param.ty)
             .map(|inner| {
                 let converted_inner = generated_constructor_value(inner, quote! { $some_value });
@@ -1523,6 +1667,13 @@ fn build_constructor_macro(
                     #(#ctor_args),*
                 )
             }};
+            // Issue #166 (A2): a derived Component in another crate learns this Component's
+            // required constructor inputs (constructor order) to auto-forward them; its embedded
+            // base value converts each named value through `@__ctor_arg_<name>`.
+            (@required_params $cb:path, { $($item:tt)* }) => {
+                $cb! { { $($item)* } [#(#required_param_idents),*] }
+            };
+
             #mount_arm
             #ctor_arg_arms
             #new_validation_arms
@@ -1543,6 +1694,7 @@ fn build_constructor_macro(
             #writable_arms
             (@writable_after_construct $name:ident) => { false };
         }
+        #required_param_impls
     }
 }
 
@@ -1986,6 +2138,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             own_on_unmount: own_view.and_then(|v| v.on_unmount.clone()),
                             // Finalized in the same later pass as `is_native`, for the same reason.
                             composed_shape: None,
+                            deferred_constructor: false,
                             host_composition_base: None,
                             sealed: c.sealed,
                             is_abstract: c.is_abstract,
@@ -2061,6 +2214,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             own_on_mount: None,
                             own_on_unmount: None,
                             composed_shape: None,
+                            deferred_constructor: false,
                             host_composition_base: None,
                             sealed: false,
                             is_abstract: false,
@@ -2138,6 +2292,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             own_on_mount: None,
                             own_on_unmount: None,
                             composed_shape: None,
+                            deferred_constructor: false,
                             host_composition_base: None,
                             sealed: false,
                             is_abstract: false,
@@ -2184,8 +2339,13 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
             )
         })
         .collect();
+    let mut deferred_memo: HashMap<(Vec<String>, String), bool> = HashMap::new();
+    for key in &keys {
+        resolve_deferred_constructor(key, modules, &table, &mut deferred_memo);
+    }
     let mut types = table.types;
     for (key, info) in types.iter_mut() {
+        info.deferred_constructor = deferred_memo.get(key).copied().unwrap_or(false);
         info.is_native = memo.get(key).copied().unwrap_or(false);
         info.composed_shape = composed_shape_memo.get(key).cloned().flatten();
         info.host_composition_base = host_composition_memo
@@ -2336,6 +2496,17 @@ pub(crate) fn resolve_effective_fields<'m>(
     let Some(base) = c.base.as_deref() else {
         return c.fields.clone();
     };
+    // Issue #166 (A2): a base whose constructor inputs were delivered by its constructor ABI
+    // (phase two) is treated exactly like a cross-crate base, even when it is a same-crate
+    // Component whose own table entry cannot list them.
+    if external_base_params(&c.name).is_some() {
+        return synthesize_external_base_fields(
+            c,
+            base,
+            c.base_path.as_deref(),
+            find_view(from, &c.name),
+        );
+    }
     let Some((base_module, base_c)) = find_component_and_module(from, base, modules) else {
         return synthesize_external_base_fields(
             c,
@@ -2374,6 +2545,11 @@ pub(crate) fn resolve_effective_fields<'m>(
             } else {
                 HashSet::new()
             };
+            // Issue #166 (A2): a required base `#[param]` / `#[bindable]` (no initializer) that the
+            // composed root leaves unset is auto-forwarded as a constructor input of this
+            // Component (see `generate_view`'s synthesized `name: name` root forward), so it stays
+            // in the effective field set even when the view never mentions it.
+            let auto_forwards_required = !view.is_template && view.implicit_owner.is_none();
             base_fields
                 .into_iter()
                 .filter(|f| {
@@ -2383,6 +2559,11 @@ pub(crate) fn resolve_effective_fields<'m>(
                         || common_fields.contains(f.name.as_str())
                         || view_references_bare_name(view, &f.name)
                         || template_parent_fields.contains(&f.name)
+                        || (auto_forwards_required
+                            && f.initializer.is_none()
+                            && f.kind == FieldKind::Param
+                            && !crate::attr_frontend::is_event_schema_field(f)
+                            && !view.root.attributes.iter().any(|a| a.name == f.name))
                 })
                 .collect()
         }
@@ -2423,8 +2604,41 @@ fn synthesize_external_base_fields(
     base_path: Option<&str>,
     view: Option<&ViewDef>,
 ) -> Vec<FieldDef> {
+    // Issue #166 (A2): the base's required constructor inputs, delivered by its constructor ABI
+    // macro in phase two (`generate_component_with_base_params`). Each one the composed root does
+    // not set to a value of its own is auto-forwarded as a constructor input of `c`, typed through
+    // the base's `RequiredParam` impl (the field's own type may not be nameable here). They lead
+    // the effective field list, so constructor order is base-first.
+    let external_required: Vec<FieldDef> = external_base_params(&c.name)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| !c.fields.iter().any(|f| &f.name == name))
+        .filter(|name| {
+            view.is_none_or(|view| {
+                view.root.attributes.iter().all(|a| {
+                    &a.name != name
+                        || matches!(&a.value, ViewExpr::Path(p) if p.len() == 1 && &p[0] == name)
+                })
+            })
+        })
+        .map(|name| {
+            let key = required_param_key(&name);
+            FieldDef {
+                ty: format!(
+                    "<{} as elwindui::core::reactive::RequiredParam<{key}>>::Ty",
+                    base_path.unwrap_or(base)
+                ),
+                name,
+                kind: FieldKind::Param,
+                attrs: Vec::new(),
+                initializer: None,
+            }
+        })
+        .collect();
     let Some(view) = view else {
-        return c.fields.clone();
+        let mut result = external_required;
+        result.extend(c.fields.iter().cloned());
+        return result;
     };
     // Issue #162: a hidden Component lowered from a `ViewExpr::DeferredView`
     // (`ViewDef::implicit_owner`) already resolves every otherwise-unresolved bare name through its
@@ -2455,7 +2669,9 @@ fn synthesize_external_base_fields(
     // an external/local qualified inherits path so the deferred type query reaches that defining
     // crate's shape macro root instead of falling back to the builtin crate.
     let props_macro = dsl_props_macro_path(base_path.unwrap_or(base), None).to_string();
-    let mut result = c.fields.clone();
+    bare_names.retain(|name| !external_required.iter().any(|f| &f.name == name));
+    let mut result = external_required;
+    result.extend(c.fields.iter().cloned());
     result.extend(bare_names.into_iter().map(|name| FieldDef {
         ty: format!("{props_macro}!(@field_type {name})"),
         name,
@@ -3473,6 +3689,44 @@ fn resolve_is_native(
 /// Recursively resolves the virtual-builtin shape (if any) the component at `key` composes over via
 /// a real `base: <Impl>` field — see `TypeInfo::composed_shape`'s doc comment and
 /// `codegen::generate_view`'s `composed_shape`-driven branch.
+/// Issue #166 (A2): whether the component at `key` inherits, directly or through same-crate
+/// ancestors, a generated Component of another crate (see `TypeInfo::deferred_constructor`).
+fn resolve_deferred_constructor(
+    key: &(Vec<String>, String),
+    modules: &[Module],
+    table: &SymbolTable,
+    memo: &mut HashMap<(Vec<String>, String), bool>,
+) -> bool {
+    if let Some(cached) = memo.get(key) {
+        return *cached;
+    }
+    memo.insert(key.clone(), false);
+    let result = modules
+        .iter()
+        .filter(|module| module.path == key.0)
+        .find_map(|module| {
+            module.items.iter().find_map(|item| match item {
+                Item::Component(c) if c.name == key.1 => Some((module, c)),
+                _ => None,
+            })
+        })
+        .is_some_and(|(module, c)| {
+            let (Some(base), base_path) = (c.base.as_deref(), c.base_path.as_deref()) else {
+                return false;
+            };
+            if let Some(base_path) = base_path {
+                if is_external_generated_base(table, module, base, base_path) {
+                    return true;
+                }
+            }
+            table.resolve_key(module, base).is_some_and(|base_key| {
+                resolve_deferred_constructor(&base_key, modules, table, memo)
+            })
+        });
+    memo.insert(key.clone(), result);
+    result
+}
+
 fn resolve_composed_shape(
     key: &(Vec<String>, String),
     component_meta: &HashMap<(Vec<String>, String), (usize, Option<String>, Option<String>, bool)>,
@@ -5063,7 +5317,7 @@ fn generate_component(
         non_writable_fields,
     );
     let constructor_macro =
-        build_constructor_macro(&struct_name.to_string(), &constructor_shape, None);
+        build_constructor_macro(&struct_name.to_string(), &constructor_shape, None, false);
     quote! {
         #[allow(non_camel_case_types)]
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5334,6 +5588,64 @@ fn generate_view(
         .and_then(|i| i.host_composition_base.clone());
     let is_host_composition = host_composition_base.is_some();
     let is_composed = composed_shape.is_some() || is_host_composition;
+    // Issue #166 (A2): a required base `#[param]` / `#[bindable]` (no initializer) that this
+    // Component's own composed view leaves unset is auto-forwarded — exactly like a view-less
+    // derived Component: it becomes a constructor parameter of this Component (effective field
+    // order, so base-first) and reaches the base construction through a synthesized same-name root
+    // forward (`name: name`), which every downstream step already treats as the established root
+    // forwarding form (constructor surface, no derived storage/accessor — D1/D6). A value the
+    // derived view sets itself (`title: "fixed"`) wins and adds no parameter; an authored
+    // `title: title` is the same forward, never a duplicate.
+    let auto_forwarded_view;
+    let view: &ViewDef = if has_own_view
+        && composed_shape.is_some()
+        && !view.is_template
+        && view.implicit_owner.is_none()
+    {
+        let declared: HashSet<&str> = source_component
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        let missing: Vec<String> = component
+            .fields
+            .iter()
+            .filter(|f| {
+                !declared.contains(f.name.as_str())
+                    // A cross-crate base field synthesized only from a bare reference
+                    // (`synthesize_external_base_fields`) is not known to be required.
+                    && !f.ty.contains("@field_type")
+                    && f.initializer.is_none()
+                    && f.kind == FieldKind::Param
+                    && !crate::attr_frontend::is_event_schema_field(f)
+                    && !view.root.attributes.iter().any(|a| a.name == f.name)
+            })
+            .map(|f| f.name.clone())
+            .collect();
+        if missing.is_empty() {
+            view
+        } else {
+            let mut owned = view.clone();
+            let span = crate::ast::SourceSpan {
+                start: 0,
+                end: 0,
+                line: 1,
+                column: 1,
+            };
+            for name in missing {
+                owned.root.attributes.push(ViewAttribute {
+                    value: ViewExpr::Path(vec![name.clone()]),
+                    name,
+                    kind: AssignmentKind::Normal,
+                    span,
+                });
+            }
+            auto_forwarded_view = owned;
+            &auto_forwarded_view
+        }
+    } else {
+        view
+    };
     // `#[class]` derives an `XExt` trait from the component struct `X`.
     let struct_ident = target.clone();
 
@@ -5530,9 +5842,13 @@ fn generate_view(
         own_fields,
         mutable_own_fields: HashSet::new(),
         inherited_fields: HashSet::new(),
+        forwarded_inherited_fields: HashSet::new(),
         inherited_props_macro: None,
         composition_base_prefix_root: None,
-        weak_wiring: is_shape_composition || is_inherited_view_composition,
+        // Issue #166 (A1): host composition (`inherits Window`) too — while shown, the application
+        // window registry is the owner's strong lifetime authority (Issue #254), so stored callbacks
+        // must not keep it alive after close.
+        weak_wiring: is_shape_composition || is_inherited_view_composition || is_host_composition,
         property_dependencies: own_dependents_of.clone(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
@@ -5785,6 +6101,10 @@ fn generate_view(
         component
             .fields
             .iter()
+            // Issue #166 (A2): an inherited `#[bindable]` (auto-forwarded into the embedded base)
+            // is subscribed by the base itself (`EmbeddedViewSync::__elwindui_mount_embedded`) and
+            // has no storage on this Component.
+            .filter(|f| !inherited_shape_field_names.contains(&f.name))
             .filter(|f| {
                 f.attrs.iter().any(|a| matches!(a, Attr::Bindable)) || is_reserved_weak_owner(f)
             })
@@ -6080,15 +6400,36 @@ fn generate_view(
     let required_own_names: Vec<syn::Ident> = own_struct_param_names.clone();
     let required_own_types: Vec<syn::Type> = own_struct_param_types.clone();
     // `new(..)`/`create_<snake case>(..)`'s own argument list — required Params only.
+    // Issue #166 (A2): an inherited param the composed root forwards by the same name (authored
+    // `name: name`, or synthesized above for a required base param the view leaves unset) stays a
+    // constructor parameter; it is consumed by the base construction and never stored again here.
+    let root_forwarded_inherited: HashSet<String> = if is_shape_composition {
+        view.root
+            .attributes
+            .iter()
+            .filter(|a| matches!(&a.value, ViewExpr::Path(p) if p.len() == 1 && p[0] == a.name))
+            .map(|a| a.name.clone())
+            .filter(|name| inherited_shape_field_names.contains(name))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    ctx.forwarded_inherited_fields = root_forwarded_inherited.clone();
     let ctor_param_names: Vec<syn::Ident> = param_names
         .iter()
-        .filter(|n| !inherited_shape_field_names.contains(&n.to_string()))
+        .filter(|n| {
+            let n = n.to_string();
+            !inherited_shape_field_names.contains(&n) || root_forwarded_inherited.contains(&n)
+        })
         .cloned()
         .collect();
     let ctor_param_types: Vec<syn::Type> = param_names
         .iter()
         .zip(param_types.iter())
-        .filter(|(n, _)| !inherited_shape_field_names.contains(&n.to_string()))
+        .filter(|(n, _)| {
+            let n = n.to_string();
+            !inherited_shape_field_names.contains(&n) || root_forwarded_inherited.contains(&n)
+        })
         .map(|(_, t)| t.clone())
         .collect();
 
@@ -6543,7 +6884,11 @@ fn generate_view(
             continue;
         }
         let own_field_ident = format_ident!("{}", own_field_name);
-        let own_field_get = if is_composed
+        let own_field_get = if root_forwarded_inherited.contains(own_field_name) {
+            // Issue #166 (A2): a root-forwarded inherited constructor input has no accessor on
+            // this Component; read it from the declaring ancestor like any inherited field.
+            inherited_field_read(&ctx, &EmitMode::Construction, own_field_name)
+        } else if is_composed
             && source_component.content_field.as_deref() == Some(own_field_name.as_str())
         {
             // Keep a generated component's typed content getter distinct from a same-named
@@ -8304,6 +8649,23 @@ fn generate_view(
         } else {
             Vec::new()
         };
+    // Issue #166 (A2): this Component's own `#[param]`s (required and defaulted) are readable by a
+    // derived Component through the exported shape macro's `@inherited_get` (`#[fixed(name)]`),
+    // so an inherited constructor input resolves by bare name in any crate.
+    let generated_class_fixed_decls: Vec<TokenStream> =
+        if is_shape_composition || is_inherited_view_composition {
+            own_field_shape
+                .constructor_params
+                .iter()
+                .chain(own_field_shape.defaulted_params.iter())
+                .map(|(name, _)| {
+                    let name = format_ident!("{name}");
+                    quote! { #[fixed(#name)] }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
     let generated_class_content_decl = if is_shape_composition || is_inherited_view_composition {
         source_component.content_field.as_ref().map(|field| {
             let field = format_ident!("{}", field);
@@ -9115,8 +9477,12 @@ fn generate_view(
         own_field_shape.constructor_return,
         non_writable_fields,
     );
-    let constructor_macro =
-        build_constructor_macro(&target_name, &constructor_shape, generated_props_macro);
+    let constructor_macro = build_constructor_macro(
+        &target_name,
+        &constructor_shape,
+        generated_props_macro,
+        is_shape_composition || is_inherited_view_composition,
+    );
 
     let generated = if is_composed {
         // A component-level template takes the specialized path above and returns from
@@ -9262,6 +9628,7 @@ fn generate_view(
 
             #[elwindui::class(inherits = #inherits_path)]
             #(#generated_class_prop_decls)*
+            #(#generated_class_fixed_decls)*
             #generated_class_content_decl
             pub struct #target {
                 #(#plain_required_names: #plain_required_types,)*
@@ -9654,6 +10021,11 @@ struct ViewCtx {
     /// declaring ancestor owns storage and accessors, so a read lowers to `<recv>.base.<name>()`
     /// and a write to `<recv>.base.set_<name>(..)` — never to own storage of this Component.
     inherited_fields: HashSet<String>,
+    /// Issue #166 (A2): inherited constructor inputs this Component forwards into its composed
+    /// root (`name: name`, authored or auto-forwarded). They are constructor locals while the base
+    /// value is built, but have no storage or accessor on this Component afterwards, so every
+    /// post-construction read goes through the declaring ancestor (`inherited_field_read`).
+    forwarded_inherited_fields: HashSet<String>,
     /// Issue #166: the immediate base's `__elwindui_props_<Base>!` shape macro. When set, an
     /// otherwise-unresolved bare snake_case name in raw Rust (handler bodies, `format!` arguments)
     /// is routed through its `@inherited_get`/`@inherited_set` arms, which resolve the name against
@@ -10005,6 +10377,7 @@ pub(crate) fn lower_template_body(
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
         inherited_fields: HashSet::new(),
+        forwarded_inherited_fields: HashSet::new(),
         inherited_props_macro: None,
         composition_base_prefix_root: None,
         weak_wiring: false,
@@ -14395,8 +14768,12 @@ fn emit_external_construction(
     out: &mut TokenStream,
 ) {
     let binding = &node.binding;
-    let type_path = dsl_concrete_type_path(&node.type_path, None);
-    let ext_path = dsl_ext_path(&node.type_path, None);
+    // Issue #166 (A2): a same-crate Component with a deferred constructor keeps its local type,
+    // trait and shape-macro paths; only its constructor ABI is used like an external one.
+    let deferred_local = resolve_context_info(ctx, from, table, &node.type_path)
+        .filter(|info| info.deferred_constructor);
+    let type_path = dsl_concrete_type_path(&node.type_path, deferred_local);
+    let ext_path = dsl_ext_path(&node.type_path, deferred_local);
     let binding_ts = quote! { #binding };
     // `Grid::row`/`Grid::column`/... — every real builtin now goes through this construction
     // path (no `TypeInfo` left to route a virtual builtin through `emit_virtual_construction`'s
@@ -14407,14 +14784,14 @@ fn emit_external_construction(
     // own content instead of occupying its own row).
     let attached = emit_common_ui_element_setters(node, ctx, from, table, &binding_ts);
     let attribute_values = external_attribute_values(node, ctx, from, table);
-    let props_macro = dsl_props_macro_path(&node.type_path, None);
+    let props_macro = dsl_props_macro_path(&node.type_path, deferred_local);
     let non_dynamic_children: Vec<_> = node
         .child_bindings
         .iter()
         .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
         .map(|(child, _)| quote! { #child.clone() })
         .collect();
-    if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
+    if let Some(ctor_macro) = node_ctor_macro_path(node, ctx, from, table) {
         let props: Vec<TokenStream> = attribute_values
             .iter()
             .filter(|attribute| !attribute.synthesized)
@@ -14525,7 +14902,9 @@ fn external_attribute_values(
     from: &Module,
     table: &SymbolTable,
 ) -> Vec<ExternalAttributeValue> {
-    let props_macro = dsl_props_macro_path(&node.type_path, None);
+    let deferred_local = resolve_context_info(ctx, from, table, &node.type_path)
+        .filter(|info| info.deferred_constructor);
+    let props_macro = dsl_props_macro_path(&node.type_path, deferred_local);
     let mut values = Vec::new();
     for attribute in &node.attributes {
         let name = &attribute.name;
@@ -14836,7 +15215,9 @@ fn emit_construction(
         return;
     }
     let resolved_info = resolve_context_info(ctx, from, table, &node.type_path);
-    if resolved_info.is_none() {
+    // Issue #166 (A2): a same-crate Component with a deferred constructor is built through its
+    // constructor ABI macro, exactly like an external generated Component.
+    if resolved_info.is_none_or(|info| info.deferred_constructor) {
         emit_external_construction(node, ctx, from, table, out);
         // `DYNAMIC_CHILD_SLOT_MARKER` bindings are never actually constructed (`build_component_setters`'s
         // own identically-filtered `children` loop doc comment: a list-based dynamic region starts
@@ -14848,7 +15229,8 @@ fn emit_construction(
             .iter()
             .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
             .collect();
-        if dsl_ctor_macro_path(&node.type_path, None).is_none() && !non_dynamic_children.is_empty()
+        if node_ctor_macro_path(node, ctx, from, table).is_none()
+            && !non_dynamic_children.is_empty()
         {
             let binding = &node.binding;
             let props_macro = dsl_props_macro_path(
@@ -15789,6 +16171,47 @@ fn build_component_value(
     plan: &[PlannedNode],
     component: &ComponentDef,
 ) -> TokenStream {
+    // Issue #166 (A2): a generated base whose required inputs arrived through its constructor ABI in
+    // phase two is constructed through its constructor ABI from the named root values (the
+    // auto-forwarded `name: name` and any value the derived view sets itself).
+    if let (Some(required), Some(base_path)) = (
+        external_base_params(&component.name),
+        component.base_path.as_deref(),
+    ) {
+        if component.base.as_deref() == Some(dsl_type_ident(&node.type_path).to_string().as_str()) {
+            let ctor_macro = external_ctor_macro_path(base_path);
+            let type_path: syn::Path =
+                syn::parse_str(base_path).expect("inherits path must be a Rust path");
+            let props: Vec<TokenStream> = external_attribute_values(node, ctx, from, table)
+                .into_iter()
+                .filter(|value| !value.synthesized && required.contains(&value.name.to_string()))
+                .map(|value| {
+                    let name_literal =
+                        syn::LitStr::new(&value.name.to_string(), proc_macro2::Span::call_site());
+                    // The auto-forwarded input already has the base's declared type.
+                    let forwarded =
+                        value.typed || value.value.to_string() == value.name.to_string();
+                    let value = &value.value;
+                    if forwarded {
+                        quote! { (#name_literal => @typed #value), }
+                    } else {
+                        quote! { (#name_literal => #value), }
+                    }
+                })
+                .collect();
+            // `#[class]` rewrites a literal `Base::construct(..)` call into its hidden
+            // constructor, so the call itself stays visible here; only each argument's
+            // conversion goes through the base's constructor ABI.
+            // Built with a loop rather than a closure so rust-analyzer's `quote!` expansion sees
+            // `ctor_macro` as used.
+            let mut args: Vec<TokenStream> = Vec::new();
+            for name in &required {
+                let helper = format_ident!("__ctor_arg_{name}");
+                args.push(quote! { #ctor_macro!(@#helper props = [#(#props)*]) });
+            }
+            return quote! { #type_path::construct(#(#args),*) };
+        }
+    }
     let Some(info) = table.resolve(from, &node.type_path) else {
         // External (no local `TypeInfo`) — same rule every other construction path applies
         // (`concrete_type_ident`'s own doc comment): unresolved here means declared entirely
@@ -18877,6 +19300,11 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                 // as the owner of a `.getter()` call — the field/constructor-parameter itself, not
                 // `emit_path_get`'s `vm.something`-shaped 2-segment machinery.
                 if ctx.own_fields.contains_key(only) {
+                    if ctx.forwarded_inherited_fields.contains(only) {
+                        if let EmitMode::WithSelf(_) = mode {
+                            return inherited_field_read(ctx, mode, only);
+                        }
+                    }
                     // A mutable-required own field (`ViewCtx::mutable_own_fields`,
                     // `generate_view`'s `mutable_required_names`) is Cell/RefCell-backed, not a
                     // bare field — `self.<name>` alone would hand back the cell itself, not its
@@ -19015,6 +19443,11 @@ fn inherited_field_read(ctx: &ViewCtx, mode: &EmitMode, name: &str) -> TokenStre
 /// `self.vm.content()` (with self). A viewmodel action (`vm.save`) resolves through this exact
 /// same 2-segment shape — there is no separate `Command`-wrapper indirection to fold in.
 fn owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> TokenStream {
+    // Issue #166 (A2): a root-forwarded inherited constructor input is stored only by the
+    // declaring ancestor once construction is over.
+    if matches!(mode, EmitMode::WithSelf(_)) && ctx.forwarded_inherited_fields.contains(owner) {
+        return inherited_field_read(ctx, mode, owner);
+    }
     if ctx.default_template_parent && ctx.is_template_parent_alias(owner) {
         return match mode {
             EmitMode::Construction => quote! { self },
@@ -19184,6 +19617,7 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
         inherited_fields: HashSet::new(),
+        forwarded_inherited_fields: HashSet::new(),
         inherited_props_macro: None,
         composition_base_prefix_root: None,
         weak_wiring: false,
@@ -19836,7 +20270,7 @@ mod tests {
             crate::component_frontend::ComponentConstructorReturn::RcSelf,
             Vec::new(),
         );
-        let generated = build_constructor_macro("Thing", &shape, None).to_string();
+        let generated = build_constructor_macro("Thing", &shape, None, false).to_string();
         assert!(!generated.contains("children"), "{generated}");
     }
 
@@ -23177,6 +23611,49 @@ struct NotepadWindow {
             !generated_str.contains("`base::on_mount()`"),
             "{generated_str}"
         );
+    }
+
+    /// Issue #166 (A2): every level of an inheritance chain (and every crate) must derive the same
+    /// `RequiredParam` key for the same input name, and distinct names must not collide.
+    #[test]
+    fn required_param_key_is_stable_and_name_specific() {
+        assert_eq!(required_param_key("title"), required_param_key("title"));
+        assert_eq!(required_param_key(""), 0xcbf2_9ce4_8422_2325);
+        let keys: std::collections::HashSet<u64> = ["title", "count", "vm", "suffix", "extra"]
+            .into_iter()
+            .map(required_param_key)
+            .collect();
+        assert_eq!(keys.len(), 5);
+    }
+
+    /// Issue #166 (A2): an auto-forwarded input keeps its opaque `RequiredParam` type, so its value
+    /// conversion is delegated to the defining base's constructor ABI (`$crate`-relative for a
+    /// same-crate base, crate-prefixed for another crate's).
+    #[test]
+    fn forwarded_required_param_conversion_delegates_to_the_base_abi() {
+        let name = format_ident!("title");
+        let external: syn::Type =
+            syn::parse_str("<other_crate::Base as elwindui::core::reactive::RequiredParam<7>>::Ty")
+                .unwrap();
+        let tokens = forwarded_required_param_conversion(&external, &name)
+            .expect("RequiredParam-typed input")
+            .to_string();
+        assert!(
+            tokens.contains("other_crate :: __elwindui_ctor_Base ! (@ __ctor_arg_title"),
+            "{tokens}"
+        );
+        let local: syn::Type =
+            syn::parse_str("<crate::Middle as elwindui::core::reactive::RequiredParam<7>>::Ty")
+                .unwrap();
+        let tokens = forwarded_required_param_conversion(&local, &name)
+            .expect("RequiredParam-typed input")
+            .to_string();
+        assert!(
+            tokens.contains("$ crate :: __elwindui_ctor_Middle !"),
+            "{tokens}"
+        );
+        let plain: syn::Type = syn::parse_str("String").unwrap();
+        assert!(forwarded_required_param_conversion(&plain, &name).is_none());
     }
 
     /// PR #311 A/P2: the explicit-base-hook check detects only a real `base::<hook>(..)` call

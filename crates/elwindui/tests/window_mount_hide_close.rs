@@ -125,6 +125,45 @@ struct WindowLifetimeProbe {
 #[elwindui::component]
 impl WindowLifetimeProbe {}
 
+/// Issue #166 (A1): a Window whose content subtree stores an event handler that writes the
+/// Window's own `#[prop]`. The handler must not capture the generated owner strongly: the owner
+/// stays alive while shown (application window registry, Issue #254), runs the handler, and is
+/// released after close; a handler that outlives it is a no-op.
+#[elwindui::component(inherits Window)]
+struct WindowHandlerLifetimeProbe {
+    #[prop(default = 0)]
+    taps: i32,
+
+    body: view! {
+        #[id("tap_target")]
+        let tap_target = TextBlock {
+            text: format!("taps {taps}"),
+            on_tapped: |_event| {
+                taps += 1;
+            },
+        };
+        title: "window handler lifetime probe"
+        content: VerticalLayout { tap_target }
+    },
+}
+
+#[elwindui::component]
+impl WindowHandlerLifetimeProbe {}
+
+#[cfg(all(feature = "backend-winui3", target_os = "windows"))]
+fn tap(target: Rc<dyn elwindui::core::ui::UIElementExt>) {
+    let routed_args = elwindui::core::input::RoutedEventArgs::default();
+    elwindui::core::ui::dispatch_routed(
+        &target,
+        "on_tapped",
+        &elwindui::core::input::TappedEventArgs {
+            position: elwindui::core::base::Point { x: 1.0, y: 1.0 },
+            modifiers: elwindui::core::input::KeyModifiers::default(),
+        },
+        &routed_args,
+    );
+}
+
 /// Type-checked, not executed (see module doc comment). Demonstrates the target usage shape from
 /// spec §10/§11 and Issue #126: `new()` performs no build; a property set between `new()` and `show()`
 /// is observed by the initial build; `show()` mounts+builds exactly once; `show(); hide(); show();`
@@ -316,6 +355,33 @@ fn winui3_show_hide_show_builds_once_and_close_cascades_unmount() {
             "generated Window owner must actually drop once native close is observed and the \
              temporary upgrade used to close it is gone"
         );
+
+        // Issue #166 (A1): the same retention proof for a Window whose content stores a handler
+        // that writes the Window's own `#[prop]` — before the fix that handler captured the owner
+        // strongly, so `owner -> backend Window -> content -> handler -> owner` survived close.
+        let handler_probe: Rc<WindowHandlerLifetimeProbe> = WindowHandlerLifetimeProbe::new();
+        let handler_probe_weak = Rc::downgrade(&handler_probe);
+        handler_probe.show();
+        let tap_target: Rc<dyn elwindui::core::ui::UIElementExt> = handler_probe.tap_target();
+        drop(handler_probe);
+        tap(Rc::clone(&tap_target));
+        {
+            let retained = handler_probe_weak
+                .upgrade()
+                .expect("shown Window owner retained by the window registry");
+            assert_eq!(
+                retained.taps(),
+                1,
+                "the stored handler reaches the live owner"
+            );
+            retained.close();
+        }
+        assert!(
+            handler_probe_weak.upgrade().is_none(),
+            "a Window with a stored content handler must drop once closed"
+        );
+        // The handler outlives its owner through `tap_target`; it must be a harmless no-op.
+        tap(tap_target);
 
         window.close();
         assert_eq!(

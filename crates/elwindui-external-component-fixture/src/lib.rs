@@ -214,3 +214,34 @@ pub struct ExternalInheritMiddle {
 
 #[component]
 impl ExternalInheritMiddle {}
+
+/// Issue #166 (A2): an external shape-composed base with required constructor inputs, so a
+/// downstream derived Component with its own view proves they are auto-forwarded across crates.
+#[component(inherits VerticalLayout)]
+pub struct ExternalRequiredBase {
+    #[param]
+    title: String,
+    #[param]
+    count: usize,
+    body: view! {
+        TextBlock { text: format!("{title}:{count}") }
+    },
+}
+
+#[component]
+impl ExternalRequiredBase {}
+
+/// Issue #166 (A2): a derived Component with its own view in the defining crate that leaves
+/// `ExternalRequiredBase`'s required inputs to auto-forwarding and adds one of its own, so a
+/// downstream crate inherits a two-level chain of required inputs.
+#[component(inherits crate::ExternalRequiredBase)]
+pub struct ExternalRequiredMiddle {
+    #[param]
+    suffix: String,
+    body: view! {
+        TextBlock { text: format!("{title}{suffix}") }
+    },
+}
+
+#[component]
+impl ExternalRequiredMiddle {}

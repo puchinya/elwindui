@@ -143,6 +143,23 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Issue #166 (A2): the second phase of `#[elwindui::component] impl Derived {}` when `Derived`
+/// inherits a generated Component from another crate. The base's constructor ABI macro answers
+/// `@required_params` by invoking this macro with the deferred `impl` item and the base's required
+/// constructor input names (`{ <impl item> } [title, count]`), so the derived Component is generated
+/// knowing which inputs to auto-forward. Generated code only.
+#[doc(hidden)]
+#[proc_macro]
+pub fn __component_with_base_params(input: TokenStream) -> TokenStream {
+    match elwindui_codegen::generate_component_with_base_params(input.into()) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => {
+            let msg = format!("#[elwindui::component]: {e}");
+            quote::quote! { compile_error!(#msg); }.into()
+        }
+    }
+}
+
 /// Builds a typed `ControlTemplate<C>` value from the shared view grammar. The target type and
 /// parent alias are declared by the lambda-style header.
 #[proc_macro]

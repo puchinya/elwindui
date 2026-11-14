@@ -2254,9 +2254,98 @@ fn generate_component_impl_real(
             )));
         }
     }
+    // Issue #166 (A2): a base that is a generated Component of another crate exposes its
+    // required constructor inputs only through its constructor ABI macro. Defer real generation
+    // to `__component_with_base_params`, which the base's `@required_params` arm invokes with
+    // those names, so they can be auto-forwarded like a same-crate base's.
+    if let (Some(base), Some(base_path)) = (&base, &base_path) {
+        let deferred_base = codegen::is_external_generated_base(&table, &module, base, base_path)
+            || table
+                .resolve(&module, base)
+                .is_some_and(|info| info.deferred_constructor);
+        if deferred_base && codegen::external_base_params(&name).is_none() {
+            let ctor_macro = codegen::external_ctor_macro_path(base_path);
+            // Phase two resolves its generated tokens at this attribute expansion's own context
+            // (not the base crate's macro expansion that invokes it), so lints and `$crate` behave
+            // exactly as for a Component generated directly here.
+            let anchor = quote::format_ident!("__elwindui_resolution_anchor");
+            return Ok(quote::quote! {
+                #ctor_macro!(@required_params elwindui::__component_with_base_params, { #anchor #item_impl });
+            });
+        }
+    }
     let generated = codegen::generate_module(&module, &table);
     component_frontend::register_same_crate_component_methods(&name, item_impl);
     Ok(generated)
+}
+
+/// Re-resolves every token of `tokens` (recursively) at `anchor`'s name-resolution context,
+/// keeping each token's own location.
+fn resolve_tokens_at(
+    tokens: proc_macro2::TokenStream,
+    anchor: proc_macro2::Span,
+) -> proc_macro2::TokenStream {
+    tokens
+        .into_iter()
+        .map(|token| match token {
+            proc_macro2::TokenTree::Group(group) => {
+                let mut regrouped = proc_macro2::Group::new(
+                    group.delimiter(),
+                    resolve_tokens_at(group.stream(), anchor),
+                );
+                regrouped.set_span(group.span().resolved_at(anchor));
+                proc_macro2::TokenTree::Group(regrouped)
+            }
+            mut other => {
+                other.set_span(other.span().resolved_at(anchor));
+                other
+            }
+        })
+        .collect()
+}
+
+/// Issue #166 (A2): phase two of a derived Component over a generated base from another crate —
+/// see `elwindui_macros::__component_with_base_params`. `input` is `{ <impl item> } [names..]`,
+/// where `names` are the base's required constructor inputs in its constructor order.
+pub fn generate_component_with_base_params(
+    input: proc_macro2::TokenStream,
+) -> Result<proc_macro2::TokenStream, String> {
+    let mut groups = input.into_iter();
+    let (Some(proc_macro2::TokenTree::Group(item)), Some(proc_macro2::TokenTree::Group(names))) =
+        (groups.next(), groups.next())
+    else {
+        return Err("internal: malformed base constructor parameter callback".to_string());
+    };
+    let mut item_tokens = item.stream().into_iter();
+    let Some(proc_macro2::TokenTree::Ident(anchor)) = item_tokens.next() else {
+        return Err("internal: base constructor parameter callback has no anchor".to_string());
+    };
+    let item_impl: syn::ItemImpl = syn::parse2(item_tokens.collect())
+        .map_err(|e| format!("internal: base constructor parameter callback item: {e}"))?;
+    let names: Vec<String> = names
+        .stream()
+        .into_iter()
+        .filter_map(|token| match token {
+            proc_macro2::TokenTree::Ident(ident) => Some(ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    let (name, _) = component_frontend::methods_from_item_impl(&item_impl)?;
+    let _scope = codegen::ExternalBaseParamsScope::enter(&name, names);
+    // This macro is invoked from inside the base's constructor ABI macro, so tokens it creates
+    // would otherwise resolve in that expansion's context (`$crate` in a generated `macro_rules!`
+    // naming the base crate). Resolve everything at phase one's own attribute expansion.
+    let anchor = anchor.span();
+    match generate_component_impl_real(&item_impl) {
+        Ok(real) => {
+            rust_analyzer_shadow::gate_real_items_for_rustc(resolve_tokens_at(real, anchor))
+        }
+        Err(ComponentGenerationFailure::ItemLocal(error))
+        | Err(ComponentGenerationFailure::RegistryDependent(error)) => Err(error),
+        Err(ComponentGenerationFailure::Classified(diagnostics)) => {
+            Ok(validation_diagnostic_tokens(&diagnostics))
+        }
+    }
 }
 
 /// Issue #162 §3.5/§4.6: finds `outer_component_name`'s own `Item::View` in `module` (if any) and

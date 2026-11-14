@@ -10,6 +10,8 @@
 pub use elwindui_core as core;
 pub use elwindui_core::visual_tree;
 pub use elwindui_i18n as i18n;
+#[doc(hidden)]
+pub use elwindui_macros::__component_with_base_params;
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` — writes
 /// a `component`+`view` pair (docs/specs/dsl_spec.md §3/§13) as a single ordinary Rust `struct`,
 /// alongside `#[elwindui::viewmodel] mod foo { struct Foo { .. } impl Foo { .. } }` for the

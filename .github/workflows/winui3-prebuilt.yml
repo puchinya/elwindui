@@ -224,16 +224,33 @@ jobs:
           # NuGet metadata/runtime only; no Visual Studio developer environment is imported.
           . ./tools/restore-winui3.ps1
           $env:CARGO_TARGET_DIR = "$env:RUNNER_TEMP/target-prebuilt"
-          cargo build -p custom-controls-demo --target ${{ matrix.target }}
+          # Cargo's JSON messages report each build script's real OUT_DIR, so the assertion below
+          # does not depend on the target-directory layout (the `<profile>/build/<pkg>-<hash>/out`
+          # glob found no OUT_DIR once runners moved to rustc 1.100.0). Diagnostics render to stderr.
+          $messages = "$env:RUNNER_TEMP/consumer-build-messages.jsonl"
+          cargo build -p custom-controls-demo --target ${{ matrix.target }} --message-format=json-render-diagnostics |
+            Out-File -Encoding utf8 $messages
           if ($LASTEXITCODE -ne 0) { throw "prebuilt consumer build failed" }
       - name: Assert prebuilt path, architecture and deployment
         run: |
           . ./tools/winui3-prebuilt-common.ps1
           $profileDir = "$env:RUNNER_TEMP/target-prebuilt/${{ matrix.target }}/debug"
-          $outDirs = @(Get-ChildItem "$profileDir/build" -Directory -Filter "elwindui-backend-winui3-*" |
-            Where-Object { Test-Path (Join-Path $_.FullName "out/elwindui-winui3-native-mode.txt") })
+          $messages = @(Get-Content "$env:RUNNER_TEMP/consumer-build-messages.jsonl" |
+            Where-Object { $_.StartsWith("{") } | ForEach-Object { $_ | ConvertFrom-Json })
+          $backendIds = @($messages | Where-Object {
+              $_.reason -eq "compiler-artifact" -and $_.target.name -eq "elwindui_backend_winui3"
+            } | ForEach-Object { $_.package_id } | Sort-Object -Unique)
+          $outDirs = @($messages | Where-Object {
+              $_.reason -eq "build-script-executed" -and $backendIds -contains $_.package_id
+            } | ForEach-Object { $_.out_dir } | Sort-Object -Unique)
+          # Every native-mode marker under the target dir, so a layout or marker mismatch is visible.
+          $markers = @(Get-ChildItem "$env:RUNNER_TEMP/target-prebuilt" -Recurse -File -Filter "elwindui-winui3-native-mode.txt" -ErrorAction SilentlyContinue)
+          Write-Host "backend package ids: $($backendIds -join '; ')"
+          Write-Host "backend build-script OUT_DIRs: $($outDirs -join '; ')"
+          Write-Host "native-mode markers: $(($markers | ForEach-Object { $_.FullName }) -join '; ')"
           if ($outDirs.Count -ne 1) { throw "expected exactly one backend build-script OUT_DIR, found $($outDirs.Count)" }
-          $out = Join-Path $outDirs[0].FullName "out"
+          $out = $outDirs[0]
+          if (-not (Test-Path (Join-Path $out "elwindui-winui3-native-mode.txt"))) { throw "native mode marker missing from backend OUT_DIR $out" }
           $mode = (Get-Content (Join-Path $out "elwindui-winui3-native-mode.txt") -Raw).Trim()
           if ($mode -ne "prebuilt") { throw "native mode marker is '$mode'" }
           foreach ($generated in @("cppwinrt_include", "accessibility_component", "resources_pri", "elwindui_winui3_app_host.lib")) {

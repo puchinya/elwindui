@@ -332,7 +332,8 @@ impl ContentWrapper {}
 - DSL作者がUFCS・トレイトのimport・名前の変更などの回避策を書く必要はない。宣言元が別クレートでも、派生側で`use ..Ext as _`等の生成トレイトのimportは不要である。
 - 祖先のフィールドに依存する動的領域(`if`/`match`/`for`)も、そのフィールドの変更時にだけ再評価される。動的領域は派生`view`のroot直下に直接書いてもよい。
 - 派生`view`のroot直下の子(静的な子・動的領域とも)は、基底の`view`が置いた子の後ろに、記述した順で並ぶ(さらに派生したcomponentの子はその後ろ)。
-- 基底の`view`は、派生componentに埋め込まれても単体のときと同じく動作する(自分のプロパティへの依存の再同期・動的領域・イベントハンドラ)。
+- 基底の`view`は、派生componentに埋め込まれても単体のときと同じく動作する(自分のプロパティへの依存の再同期・動的領域・イベントハンドラ・`#[bindable]`/Environment/semantic brushの購読・lifecycle hook)。lifecycle hookの順序は§3「Lifecycle hooks」を参照。
+- `inherits`した基底のUI要素そのものになるcomponent(継承による合成)では、子要素に保存されたイベントハンドラや購読はcomponent自身を延命しない。最後の強参照が無くなれば、明示的なunmountの有無にかかわらず解放される。
 - `view`を持たずにlayout builtin(`VerticalLayout`/`HorizontalLayout`/`Grid`)を直接継承するcomponentは、空の`body`を持つcomponentと同じくそのlayoutを合成したUI要素になり、さらに継承の基底として使える(派生側はそのプロパティ・子要素の格納先・動的領域を引き継ぐ)。
 
 **メソッド継承とオーバーライド**(C#の`virtual`/`override`/`base.Method()`相当)。
@@ -398,7 +399,7 @@ body: view! {
 - 引数なしの`on_update`は任意の`#[prop]`変更を監視する
 - 初期構築時の値設定は`on_update`として数えない
 - hookは通常のRust blockであり、副作用を実行できる
-- 派生componentは`base::on_mount()`と`base::on_unmount()`を明示して直接の基底hookを呼べる
+- 基底がユーザー定義(生成)componentの場合、基底の`on_mount`/`on_update`/`on_unmount`は派生componentに埋め込まれても基底自身のhookとして自動で一度ずつ実行される。`on_mount`は基底から派生の順、`on_unmount`は派生から基底の順である。このため派生側で`base::on_mount()`/`base::on_unmount()`を書くと二重実行になり、コンパイルエラーになる
 - `#[param]`はhook内でも再代入できない
 
 attach/detach、subscription、backend resourceの内部順序は

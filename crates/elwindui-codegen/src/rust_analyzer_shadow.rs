@@ -441,9 +441,12 @@ pub(crate) fn build_component_struct_shadow(
         let base_forward = if component.base_path.is_none() && base_name == "Window" {
             window_extension_forward_impl(quote! { $SubType })
         } else {
-            let base_macro = base_inherit_macro_path(component, base_name);
-            let base_alias = base_own_trait_alias_path(component, base_name);
-            let base_concrete = base_type_path(component, base_name);
+            // These paths are spliced into an exported `macro_rules!` that downstream crates
+            // expand, so a crate-relative base path must name the defining crate (`$crate`).
+            let base_macro = exported_macro_path(base_inherit_macro_path(component, base_name));
+            let base_alias = exported_macro_path(base_own_trait_alias_path(component, base_name));
+            let base_concrete = exported_macro_path(base_type_path(component, base_name));
+            let base_trait = exported_macro_path(base_trait.clone());
             quote! {
                 #base_macro!(
                     $SubType,
@@ -561,6 +564,20 @@ fn base_ext_trait_path(component: &ComponentDef, base_name: &str) -> TokenStream
         last.ident = format_ident!("{}Ext", last.ident);
     }
     quote! { #path }
+}
+
+/// Rewrites a leading `crate` path segment to `$crate` for use inside an exported
+/// `macro_rules!` body, which may be expanded in another crate.
+fn exported_macro_path(path: TokenStream) -> TokenStream {
+    let mut tokens = path.into_iter().peekable();
+    let mut out = TokenStream::new();
+    if let Some(proc_macro2::TokenTree::Ident(first)) = tokens.peek() {
+        if first == "crate" {
+            out.extend(quote! { $ });
+        }
+    }
+    out.extend(tokens);
+    out
 }
 
 fn base_inherit_macro_path(component: &ComponentDef, base_name: &str) -> TokenStream {

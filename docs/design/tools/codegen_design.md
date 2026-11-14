@@ -374,15 +374,39 @@ accessorを呼ぶ。
   builtinを基底とする場合はprefixが常に0なので従来どおり。動的領域のhost取得(`@content_dynamic_host_into`)は
   宣言元classの`{Class}Ext`をUFCSで呼ぶため、基底のcontentが祖先(`Layout`の`children`)で宣言されていても
   派生側のtrait importに依存しない。
-- **埋め込まれた基底の`view`**: 基底の`view`は自分の`__build_view`で構築されるが、派生の`base`値として
-  埋め込まれていると`__self_weak`は最派生型を指すため、自分の型への`Rc`を得られず自身の購読・配線を
-  張れない。そこで生成component(テンプレート以外)は`elwindui::core::reactive::EmbeddedViewSync`を実装する:
-  `__elwindui_embedded_property_changed(name)`は自分のプロパティ・継承プロパティの再同期と動的領域の更新を
-  行ってから自分の`base`へ中継し、`__elwindui_wire_embedded(EmbeddedHandle<Self>)`は最派生の`Rc`から射影した
-  ハンドル経由で自分の配線(イベントハンドラ等)を張って`base`へ中継する。最派生componentは`base`の名前付き
-  `ObservableExt`購読の中で先に`base`へ中継し、`__build_view`の配線時にハンドルを作って`base`へ配線を
-  中継する。基底がbuiltin/手書きの場合は`EmbeddedNotify`のautoref dispatchで何もしない。配線コード中の
-  `this`の複製は`Clone::clone`で書き、`Rc<Self>`と`EmbeddedHandle<Self>`の両方で同じコードを使う。
+- **埋め込まれた基底の`view`**: 派生の`base`値として埋め込まれた生成componentは`__self_weak`が最派生型を指すため、
+  自分の型への`Rc`を持たない。そこで生成componentは`elwindui::core::reactive::EmbeddedViewSync`を実装し、
+  最派生componentが基底チェーンを1階層ずつ駆動する。各階層には最派生の`Rc`から射影した`EmbeddedHandle<Self>`
+  (保持用には弱参照の`WeakEmbeddedHandle<Self>`)を渡す。
+  - **mount**: 埋め込まれた基底は自分の`on_constructed`ではmountしない(最派生でないことを`__self_weak`で判定)。
+    埋め込む側の`mount`が先頭で`__elwindui_mount_as_base(弱ハンドル, environment)`を呼び、基底は弱ハンドルを
+    `__elwindui_embedded_self`へ記録してから自分をmountする。以後その階層は`__elwindui_self_handle()`で
+    自分へのハンドルを得られるので、mount中に作る`for`要素の配線や遅延構築分岐の配線も埋め込み時に動く。
+    `__new_unmounted`+明示`mount`の経路でも基底は同じ順でmountされる。
+  - **配線とunmount hook**: 最派生の`__build_view`は自分の配線・unmount hookの登録の後で
+    `__elwindui_wire_embedded`を中継し、各階層は自分の配線とunmount hookを登録してから`base`へ中継する。
+    unmount hookは登録順に実行されるので、`on_unmount`は最派生から基底へ順に一度ずつ実行される。
+  - **購読と`on_mount`**: 最派生は自分の購読(`#[bindable]`・Environment・semantic brush・`on_update`)と
+    `on_mount`の前に`__elwindui_mount_embedded`を中継し、各階層は先に`base`へ中継してから自分の購読と
+    `on_mount`を実行する。よって`on_mount`は基底から最派生へ順に一度ずつ実行される。購読は各階層の
+    `__property_changed_subscriptions`に入り、その階層の`__unmount_local`で解放される。
+  - **プロパティ変更**: `__elwindui_embedded_property_changed(name)`は自分の`base`へ中継してから自分の
+    プロパティ・継承プロパティの再同期と動的領域の更新を行う。最派生は`base`の名前付き`ObservableExt`購読の
+    中でこれを呼ぶ。
+  - 基底がbuiltin/手書きの場合は`EmbeddedNotify`のautoref dispatchで何もしない。viewを持たない派生
+    (inherited view composition)は基底の`view`と同じhookを持つため、自分では`on_mount`/`on_update`/
+    `on_unmount`を展開せず基底側の実行に一本化する。生成componentを基底とするshape合成で
+    `base::on_mount()`/`base::on_unmount()`を書くと二重実行になるため`compile_error!`にする。
+- **保存されるcallbackの所有**: shape合成・inherited view compositionのcomponentは自分自身がUI treeの
+  ノードなので、子要素に保存するイベントハンドラ・双方向バインディング・`for`要素のハンドラは
+  `ViewCtx::weak_wiring`により所有者を弱参照(`WiringOwner::downgrade_wiring`)で捕捉し、実行時に
+  `WiringWeak::upgrade_wiring`で取り直す(所有者が無ければ何もしない)。強参照で捕捉すると
+  `所有者 → 子 → ハンドラ → 所有者`の循環で、drop・unmountの後も解放されない。購読・unmount hookの
+  弱参照も同じtraitを使い、`Rc<Self>`と`EmbeddedHandle<Self>`の両方で同じ生成コードが動く。rootウィジェット
+  だけをtreeへ渡すshape合成以外のcomponentは、component自身を保持する経路が他に無い場合があるため従来どおり。
+- `for`のitem factoryは計画(`plan_dynamic_entry`)の時点で生成されるため、計画の前に暫定の
+  `ViewCtx::mutable_own_fields`を設定し、`for`要素のハンドラからも自分の可変Propを読み書きできるようにする。
+  item購読内でウィジェットを束縛する名前は`__elwindui_item_widget`で、ループ変数名`item`と衝突しない。
 - 自分の可変Propへの複合代入(`count += 1`)は、継承Propと同じく自分のgetterで取った一時値へ元の`op=`を
   適用してsetterへ渡す。
 

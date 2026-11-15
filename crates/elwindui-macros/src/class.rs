@@ -1637,6 +1637,11 @@ struct PropDecls {
     /// Issue #166 (A2): the declared type of a `#[fixed(name: Type, ..)]` input, used to convert a
     /// derived root's initial value the same way the constructor ABI converts constructor values.
     fixed_types: Vec<(Ident, Type)>,
+    /// Issue #166 (A2): `#[constructor_inputs(a, b, ..)]` — a generated Component's required
+    /// constructor inputs in constructor order (inherited ones first). Every class answers
+    /// `@required_params` with this list, empty for a class that declares none (every builtin), so
+    /// a derived Component in another crate asks any base the same way.
+    constructor_inputs: Vec<Ident>,
     /// `#[content(children)]` — which property receives bare nested child elements. Routinely names
     /// a property an *ancestor* declares (`VerticalLayout`'s content is `Layout`'s `children`), so
     /// it is validated by the deferred `@assert_declared` probe rather than locally.
@@ -1708,6 +1713,13 @@ fn take_prop_decls(attrs: &[syn::Attribute]) -> syn::Result<(PropDecls, Vec<syn:
                 shape.fixed_types.push((name.clone(), ty));
             }
             shape.fixed.push(name);
+        } else if attr.path().is_ident("constructor_inputs") {
+            shape.constructor_inputs = attr
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<Ident, syn::Token![,]>::parse_terminated,
+                )?
+                .into_iter()
+                .collect();
         } else if attr.path().is_ident("text_style") {
             shape.text_style = true;
         } else {
@@ -2117,6 +2129,7 @@ fn build_props_macro(
     //   constructor already.
     // `@initial_brush_with_environment` is the same walk run once the derived Component is
     // mounted, with its mount environment: it applies only the semantic brushes.
+    let constructor_inputs = &shape.constructor_inputs;
     let initial_props: Vec<(Ident, bool)> = shape
         .props
         .iter()
@@ -3223,6 +3236,9 @@ fn build_props_macro(
             #(#inherited_access_arms)*
             #(#inherited_fixed_arms)*
             #inherited_access_fallback
+            (@required_params $cb:path, { $($item:tt)* }) => {
+                $cb! { { $($item)* } [#(#constructor_inputs),*] }
+            };
             (@initial_with_environment $recv:expr, $name:ident, $($rest:tt)*) => {
                 $crate::#macro_ident!(@initial_with_environment_from $recv, $name, $($rest)*);
             };

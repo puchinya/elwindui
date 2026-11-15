@@ -443,6 +443,63 @@ fn a_root_semantic_brush_resolves_against_the_mount_environment() {
     assert_eq!(cross.base.base.base.background(), Some(scoped_brush()));
 }
 
+/// A builtin base written as a fully qualified path of another crate behaves exactly like the bare
+/// builtin name: it has no required constructor inputs, and root values reach the builtin.
+#[elwindui::component(inherits elwindui::core::ui::VerticalLayout)]
+struct QualifiedBuiltinBase {
+    #[param]
+    label: String,
+
+    body: view! {
+        spacing: 8.0
+        TextBlock { text: label }
+        TextBlock { text: "qualified" }
+    },
+}
+
+#[elwindui::component]
+impl QualifiedBuiltinBase {}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct BareBuiltinBase {
+    #[param]
+    label: String,
+
+    body: view! {
+        spacing: 8.0
+        TextBlock { text: label }
+        TextBlock { text: "qualified" }
+    },
+}
+
+#[elwindui::component]
+impl BareBuiltinBase {}
+
+/// A derived Component over the qualified one, adding nothing but a child.
+#[elwindui::component(inherits crate::QualifiedBuiltinBase)]
+struct QualifiedBuiltinDerived {
+    body: view! {
+        margin: 18.0
+        TextBlock { text: "derived" }
+    },
+}
+
+#[elwindui::component]
+impl QualifiedBuiltinDerived {}
+
+#[test]
+fn a_qualified_builtin_base_behaves_like_the_bare_builtin_name() {
+    let qualified = QualifiedBuiltinBase::new("q".to_string());
+    let bare = BareBuiltinBase::new("q".to_string());
+    assert_eq!(texts(&*qualified), ["q", "qualified"]);
+    assert_eq!(texts(&*qualified), texts(&*bare));
+    assert_eq!(measured_height(&*qualified), measured_height(&*bare));
+
+    let derived = QualifiedBuiltinDerived::new("d".to_string());
+    assert_eq!(texts(&*derived), ["d", "qualified", "derived"]);
+    assert_eq!(derived.margin(), 18.0);
+}
+
 /// A required input type less visible than the (always `pub`) generated Component. An inheritable
 /// base must still compile with it (no E0446), and a same-crate derived still auto-forwards it.
 struct PrivateInput(String);

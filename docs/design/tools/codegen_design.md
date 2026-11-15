@@ -420,10 +420,13 @@ accessorを呼ぶ。
   解決できるようにする。
 - **別クレートの基底の必須入力**: 派生のproc-macro展開時には別クレートの基底の必須入力が見えないため、
   2段階で生成する。
-  - 1段目(`generate_component_impl_real`)は、基底が別クレートの生成component(`is_external_generated_base`)
-    または`TypeInfo::deferred_constructor`な同一クレートのcomponentなら生成せず、基底のconstructor ABI macroの
-    `@required_params`を呼ぶ。基底は自分のコンストラクタ引数名を順に並べて
-    `elwindui::__component_with_base_params!`を呼び戻す。
+  - 1段目(`generate_component_impl_real`)は、基底が別クレートのclass(`is_external_base`。修飾pathで
+    tableにないもの)または`TypeInfo::deferred_constructor`な同一クレートのcomponentなら生成せず、基底の
+    shape macro(props macro)の`@required_params`を呼ぶ。`#[class]`はすべてこのarmを持ち、
+    `#[constructor_inputs(..)]`で宣言されたコンストラクタ引数名(生成componentが継承分を先頭にした
+    コンストラクタ順で宣言する。builtinは宣言しないので空)を並べて`elwindui::__component_with_base_params!`を
+    呼び戻す。基底が生成componentかbuiltinかはここで判定しない(`inherits elwindui::core::ui::VerticalLayout`
+    のような修飾pathのbuiltinも、必須入力なしとして同じ経路を通る)。
   - 2段目(`generate_component_with_base_params`)は受け取った名前を`ExternalBaseParamsScope`に置いて通常の
     生成を行う。`synthesize_external_base_fields`はそれらを実効フィールドの先頭へ
     基底の型エイリアス`<基底のpath>::__elwindui_required__<N>_<Base>_<name>`型で加える

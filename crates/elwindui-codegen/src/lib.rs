@@ -2254,23 +2254,25 @@ fn generate_component_impl_real(
             )));
         }
     }
-    // Issue #166 (A2): a base that is a generated Component of another crate exposes its
-    // required constructor inputs only through its constructor ABI macro. Defer real generation
-    // to `__component_with_base_params`, which the base's `@required_params` arm invokes with
-    // those names, so they can be auto-forwarded like a same-crate base's.
+    // Issue #166 (A2): the required constructor inputs of a base from another crate (or of a
+    // same-crate base whose own constructor is deferred) are known only to its exported shape
+    // macro. Defer real generation to `__component_with_base_params`, which the shape macro's
+    // `@required_params` arm invokes with those names (none for a builtin), so they can be
+    // auto-forwarded like a same-crate base's. Every class answers the same way, generated or not.
     if let (Some(base), Some(base_path)) = (&base, &base_path) {
-        let deferred_base = codegen::is_external_generated_base(&table, &module, base, base_path)
-            || table
-                .resolve(&module, base)
-                .is_some_and(|info| info.deferred_constructor);
+        let local_deferred = table
+            .resolve(&module, base)
+            .filter(|info| info.deferred_constructor);
+        let deferred_base =
+            codegen::is_external_base(&table, &module, base, base_path) || local_deferred.is_some();
         if deferred_base && codegen::external_base_params(&name).is_none() {
-            let ctor_macro = codegen::external_ctor_macro_path(base_path);
+            let shape_macro = codegen::dsl_props_macro_path(base_path, local_deferred);
             // Phase two resolves its generated tokens at this attribute expansion's own context
             // (not the base crate's macro expansion that invokes it), so lints and `$crate` behave
             // exactly as for a Component generated directly here.
             let anchor = quote::format_ident!("__elwindui_resolution_anchor");
             return Ok(quote::quote! {
-                #ctor_macro!(@required_params elwindui::__component_with_base_params, { #anchor #item_impl });
+                #shape_macro!(@required_params elwindui::__component_with_base_params, { #anchor #item_impl });
             });
         }
     }

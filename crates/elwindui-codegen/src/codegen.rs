@@ -316,7 +316,7 @@ fn dsl_authored_path(type_path: &str) -> syn::Path {
 /// Resolves the defining crate's exported `__elwindui_props_<Type>!` macro.  `#[macro_export]`
 /// places that macro at the defining crate root, so only the first segment of a qualified Rust
 /// path is retained (`crate_alias::widgets::Thing` -> `crate_alias::__elwindui_props_Thing`).
-fn dsl_props_macro_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
+pub(crate) fn dsl_props_macro_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
     let ident = format_ident!("__elwindui_props_{}", dsl_type_ident(type_path));
     match dsl_type_origin(type_path, info) {
         DslTypeOrigin::Builtin | DslTypeOrigin::UnresolvedUnqualified => {
@@ -476,7 +476,11 @@ impl Drop for ExternalBaseParamsScope {
 
 /// Whether `base` (written as `base_path`) is a generated Component defined in another crate:
 /// not resolvable in this crate's symbol table and named through a crate-qualified path.
-pub(crate) fn is_external_generated_base(
+/// Issue #166 (A2): whether `base` is a class of another crate (a qualified path with no table
+/// entry). Its required constructor inputs, if any, are known only to its own exported shape
+/// macro (`@required_params`); a builtin answers with none, so this does not decide whether the
+/// class is a generated Component.
+pub(crate) fn is_external_base(
     table: &SymbolTable,
     module: &Module,
     base: &str,
@@ -1104,8 +1108,6 @@ fn build_constructor_macro(
             quote! { $crate::#macro_ident!(@#helper props = [$($props)*]) }
         })
         .collect();
-    let required_param_idents: Vec<&syn::Ident> =
-        shape.params.iter().map(|param| &param.name).collect();
     // Only a Component that can be an inheritance base needs its input types exported. The alias
     // keeps a less visible input type a lint (allowed here), never an E0446 error; a derived
     // Component in another crate can still only use it when the type is public there.
@@ -1693,12 +1695,6 @@ fn build_constructor_macro(
                     #(#ctor_args),*
                 )
             }};
-            // Issue #166 (A2): a derived Component in another crate learns this Component's
-            // required constructor inputs (constructor order) to auto-forward them; its embedded
-            // base value converts each named value through `@__ctor_arg_<name>`.
-            (@required_params $cb:path, { $($item:tt)* }) => {
-                $cb! { { $($item)* } [#(#required_param_idents),*] }
-            };
 
             #mount_arm
             #ctor_arg_arms
@@ -3735,7 +3731,7 @@ fn resolve_deferred_constructor(
                 return false;
             };
             if let Some(base_path) = base_path {
-                if is_external_generated_base(table, module, base, base_path) {
+                if is_external_base(table, module, base, base_path) {
                     return true;
                 }
             }
@@ -8692,6 +8688,12 @@ fn generate_view(
     // so an inherited constructor input resolves by bare name in any crate. A defaulted one
     // (`#[fixed(name: Type, default)]`) also takes a derived root's initial value through
     // `@initial_with_environment`, converted for its declared type.
+    // Issue #166 (A2): the required constructor inputs in constructor order, answered by the
+    // exported shape macro's `@required_params` to a derived Component in another crate (which asks
+    // every base, generated or builtin, through the same shape macro).
+    let generated_class_constructor_inputs = (is_shape_composition
+        || is_inherited_view_composition)
+        .then(|| quote! { #[constructor_inputs(#(#ctor_param_names),*)] });
     let generated_class_fixed_decls: Vec<TokenStream> =
         if is_shape_composition || is_inherited_view_composition {
             own_field_shape
@@ -9674,6 +9676,7 @@ fn generate_view(
             #[elwindui::class(inherits = #inherits_path)]
             #(#generated_class_prop_decls)*
             #(#generated_class_fixed_decls)*
+            #generated_class_constructor_inputs
             #generated_class_content_decl
             pub struct #target {
                 #(#plain_required_names: #plain_required_types,)*

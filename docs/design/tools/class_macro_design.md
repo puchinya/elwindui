@@ -123,6 +123,10 @@ property protocolには参加しない)。派生componentへ自動転送され�
 - `#[fixed(name)]`(必須のコンストラクタ入力)は、構築時にコンストラクタへ渡し済みなので何もしない。
 - 親を持たない終端まで宣言元がなければ`compile_error!`にする。
 
+`@required_params $cb, { .. }`(Issue #166)は、`#[constructor_inputs(a, b, ..)]`で宣言されたコンストラクタ
+引数名を`$cb! { { .. } [a, b, ..] }`として返す。宣言のないclass(builtin)は空のリストを返すので、別クレートの
+派生componentはどの基底にも同じ形で問い合わせられる。
+
 `@initial_brush_with_environment`は同じ連鎖を、派生componentがmountされた後(`__build_view`)にmount時の
 環境で実行する。semantic brushのpropertyだけを設定し、それ以外の名前は何もしない(未宣言名の報告は構築時の
 `@initial_with_environment`が行う)。semantic brushは派生componentが置かれた環境(`EnvironmentScope`など)で

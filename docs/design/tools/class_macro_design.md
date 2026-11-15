@@ -109,6 +109,18 @@ Only `@set`'s `wrap_prop_value` knows how to shape a value into a declared prope
 コンストラクタ入力)として宣言され、`@inherited_get`だけが宣言元のgetterへ解決する(`@set`・`@field_type`等の
 property protocolには参加しない)。派生componentへ自動転送された基底の必須入力を裸名で読むための経路である。
 
+`@initial_with_environment $recv, name, value, environment`(Issue #166)は、派生componentの`view`のrootが、
+埋め込んだ基底(`$recv`はその参照)にmount前の初期値を設定するための経路である。各classは自分が宣言した名前だけを、
+自分の値に自分のtraitで設定し、それ以外の名前は自分の`base`(`&$recv.base`)と共に親classのshape macroへ転送する。
+派生classは祖先のtraitをすべて実装しているわけではなく、隠しinitial setterも委譲されないため、受け手を宣言元の
+値そのものにする。
+
+- `#[prop]`・`#[text_style]`のpropertyは、そのclassの`@set_with_environment`で設定する。
+- `#[fixed(name, default)]`(既定値付きのコンストラクタ入力)は、隠しinitial setter
+  `__set_initial_param_<name>`で設定する。
+- `#[fixed(name)]`(必須のコンストラクタ入力)は、構築時にコンストラクタへ渡し済みなので何もしない。
+- 親を持たない終端まで宣言元がなければ`compile_error!`にする。
+
 ## Validation boundary
 
 Publicly observable accepted/rejected forms remain in the specification. Parser representation, token generation, registry layout, shadow expansion, and debugging strategy belong only here.

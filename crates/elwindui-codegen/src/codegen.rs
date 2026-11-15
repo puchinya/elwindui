@@ -93,10 +93,6 @@ pub struct TypeInfo {
     /// own doc comment) — a field this type declares itself is never ambiguous, only one it inherited
     /// from some ancestor.
     pub declaring_types: HashMap<String, String>,
-    /// Issue #166 (A2): the table key of this Component's same-crate generated `inherits` base, if
-    /// any. A derived root's initial values reach an ancestor Prop or defaulted Param that a middle
-    /// level's own view left out of its effective fields (`shape_root_initial_sets`) through it.
-    pub base_key: Option<(Vec<String>, String)>,
     /// Names of `#[onetime]` fields (`ast::Attr::Onetime`'s own doc comment) — applied once at
     /// construction, never re-pushed by `emit_resync`'s per-attribute loop. Empty for ordinary user
     /// components (only `Window` declares any today: `left`/`top`/`width`/
@@ -1090,8 +1086,6 @@ fn build_constructor_macro(
     shape: &EffectiveConstructorShape,
     props_macro: Option<TokenStream>,
     inheritable_base: bool,
-    base_ctor_macro: Option<TokenStream>,
-    shape_props_macro: Option<TokenStream>,
 ) -> TokenStream {
     let macro_ident = format_ident!("__elwindui_ctor_{type_name}");
     let return_name = match shape.constructor_return {
@@ -1112,51 +1106,6 @@ fn build_constructor_macro(
         .collect();
     let required_param_idents: Vec<&syn::Ident> =
         shape.params.iter().map(|param| &param.name).collect();
-    // Issue #166 (A2): a derived Component's view root sets static values right after
-    // constructing its base, keyed by the attribute's name as an ident (an `ident` fragment stays
-    // matchable when forwarded; a `literal` or `expr` one would not):
-    // - this Component's ordinary Props and defaulted Params have their own arms above;
-    // - a required constructor input was already passed to the constructor, so it is ignored;
-    // - any other name may be an ancestor's Prop or defaulted Param that this Component's own view
-    //   left out of its effective fields, so it goes on to the generated base's ABI for the
-    //   embedded `base`, with the value tokens untouched (a literal `None` still matches there);
-    // - at the last generated level it belongs to the builtin shape (`spacing`, `margin`) and is
-    //   set through that builtin's exported property-shape macro on the embedded `base`.
-    let root_initial_required_arms: TokenStream = required_param_idents
-        .iter()
-        .map(|name| {
-            quote! {
-                (@root_initial_typed $recv:expr, #name, $($rest:tt)*) => {};
-                (@root_initial $recv:expr, #name, $($rest:tt)*) => {};
-            }
-        })
-        .collect();
-    let root_initial_fallback = match (&base_ctor_macro, &shape_props_macro) {
-        (Some(base_ctor_macro), _) => quote! {
-            (@root_initial_typed $recv:expr, $name:ident, $($rest:tt)*) => {
-                #base_ctor_macro!(@root_initial_typed $recv.base, $name, $($rest)*)
-            };
-            (@root_initial $recv:expr, $name:ident, $($rest:tt)*) => {
-                #base_ctor_macro!(@root_initial $recv.base, $name, $($rest)*)
-            };
-        },
-        (None, Some(shape_props_macro)) => quote! {
-            (@root_initial_typed $recv:expr, $name:ident, $($rest:tt)*) => {{
-                #[allow(unused_imports)]
-                use elwindui::ui::*;
-                #shape_props_macro!(@set_with_environment $recv.base, $name, $($rest)*);
-            }};
-            (@root_initial $recv:expr, $name:ident, $($rest:tt)*) => {{
-                #[allow(unused_imports)]
-                use elwindui::ui::*;
-                #shape_props_macro!(@set_with_environment $recv.base, $name, $($rest)*);
-            }};
-        },
-        (None, None) => quote! {
-            (@root_initial_typed $recv:expr, $name:ident, $($rest:tt)*) => {};
-            (@root_initial $recv:expr, $name:ident, $($rest:tt)*) => {};
-        },
-    };
     // Only a Component that can be an inheritance base needs its input types exported. The alias
     // keeps a less visible input type a lint (allowed here), never an E0446 error; a derived
     // Component in another crate can still only use it when the type is public there.
@@ -1384,11 +1333,6 @@ fn build_constructor_macro(
             }
         };
         initial_field_arms.extend(quote! {
-            (@root_initial_typed $recv:expr, #name, $value:expr, $environment:expr) => {
-                #set_typed
-            };
-            (@root_initial $recv:expr, #name, None, $environment:expr) => { #set_none };
-            (@root_initial $recv:expr, #name, $value:expr, $environment:expr) => { #set_value };
             (@initial_named_typed $recv:expr, #name_literal, $value:expr, $environment:expr) => {
                 #set_typed
             };
@@ -1763,8 +1707,6 @@ fn build_constructor_macro(
             #initial_field_arms
             #initial_named_required_arms
             #initial_named_unknown
-            #root_initial_required_arms
-            #root_initial_fallback
             #new_initial_field_arms
             #new_initial_required_arms
             #new_initial_lookup_arms
@@ -1898,11 +1840,6 @@ impl SymbolTable {
             });
         let first = matches.next()?;
         matches.next().is_none().then_some(first)
-    }
-
-    /// Issue #166 (A2): `info`'s same-crate generated `inherits` base (`TypeInfo::base_key`).
-    pub(crate) fn base_info(&self, info: &TypeInfo) -> Option<&TypeInfo> {
-        self.types.get(info.base_key.as_ref()?)
     }
 
     pub(crate) fn type_info_for_key(&self, key: &ResolvedTypeKey) -> Option<&TypeInfo> {
@@ -2234,13 +2171,6 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             content_field: resolve_content_field(module, c, modules),
                             is_builtin: c.embedded,
                             declaring_types: resolve_field_declaring_types(module, c, modules),
-                            base_key: c
-                                .base
-                                .as_deref()
-                                .and_then(|base| find_component_and_module(module, base, modules))
-                                .map(|(base_module, base_c)| {
-                                    (base_module.path.clone(), base_c.name.clone())
-                                }),
                         },
                     );
                 }
@@ -2290,7 +2220,6 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             semantic_brush_fields: HashSet::new(),
                             bindable_fields: HashSet::new(),
                             declaring_types: HashMap::new(),
-                            base_key: None,
                             onetime_fields: HashSet::new(),
                             is_virtual_builtin: false,
                             field_types,
@@ -2364,7 +2293,6 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             semantic_brush_fields: HashSet::new(),
                             bindable_fields: HashSet::new(),
                             declaring_types: HashMap::new(),
-                            base_key: None,
                             onetime_fields: HashSet::new(),
                             is_virtual_builtin: false,
                             field_types,
@@ -5408,14 +5336,8 @@ fn generate_component(
         own_field_shape.constructor_return,
         non_writable_fields,
     );
-    let constructor_macro = build_constructor_macro(
-        &struct_name.to_string(),
-        &constructor_shape,
-        None,
-        false,
-        None,
-        None,
-    );
+    let constructor_macro =
+        build_constructor_macro(&struct_name.to_string(), &constructor_shape, None, false);
     quote! {
         #[allow(non_camel_case_types)]
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7673,7 +7595,6 @@ fn generate_view(
                         &ctx,
                         from,
                         table,
-                        component,
                         &required_own_names
                             .iter()
                             .chain(&own_default_construct_locals)
@@ -8763,17 +8684,22 @@ fn generate_view(
         };
     // Issue #166 (A2): this Component's own `#[param]`s (required and defaulted) are readable by a
     // derived Component through the exported shape macro's `@inherited_get` (`#[fixed(name)]`),
-    // so an inherited constructor input resolves by bare name in any crate.
+    // so an inherited constructor input resolves by bare name in any crate. A defaulted one
+    // (`#[fixed(name, default)]`) also takes a derived root's initial value through
+    // `@initial_with_environment`.
     let generated_class_fixed_decls: Vec<TokenStream> =
         if is_shape_composition || is_inherited_view_composition {
             own_field_shape
                 .constructor_params
                 .iter()
-                .chain(own_field_shape.defaulted_params.iter())
                 .map(|(name, _)| {
                     let name = format_ident!("{name}");
                     quote! { #[fixed(#name)] }
                 })
+                .chain(own_field_shape.defaulted_params.iter().map(|(name, _)| {
+                    let name = format_ident!("{name}");
+                    quote! { #[fixed(#name, default)] }
+                }))
                 .collect()
         } else {
             Vec::new()
@@ -9589,42 +9515,11 @@ fn generate_view(
         own_field_shape.constructor_return,
         non_writable_fields,
     );
-    // Issue #166 (A2): the generated base's constructor ABI, for root initial values this
-    // Component's own ABI has no arm for (see `build_constructor_macro`).
-    let base_ctor_macro = (is_shape_composition || is_inherited_view_composition)
-        .then_some(())
-        .and_then(|()| {
-            let base = component.base.as_deref()?;
-            let base_text = component.base_path.as_deref().unwrap_or(base);
-            let generated = match table
-                .resolve(from, base_text)
-                .or_else(|| table.resolve(from, base))
-            {
-                Some(info) => {
-                    !info.is_virtual_builtin
-                        && !info.is_builtin
-                        && !is_hand_written_native(info)
-                        && info.composed_shape.is_some()
-                }
-                None => {
-                    external_base_params(&component.name).is_some()
-                        || dsl_ctor_macro_path(base_text, None).is_some()
-                }
-            };
-            generated.then(|| rewrite_crate_tokens(external_ctor_macro_path(base_text)))
-        });
-    // Without a generated base, the builtin shape this Component composes over directly.
-    let shape_props_macro = (is_shape_composition && base_ctor_macro.is_none())
-        .then(|| table.resolve(from, &target_name)?.composed_shape.clone())
-        .flatten()
-        .map(|shape| dsl_props_macro_path(&shape, None));
     let constructor_macro = build_constructor_macro(
         &target_name,
         &constructor_shape,
         generated_props_macro,
         is_shape_composition || is_inherited_view_composition,
-        base_ctor_macro,
-        shape_props_macro,
     );
 
     let generated = if is_composed {
@@ -15424,16 +15319,7 @@ fn emit_construction(
         // list for positional arguments. Defaulted Params and ordinary Props are applied through
         // the matching pre-mount initial setters below.
         let args = build_component_args(node, ctx, from, table, info, plan, false);
-        let optional_setters = build_component_optional_setters(
-            node,
-            ctx,
-            from,
-            table,
-            info,
-            false,
-            &HashSet::new(),
-            None,
-        );
+        let optional_setters = build_component_optional_setters(node, ctx, from, table, info);
         // CI-7 of #80 (docs/design/runtime/component_lifecycle_design.md §4f): a node declared
         // inside an `EnvironmentScope` constructs via `__new_unmounted` (no automatic self-mount)
         // and is then mounted explicitly, right here, against the scope's own derived
@@ -16081,17 +15967,10 @@ fn build_component_optional_setters(
     from: &Module,
     table: &SymbolTable,
     info: &TypeInfo,
-    static_only: bool,
-    skip: &HashSet<String>,
-    receiver: Option<TokenStream>,
 ) -> Vec<TokenStream> {
     let binding = &node.binding;
-    // Issue #166 (A2): an ancestor level of a shape-composition root is reached through the
-    // embedded `base` field chain (`shape_root_initial_sets`).
-    let receiver = receiver.unwrap_or_else(|| quote! { #binding });
     let initial_fields = info.effective_fields.iter().filter(|f| {
-        !skip.contains(&f.name)
-            && !crate::attr_frontend::is_event_schema_field(f)
+        !crate::attr_frontend::is_event_schema_field(f)
             && ((f.kind == FieldKind::Prop)
                 || (f.kind == FieldKind::Param
                     && matches!(f.initializer, Some(Initializer::Expr(_)))))
@@ -16101,19 +15980,6 @@ fn build_component_optional_setters(
     for field in initial_fields {
         let name = field.name.as_str();
         let ty = field.ty.as_str();
-        // `static_only` (a shape-composition root, set before `Self` exists): only an authored
-        // plain value applies here. A reactive value is pushed by the root's resync at mount, a
-        // semantic brush needs the mount environment, and content, element and closure values
-        // are wired once the view's children and `Self` exist.
-        if static_only
-            && (is_semantic_brush_property(info, name)
-                || find_attr(node, name).is_none_or(|expr| {
-                    matches!(expr, ViewExpr::Element(_) | ViewExpr::Closure { .. })
-                        || view_expr_has_reactive_dependency(expr, ctx)
-                }))
-        {
-            continue;
-        }
         let setter_ident = if field.kind == FieldKind::Param {
             format_ident!("__set_initial_param_{}", name)
         } else {
@@ -16132,6 +15998,7 @@ fn build_component_optional_setters(
         {
             let raw = emit_expr(expr, ctx, &EmitMode::Construction);
             let environment = semantic_brush_construction_environment(node, ctx);
+            let receiver = quote! { #binding };
             let set = emit_field_setter_call(
                 name,
                 &node.type_path,
@@ -16188,7 +16055,7 @@ fn build_component_optional_setters(
         } else {
             value
         };
-        setters.push(quote! { #receiver.#setter_ident(#value); });
+        setters.push(quote! { #binding.#setter_ident(#value); });
     }
     setters
 }
@@ -16319,111 +16186,46 @@ fn local_content_initial_setter_applies(node: &PlannedNode, info: &TypeInfo) -> 
     true
 }
 
-/// Issue #166 (A2): applies the ordinary Props and defaulted Params a shape-composition root sets on
-/// its generated base (`flag: true` in a derived view), right after `build_component_value`
-/// constructed it. Only static values are set here: a reactive one is pushed by the root's resync at
-/// mount, and that resync skips static values (`reactive = false`), so without this they would
-/// keep the base's declared defaults.
+/// Issue #166 (A2): applies the static values a shape-composition root sets on its base (`flag:
+/// true`, `step: 5`, `spacing: 8.0` in a derived view), right after `build_component_value`
+/// constructed it. A reactive value is pushed by the root's resync at mount; that resync skips
+/// static values (`reactive = false`), so without this they would keep the base's defaults.
+///
+/// Every value goes through the base's exported property-shape macro (`@initial_with_environment`),
+/// the same way for a base in this crate or another one. The macro walks the class chain declared
+/// by `#[class]` attributes, so whichever class declares the name (a generated ancestor's Prop or
+/// defaulted Param, or a builtin's property) applies it; a required constructor input is ignored
+/// there, since `build_component_value` already passed it to the constructor.
 fn shape_root_initial_sets(
     node: &PlannedNode,
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
-    component: &ComponentDef,
     construct_locals: &[syn::Ident],
 ) -> TokenStream {
-    let binding = &node.binding;
-    let ctor_macro = match (
-        external_base_params(&component.name),
-        component.base_path.as_deref(),
-    ) {
-        (Some(_), Some(base_path)) => Some(external_ctor_macro_path(base_path)),
-        _ => match table.resolve(from, &node.type_path) {
-            Some(info) if !is_hand_written_native(info) => {
-                // Each generated level sets, on its own value inside the embedded `base` field
-                // chain, only the fields it declares itself: a middle level's view can leave an
-                // ancestor's field out of its effective fields, and an inherited field has no
-                // hidden initial setter on the inheriting level.
-                let mut setters = Vec::new();
-                let mut receiver = quote! { #binding };
-                let mut level_name = dsl_type_ident(&node.type_path).to_string();
-                let mut level = info;
-                loop {
-                    let not_declared_here: HashSet<String> = level
-                        .effective_fields
-                        .iter()
-                        .filter(|f| {
-                            level.declaring_types.get(&f.name).map(String::as_str)
-                                != Some(level_name.as_str())
-                        })
-                        .map(|f| f.name.clone())
-                        .collect();
-                    setters.extend(build_component_optional_setters(
-                        node,
-                        ctx,
-                        from,
-                        table,
-                        level,
-                        true,
-                        &not_declared_here,
-                        Some(receiver.clone()),
-                    ));
-                    receiver = quote! { #receiver.base };
-                    // A builtin ancestor (in a table that has one) has no hidden initial setters;
-                    // its properties are set below through its public setters.
-                    match table.base_info(level).filter(|base| {
-                        !base.is_builtin
-                            && !base.is_virtual_builtin
-                            && !is_hand_written_native(base)
-                    }) {
-                        Some(base) => {
-                            level_name = level.base_key.as_ref().expect("base_info").1.clone();
-                            level = base;
-                        }
-                        None => break,
-                    }
-                }
-                // The shape the generated chain composes over (`VerticalLayout`, ...) is reached as
-                // the innermost `base`. A static root value for a name no generated level consumes
-                // (`spacing`, `margin`, declared by that shape or `UIElement`) is set through the
-                // builtin's own exported property-shape macro and public setters, exactly as when
-                // the builtin is constructed directly.
-                if let Some(shape) = level.composed_shape.as_deref() {
-                    setters.push(shape_root_builtin_sets(
-                        node, ctx, from, table, info, shape, &receiver,
-                    ));
-                }
-                return clone_referenced_construct_locals(
-                    quote! { #(#setters)* },
-                    construct_locals,
-                );
-            }
-            Some(_) => None,
-            None => dsl_ctor_macro_path(&node.type_path, None),
-        },
-    };
-    let Some(ctor_macro) = ctor_macro else {
-        return TokenStream::new();
-    };
+    let props_macro = dsl_props_macro_path(
+        &node.type_path,
+        resolve_context_info(ctx, from, table, &node.type_path),
+    );
     let environment = format_ident!("__elwindui_root_environment");
-    let mut sets: Vec<TokenStream> = Vec::new();
-    for attribute in external_attribute_values(node, ctx, from, table) {
-        if attribute.synthesized
-            || find_attr(node, &attribute.name.to_string()).is_none_or(|expr| {
-                matches!(expr, ViewExpr::Element(_) | ViewExpr::Closure { .. })
-                    || view_expr_has_reactive_dependency(expr, ctx)
-            })
-        {
-            continue;
-        }
-        let name = &attribute.name;
-        let value = &attribute.value;
-        sets.push(if attribute.typed {
-            quote! { #ctor_macro!(@root_initial_typed #binding, #name, #value, &#environment); }
-        } else {
-            quote! { #ctor_macro!(@root_initial #binding, #name, #value, &#environment); }
-        });
-    }
+    let sets: Vec<TokenStream> = external_attribute_values(node, ctx, from, table)
+        .into_iter()
+        .filter(|attribute| {
+            !attribute.synthesized
+                && find_attr(node, &attribute.name.to_string()).is_some_and(|expr| {
+                    !matches!(
+                        expr,
+                        ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_)
+                    ) && !view_expr_has_reactive_dependency(expr, ctx)
+                })
+        })
+        .map(|attribute| {
+            let binding = &node.binding;
+            let name = &attribute.name;
+            let value = &attribute.value;
+            quote! { #props_macro!(@initial_with_environment &#binding, #name, #value, &#environment); }
+        })
+        .collect();
     if sets.is_empty() {
         return TokenStream::new();
     }
@@ -16434,82 +16236,6 @@ fn shape_root_initial_sets(
         },
         construct_locals,
     )
-}
-
-/// Issue #166 (A2): `shape_root_initial_sets`' builtin part. `receiver` is the embedded builtin
-/// `shape` value under the generated chain that starts at `info`. Every name a generated level
-/// consumes is left out: a Prop or defaulted Param (set through its declaring level's hidden
-/// initial setter) and a constructor input (a Param without a default). What remains of the
-/// root's static authored attributes belongs to the builtin.
-fn shape_root_builtin_sets(
-    node: &PlannedNode,
-    ctx: &ViewCtx,
-    from: &Module,
-    table: &SymbolTable,
-    info: &TypeInfo,
-    shape: &str,
-    receiver: &TokenStream,
-) -> TokenStream {
-    let mut consumed: HashSet<&str> = HashSet::new();
-    let mut level = Some(info);
-    while let Some(current) = level {
-        consumed.extend(current.effective_fields.iter().map(|f| f.name.as_str()));
-        level = table.base_info(current).filter(|base| {
-            !base.is_builtin && !base.is_virtual_builtin && !is_hand_written_native(base)
-        });
-    }
-    // A generated level's effective field the builtin itself declares is still the builtin's,
-    // unless that level consumes it as a constructor input.
-    let builtin_fields: HashSet<&str> = resolve_context_info(ctx, from, table, shape)
-        .map(|shape_info| shape_info.fields.keys().map(String::as_str).collect())
-        .unwrap_or_default();
-    let mut level = Some(info);
-    while let Some(current) = level {
-        for field in &current.effective_fields {
-            let constructor_input = field.kind == FieldKind::Param && field.initializer.is_none();
-            if builtin_fields.contains(field.name.as_str()) && !constructor_input {
-                consumed.remove(field.name.as_str());
-            }
-        }
-        level = table.base_info(current).filter(|base| {
-            !base.is_builtin && !base.is_virtual_builtin && !is_hand_written_native(base)
-        });
-    }
-    let environment = format_ident!("__elwindui_root_builtin_environment");
-    let target = format_ident!("__elwindui_root_builtin");
-    let props_macro = dsl_props_macro_path(shape, None);
-    let sets: Vec<TokenStream> = external_attribute_values(node, ctx, from, table)
-        .into_iter()
-        .filter(|attribute| {
-            let name = attribute.name.to_string();
-            !attribute.synthesized
-                && !name.starts_with("on_")
-                && !consumed.contains(name.as_str())
-                && find_attr(node, &name).is_some_and(|expr| {
-                    !matches!(
-                        expr,
-                        ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_)
-                    ) && !view_expr_has_reactive_dependency(expr, ctx)
-                })
-        })
-        .map(|attribute| {
-            let name = &attribute.name;
-            let value = &attribute.value;
-            quote! { #props_macro!(@set_with_environment #target, #name, #value, &#environment); }
-        })
-        .collect();
-    if sets.is_empty() {
-        return TokenStream::new();
-    }
-    quote! {
-        {
-            #[allow(unused_imports)]
-            use elwindui::ui::*;
-            let #environment = elwindui::core::environment::application_environment();
-            let #target = &#receiver;
-            #(#sets)*
-        }
-    }
 }
 
 /// Issue #166 (A2): the root initial values run inside `construct()` before `Self { .. }` takes
@@ -20676,8 +20402,7 @@ mod tests {
             crate::component_frontend::ComponentConstructorReturn::RcSelf,
             Vec::new(),
         );
-        let generated =
-            build_constructor_macro("Thing", &shape, None, false, None, None).to_string();
+        let generated = build_constructor_macro("Thing", &shape, None, false).to_string();
         assert!(!generated.contains("children"), "{generated}");
     }
 
@@ -25358,10 +25083,10 @@ struct NotepadWindow {
     /// Model A is asserted alongside: the inherited Prop `heading` gets no derived-owned accessor
     /// or `{Derived}Property` variant either, and is read/written through the base value.
     #[test]
-    fn issue_166_root_initial_values_stop_at_a_builtin_ancestor() {
-        // A table that has the builtins (`VerticalLayout`'s `spacing`, `UIElement`'s `margin`):
-        // the hidden initial setters exist only on generated levels, so builtin properties set on a
-        // derived root two hops above go through the builtin's own property-shape macro.
+    fn issue_166_root_initial_values_go_through_the_base_property_shape_macro() {
+        // Every static root value (a base Prop two hops up, a builtin's `spacing`/`margin`) goes
+        // through the immediate base's property-shape macro, which walks the `#[class]` chain;
+        // codegen never decides which class declares it, even with the builtins in the table.
         let module = crate::test_module(&[
             (
                 Some("VerticalLayout"),
@@ -25405,26 +25130,22 @@ struct NotepadWindow {
         .expect("should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
-        assert_valid_rust("issue_166_root_initial_builtin_ancestor", &generated);
+        assert_valid_rust("issue_166_root_initial_property_shape_macro", &generated);
         let rendered = generated.to_string();
-        for hidden in ["__set_initial_prop_spacing", "__set_initial_prop_margin"] {
+        assert!(
+            !rendered.contains("__set_initial_prop_spacing")
+                && !rendered.contains("__set_initial_prop_margin")
+                && !rendered.contains(". base . __set_initial"),
+            "no hidden setter is chosen for the root values: {rendered}"
+        );
+        for name in ["spacing", "margin", "flag"] {
+            let call = "crate :: __elwindui_props_I166LayoutMiddle ! (@ initial_with_environment & __i166layoutmiddle_";
+            assert!(rendered.contains(call), "{name}: {rendered}");
             assert!(
-                !rendered.contains(hidden),
-                "{hidden} is not a builtin method"
+                rendered.contains(&format!(", {name} ,")),
+                "{name} is passed to the base's property-shape macro"
             );
         }
-        assert!(
-            rendered.contains(". base . __set_initial_prop_flag (true)"),
-            "the base Prop is set on the base two hops up: {rendered}"
-        );
-        assert!(
-            rendered.contains("__elwindui_props_VerticalLayout ! (@ set_with_environment __elwindui_root_builtin , spacing"),
-            "spacing goes through the builtin's property-shape macro"
-        );
-        assert!(
-            rendered.contains("__elwindui_props_VerticalLayout ! (@ set_with_environment __elwindui_root_builtin , margin"),
-            "margin goes through the builtin's property-shape macro"
-        );
     }
 
     #[test]

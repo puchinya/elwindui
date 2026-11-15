@@ -1630,6 +1630,10 @@ struct PropDecls {
     /// crate) can read an inherited `#[param]` by its bare name; it has no setter, field-type or
     /// content protocol.
     fixed: Vec<Ident>,
+    /// Issue #166 (A2): the `#[fixed(name, default)]` subset of `fixed` — a defaulted constructor
+    /// input, which (unlike a required one) still takes a pre-mount initial value through the
+    /// `@initial_with_environment` protocol.
+    fixed_defaulted: Vec<Ident>,
     /// `#[content(children)]` — which property receives bare nested child elements. Routinely names
     /// a property an *ancestor* declares (`VerticalLayout`'s content is `Layout`'s `children`), so
     /// it is validated by the deferred `@assert_declared` probe rather than locally.
@@ -1674,7 +1678,22 @@ fn take_prop_decls(attrs: &[syn::Attribute]) -> syn::Result<(PropDecls, Vec<syn:
             }
             shape.content_field = Some(attr.parse_args::<Ident>()?);
         } else if attr.path().is_ident("fixed") {
-            shape.fixed.push(attr.parse_args::<Ident>()?);
+            let (name, defaulted) = attr.parse_args_with(|input: syn::parse::ParseStream| {
+                let name: Ident = input.parse()?;
+                if input.is_empty() {
+                    return Ok((name, false));
+                }
+                input.parse::<syn::Token![,]>()?;
+                let marker: Ident = input.parse()?;
+                if marker != "default" {
+                    return Err(syn::Error::new(marker.span(), "expected `default`"));
+                }
+                Ok((name, true))
+            })?;
+            if defaulted {
+                shape.fixed_defaulted.push(name.clone());
+            }
+            shape.fixed.push(name);
         } else if attr.path().is_ident("text_style") {
             shape.text_style = true;
         } else {
@@ -2029,6 +2048,77 @@ fn build_props_macro(
             }
         })
         .collect();
+    // Issue #166 (A2): `@initial_with_environment` — a derived Component's view root setting a
+    // pre-mount initial value on its embedded base (`$recv` is a reference to it). It walks the
+    // class chain the `#[class]` attributes declare, stepping into each class's own `base` value,
+    // so every class applies the names it declares itself, on itself, through its own trait:
+    // - a `#[prop]` (and a `#[text_style]` property) through this class's `@set_with_environment`;
+    // - a defaulted constructor input (`#[fixed(name, default)]`) through its hidden initial setter;
+    // - a required constructor input (`#[fixed(name)]`) not at all: it was passed to the
+    //   constructor already.
+    let initial_prop_names: Vec<Ident> = shape
+        .props
+        .iter()
+        .filter(|p| takes_set_arm(p) && !p.routed)
+        .map(|p| p.name.clone())
+        .chain(
+            shape
+                .text_style
+                .then(|| {
+                    elwindui_codegen::TEXT_STYLE_FIELDS
+                        .iter()
+                        .map(|(name, _, _)| format_ident!("{name}"))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        )
+        .collect();
+    let initial_arms: Vec<TokenStream2> = initial_prop_names
+        .iter()
+        .map(|name| {
+            quote! {
+                (@initial_with_environment_from $recv:expr, #name, $($rest:tt)*) => {{
+                    #[allow(unused_imports)]
+                    use #own_ext as _;
+                    $crate::#macro_ident!(@set_with_environment_from #bare_ident, $recv, #name, $($rest)*);
+                }};
+            }
+        })
+        .chain(shape.fixed.iter().map(|name| {
+            if shape.fixed_defaulted.contains(name) {
+                let setter = format_ident!("__set_initial_param_{}", name);
+                quote! {
+                    (@initial_with_environment_from $recv:expr, #name, $value:expr, $environment:expr) => {{
+                        #[allow(unused_imports)]
+                        use #own_ext as _;
+                        $recv.#setter(::core::convert::Into::into($value));
+                    }};
+                }
+            } else {
+                quote! {
+                    (@initial_with_environment_from $recv:expr, #name, $($rest:tt)*) => {};
+                }
+            }
+        }))
+        .collect();
+    let initial_fallback = match parent {
+        Some((parent_bare, parent_ty)) => {
+            let parent_macro =
+                inherit_macro_self_ref_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
+            quote! {
+                (@initial_with_environment_from $recv:expr, $name:ident, $($rest:tt)*) => {
+                    #parent_macro!(@initial_with_environment_from &$recv.base, $name, $($rest)*)
+                };
+            }
+        }
+        None => quote! {
+            (@initial_with_environment_from $recv:expr, $name:ident, $($rest:tt)*) => {
+                compile_error!(concat!(
+                    "`", stringify!($name), "` is not a property this class or an ancestor declares"
+                ));
+            };
+        },
+    };
     let inherited_access_fallback = match parent {
         Some((parent_bare, parent_ty)) => {
             let parent_macro =
@@ -3043,6 +3133,11 @@ fn build_props_macro(
             #(#inherited_access_arms)*
             #(#inherited_fixed_arms)*
             #inherited_access_fallback
+            (@initial_with_environment $recv:expr, $name:ident, $($rest:tt)*) => {
+                $crate::#macro_ident!(@initial_with_environment_from $recv, $name, $($rest)*);
+            };
+            #(#initial_arms)*
+            #initial_fallback
             #(#field_type_arms)*
             #field_type_fallback
             (@routed $recv:expr, $name:ident, $value:expr) => {

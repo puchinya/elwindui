@@ -438,25 +438,14 @@ accessorを呼ぶ。
     基底ABIへ委ねる(`forwarded_required_param_conversion`。エイリアス名から基底のpathを復元する)。
     `<N>`は`<Base>`の文字数である。型名にもフィールド名にも`_`や`__`を含められるので、区切り文字ではなく
     この長さで`<Base>`を一意に復元する(`required_param_alias_base`)。
-  - shape合成のrootが基底の通常Prop・既定値付きParamに設定した値は、基底を構築した直後に
-    `shape_root_initial_sets`で初期値として設定する(rootのresyncは`reactive = false`の値を設定しないため)。
-    同一クレートの基底は`__set_initial_*`、別クレート(または2段階生成)の基底はconstructor ABIの
-    `@root_initial`を使う。設定するのは
-    authorした通常の値だけで、reactiveな値・semantic brush・要素・closureは従来どおりmount時の経路で扱う。
-    - 中間の祖先の`view`が参照しない祖先のフィールドは、中間の実効フィールドから外れる
-      (`resolve_effective_fields`)。同一クレートでは`TypeInfo::base_key`で生成componentの祖先を順にたどり、
-      各段はその段自身が宣言したフィールド(`declaring_types`)だけを`<root>.base...`の`__set_initial_*`で
-      設定する。builtin(`is_builtin`・`is_virtual_builtin`・手書きnative)では止まる。隠しinitial setterは
-      生成componentにしかないためである。
-    - 生成componentの段が消費しない名前(通常Prop・既定値付きParam・コンストラクタ入力のいずれでもない名前)は、
-      生成の連鎖が合成するbuiltin shape(`VerticalLayout`など)のものとして、最も内側の`base`に
-      そのbuiltinのprops macro(`elwindui::core::__elwindui_props_<Shape>!(@set_with_environment ..)`)で
-      設定する(`shape_root_builtin_sets`)。builtinを直接構築するときと同じ公開setterの経路である。
-    - constructor ABIの`@root_initial`は属性名をidentで受ける。`ident`のフラグメントは別のmacroへ転送しても
-      一致するが、`literal`/`expr`は不透明になって一致しなくなるためである。自分のarm(通常Prop・既定値付き
-      Param)にない名前は、コンストラクタ入力なら無視する。それ以外は、生成componentの基底があればその基底ABIへ
-      `$recv.base`として転送し(値は`tt`のまま渡すので`None`も一致する)、なければ自分が合成するbuiltin shapeの
-      props macroで`$recv.base`に設定する。
+  - shape合成のrootが基底に設定した静的な値(祖先の通常Prop・既定値付きParam、builtinの`spacing`・`margin`など)は、
+    基底を構築した直後に`shape_root_initial_sets`で初期値として設定する(rootのresyncは`reactive = false`の値を
+    設定しないため)。設定するのはauthorした通常の値だけで、reactiveな値・要素・closureは従来どおりmount時の経路で扱う。
+    - 基底が同一クレートでも別クレートでも同じで、すべての名前を基底のprops macro(shape macro)の
+      `@initial_with_environment &<root>, name, value, env`へ渡す。どのclassがその名前を宣言しているか
+      (生成componentかbuiltinか、何段上か)をcodegenは判定しない。`#[class]`の属性で宣言された連鎖を
+      macroがたどり、最終的な解決はコンパイラに任せる(`class_macro_design`の`@initial_with_environment`)。
+    - 生成componentは既定値付きParamを`#[fixed(name, default)]`、必須Paramを`#[fixed(name)]`として宣言する。
     - これらの文は`construct()`の中で`Self { .. }`より前に実行される。値が派生自身のコンストラクタの
       ローカル(必須引数・既定値付きフィールド)を参照すると`Self`へ渡す前にmoveしてしまうので、
       参照するローカルだけをブロック内で`Clone::clone`した値に束縛し直す

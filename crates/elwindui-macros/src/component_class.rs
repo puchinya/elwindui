@@ -347,6 +347,63 @@ pub(crate) fn is_class_backed_impl(item: &syn::ItemImpl) -> bool {
     })
 }
 
+/// D1 case (iii): a struct registered as a declarative Component that has no `view!`/
+/// `template_view!` field and no field-level DSL attribute, paired with an `impl` that has a
+/// `construct`, keeps its hand-written storage. Only the `impl` can tell, so the struct is
+/// re-expanded here, through the `#[class]` layer, from its registered source.
+pub(crate) fn late_class_backed_struct(item: &syn::ItemImpl) -> Option<syn::ItemStruct> {
+    let name = impl_type_name(item)?;
+    let has_construct = item
+        .items
+        .iter()
+        .any(|impl_item| matches!(impl_item, syn::ImplItem::Fn(f) if f.sig.ident == "construct"));
+    if !has_construct {
+        return None;
+    }
+    let (_, item_struct) =
+        elwindui_codegen::component_frontend::registered_component_struct(&name)?;
+    let plain = item_struct.fields.iter().all(|field| {
+        !is_view_field(field)
+            && !field.attrs.iter().any(|attr| {
+                DECLARATIVE_FIELD_ATTRS
+                    .iter()
+                    .any(|name| attr.path().is_ident(name))
+            })
+    });
+    plain.then_some(item_struct)
+}
+
+/// Expands a case (iii) struct and its `impl`. The struct half already emitted the declarative
+/// rust-analyzer shadow (rust-analyzer cannot see the `impl`'s `construct` when it expands the
+/// struct), so this real expansion is limited to rustc to avoid a second definition there.
+pub(crate) fn expand_late(item_struct: syn::ItemStruct, item: syn::ItemImpl) -> TokenStream2 {
+    let name = item_struct.ident.to_string();
+    let base = elwindui_codegen::component_frontend::registered_component_struct(&name)
+        .and_then(|(base, _)| base);
+    elwindui_codegen::component_frontend::unregister_same_crate_component(&name);
+    let args = ComponentArgs {
+        base: match base.as_deref().map(syn::parse_str::<syn::Path>) {
+            Some(Ok(path)) => Some(path),
+            Some(Err(error)) => return error.to_compile_error(),
+            None => None,
+        },
+        ..ComponentArgs::default()
+    };
+    let mut tokens = expand_struct(&args, item_struct);
+    tokens.extend(expand_impl(item));
+    let Ok(file) = syn::parse2::<syn::File>(tokens.clone()) else {
+        return tokens;
+    };
+    let items = file.items.into_iter().map(|item| {
+        quote! {
+            #[cfg(not(rust_analyzer))]
+            #[allow(unexpected_cfgs)]
+            #item
+        }
+    });
+    quote! { #(#items)* }
+}
+
 /// D2: the item-local rules for a class-backed Component's `construct`.
 fn validate_construct(item: &syn::ItemImpl) -> syn::Result<()> {
     let mut seen = false;

@@ -697,6 +697,25 @@ pub fn registered_component_parts(name: &str) -> Option<(ComponentDef, Option<Vi
     component_and_view_from_item_struct(stored.base.clone(), &item_struct).ok()
 }
 
+/// PR #312 Implementation Contract v3 (D1, case iii): `name`'s registered struct (and the base it
+/// was written with), so a paired `impl` with a `construct` can re-expand it with hand-written
+/// storage.
+pub fn registered_component_struct(name: &str) -> Option<(Option<String>, syn::ItemStruct)> {
+    let store = same_crate_components().lock().unwrap();
+    let stored = store.get(&(compiling_crate_key(), name.to_string()))?;
+    let item_struct = syn::parse_str(&stored.struct_src).ok()?;
+    Some((stored.base.clone(), item_struct))
+}
+
+/// Removes `name` from the same-crate Component registry: it turned out (case iii) to keep its
+/// hand-written storage, so it is a class, not a generated Component.
+pub fn unregister_same_crate_component(name: &str) {
+    same_crate_components()
+        .lock()
+        .unwrap()
+        .remove(&(compiling_crate_key(), name.to_string()));
+}
+
 /// Attaches `name`'s companion `#[elwindui::component] impl Name { .. }` to its already-registered
 /// struct, so a *later* same-crate component writing `#[overrides]` against one of these methods can
 /// see it (`sibling_component_modules` replays both halves). Must run after the `impl` block's own
@@ -1115,6 +1134,50 @@ fn inherits_arg_from_component_attrs(attrs: &[syn::Attribute]) -> Result<Option<
 /// Deliberately narrow, exactly as `MethodDef` is: `&self` receiver, plain typed parameters, no
 /// generics, no `where` clause, no `async`/`unsafe`. Anything beyond that belongs in an ordinary
 /// (non-`#[elwindui::component]`) `impl` block, which this macro never touches.
+/// PR #312 Implementation Contract v3 (D2): the hand-written `construct` of a declarative
+/// Component's `impl`, if any. Item-local rules only; its inputs are checked against the
+/// Component's constructor inputs once those are known (after a phase-two base callback).
+pub fn construct_from_item_impl(
+    item_impl: &syn::ItemImpl,
+) -> Result<Option<syn::ImplItemFn>, String> {
+    let mut found: Option<syn::ImplItemFn> = None;
+    for item in &item_impl.items {
+        let syn::ImplItem::Fn(f) = item else {
+            continue;
+        };
+        if f.sig.ident != "construct" {
+            continue;
+        }
+        let fail = |message: &str| Err(format!("construct: {message}"));
+        if found.is_some() {
+            return fail("declared more than once");
+        }
+        if f.sig.receiver().is_some() {
+            return fail("takes no `self` receiver; it returns the new `Self`");
+        }
+        if f.sig.asyncness.is_some() || f.sig.unsafety.is_some() {
+            return fail("cannot be `async` or `unsafe`");
+        }
+        if !f.sig.generics.params.is_empty() || f.sig.generics.where_clause.is_some() {
+            return fail("cannot be generic");
+        }
+        let returns_self = matches!(&f.sig.output, syn::ReturnType::Type(_, ty)
+            if matches!(ty.as_ref(), syn::Type::Path(p) if p.qself.is_none() && p.path.is_ident("Self")));
+        if !returns_self {
+            return fail("must return `Self`");
+        }
+        for input in &f.sig.inputs {
+            if let syn::FnArg::Typed(typed) = input
+                && !matches!(typed.pat.as_ref(), syn::Pat::Ident(_))
+            {
+                return fail("a constructor argument must be a plain name");
+            }
+        }
+        found = Some(f.clone());
+    }
+    Ok(found)
+}
+
 pub fn methods_from_item_impl(
     item_impl: &syn::ItemImpl,
 ) -> Result<(String, Vec<ast::MethodDef>), String> {
@@ -1144,6 +1207,16 @@ pub fn methods_from_item_impl(
         let is_overridable = attr_path_ends_with(&f.attrs, "overridable");
         let is_overrides = attr_path_ends_with(&f.attrs, "overrides");
         let fn_name = f.sig.ident.to_string();
+        // PR #312 Implementation Contract v3 (D2): `construct` is the constructor, read by
+        // `construct_from_item_impl`, never a virtual method.
+        if fn_name == "construct" {
+            if is_overridable || is_overrides {
+                return Err(format!(
+                    "{name}::construct: `construct` is the constructor, not a virtual method —                      remove `#[overridable]`/`#[overrides]`"
+                ));
+            }
+            continue;
+        }
         // Issue #162 §3.17: `mount_override`/`unmount_override` are framework-reserved
         // implementation hooks (`Window`'s own `#[overridable]` slots, reached only through the
         // ordinary `#[overridable]`/`#[overrides]` class-bridge chain PR #164 restored) — not a

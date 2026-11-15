@@ -115,6 +115,9 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
         if component_class::is_class_backed_impl(&item_impl) {
             return component_class::expand_impl(item_impl).into();
         }
+        if let Some(item_struct) = component_class::late_class_backed_struct(&item_impl) {
+            return component_class::expand_late(item_struct, item_impl).into();
+        }
         return match elwindui_codegen::generate_component_from_item_impl(&item_impl) {
             Ok(tokens) => tokens.into(),
             Err(e) => {

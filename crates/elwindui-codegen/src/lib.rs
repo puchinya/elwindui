@@ -2193,6 +2193,11 @@ fn generate_component_impl_real(
 ) -> Result<proc_macro2::TokenStream, ComponentGenerationFailure> {
     let (name, methods) = component_frontend::methods_from_item_impl(item_impl)
         .expect("item-local method parse already validated by build_component_impl_shadow");
+    let custom_construct = component_frontend::construct_from_item_impl(item_impl)
+        .map_err(|error| ComponentGenerationFailure::ItemLocal(format!("{name}::{error}")))?;
+    let _custom_construct_scope = custom_construct
+        .as_ref()
+        .map(|construct| codegen::CustomConstructScope::enter(&name, construct));
     let Some((mut component_def, view_def)) = component_frontend::registered_component_parts(&name)
     else {
         return Err(ComponentGenerationFailure::RegistryDependent(format!(

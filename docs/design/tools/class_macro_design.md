@@ -132,6 +132,21 @@ property protocolには参加しない)。派生componentへ自動転送され�
 `@initial_with_environment`が行う)。semantic brushは派生componentが置かれた環境(`EnvironmentScope`など)で
 解決する必要があり、構築時にはその環境がまだ決まっていないためである。
 
+`@set_chain_with_environment $recv, name, value, environment`(PR #312 contract v3)は、
+`@initial_with_environment`と同じく宣言元のclassを`&$recv.base`でたどり、そのclassの値に自分のtraitで設定する。
+semantic brushもその場で`environment`で解決して設定する。手書きストレージのcomponentのconstructor ABIが、
+自分では列挙しない名前(祖先やCore interfaceのproperty)をこの経路へ渡す。呼び出し側でtraitを
+importしなくても設定できる。
+
+### `#[component]`のclass-backed形(PR #312 contract v3)
+
+`elwindui_macros::component`は、手書きストレージを持つcomponent(`trait_only`のtrait、`struct_only`のstruct、
+structの段に`#[class]`の形の属性を持つstruct、`construct`だけで判定されるstruct)を、引数を`#[class]`の形
+(`inherits = Path`など)に変えてこの層(`class::expand`)へそのまま渡す(`component_class.rs`)。`#[class]`自体の
+展開は変えない。struct側の情報(抽象か、`#[constructor_inputs]`、`abi_props`)はimpl側でconstructor ABIを
+生成するために保存する(トークンはマクロ呼び出しをまたいで保持できないので文字列で保存する)。
+`#[constructor_inputs(..)]`は`@required_params`の答えにもなる。
+
 ## Validation boundary
 
 Publicly observable accepted/rejected forms remain in the specification. Parser representation, token generation, registry layout, shadow expansion, and debugging strategy belong only here.

@@ -80,3 +80,83 @@ fn native_builtins_build_through_their_constructor_abi() {
         assert_eq!(label(&*via_new).as_deref(), Some("builtin"));
     });
 }
+
+thread_local! {
+    static CUSTOM_CONSTRUCTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// T3 (D2): a declarative Component with a hand-written `construct` keeps its generated storage:
+/// `construct` runs once per instance and builds `Self` through the generated initializer, with
+/// the Component's constructor inputs in order.
+#[elwindui::component(inherits VerticalLayout)]
+struct CustomConstructed {
+    #[param]
+    title: String,
+
+    body: view! {
+        TextBlock { text: title }
+    },
+}
+
+#[elwindui::component]
+impl CustomConstructed {
+    fn construct(title: String) -> Self {
+        CUSTOM_CONSTRUCTS.with(|count| count.set(count.get() + 1));
+        Self::__elwindui_generated_construct(__self_weak, format!("{title}!"))
+    }
+}
+
+fn texts(root: &dyn elwindui::core::ui::UIElementExt) -> Vec<String> {
+    root.visual_children()
+        .iter()
+        .filter_map(|child| {
+            child
+                .as_any()
+                .downcast_ref::<elwindui::ui::TextBlock>()
+                .map(|text| text.text.borrow().clone())
+        })
+        .collect()
+}
+
+#[test]
+fn a_declarative_component_with_a_hand_written_construct() {
+    CUSTOM_CONSTRUCTS.with(|count| count.set(0));
+    let first = CustomConstructed::new("a".to_string());
+    let second = CustomConstructed::new("b".to_string());
+    assert_eq!(CUSTOM_CONSTRUCTS.with(std::cell::Cell::get), 2);
+    assert_eq!(texts(&*first), ["a!"]);
+    assert_eq!(texts(&*second), ["b!"]);
+    assert_eq!(first.title(), "a!");
+}
+
+/// D1 case (iii): a struct with no view, no field-level DSL attribute and no struct-level class
+/// shape attribute, whose `impl` has a `construct`, keeps its hand-written storage (here a
+/// `Cell`) and its untagged methods, like any class-backed Component.
+#[elwindui::component(inherits elwindui::core::ui::VerticalLayout)]
+pub struct RawCounterLayout {
+    hits: std::cell::Cell<u32>,
+}
+
+#[elwindui::component]
+impl RawCounterLayout {
+    fn hit(&self) -> u32 {
+        self.hits.set(self.hits.get() + 1);
+        self.hits.get()
+    }
+
+    fn construct() -> Self {
+        Self {
+            base: elwindui::core::ui::VerticalLayout::construct(),
+            hits: std::cell::Cell::new(10),
+        }
+    }
+}
+
+#[test]
+fn a_construct_only_struct_keeps_its_hand_written_storage() {
+    let layout = RawCounterLayout::new();
+    assert_eq!(layout.hit(), 11);
+    assert_eq!(layout.hit(), 12);
+    layout.set_margin(3.0);
+    assert_eq!(layout.margin(), 3.0);
+}

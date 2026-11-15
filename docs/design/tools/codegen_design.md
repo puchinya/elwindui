@@ -461,6 +461,25 @@ accessorを呼ぶ。
   - 同一クレートでそのcomponentを使う側は`TypeInfo::deferred_constructor`を見て、継承するなら同じ2段階生成を、
     `view`から構築するなら`crate::__elwindui_ctor_<Name>!`による名前付き構築(外部生成componentと同じ経路)を使う。
 
+#### 手書きストレージのcomponentとconstructor ABI(PR #312 contract v3)
+
+- constructor ABI(`__elwindui_ctor_<Type>!`)の名前はidentで受け渡す(`new!`、外部構築の`@new`/`@initial_named`、
+  `@__ctor_arg_*`、`@resync_named`、`@is_semantic_brush_named`)。ABIが列挙しない名前をclassのprops macroへ
+  渡せるようにするためである(文字列リテラルはmacro_rulesでidentに変換できない)。
+- 手書きストレージのcomponentのABIは`codegen::class_constructor_abi`が、生成componentと同じ
+  `build_constructor_macro`で作る。列挙するのは`#[constructor_inputs]`の入力だけで、ほかの名前は
+  `delegate_props`(自分のprops macro、または`abi_props`の再エクスポート`$crate::__elwindui_abi_props_<Type>`)の
+  `@set_chain_with_environment`(値の設定)と`@field_type`(`new!`の名前検査)へ渡す。`new`はclassの`new`で、
+  mountは取り付けた側が行う。抽象classと内部専用の`construct`は`unconstructible_class_abi`(どの使い方も
+  compile error)になる。facadeはbuiltinのABIをルートで再エクスポートする(具象型を定義するcrateが一つの所有者)。
+- 宣言的componentに`construct`がある場合(`CustomConstructScope`)、生成した初期化は`#[class]` implの外の
+  `__elwindui_generated_construct(__self_weak, <入力>)`になり、`#[class]`が行う親の`construct`呼び出しの書き換え
+  (`Parent::__class_construct(__self_weak.clone(), ..)`)は`ParentConstructRewriter`が同じ規則で行う。
+  `construct`の引数名は生成したコンストラクタ入力と同じ順でなければならない。
+- 手書きストレージの判定がimplまで決まらない形(case iii)は、struct側が宣言的componentとして登録・shadowを出した
+  後、impl側で登録を外して`#[class]`として展開し直す。struct側のrust-analyzer shadowと重ならないよう、
+  この展開は`cfg(not(rust_analyzer))`に限る。
+
 #### Component override bridge
 
 `#[elwindui::component]` の companion `impl` にある `#[overridable]` / `#[overrides]` は

@@ -474,6 +474,74 @@ impl Drop for ExternalBaseParamsScope {
     }
 }
 
+thread_local! {
+    /// PR #312 Implementation Contract v3 (D2): the hand-written `construct` of a declarative
+    /// Component, by Component name, while its `impl` is being generated.
+    static CUSTOM_CONSTRUCT: std::cell::RefCell<HashMap<String, String>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Holds `component`'s hand-written `construct` (D2) for the duration of its generation.
+pub(crate) struct CustomConstructScope {
+    component: String,
+}
+
+impl CustomConstructScope {
+    pub(crate) fn enter(component: &str, construct: &syn::ImplItemFn) -> Self {
+        CUSTOM_CONSTRUCT.with(|map| {
+            map.borrow_mut()
+                .insert(component.to_string(), quote! { #construct }.to_string());
+        });
+        Self {
+            component: component.to_string(),
+        }
+    }
+}
+
+impl Drop for CustomConstructScope {
+    fn drop(&mut self) {
+        CUSTOM_CONSTRUCT.with(|map| {
+            map.borrow_mut().remove(&self.component);
+        });
+    }
+}
+
+fn custom_construct(component: &str) -> Option<syn::ImplItemFn> {
+    CUSTOM_CONSTRUCT
+        .with(|map| map.borrow().get(component).cloned())
+        .and_then(|text| syn::parse_str(&text).ok())
+}
+
+/// D2: the generated storage initializer of a Component with a hand-written `construct` lives in
+/// a private helper outside the `#[class]` impl, so the `#[class]` layer no longer rewrites its
+/// call to the parent's `construct`; this does the same rewrite (`Parent::construct(..)` becomes
+/// `Parent::__class_construct(__self_weak.clone(), ..)`).
+struct ParentConstructRewriter<'a> {
+    parent: &'a str,
+}
+
+impl syn::visit_mut::VisitMut for ParentConstructRewriter<'_> {
+    fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
+        syn::visit_mut::visit_expr_mut(self, expr);
+        let syn::Expr::Call(call) = expr else {
+            return;
+        };
+        let syn::Expr::Path(func) = &mut *call.func else {
+            return;
+        };
+        let segments = &func.path.segments;
+        if segments.len() < 2
+            || segments.last().is_none_or(|s| s.ident != "construct")
+            || segments[segments.len() - 2].ident != self.parent
+        {
+            return;
+        }
+        func.path.segments.last_mut().unwrap().ident = format_ident!("__class_construct");
+        call.args
+            .insert(0, syn::parse_quote! { __self_weak.clone() });
+    }
+}
+
 /// Whether `base` (written as `base_path`) is a generated Component defined in another crate:
 /// not resolvable in this crate's symbol table and named through a crate-qualified path.
 /// Issue #166 (A2): whether `base` is a class of another crate (a qualified path with no table
@@ -9599,6 +9667,79 @@ fn generate_view(
         own_field_shape.constructor_return,
         non_writable_fields,
     );
+    // D2 (PR #312 Implementation Contract v3): a hand-written `construct` replaces the generated
+    // one in the `#[class]` impl; the generated storage initializer becomes the private
+    // `__elwindui_generated_construct(__self_weak, <inputs>)` it can call. Its inputs must be the
+    // generated constructor inputs, in order (base-first, then this Component's own).
+    let generated_construct_body = quote! {
+        let __self_weak_erased: std::rc::Weak<dyn std::any::Any> = __self_weak.clone();
+        #construct_stmts
+        let __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(
+            std::rc::Rc<std::cell::Cell<bool>>,
+            std::rc::Rc<dyn Fn(#component_property_enum)>,
+        )>>> = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(
+            std::rc::Rc<std::cell::Cell<bool>>,
+            std::rc::Rc<dyn Fn(#component_property_enum)>,
+        )>::new()));
+        Self { #(#plain_required_names,)* #cell_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers, __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created), __closed: std::cell::Cell::new(false), __elwindui_embedded_self: std::cell::RefCell::new(None) }
+    };
+    let (class_construct, generated_construct_helper) = match custom_construct(&target_name) {
+        None => (
+            quote! {
+                fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
+                    #generated_construct_body
+                }
+            },
+            TokenStream::new(),
+        ),
+        Some(construct) => {
+            let names: Vec<String> = construct
+                .sig
+                .inputs
+                .iter()
+                .filter_map(|input| match input {
+                    syn::FnArg::Typed(typed) => match typed.pat.as_ref() {
+                        syn::Pat::Ident(pat) => Some(pat.ident.to_string()),
+                        _ => None,
+                    },
+                    syn::FnArg::Receiver(_) => None,
+                })
+                .collect();
+            let expected: Vec<String> = ctor_param_names.iter().map(|n| n.to_string()).collect();
+            let mismatch = (names != expected).then(|| {
+                let message = format!(
+                    "`{target_name}::construct`: its arguments ({}) must be the Component's \
+                     constructor inputs, in order ({})",
+                    names.join(", "),
+                    expected.join(", ")
+                );
+                quote! { compile_error!(#message); }
+            });
+            let mut helper_body: syn::Block = syn::parse2(quote! { { #generated_construct_body } })
+                .expect("generated construct body is a block");
+            if let Some(parent) = component.base.as_deref() {
+                let parent = parent.rsplit("::").next().unwrap_or(parent);
+                syn::visit_mut::VisitMut::visit_block_mut(
+                    &mut ParentConstructRewriter { parent },
+                    &mut helper_body,
+                );
+            }
+            (
+                quote! { #construct },
+                quote! {
+                    #mismatch
+                    impl #target {
+                        #[doc(hidden)]
+                        #[allow(clippy::too_many_arguments, dead_code)]
+                        fn __elwindui_generated_construct(
+                            __self_weak: std::rc::Weak<dyn #target_ext>,
+                            #(#ctor_param_names: #ctor_param_types),*
+                        ) -> Self #helper_body
+                    }
+                },
+            )
+        }
+    };
     let constructor_macro = build_constructor_macro(
         &target_name,
         &constructor_shape,
@@ -9786,20 +9927,11 @@ fn generate_view(
                 __elwindui_embedded_self: std::cell::RefCell<Option<elwindui::core::reactive::WeakEmbeddedHandle<Self>>>,
             }
 
+            #generated_construct_helper
+
             #[elwindui::class]
             impl #target {
-                fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
-                    let __self_weak_erased: std::rc::Weak<dyn std::any::Any> = __self_weak.clone();
-                    #construct_stmts
-                    let __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(
-                        std::rc::Rc<std::cell::Cell<bool>>,
-                        std::rc::Rc<dyn Fn(#component_property_enum)>,
-                    )>>> = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(
-                        std::rc::Rc<std::cell::Cell<bool>>,
-                        std::rc::Rc<dyn Fn(#component_property_enum)>,
-                    )>::new()));
-                    Self { #(#plain_required_names,)* #cell_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers, __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created), __closed: std::cell::Cell::new(false), __elwindui_embedded_self: std::cell::RefCell::new(None) }
-                }
+                #class_construct
 
                 // Runs automatically, exactly once, right after `#[class]`'s auto-generated `new()`
                 // completes its `Rc::new_cyclic` (parent-pointer wiring, event wiring, the initial

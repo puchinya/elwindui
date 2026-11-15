@@ -297,3 +297,20 @@ pub struct Odd__Name {
 
 #[component]
 impl Odd__Name {}
+
+/// Issue #166 (A2): an external base with defaulted `Option<String>` and `String` Params, so a
+/// downstream derived root's `label: "x"` and `caption: "c"` prove the value is converted for
+/// the declared type (`Some("x".to_string())`, `"c".to_string()`).
+#[component(inherits VerticalLayout)]
+pub struct ExternalOptionalBase {
+    #[param(default = None)]
+    label: Option<String>,
+    #[param(default = String::from("none"))]
+    caption: String,
+    body: view! {
+        TextBlock { text: format!("{label:?}:{caption}") }
+    },
+}
+
+#[component]
+impl ExternalOptionalBase {}

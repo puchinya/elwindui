@@ -330,7 +330,7 @@ impl ContentWrapper {}
 - `title: title`のように明示的に同名転送しても、引数は1つだけである(自動転送と同じ)。
 - 転送した入力は基底だけが保持する。派生componentはそのgetter・`{Derived}Property`のvariant・格納領域を生成せず、派生の`view`から裸の名前で読むと基底の値になる(次段落の継承フィールドアクセス)。転送した`#[bindable]`の購読は基底自身が行う。
 - 基底が別クレートの生成componentでも同じである。派生側でトレイトのimportや型の記述は不要で、引数の型は基底側で宣言した型になる。その派生componentを同じクレート内でさらに継承したり、別のcomponentの`view`から構築したりしてもよい。
-- 派生の`view`のroot要素が基底の通常`#[prop]`や既定値付き`#[param]`に値を設定した場合(例:`flag: true`)、その値は基底を構築した直後に初期値として設定される。基底が同一クレートでも別クレートでも同じであり、その`#[prop]`/`#[param]`を宣言したのが中間の祖先より上の祖先(`Base -> Middle -> Derived`の`Base`で、`Middle`の`view`がそのフィールドを参照しない場合)でも同じである。値に派生自身のコンストラクタ引数を使っても(`payload: source`)、派生はその引数を保持したままである(値は複製して設定する)。同じroot要素に書いたbuiltinの属性(基底が合成する`VerticalLayout`の`spacing`、`UIElement`の`margin`など)も、何段上の基底であっても同じく構築直後に設定される。
+- 派生の`view`のroot要素が基底の通常`#[prop]`や既定値付き`#[param]`に値を設定した場合(例:`flag: true`)、その値は基底を構築した直後に初期値として設定される。基底が同一クレートでも別クレートでも同じであり、その`#[prop]`/`#[param]`を宣言したのが中間の祖先より上の祖先(`Base -> Middle -> Derived`の`Base`で、`Middle`の`view`がそのフィールドを参照しない場合)でも同じである。値に派生自身のコンストラクタ引数を使っても(`payload: source`)、派生はその引数を保持したままである(値は複製して設定する)。同じroot要素に書いたbuiltinの属性(基底が合成する`VerticalLayout`の`spacing`、`UIElement`の`margin`など)も、何段上の基底であっても同じく構築直後に設定される。既定値付き`#[param]`への値はコンストラクタ引数と同じく宣言型に変換される(`Option<String>`へ`"x"`なら`Some("x".to_string())`)。semantic brushの値(`background: BrushStyle::Primary`など)は、派生componentがmountされた環境(`EnvironmentScope`を含む)で解決される。
 - 必須入力の型がcomponentより非公開でも、そのcomponentはコンパイルでき、同一クレート内の派生へは自動転送できる。別クレートの派生は、派生側から名前を参照できない型の入力を継承できない。
 
 **祖先が宣言したフィールドへの派生`view`からのアクセス(Issue #166)。** 自前の`view`を持つ派生componentは、祖先(ユーザー定義component・builtinのいずれも、同一クレートでも別クレートでもよい)が宣言した公開フィールドを、`view`の属性値・`format!`等の式・イベントハンドラ本体・ライフサイクルフックの中から**裸の名前のまま**読み書きできる。

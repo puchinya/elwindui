@@ -115,11 +115,18 @@ property protocolには参加しない)。派生componentへ自動転送され�
 派生classは祖先のtraitをすべて実装しているわけではなく、隠しinitial setterも委譲されないため、受け手を宣言元の
 値そのものにする。
 
-- `#[prop]`・`#[text_style]`のpropertyは、そのclassの`@set_with_environment`で設定する。
-- `#[fixed(name, default)]`(既定値付きのコンストラクタ入力)は、隠しinitial setter
-  `__set_initial_param_<name>`で設定する。
+- `#[prop]`・`#[text_style]`のpropertyは、そのclassの`@set_with_environment`で設定する。semantic brushの
+  propertyはここでは設定しない(下の`@initial_brush_with_environment`で設定する)。
+- `#[fixed(name: Type, default)]`(既定値付きのコンストラクタ入力)は、隠しinitial setter
+  `__set_initial_param_<name>`で設定する。値はconstructor ABIと同じく宣言型で変換する
+  (`String`/`Vec`は`.to_string()`/`.to_vec()`、`Option<T>`は`Some(..)`で包み、`None`はそのまま)。
 - `#[fixed(name)]`(必須のコンストラクタ入力)は、構築時にコンストラクタへ渡し済みなので何もしない。
 - 親を持たない終端まで宣言元がなければ`compile_error!`にする。
+
+`@initial_brush_with_environment`は同じ連鎖を、派生componentがmountされた後(`__build_view`)にmount時の
+環境で実行する。semantic brushのpropertyだけを設定し、それ以外の名前は何もしない(未宣言名の報告は構築時の
+`@initial_with_environment`が行う)。semantic brushは派生componentが置かれた環境(`EnvironmentScope`など)で
+解決する必要があり、構築時にはその環境がまだ決まっていないためである。
 
 ## Validation boundary
 

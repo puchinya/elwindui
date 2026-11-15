@@ -17,6 +17,7 @@
 
 use std::rc::Rc;
 
+use elwindui::core::theme::BrushStyle;
 use elwindui::core::ui::UIElementExt;
 
 fn texts(root: &dyn UIElementExt) -> Vec<String> {
@@ -341,6 +342,107 @@ fn a_non_copy_own_param_set_on_the_root_is_also_kept() {
     assert_eq!(texts(&*derived), ["payload 7", "source 7"]);
 }
 
+/// Defaulted `Option<String>` and `String` Params set from a derived root with plain literals: the
+/// value is converted for the declared type, as in a constructor call.
+#[elwindui::component(inherits VerticalLayout)]
+struct OptionalBase {
+    #[param(default = None)]
+    label: Option<String>,
+    #[param(default = String::from("none"))]
+    caption: String,
+
+    body: view! {
+        TextBlock { text: format!("{label:?}:{caption}") }
+    },
+}
+
+#[elwindui::component]
+impl OptionalBase {}
+
+#[elwindui::component(inherits crate::OptionalBase)]
+struct OptionalDerived {
+    body: view! {
+        label: "x"
+        caption: "c"
+        TextBlock { text: "optional derived" }
+    },
+}
+
+#[elwindui::component]
+impl OptionalDerived {}
+
+#[test]
+fn defaulted_params_set_on_the_root_are_converted_for_their_type() {
+    let derived = OptionalDerived::new();
+    assert_eq!(texts(&*derived), ["Some(\"x\"):c", "optional derived"]);
+}
+
+/// A semantic brush set on a derived root two hops above (`background`, declared by `Layout`)
+/// resolves against the environment the Component is mounted in, here an `EnvironmentScope`.
+#[elwindui::component(inherits crate::LayoutMiddle)]
+struct BrushedLayoutLeaf {
+    body: view! {
+        background: BrushStyle::Primary
+        TextBlock { text: "brushed" }
+    },
+}
+
+#[elwindui::component]
+impl BrushedLayoutLeaf {}
+
+#[elwindui::component(inherits elwindui_external_component_fixture::ExternalDefaultsMiddle)]
+struct CrossCrateBrushedLeaf {
+    body: view! {
+        background: BrushStyle::Primary
+        TextBlock { text: "cross brushed" }
+    },
+}
+
+#[elwindui::component]
+impl CrossCrateBrushedLeaf {}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct BrushScopeHost {
+    #[prop(default = BrushStyle::Value(scoped_brush()))]
+    scoped_primary: BrushStyle,
+
+    body: view! {
+        EnvironmentScope {
+            primary: scoped_primary,
+            BrushedLayoutLeaf {}
+            CrossCrateBrushedLeaf { title: "b" }
+        }
+    },
+}
+
+#[elwindui::component]
+impl BrushScopeHost {}
+
+fn scoped_brush() -> elwindui::core::graphics::Brush {
+    elwindui::core::graphics::Brush::Solid(elwindui::core::graphics::Color::rgb(1, 2, 3))
+}
+
+#[test]
+fn a_root_semantic_brush_resolves_against_the_mount_environment() {
+    use elwindui::core::ui::LayoutExt as _;
+    let host = BrushScopeHost::new();
+    let leaf = elwindui::core::visual_tree::find_all::<BrushedLayoutLeaf>(host.as_ref())
+        .into_iter()
+        .next()
+        .expect("brushed leaf");
+    let leaf = leaf.as_any().downcast_ref::<BrushedLayoutLeaf>().unwrap();
+    assert_eq!(leaf.base.base.base.background(), Some(scoped_brush()));
+    let cross = elwindui::core::visual_tree::find_all::<CrossCrateBrushedLeaf>(host.as_ref())
+        .into_iter()
+        .next()
+        .expect("cross-crate brushed leaf");
+    let cross = cross
+        .as_any()
+        .downcast_ref::<CrossCrateBrushedLeaf>()
+        .unwrap();
+    assert_eq!(cross.base.base.base.background(), Some(scoped_brush()));
+}
+
 /// A required input type less visible than the (always `pub`) generated Component. An inheritable
 /// base must still compile with it (no E0446), and a same-crate derived still auto-forwards it.
 struct PrivateInput(String);
@@ -459,6 +561,24 @@ struct CrossCrateRootDefaults {
 
 #[elwindui::component]
 impl CrossCrateRootDefaults {}
+
+#[elwindui::component(inherits elwindui_external_component_fixture::ExternalOptionalBase)]
+struct CrossCrateOptionalDerived {
+    body: view! {
+        label: "x"
+        caption: "c"
+        TextBlock { text: "cross optional" }
+    },
+}
+
+#[elwindui::component]
+impl CrossCrateOptionalDerived {}
+
+#[test]
+fn cross_crate_defaulted_params_set_on_the_root_are_converted_for_their_type() {
+    let derived = CrossCrateOptionalDerived::new();
+    assert_eq!(texts(&*derived), ["Some(\"x\"):c", "cross optional"]);
+}
 
 #[test]
 fn cross_crate_root_sets_the_base_prop_and_defaulted_param() {

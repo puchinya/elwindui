@@ -6871,6 +6871,9 @@ fn generate_view(
 
     let mut struct_fields = TokenStream::new();
     let mut construct_stmts = own_default_construct_stmts;
+    // Issue #166 (A2): the shape-composition root's mount-time initial values (semantic brushes),
+    // run from `__build_view` once the mount environment is known (`shape_root_initial_sets`).
+    let mut root_mount_initial_stmts = TokenStream::new();
     // CI-4 of #80 (docs/design/runtime/component_lifecycle_design.md §4b): plan-driven descendant
     // construction — every ordinary (non-root-composition) `PlannedNode` — is emitted here instead
     // of into `construct_stmts`, so it runs from `__build_view()` (post-`Rc::new_cyclic`, once this
@@ -7590,7 +7593,7 @@ fn generate_view(
                                 )
                             });
                     construct_stmts.extend(quote! { let #binding: #base_impl_ty = #value; });
-                    construct_stmts.extend(shape_root_initial_sets(
+                    let (root_construct_sets, root_mount_sets) = shape_root_initial_sets(
                         node,
                         &ctx,
                         from,
@@ -7600,7 +7603,9 @@ fn generate_view(
                             .chain(&own_default_construct_locals)
                             .cloned()
                             .collect::<Vec<_>>(),
-                    ));
+                    );
+                    construct_stmts.extend(root_construct_sets);
+                    root_mount_initial_stmts.extend(root_mount_sets);
                 }
                 continue;
             }
@@ -8685,8 +8690,8 @@ fn generate_view(
     // Issue #166 (A2): this Component's own `#[param]`s (required and defaulted) are readable by a
     // derived Component through the exported shape macro's `@inherited_get` (`#[fixed(name)]`),
     // so an inherited constructor input resolves by bare name in any crate. A defaulted one
-    // (`#[fixed(name, default)]`) also takes a derived root's initial value through
-    // `@initial_with_environment`.
+    // (`#[fixed(name: Type, default)]`) also takes a derived root's initial value through
+    // `@initial_with_environment`, converted for its declared type.
     let generated_class_fixed_decls: Vec<TokenStream> =
         if is_shape_composition || is_inherited_view_composition {
             own_field_shape
@@ -8696,9 +8701,10 @@ fn generate_view(
                     let name = format_ident!("{name}");
                     quote! { #[fixed(#name)] }
                 })
-                .chain(own_field_shape.defaulted_params.iter().map(|(name, _)| {
+                .chain(own_field_shape.defaulted_params.iter().map(|(name, ty)| {
                     let name = format_ident!("{name}");
-                    quote! { #[fixed(#name, default)] }
+                    let ty: syn::Type = syn::parse_str(ty).expect("field type must parse");
+                    quote! { #[fixed(#name: #ty, default)] }
                 }))
                 .collect()
         } else {
@@ -9536,6 +9542,7 @@ fn generate_view(
         } else {
             quote! {
                 #own_environment_resolve_stmts
+                #root_mount_initial_stmts
                 #body_prepare_stmt
                 #child_construct_stmts
                 #content_attach_stmt
@@ -16202,23 +16209,23 @@ fn shape_root_initial_sets(
     from: &Module,
     table: &SymbolTable,
     construct_locals: &[syn::Ident],
-) -> TokenStream {
+) -> (TokenStream, TokenStream) {
     let props_macro = dsl_props_macro_path(
         &node.type_path,
         resolve_context_info(ctx, from, table, &node.type_path),
     );
+    let is_static = |name: &str| {
+        find_attr(node, name).is_some_and(|expr| {
+            !matches!(
+                expr,
+                ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_)
+            ) && !view_expr_has_reactive_dependency(expr, ctx)
+        })
+    };
     let environment = format_ident!("__elwindui_root_environment");
     let sets: Vec<TokenStream> = external_attribute_values(node, ctx, from, table)
         .into_iter()
-        .filter(|attribute| {
-            !attribute.synthesized
-                && find_attr(node, &attribute.name.to_string()).is_some_and(|expr| {
-                    !matches!(
-                        expr,
-                        ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_)
-                    ) && !view_expr_has_reactive_dependency(expr, ctx)
-                })
-        })
+        .filter(|attribute| !attribute.synthesized && is_static(&attribute.name.to_string()))
         .map(|attribute| {
             let binding = &node.binding;
             let name = &attribute.name;
@@ -16226,16 +16233,48 @@ fn shape_root_initial_sets(
             quote! { #props_macro!(@initial_with_environment &#binding, #name, #value, &#environment); }
         })
         .collect();
-    if sets.is_empty() {
-        return TokenStream::new();
-    }
-    clone_referenced_construct_locals(
+    // A semantic brush resolves against the environment the derived Component is mounted with,
+    // so the class chain applies those names only in this mount-time pass (from `__build_view`,
+    // where the embedded base is `self.base`); every other name is a no-op here.
+    let mount_environment = format_ident!("__elwindui_root_mount_environment");
+    let self_mode = EmitMode::WithSelf(quote! { self });
+    let brush_sets: Vec<TokenStream> = node
+        .attributes
+        .iter()
+        .filter(|attribute| !attribute.name.starts_with("on_") && is_static(&attribute.name))
+        .map(|attribute| {
+            let name = format_ident!("{}", attribute.name);
+            let value = emit_expr(&attribute.value, ctx, &self_mode);
+            quote! {
+                #props_macro!(@initial_brush_with_environment &self.base, #name, #value, #mount_environment);
+            }
+        })
+        .collect();
+    let construct = if sets.is_empty() {
+        TokenStream::new()
+    } else {
+        clone_referenced_construct_locals(
+            quote! {
+                let #environment = elwindui::core::environment::application_environment();
+                #(#sets)*
+            },
+            construct_locals,
+        )
+    };
+    let mount = if brush_sets.is_empty() {
+        TokenStream::new()
+    } else {
         quote! {
-            let #environment = elwindui::core::environment::application_environment();
-            #(#sets)*
-        },
-        construct_locals,
-    )
+            {
+                let #mount_environment = self
+                    .__mount_environment
+                    .get()
+                    .expect("root semantic brush resolution: component is not yet mounted");
+                #(#brush_sets)*
+            }
+        }
+    };
+    (construct, mount)
 }
 
 /// Issue #166 (A2): the root initial values run inside `construct()` before `Self { .. }` takes

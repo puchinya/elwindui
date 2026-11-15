@@ -445,7 +445,9 @@ accessorを呼ぶ。
       `@initial_with_environment &<root>, name, value, env`へ渡す。どのclassがその名前を宣言しているか
       (生成componentかbuiltinか、何段上か)をcodegenは判定しない。`#[class]`の属性で宣言された連鎖を
       macroがたどり、最終的な解決はコンパイラに任せる(`class_macro_design`の`@initial_with_environment`)。
-    - 生成componentは既定値付きParamを`#[fixed(name, default)]`、必須Paramを`#[fixed(name)]`として宣言する。
+    - semantic brushの値は同じ名前を`__build_view`からも`@initial_brush_with_environment &self.base, ..`へ渡し、
+      mount時の環境で解決する。どの名前がsemantic brushかはclassの属性(`semantic_brush`)で決まる。
+    - 生成componentは既定値付きParamを`#[fixed(name: Type, default)]`、必須Paramを`#[fixed(name)]`として宣言する。
     - これらの文は`construct()`の中で`Self { .. }`より前に実行される。値が派生自身のコンストラクタの
       ローカル(必須引数・既定値付きフィールド)を参照すると`Self`へ渡す前にmoveしてしまうので、
       参照するローカルだけをブロック内で`Clone::clone`した値に束縛し直す

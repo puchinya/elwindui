@@ -6,6 +6,7 @@ use syn::spanned::Spanned;
 use syn::{Expr, Ident, Path, Token, parenthesized};
 
 mod class;
+mod component_class;
 
 /// `#[elwindui::viewmodel] mod foo { struct Foo { #[observable(default = ...)] field: Ty, ... }
 /// impl Foo { fn some_action(&self) { ... } } }` — lets a `viewmodel` be written as ordinary Rust
@@ -106,9 +107,13 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
     // because an `impl` never parses as an `ItemStruct`, so there's no ambiguity to resolve.
     if let Ok(item_impl) = syn::parse::<syn::ItemImpl>(item.clone()) {
         if !attr.is_empty() {
-            let msg = "#[elwindui::component]: the `impl` form takes no arguments — `inherits Base` \
-                       belongs on the `struct`";
+            let msg = "#[elwindui::component]: the `impl` form takes no arguments — `inherits Base`                        belongs on the `struct`";
             return quote::quote! { compile_error!(#msg); }.into();
+        }
+        // PR #312 contract v3 (D1/D2): the impl of a Component with hand-written storage goes to
+        // the `#[class]` layer, like its struct.
+        if component_class::is_class_backed_impl(&item_impl) {
+            return component_class::expand_impl(item_impl).into();
         }
         return match elwindui_codegen::generate_component_from_item_impl(&item_impl) {
             Ok(tokens) => tokens.into(),
@@ -118,23 +123,33 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         };
     }
-    let item_struct = match syn::parse::<syn::ItemStruct>(item) {
-        Ok(item_struct) => item_struct,
-        Err(e) => {
-            let msg = format!(
-                "#[elwindui::component]: expected `struct Name {{ .. }}` or `impl Name {{ .. }}`: {e}"
-            );
-            return quote::quote! { compile_error!(#msg); }.into();
-        }
-    };
-    let args = match parse_component_args(attr.into()) {
+    let args = match component_class::parse_component_args(attr.into()) {
         Ok(args) => args,
         Err(e) => {
             let msg = format!("#[elwindui::component]: {e}");
             return quote::quote! { compile_error!(#msg); }.into();
         }
     };
-    match elwindui_codegen::generate_component_from_item_struct(args.base, &item_struct) {
+    // A Core interface: `#[component(trait_only, ..)] trait Name { .. }`.
+    if let Ok(item_trait) = syn::parse::<syn::ItemTrait>(item.clone()) {
+        return component_class::expand_trait(&args, item_trait).into();
+    }
+    let item_struct = match syn::parse::<syn::ItemStruct>(item) {
+        Ok(item_struct) => item_struct,
+        Err(e) => {
+            let msg = format!(
+                "#[elwindui::component]: expected `struct Name {{ .. }}`, `impl Name {{ .. }}` or                  (with `trait_only`) `trait Name {{ .. }}`: {e}"
+            );
+            return quote::quote! { compile_error!(#msg); }.into();
+        }
+    };
+    match component_class::classify_struct(&args, &item_struct) {
+        Ok(true) => return component_class::expand_struct(&args, item_struct).into(),
+        Ok(false) => {}
+        Err(e) => return e.to_compile_error().into(),
+    }
+    let base = args.base.as_ref().map(path_to_string);
+    match elwindui_codegen::generate_component_from_item_struct(base, &item_struct) {
         Ok(tokens) => tokens.into(),
         Err(e) => {
             let msg = format!("#[elwindui::component]: {e}");
@@ -341,55 +356,6 @@ pub fn environment_key(attr: TokenStream, item: TokenStream) -> TokenStream {
             .to_compile_error()
             .into(),
     }
-}
-
-/// Parses `#[component]`'s own argument list: empty (no base), or exactly `inherits Base` (no
-/// `=`, matching the DSL's own `component Name inherits Base` spelling — unlike `#[class]`'s
-/// `inherits = ..` convention). `Base` may be a bare name (`ContentControl`) — only ever valid for
-/// a builtin, since a bare name has no anchor `#[class]`'s own generated `__elwindui_inherit_*!`
-/// chain could resolve from elsewhere (see `docs/specs/macro_class_spec.md` §7) — or a full
-/// crate-root-qualified path (`crate::ui::LabeledPanel`), required for a user-defined base for the
-/// exact same reason. Either form is accepted here; `elwindui_codegen::component_frontend` is what
-/// splits the result back into a bare symbol-table name plus an optional qualifying path (Refs #25).
-struct ComponentArgs {
-    base: Option<String>,
-}
-
-/// Parses `#[component]` arguments: optional `inherits Path`.
-fn parse_component_args(attr: proc_macro2::TokenStream) -> syn::Result<ComponentArgs> {
-    use syn::parse::Parser;
-    if attr.is_empty() {
-        return Ok(ComponentArgs { base: None });
-    }
-    (|input: syn::parse::ParseStream| {
-        let mut base = None;
-        while !input.is_empty() {
-            let kw: syn::Ident = input.parse()?;
-            if kw != "inherits" {
-                if kw == "template" {
-                    return Err(syn::Error::new(
-                        kw.span(),
-                        "`template = <environment_key>` is no longer supported; declare `template: template_view!(|alias: Self| { ... })` and use EnvironmentContext::set_control_template::<Target>(...) for overrides",
-                    ));
-                }
-                return Err(syn::Error::new(
-                    kw.span(),
-                    "expected `inherits <Base>`",
-                ));
-            }
-            if base.is_some() {
-                return Err(syn::Error::new(kw.span(), "duplicate `inherits` argument"));
-            }
-            let path: syn::Path = input.parse()?;
-            base = Some(path_to_string(&path));
-            if input.is_empty() {
-                break;
-            }
-            input.parse::<syn::Token![,]>()?;
-        }
-        Ok(ComponentArgs { base })
-    })
-    .parse2(attr)
 }
 
 /// Joins `path`'s segments with `::`, ignoring any generic arguments (`inherits` targets are

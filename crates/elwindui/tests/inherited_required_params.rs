@@ -212,6 +212,101 @@ fn leaf_root_sets_a_base_prop_and_defaulted_param_two_hops_up() {
     assert_eq!(texts(&*leaf), ["l:true:5", "middle", "leaf"]);
 }
 
+/// A plain chain over `VerticalLayout` whose leaf root sets builtin properties: `spacing`
+/// (declared by `VerticalLayout`) and `margin` (declared by `UIElement`). Neither middle view
+/// references them, so both are set on the hand-written builtin through its public setters.
+#[elwindui::component(inherits VerticalLayout)]
+struct LayoutBase {
+    body: view! {
+        TextBlock { text: "layout base" }
+    },
+}
+
+#[elwindui::component]
+impl LayoutBase {}
+
+#[elwindui::component(inherits crate::LayoutBase)]
+struct LayoutMiddle {
+    body: view! {
+        TextBlock { text: "layout middle" }
+    },
+}
+
+#[elwindui::component]
+impl LayoutMiddle {}
+
+#[elwindui::component(inherits crate::LayoutMiddle)]
+struct SpacedLayoutLeaf {
+    body: view! {
+        spacing: 8.0
+        margin: 18.0
+        TextBlock { text: "layout leaf" }
+    },
+}
+
+#[elwindui::component]
+impl SpacedLayoutLeaf {}
+
+#[elwindui::component(inherits crate::LayoutMiddle)]
+struct PlainLayoutLeaf {
+    body: view! {
+        TextBlock { text: "layout leaf" }
+    },
+}
+
+#[elwindui::component]
+impl PlainLayoutLeaf {}
+
+/// The same builtin properties set one hop over the shape base.
+#[elwindui::component(inherits crate::LayoutBase)]
+struct SpacedLayoutDerived {
+    body: view! {
+        spacing: 8.0
+        margin: 18.0
+        TextBlock { text: "layout derived" }
+    },
+}
+
+#[elwindui::component]
+impl SpacedLayoutDerived {}
+
+fn measured_height(root: &dyn UIElementExt) -> f32 {
+    root.measure(elwindui::core::base::Size {
+        width: 400.0,
+        height: f32::INFINITY,
+    });
+    root.measured_size().unwrap_or_default().height
+}
+
+#[test]
+fn leaf_root_sets_builtin_spacing_and_margin_two_hops_up() {
+    let spaced = SpacedLayoutLeaf::new();
+    let plain = PlainLayoutLeaf::new();
+    assert_eq!(
+        texts(&*spaced),
+        ["layout base", "layout middle", "layout leaf"]
+    );
+    assert_eq!(spaced.margin(), 18.0);
+    assert_eq!(plain.margin(), 0.0);
+    // Three stacked children: two spacing gaps, plus the margin on both sides.
+    assert_eq!(
+        measured_height(&*spaced) - measured_height(&*plain),
+        2.0 * 8.0 + 2.0 * 18.0
+    );
+}
+
+#[test]
+fn derived_root_sets_builtin_spacing_and_margin_one_hop_up() {
+    let spaced = SpacedLayoutDerived::new();
+    let plain = LayoutMiddle::new();
+    assert_eq!(spaced.margin(), 18.0);
+    // Two stacked children (as in `LayoutMiddle`): one spacing gap, plus the margin on both sides.
+    assert_eq!(
+        measured_height(&*spaced) - measured_height(&*plain),
+        8.0 + 2.0 * 18.0
+    );
+}
+
 #[elwindui::component(inherits VerticalLayout)]
 struct PayloadBase {
     #[prop(default = Rc::new(0))]
@@ -410,6 +505,69 @@ fn cross_crate_leaf_root_sets_a_base_prop_and_defaulted_param_two_hops_up() {
     assert_eq!(
         texts(&*leaf),
         ["d:true:5", "defaults middle", "cross leaf defaults"]
+    );
+}
+
+/// Builtin properties (`spacing` from `VerticalLayout`, `margin` from `UIElement`) set on the
+/// root two generated levels above, in another crate, next to a base Prop.
+#[elwindui::component(inherits elwindui_external_component_fixture::ExternalDefaultsMiddle)]
+struct CrossCrateSpacedLeaf {
+    body: view! {
+        spacing: 8.0
+        margin: 18.0
+        flag: true
+        TextBlock { text: "cross leaf defaults" }
+    },
+}
+
+#[elwindui::component]
+impl CrossCrateSpacedLeaf {}
+
+#[elwindui::component(inherits elwindui_external_component_fixture::ExternalDefaultsMiddle)]
+struct CrossCratePlainLeaf {
+    body: view! {
+        flag: true
+        TextBlock { text: "cross leaf defaults" }
+    },
+}
+
+#[elwindui::component]
+impl CrossCratePlainLeaf {}
+
+/// The same builtin properties set one hop over the other crate's shape base.
+#[elwindui::component(inherits elwindui_external_component_fixture::ExternalDefaultsBase)]
+struct CrossCrateSpacedDerived {
+    body: view! {
+        spacing: 8.0
+        margin: 18.0
+        TextBlock { text: "cross defaults" }
+    },
+}
+
+#[elwindui::component]
+impl CrossCrateSpacedDerived {}
+
+#[test]
+fn cross_crate_root_sets_builtin_spacing_and_margin() {
+    let spaced = CrossCrateSpacedLeaf::new("d".to_string());
+    let plain = CrossCratePlainLeaf::new("d".to_string());
+    assert_eq!(
+        texts(&*spaced),
+        ["d:true:1", "defaults middle", "cross leaf defaults"]
+    );
+    assert_eq!(spaced.margin(), 18.0);
+    assert_eq!(plain.margin(), 0.0);
+    assert_eq!(
+        measured_height(&*spaced) - measured_height(&*plain),
+        2.0 * 8.0 + 2.0 * 18.0
+    );
+
+    let derived = CrossCrateSpacedDerived::new("d".to_string());
+    let plain = CrossCrateRootDefaults::new("d".to_string());
+    assert_eq!(derived.margin(), 18.0);
+    assert_eq!(
+        measured_height(&*derived) - measured_height(&*plain),
+        8.0 + 2.0 * 18.0
     );
 }
 

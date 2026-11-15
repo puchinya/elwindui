@@ -444,11 +444,19 @@ accessorを呼ぶ。
     `@root_initial`を使う。設定するのは
     authorした通常の値だけで、reactiveな値・semantic brush・要素・closureは従来どおりmount時の経路で扱う。
     - 中間の祖先の`view`が参照しない祖先のフィールドは、中間の実効フィールドから外れる
-      (`resolve_effective_fields`)。同一クレートでは`TypeInfo::base_key`で祖先を順にたどり、近い段に
-      ないフィールドを`<root>.base.base...`の`__set_initial_*`で設定する。constructor ABIでは、自分のarmに
-      ない名前の`@root_initial`を、生成componentの基底があればその基底ABIへ`$recv.base`として渡す
-      (なければ無視する)。名前と値は`tt`のまま渡す。`literal`/`expr`のフラグメントとして渡すと不透明になり、
-      基底側の`"flag"`や`None`のarmに一致しない。
+      (`resolve_effective_fields`)。同一クレートでは`TypeInfo::base_key`で生成componentの祖先を順にたどり、
+      各段はその段自身が宣言したフィールド(`declaring_types`)だけを`<root>.base...`の`__set_initial_*`で
+      設定する。builtin(`is_builtin`・`is_virtual_builtin`・手書きnative)では止まる。隠しinitial setterは
+      生成componentにしかないためである。
+    - 生成componentの段が消費しない名前(通常Prop・既定値付きParam・コンストラクタ入力のいずれでもない名前)は、
+      生成の連鎖が合成するbuiltin shape(`VerticalLayout`など)のものとして、最も内側の`base`に
+      そのbuiltinのprops macro(`elwindui::core::__elwindui_props_<Shape>!(@set_with_environment ..)`)で
+      設定する(`shape_root_builtin_sets`)。builtinを直接構築するときと同じ公開setterの経路である。
+    - constructor ABIの`@root_initial`は属性名をidentで受ける。`ident`のフラグメントは別のmacroへ転送しても
+      一致するが、`literal`/`expr`は不透明になって一致しなくなるためである。自分のarm(通常Prop・既定値付き
+      Param)にない名前は、コンストラクタ入力なら無視する。それ以外は、生成componentの基底があればその基底ABIへ
+      `$recv.base`として転送し(値は`tt`のまま渡すので`None`も一致する)、なければ自分が合成するbuiltin shapeの
+      props macroで`$recv.base`に設定する。
     - これらの文は`construct()`の中で`Self { .. }`より前に実行される。値が派生自身のコンストラクタの
       ローカル(必須引数・既定値付きフィールド)を参照すると`Self`へ渡す前にmoveしてしまうので、
       参照するローカルだけをブロック内で`Clone::clone`した値に束縛し直す

@@ -16,16 +16,27 @@
 //! Every other `struct` stays a declarative Component (`elwindui_codegen`), exactly as before.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::spanned::Spanned;
 
+/// What the paired `impl` needs from a class-backed struct to publish its constructor ABI.
+#[derive(Clone)]
+struct ClassBackedStruct {
+    abstract_class: bool,
+    /// `#[constructor_inputs(..)]`, when declared. Kept as text: tokens must not outlive the
+    /// macro invocation that produced them.
+    constructor_inputs: Option<Vec<String>>,
+    /// `abi_props = <path>` of a `struct_only` implementor, as text.
+    abi_props: Option<String>,
+}
+
 thread_local! {
-    /// Names of the class-backed `#[component]` structs expanded so far in this crate, so the
-    /// paired `#[component] impl` takes the same class-backed path.
-    static CLASS_BACKED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// The class-backed `#[component]` structs expanded so far in this crate, so the paired
+    /// `#[component] impl` takes the same class-backed path.
+    static CLASS_BACKED: RefCell<HashMap<String, ClassBackedStruct>> = RefCell::new(HashMap::new());
 }
 
 /// `#[component(..)]`'s arguments: `inherits Path` (no `=`), and the class-backed modifiers.
@@ -258,7 +269,28 @@ pub(crate) fn classify_struct(args: &ComponentArgs, item: &syn::ItemStruct) -> s
 
 /// Expands a class-backed `struct` through the `#[class]` layer.
 pub(crate) fn expand_struct(args: &ComponentArgs, item: syn::ItemStruct) -> TokenStream2 {
-    CLASS_BACKED.with(|names| names.borrow_mut().insert(item.ident.to_string()));
+    let mut constructor_inputs = None;
+    for attr in &item.attrs {
+        if attr.path().is_ident("constructor_inputs") {
+            match attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Ident, syn::Token![,]>::parse_terminated,
+            ) {
+                Ok(names) => {
+                    constructor_inputs = Some(names.iter().map(|name| name.to_string()).collect())
+                }
+                Err(error) => return error.to_compile_error(),
+            }
+        }
+    }
+    let info = ClassBackedStruct {
+        abstract_class: args.abstract_class,
+        constructor_inputs,
+        abi_props: args
+            .abi_props
+            .as_ref()
+            .map(|path| quote! { #path }.to_string()),
+    };
+    CLASS_BACKED.with(|names| names.borrow_mut().insert(item.ident.to_string(), info));
     crate::class::expand(args.class_attr(), quote! { #item })
 }
 
@@ -296,7 +328,7 @@ pub(crate) fn is_class_backed_impl(item: &syn::ItemImpl) -> bool {
     let Some(name) = impl_type_name(item) else {
         return false;
     };
-    if CLASS_BACKED.with(|names| names.borrow().contains(&name)) {
+    if CLASS_BACKED.with(|names| names.borrow().contains_key(&name)) {
         return true;
     }
     if elwindui_codegen::component_frontend::registered_component_parts(&name).is_some() {
@@ -366,10 +398,119 @@ fn validate_construct(item: &syn::ItemImpl) -> syn::Result<()> {
     Ok(())
 }
 
-/// Expands a class-backed `impl` through the `#[class]` layer.
+/// Expands a class-backed `impl` through the `#[class]` layer, and publishes the type's
+/// constructor ABI (D3).
 pub(crate) fn expand_impl(item: syn::ItemImpl) -> TokenStream2 {
     if let Err(error) = validate_construct(&item) {
         return error.to_compile_error();
     }
-    crate::class::expand(TokenStream2::new(), quote! { #item })
+    let abi = match constructor_abi(&item) {
+        Ok(abi) => abi,
+        Err(error) => error.to_compile_error(),
+    };
+    let class = crate::class::expand(TokenStream2::new(), quote! { #item });
+    quote! {
+        #class
+        #abi
+    }
+}
+
+/// D3: the constructor ABI of a class-backed Component. Its public inputs are exactly the
+/// `construct` arguments listed by `#[constructor_inputs(..)]`, in order; a `construct` with
+/// arguments and no such declaration is internal-only (a native handle, say), and an abstract
+/// class has no public constructor at all.
+fn constructor_abi(item: &syn::ItemImpl) -> syn::Result<TokenStream2> {
+    let Some(name) = impl_type_name(item) else {
+        return Ok(TokenStream2::new());
+    };
+    // Without the struct registration (an out-of-order rust-analyzer expansion) nothing is known
+    // about the type's public shape. Real builds always expand the struct first; rust-analyzer
+    // only needs the macro name to exist, so re-exports of it resolve.
+    let Some(info) = CLASS_BACKED.with(|names| names.borrow().get(&name).cloned()) else {
+        let macro_ident = quote::format_ident!("__elwindui_ctor_{name}");
+        return Ok(quote! {
+            #[cfg(rust_analyzer)]
+            #[allow(unexpected_cfgs)]
+            #[doc(hidden)]
+            #[macro_export]
+            #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+            macro_rules! #macro_ident {
+                ($($tokens:tt)*) => {};
+            }
+        });
+    };
+    let construct = item.items.iter().find_map(|impl_item| match impl_item {
+        syn::ImplItem::Fn(f) if f.sig.ident == "construct" => Some(f),
+        _ => None,
+    });
+    let Some(construct) = construct else {
+        return Ok(TokenStream2::new());
+    };
+    if info.abstract_class {
+        return Ok(elwindui_codegen::codegen::unconstructible_class_abi(
+            &name,
+            "it is an abstract class",
+        ));
+    }
+    let mut args: Vec<(syn::Ident, syn::Type)> = Vec::new();
+    for input in &construct.sig.inputs {
+        let syn::FnArg::Typed(typed) = input else {
+            continue;
+        };
+        let syn::Pat::Ident(pat) = typed.pat.as_ref() else {
+            return Err(syn::Error::new(
+                typed.pat.span(),
+                "`construct`: a constructor argument must be a plain name",
+            ));
+        };
+        args.push((pat.ident.clone(), (*typed.ty).clone()));
+    }
+    match &info.constructor_inputs {
+        Some(declared) => {
+            let names: Vec<String> = args.iter().map(|(n, _)| n.to_string()).collect();
+            let declared_names: Vec<String> = declared.clone();
+            if names != declared_names {
+                return Err(syn::Error::new(
+                    construct.sig.ident.span(),
+                    format!(
+                        "`construct`'s arguments ({}) must be exactly the declared \
+                         `#[constructor_inputs({})]`, in the same order",
+                        names.join(", "),
+                        declared_names.join(", ")
+                    ),
+                ));
+            }
+        }
+        None if !args.is_empty() => {
+            return Ok(elwindui_codegen::codegen::unconstructible_class_abi(
+                &name,
+                "its `construct` takes internal arguments that are not published with \
+                 `#[constructor_inputs(..)]`",
+            ));
+        }
+        None => {}
+    }
+    let (props_macro, abi_props_reexport) = match &info.abi_props {
+        Some(path) => {
+            let path: syn::Path = syn::parse_str(path)?;
+            let alias = quote::format_ident!("__elwindui_abi_props_{name}");
+            (
+                quote! { $crate::#alias },
+                quote! {
+                    #[doc(hidden)]
+                    #[allow(unused_imports)]
+                    pub use #path as #alias;
+                },
+            )
+        }
+        None => {
+            let own = quote::format_ident!("__elwindui_props_{name}");
+            (quote! { $crate::#own }, TokenStream2::new())
+        }
+    };
+    let abi = elwindui_codegen::codegen::class_constructor_abi(&name, &args, props_macro);
+    Ok(quote! {
+        #abi_props_reexport
+        #abi
+    })
 }

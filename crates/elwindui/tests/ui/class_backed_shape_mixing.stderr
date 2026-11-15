@@ -1,0 +1,39 @@
+error: `ClassShapeWithParam` has hand-written storage (a struct-level class shape attribute); its fields are plain Rust storage, so a field-level DSL attribute cannot be mixed in — declare properties at the struct level (`#[prop(name: Type)]`) instead
+ --> tests/ui/class_backed_shape_mixing.rs:9:5
+  |
+9 |     #[param]
+  |     ^
+
+error: `ClassShapeWithView` has hand-written storage (a struct-level class shape attribute), so it cannot also declare a `view!`/`template_view!` field
+  --> tests/ui/class_backed_shape_mixing.rs:16:5
+   |
+16 |     body: view! {
+   |     ^^^^
+
+error: `trait_only` declares a Core interface and attaches to a `trait Name { .. }` item, not a `struct`
+  --> tests/ui/class_backed_shape_mixing.rs:22:12
+   |
+22 | pub struct TraitOnlyOnStruct {}
+   |            ^^^^^^^^^^^^^^^^^
+
+error: a `trait` is a Core interface: write `#[component(trait_only, ..)]`
+  --> tests/ui/class_backed_shape_mixing.rs:25:11
+   |
+25 | pub trait StructOnlyOnTrait {}
+   |           ^^^^^^^^^^^^^^^^^
+
+error: #[elwindui::component]: unknown argument `manual`; expected `inherits <Base>`, `trait_only`, `struct_only = <Trait>`, `abi_props = <macro path>`, `abstract_class`, `sealed` or `no_ancestor_forward`
+  --> tests/ui/class_backed_shape_mixing.rs:27:1
+   |
+27 | #[elwindui::component(manual, inherits VerticalLayout)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `elwindui::component` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: #[elwindui::component]: `abi_props` names the interface that declares a `struct_only` implementor's properties; it is only valid together with `struct_only`
+  --> tests/ui/class_backed_shape_mixing.rs:30:1
+   |
+30 | #[elwindui::component(inherits VerticalLayout, abi_props = elwindui::core::__elwindui_props_Button)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `elwindui::component` (in Nightly builds, run with -Z macro-backtrace for more info)

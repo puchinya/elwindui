@@ -12,6 +12,18 @@ pub use elwindui_core::visual_tree;
 pub use elwindui_i18n as i18n;
 #[doc(hidden)]
 pub use elwindui_macros::__component_with_base_params;
+// PR #312 Implementation Contract v3 (D3): the constructor ABI of each builtin written as a
+// class-backed `#[component]`, re-exported at the facade root (one owner per type: the crate that
+// defines the concrete type).
+#[doc(hidden)]
+pub use elwindui_core::{__elwindui_ctor_Layout, __elwindui_ctor_VerticalLayout};
+// The native builtins' concrete types (and so their constructor ABI) belong to the backend.
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-appkit"),
+    all(target_os = "windows", feature = "backend-winui3"),
+))]
+#[doc(hidden)]
+pub use backend::{__elwindui_ctor_Button, __elwindui_ctor_NativeControl, __elwindui_ctor_Window};
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` — writes
 /// a `component`+`view` pair (docs/specs/dsl_spec.md §3/§13) as a single ordinary Rust `struct`,
 /// alongside `#[elwindui::viewmodel] mod foo { struct Foo { .. } impl Foo { .. } }` for the

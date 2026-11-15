@@ -16,7 +16,7 @@ use super::*;
 /// #128 removed that workaround). A host-composition generated component now emits ordinary
 /// `#[overrides]` methods calling `self.base.show()`/etc. directly, exactly like any other ancestor
 /// call at the `#[class]` layer.
-#[elwindui_macros::class(trait_only)]
+#[elwindui_macros::component(trait_only)]
 #[prop(title: String)]
 #[prop(menu_bar: std::rc::Rc<dyn crate::ui::MenuBarExt>)]
 #[content(content)]

@@ -819,10 +819,7 @@ fn new_external_expression(target: &syn::Path, args: &[(syn::Ident, syn::Expr)])
     };
     let props: Vec<_> = args
         .iter()
-        .map(|(name, value)| {
-            let name = syn::LitStr::new(&name.to_string(), name.span());
-            quote! { (#name => #value) }
-        })
+        .map(|(name, value)| quote! { (#name => #value) })
         .collect();
     let props_for_new = props.clone();
     let props_for_params = props.clone();
@@ -1081,8 +1078,53 @@ fn forwarded_required_param_conversion(ty: &syn::Type, name: &syn::Ident) -> Opt
     let base_text = required_param_alias_base(ty)?;
     let ctor_macro = rewrite_crate_tokens(external_ctor_macro_path(&base_text));
     let helper = format_ident!("__ctor_arg_{name}");
-    let name_literal = syn::LitStr::new(&name.to_string(), proc_macro2::Span::call_site());
-    Some(quote! { #ctor_macro!(@#helper props = [(#name_literal => $value)]) })
+    Some(quote! { #ctor_macro!(@#helper props = [(#name => $value)]) })
+}
+
+/// PR #312 Implementation Contract v3 (D3): the constructor ABI (`__elwindui_ctor_<Type>!`) of a
+/// class-backed Component — hand-written storage built by its own `construct`. It is the same
+/// builder every generated Component uses; only the property surface differs: the ABI lists just
+/// the public constructor inputs (`#[constructor_inputs(..)]`, in `construct`'s order), and every
+/// other name goes to `props_macro`, the class property shape that declares it (the class's own,
+/// or a Core interface's for a `struct_only` implementor).
+pub fn class_constructor_abi(
+    type_name: &str,
+    inputs: &[(syn::Ident, syn::Type)],
+    props_macro: TokenStream,
+) -> TokenStream {
+    let shape = EffectiveConstructorShape {
+        params: inputs
+            .iter()
+            .map(|(name, ty)| EffectiveConstructorField {
+                name: name.clone(),
+                ty: ty.clone(),
+                hidden_setter: false,
+            })
+            .collect(),
+        defaulted_params: Vec::new(),
+        props: Vec::new(),
+        constructor_return: crate::component_frontend::ComponentConstructorReturn::RcSelf,
+        writable_after_construct: HashSet::new(),
+        non_writable_fields: Vec::new(),
+    };
+    build_constructor_macro(type_name, &shape, None, true, Some(props_macro))
+}
+
+/// PR #312 Implementation Contract v3 (D3): the constructor ABI of a class that cannot be built
+/// from outside — abstract, or with an internal-only `construct` (a non-empty argument list not
+/// published with `#[constructor_inputs]`, such as a native handle). Any use is a compile error
+/// naming `reason`; hand-written Rust may still call `Type::construct(..)` directly.
+pub fn unconstructible_class_abi(type_name: &str, reason: &str) -> TokenStream {
+    let macro_ident = format_ident!("__elwindui_ctor_{type_name}");
+    let message = format!("`{type_name}` cannot be constructed by new! or a view: {reason}");
+    quote! {
+        #[doc(hidden)]
+        #[macro_export]
+        #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+        macro_rules! #macro_ident {
+            ($($tokens:tt)*) => { compile_error!(#message) };
+        }
+    }
 }
 
 fn build_constructor_macro(
@@ -1090,6 +1132,7 @@ fn build_constructor_macro(
     shape: &EffectiveConstructorShape,
     props_macro: Option<TokenStream>,
     inheritable_base: bool,
+    delegate_props: Option<TokenStream>,
 ) -> TokenStream {
     let macro_ident = format_ident!("__elwindui_ctor_{type_name}");
     let return_name = match shape.constructor_return {
@@ -1131,8 +1174,6 @@ fn build_constructor_macro(
     for param in &shape.params {
         let helper = format_ident!("__ctor_arg_{}", param.name);
         let name = &param.name;
-        let name_literal =
-            syn::LitStr::new(&param.name.to_string(), proc_macro2::Span::call_site());
         // Issue #166 (A2): an auto-forwarded base input is typed through the base's
         // required-input alias, so only the base's own constructor ABI knows how to convert a value.
         let converted = forwarded_required_param_conversion(&param.ty, &param.name)
@@ -1141,8 +1182,6 @@ fn build_constructor_macro(
             .map(|inner| {
                 let converted_inner = generated_constructor_value(inner, quote! { $some_value });
                 quote! {
-                    (@#helper props = [(#name_literal => Some($some_value:expr)), $($rest:tt)*]) => { Some(#converted_inner) };
-                    (@#helper props = [(#name_literal => Some($some_value:expr))]) => { Some(#converted_inner) };
                     (@#helper props = [(#name => Some($some_value:expr)), $($rest:tt)*]) => { Some(#converted_inner) };
                     (@#helper props = [(#name => Some($some_value:expr))]) => { Some(#converted_inner) };
                 }
@@ -1150,25 +1189,6 @@ fn build_constructor_macro(
             .unwrap_or_default();
         let missing = format!("missing required constructor field `{name}` for `{type_name}`");
         ctor_arg_arms.extend(quote! {
-            (@#helper props = [(#name_literal => @typed $value:expr), $($rest:tt)*]) => { $value };
-            (@#helper props = [(#name_literal => @typed $value:expr)]) => { $value };
-            (@#helper props = [(#name_literal => None), $($rest:tt)*]) => { None };
-            (@#helper props = [(#name_literal => None)]) => { None };
-            #option_some_arms
-            (@#helper props = [(#name_literal => $value:expr), $($rest:tt)*]) => { #converted };
-            (@#helper props = [(#name_literal => $value:expr)]) => { #converted };
-            (@#helper props = [($other:literal => @typed $value:expr), $($rest:tt)*]) => {
-                $crate::#macro_ident!(@#helper props = [$($rest)*])
-            };
-            (@#helper props = [($other:literal => @typed $value:expr)]) => {
-                $crate::#macro_ident!(@#helper props = [])
-            };
-            (@#helper props = [($other:literal => $value:expr), $($rest:tt)*]) => {
-                $crate::#macro_ident!(@#helper props = [$($rest)*])
-            };
-            (@#helper props = [($other:literal => $value:expr)]) => {
-                $crate::#macro_ident!(@#helper props = [])
-            };
             (@#helper props = [(#name => @typed $value:expr), $($rest:tt)*]) => { $value };
             (@#helper props = [(#name => @typed $value:expr)]) => { $value };
             (@#helper props = [(#name => None), $($rest:tt)*]) => { None };
@@ -1205,66 +1225,71 @@ fn build_constructor_macro(
         .chain(shape.defaulted_params.iter())
         .chain(shape.props.iter())
     {
-        let name_literal =
-            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
+        let name = &field.name;
         new_validation_arms.extend(quote! {
-            (@validate_new props = [(#name_literal => @typed $value:expr), $($rest:tt)*]) => {
+            (@validate_new props = [(#name => @typed $value:expr), $($rest:tt)*]) => {
                 $crate::#macro_ident!(@validate_new props = [$($rest)*]);
             };
-            (@validate_new props = [(#name_literal => @typed $value:expr)]) => {};
-            (@validate_new props = [(#name_literal => $value:expr), $($rest:tt)*]) => {
+            (@validate_new props = [(#name => @typed $value:expr)]) => {};
+            (@validate_new props = [(#name => $value:expr), $($rest:tt)*]) => {
                 $crate::#macro_ident!(@validate_new props = [$($rest)*]);
             };
-            (@validate_new props = [(#name_literal => $value:expr)]) => {};
+            (@validate_new props = [(#name => $value:expr)]) => {};
         });
     }
     for name in &shape.non_writable_fields {
         let name_literal = syn::LitStr::new(name, proc_macro2::Span::call_site());
+        let name = format_ident!("{name}");
         new_validation_arms.extend(quote! {
-            (@validate_new props = [(#name_literal => @typed $value:expr), $($rest:tt)*]) => {
+            (@validate_new props = [(#name => @typed $value:expr), $($rest:tt)*]) => {
                 compile_error!(concat!(
                     "field `", #name_literal, "` is not writable by new! on `", #type_name, "`"
                 ));
             };
-            (@validate_new props = [(#name_literal => @typed $value:expr)]) => {
+            (@validate_new props = [(#name => @typed $value:expr)]) => {
                 compile_error!(concat!(
                     "field `", #name_literal, "` is not writable by new! on `", #type_name, "`"
                 ));
             };
-            (@validate_new props = [(#name_literal => $value:expr), $($rest:tt)*]) => {
+            (@validate_new props = [(#name => $value:expr), $($rest:tt)*]) => {
                 compile_error!(concat!(
                     "field `", #name_literal, "` is not writable by new! on `", #type_name, "`"
                 ));
             };
-            (@validate_new props = [(#name_literal => $value:expr)]) => {
+            (@validate_new props = [(#name => $value:expr)]) => {
                 compile_error!(concat!(
                     "field `", #name_literal, "` is not writable by new! on `", #type_name, "`"
                 ));
             };
         });
     }
-    let new_validation_fallback = quote! {
-        (@validate_new props = []) => {};
-        (@validate_new props = [($name:literal => @typed $value:expr), $($rest:tt)*]) => {
-            compile_error!(concat!(
-                "unknown constructor field `", $name, "` on `", #type_name, "`"
-            ));
-        };
-        (@validate_new props = [($name:literal => @typed $value:expr)]) => {
-            compile_error!(concat!(
-                "unknown constructor field `", $name, "` on `", #type_name, "`"
-            ));
-        };
-        (@validate_new props = [($name:literal => $value:expr), $($rest:tt)*]) => {
-            compile_error!(concat!(
-                "unknown constructor field `", $name, "` on `", #type_name, "`"
-            ));
-        };
-        (@validate_new props = [($name:literal => $value:expr)]) => {
-            compile_error!(concat!(
-                "unknown constructor field `", $name, "` on `", #type_name, "`"
-            ));
-        };
+    let new_validation_fallback = match &delegate_props {
+        // A class-backed Component (PR #312 contract v3, D3) enumerates only its own constructor
+        // inputs: any other name is checked against the class chain's property shape.
+        Some(props_macro) => quote! {
+            (@validate_new props = []) => {};
+            (@validate_new props = [($name:ident => @typed $value:expr) $(, $($rest:tt)*)?]) => {
+                let _: ::core::option::Option<#props_macro!(@field_type $name)> = None;
+                $crate::#macro_ident!(@validate_new props = [$($($rest)*)?]);
+            };
+            (@validate_new props = [($name:ident => $value:expr) $(, $($rest:tt)*)?]) => {
+                let _: ::core::option::Option<#props_macro!(@field_type $name)> = None;
+                $crate::#macro_ident!(@validate_new props = [$($($rest)*)?]);
+            };
+        },
+        None => quote! {
+            (@validate_new props = []) => {};
+            (@validate_new props = [($name:ident => @typed $value:expr) $(, $($rest:tt)*)?]) => {
+                compile_error!(concat!(
+                    "unknown constructor field `", stringify!($name), "` on `", #type_name, "`"
+                ));
+            };
+            (@validate_new props = [($name:ident => $value:expr) $(, $($rest:tt)*)?]) => {
+                compile_error!(concat!(
+                    "unknown constructor field `", stringify!($name), "` on `", #type_name, "`"
+                ));
+            };
+        },
     };
 
     let mut initial_field_arms = TokenStream::new();
@@ -1275,8 +1300,6 @@ fn build_constructor_macro(
         .chain(shape.props.iter().map(|field| (field, false)))
     {
         let name = format_ident!("{}", field.name);
-        let name_literal =
-            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
         let converted = generated_constructor_value(&field.ty, quote! { $value });
         let setter_name = if is_param {
             format_ident!("__set_initial_param_{}", field.name)
@@ -1335,11 +1358,11 @@ fn build_constructor_macro(
             }
         };
         initial_field_arms.extend(quote! {
-            (@initial_named_typed $recv:expr, #name_literal, $value:expr, $environment:expr) => {
+            (@initial_named_typed $recv:expr, #name, $value:expr, $environment:expr) => {
                 #set_typed
             };
-            (@initial_named $recv:expr, #name_literal, None, $environment:expr) => { #set_none };
-            (@initial_named $recv:expr, #name_literal, $value:expr, $environment:expr) => { #set_value };
+            (@initial_named $recv:expr, #name, None, $environment:expr) => { #set_none };
+            (@initial_named $recv:expr, #name, $value:expr, $environment:expr) => { #set_value };
             (@initial_typed $recv:expr, #name, $value:expr, $environment:expr) => {
                 #set_typed
             };
@@ -1438,15 +1461,16 @@ fn build_constructor_macro(
     let mut new_initial_param_calls = TokenStream::new();
     for field in &shape.defaulted_params {
         let helper = format_ident!("__new_initial_param_{}", field.name);
+        let name = &field.name;
         let name_literal =
             syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
         let option_some_lookup_arms = constructor_option_inner(&field.ty)
             .map(|_| {
                 quote! {
-                    (@#helper $recv:expr, props = [(#name_literal => Some($some_value:expr)), $($rest:tt)*], environment = $environment:expr) => {
+                    (@#helper $recv:expr, props = [(#name => Some($some_value:expr)), $($rest:tt)*], environment = $environment:expr) => {
                         $crate::#macro_ident!(@new_initial $recv, #name_literal, Some($some_value), $environment);
                     };
-                    (@#helper $recv:expr, props = [(#name_literal => Some($some_value:expr))], environment = $environment:expr) => {
+                    (@#helper $recv:expr, props = [(#name => Some($some_value:expr))], environment = $environment:expr) => {
                         $crate::#macro_ident!(@new_initial $recv, #name_literal, Some($some_value), $environment);
                     };
                 }
@@ -1454,16 +1478,16 @@ fn build_constructor_macro(
             .unwrap_or_default();
         new_initial_lookup_arms.extend(quote! {
             #option_some_lookup_arms
-            (@#helper $recv:expr, props = [(#name_literal => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
+            (@#helper $recv:expr, props = [(#name => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
                 $crate::#macro_ident!(@new_initial $recv, #name_literal, $value, $environment);
             };
-            (@#helper $recv:expr, props = [(#name_literal => $value:expr)], environment = $environment:expr) => {
+            (@#helper $recv:expr, props = [(#name => $value:expr)], environment = $environment:expr) => {
                 $crate::#macro_ident!(@new_initial $recv, #name_literal, $value, $environment);
             };
-            (@#helper $recv:expr, props = [($other:literal => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
+            (@#helper $recv:expr, props = [($other:ident => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
                 $crate::#macro_ident!(@#helper $recv, props = [$($rest)*], environment = $environment);
             };
-            (@#helper $recv:expr, props = [($other:literal => $value:expr)], environment = $environment:expr) => {};
+            (@#helper $recv:expr, props = [($other:ident => $value:expr)], environment = $environment:expr) => {};
             (@#helper $recv:expr, props = [], environment = $environment:expr) => {};
         });
         new_initial_param_calls.extend(quote! {
@@ -1473,32 +1497,48 @@ fn build_constructor_macro(
     let mut new_initial_prop_calls = TokenStream::new();
     for field in &shape.props {
         let helper = format_ident!("__new_initial_prop_{}", field.name);
+        let name = &field.name;
         let name_literal =
             syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
         new_initial_lookup_arms.extend(quote! {
-            (@#helper $recv:expr, props = [(#name_literal => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
+            (@#helper $recv:expr, props = [(#name => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
                 $crate::#macro_ident!(@new_initial $recv, #name_literal, $value, $environment);
             };
-            (@#helper $recv:expr, props = [(#name_literal => $value:expr)], environment = $environment:expr) => {
+            (@#helper $recv:expr, props = [(#name => $value:expr)], environment = $environment:expr) => {
                 $crate::#macro_ident!(@new_initial $recv, #name_literal, $value, $environment);
             };
-            (@#helper $recv:expr, props = [($other:literal => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
+            (@#helper $recv:expr, props = [($other:ident => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
                 $crate::#macro_ident!(@#helper $recv, props = [$($rest)*], environment = $environment);
             };
-            (@#helper $recv:expr, props = [($other:literal => $value:expr)], environment = $environment:expr) => {};
+            (@#helper $recv:expr, props = [($other:ident => $value:expr)], environment = $environment:expr) => {};
             (@#helper $recv:expr, props = [], environment = $environment:expr) => {};
         });
         new_initial_prop_calls.extend(quote! {
             $crate::#macro_ident!(@#helper $recv, props = [$($props)*], environment = $environment);
         });
     }
-    let new_initial_dispatchers = quote! {
-        (@new_initial_params $recv:expr, props = [$($props:tt)*], environment = $environment:expr) => {{
-            #new_initial_param_calls
-        }};
-        (@new_initial_props $recv:expr, props = [$($props:tt)*], environment = $environment:expr) => {{
-            #new_initial_prop_calls
-        }};
+    let new_initial_dispatchers = match &delegate_props {
+        // A class-backed Component sets every named value that is not a constructor input through
+        // its class chain's property shape (`@initial_named`'s delegating arm).
+        Some(_) => quote! {
+            (@new_initial_params $recv:expr, props = [$($props:tt)*], environment = $environment:expr) => {};
+            (@new_initial_props $recv:expr, props = [$($props:tt)*], environment = $environment:expr) => {{
+                $crate::#macro_ident!(@__new_initial_each $recv, [$($props)*], $environment);
+            }};
+            (@__new_initial_each $recv:expr, [], $environment:expr) => {};
+            (@__new_initial_each $recv:expr, [($name:ident => $($value:tt)*) $(, $($rest:tt)*)?], $environment:expr) => {
+                $crate::#macro_ident!(@initial_named $recv, $name, $($value)*, $environment);
+                $crate::#macro_ident!(@__new_initial_each $recv, [$($($rest)*)?], $environment);
+            };
+        },
+        None => quote! {
+            (@new_initial_params $recv:expr, props = [$($props:tt)*], environment = $environment:expr) => {{
+                #new_initial_param_calls
+            }};
+            (@new_initial_props $recv:expr, props = [$($props:tt)*], environment = $environment:expr) => {{
+                #new_initial_prop_calls
+            }};
+        },
     };
     let new_initial_unknown = quote! {
         (@new_initial $recv:expr, $name:literal, $value:expr, $environment:expr) => {
@@ -1508,45 +1548,55 @@ fn build_constructor_macro(
             ));
         };
     };
-    let initial_named_unknown = quote! {
-        (@initial_named_typed $recv:expr, $name:literal, $value:expr, $environment:expr) => {
-            compile_error!(concat!(
-                "field `", $name, "` is not an externally writable property of `",
-                #type_name, "`"
-            ));
-        };
-        (@initial_named $recv:expr, $name:literal, $value:expr, $environment:expr) => {
-            compile_error!(concat!(
-                "field `", $name, "` is not an externally writable property of `",
-                #type_name, "`"
-            ));
-        };
+    let initial_named_unknown = match &delegate_props {
+        // A class-backed Component: any other name is a property some class in its chain declares.
+        // `@set_chain_with_environment` sets the name on the class in the chain that declares it,
+        // on that class's own value, through its own trait — no trait import is needed here.
+        Some(props_macro) => quote! {
+            (@initial_named_typed $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                #props_macro!(@set_chain_with_environment &$recv, $name, $value, $environment);
+            };
+            (@initial_named $recv:expr, $name:ident, $($rest:tt)*) => {
+                #props_macro!(@set_chain_with_environment &$recv, $name, $($rest)*);
+            };
+        },
+        None => quote! {
+            (@initial_named_typed $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                compile_error!(concat!(
+                    "field `", stringify!($name), "` is not an externally writable property of `",
+                    #type_name, "`"
+                ));
+            };
+            (@initial_named $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                compile_error!(concat!(
+                    "field `", stringify!($name), "` is not an externally writable property of `",
+                    #type_name, "`"
+                ));
+            };
+        },
     };
     let initial_named_required_arms: TokenStream = shape
         .params
         .iter()
         .map(|param| {
-            let name_literal =
-                syn::LitStr::new(&param.name.to_string(), proc_macro2::Span::call_site());
+            let name = &param.name;
             quote! {
-                (@initial_named_typed $recv:expr, #name_literal, $value:expr, $environment:expr) => {};
-                (@initial_named $recv:expr, #name_literal, $value:expr, $environment:expr) => {};
+                (@initial_named_typed $recv:expr, #name, $value:expr, $environment:expr) => {};
+                (@initial_named $recv:expr, #name, $value:expr, $environment:expr) => {};
             }
         })
         .collect();
     let mut resync_fixed_arms = TokenStream::new();
     for field in shape.params.iter().chain(shape.defaulted_params.iter()) {
         let name = format_ident!("{}", field.name);
-        let name_literal =
-            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
         let message = format!(
             "{type_name}.{name} is a fixed constructor field and cannot be updated reactively"
         );
         resync_fixed_arms.extend(quote! {
-            (@resync_named $recv:expr, #name_literal, $value:expr, $environment:expr, reactive = true) => {
+            (@resync_named $recv:expr, #name, $value:expr, $environment:expr, reactive = true) => {
                 compile_error!(#message);
             };
-            (@resync_named $recv:expr, #name_literal, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_named $recv:expr, #name, $value:expr, $environment:expr, reactive = false) => {};
             (@resync_set $recv:expr, #name, $value:expr, $environment:expr, reactive = true) => {
                 compile_error!(#message);
             };
@@ -1557,8 +1607,6 @@ fn build_constructor_macro(
     let mut resync_prop_arms = TokenStream::new();
     for field in &shape.props {
         let name = format_ident!("{}", field.name);
-        let name_literal =
-            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
         let setter = format_ident!("set_{}", field.name);
         let set = if field.hidden_setter {
             quote! { $recv.#setter($value); }
@@ -1578,10 +1626,10 @@ fn build_constructor_macro(
             }
         };
         resync_prop_arms.extend(quote! {
-            (@resync_named $recv:expr, #name_literal, $value:expr, $environment:expr, reactive = true) => {
+            (@resync_named $recv:expr, #name, $value:expr, $environment:expr, reactive = true) => {
                 #set
             };
-            (@resync_named $recv:expr, #name_literal, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_named $recv:expr, #name, $value:expr, $environment:expr, reactive = false) => {};
             (@resync_set $recv:expr, #name, $value:expr, $environment:expr, reactive = true) => {
                 #set
             };
@@ -1591,15 +1639,28 @@ fn build_constructor_macro(
             };
         });
     }
-    let resync_fallback = match &props_macro {
-        Some(props_macro) => quote! {
-            (@resync_named $recv:expr, $name:literal, $value:expr, $environment:expr, reactive = true) => {
+    let resync_fallback = match (&delegate_props, &props_macro) {
+        (Some(delegate), _) => quote! {
+            (@resync_named $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = true) => {
+                #delegate!(@set_chain_with_environment &$recv, $name, $value, $environment);
+            };
+            (@resync_named $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_set $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = true) => {
+                #delegate!(@set_chain_with_environment &$recv, $name, $value, $environment);
+            };
+            (@resync_set $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_item_set $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                #delegate!(@set_chain_with_environment &$recv, $name, $value, $environment);
+            };
+        },
+        (None, Some(props_macro)) => quote! {
+            (@resync_named $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = true) => {
                 compile_error!(concat!(
-                    "field `", $name, "` is not an externally writable property of `",
+                    "field `", stringify!($name), "` is not an externally writable property of `",
                     #type_name, "`"
                 ));
             };
-            (@resync_named $recv:expr, $name:literal, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_named $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = false) => {};
             (@resync_set $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = true) => {
                 #props_macro!(@set_with_environment $recv, $name, $value, $environment);
             };
@@ -1608,14 +1669,14 @@ fn build_constructor_macro(
                 #props_macro!(@set_with_environment $recv, $name, $value, $environment);
             };
         },
-        None => quote! {
-            (@resync_named $recv:expr, $name:literal, $value:expr, $environment:expr, reactive = true) => {
+        (None, None) => quote! {
+            (@resync_named $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = true) => {
                 compile_error!(concat!(
-                    "field `", $name, "` is not an externally writable property of `",
+                    "field `", stringify!($name), "` is not an externally writable property of `",
                     #type_name, "`"
                 ));
             };
-            (@resync_named $recv:expr, $name:literal, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_named $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = false) => {};
             (@resync_set $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = true) => {
                 compile_error!(concat!(
                     "field ",
@@ -1637,26 +1698,28 @@ fn build_constructor_macro(
     };
     let mut semantic_brush_named_arms = TokenStream::new();
     for field in shape.params.iter().chain(shape.defaulted_params.iter()) {
-        let name_literal =
-            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
+        let name = &field.name;
         semantic_brush_named_arms.extend(quote! {
-            (@is_semantic_brush_named #name_literal) => { false };
+            (@is_semantic_brush_named #name) => { false };
         });
     }
     for field in &shape.props {
         let name = format_ident!("{}", field.name);
-        let name_literal =
-            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
         let value = match &props_macro {
             Some(props_macro) => quote! { #props_macro!(@is_semantic_brush #name) },
             None => quote! { false },
         };
         semantic_brush_named_arms.extend(quote! {
-            (@is_semantic_brush_named #name_literal) => { #value };
+            (@is_semantic_brush_named #name) => { #value };
         });
     }
-    let semantic_brush_named_fallback = quote! {
-        (@is_semantic_brush_named $name:literal) => { false };
+    let semantic_brush_named_fallback = match &delegate_props {
+        Some(props_macro) => quote! {
+            (@is_semantic_brush_named $name:ident) => { #props_macro!(@is_semantic_brush $name) };
+        },
+        None => quote! {
+            (@is_semantic_brush_named $name:ident) => { false };
+        },
     };
     let writable_arms: TokenStream = shape
         .writable_after_construct
@@ -1666,17 +1729,25 @@ fn build_constructor_macro(
             quote! { (@writable_after_construct #name) => { true }; }
         })
         .collect();
-    let new_method = match shape.constructor_return {
-        crate::component_frontend::ComponentConstructorReturn::SelfValue => format_ident!("new"),
-        crate::component_frontend::ComponentConstructorReturn::RcSelf => {
+    // A class-backed Component is built by its `#[class]` `new` and mounted by whatever attaches
+    // it, like every builtin.
+    let new_method = match (shape.constructor_return, &delegate_props) {
+        (_, Some(_)) => format_ident!("new"),
+        (crate::component_frontend::ComponentConstructorReturn::SelfValue, None) => {
+            format_ident!("new")
+        }
+        (crate::component_frontend::ComponentConstructorReturn::RcSelf, None) => {
             format_ident!("__new_unmounted")
         }
     };
-    let mount_arm = match shape.constructor_return {
-        crate::component_frontend::ComponentConstructorReturn::SelfValue => quote! {
+    let mount_arm = match (delegate_props.is_some(), shape.constructor_return) {
+        (true, _) => quote! {
             (@mount $recv:expr, $environment:expr) => {};
         },
-        crate::component_frontend::ComponentConstructorReturn::RcSelf => quote! {
+        (false, crate::component_frontend::ComponentConstructorReturn::SelfValue) => quote! {
+            (@mount $recv:expr, $environment:expr) => {};
+        },
+        (false, crate::component_frontend::ComponentConstructorReturn::RcSelf) => quote! {
             (@mount $recv:expr, $environment:expr) => {
                 $recv.__mount($environment);
             };
@@ -5332,8 +5403,13 @@ fn generate_component(
         own_field_shape.constructor_return,
         non_writable_fields,
     );
-    let constructor_macro =
-        build_constructor_macro(&struct_name.to_string(), &constructor_shape, None, false);
+    let constructor_macro = build_constructor_macro(
+        &struct_name.to_string(),
+        &constructor_shape,
+        None,
+        false,
+        None,
+    );
     quote! {
         #[allow(non_camel_case_types)]
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7403,8 +7479,8 @@ fn generate_view(
             let value = is_semantic_brush_property(info, name);
             quote! { #value }
         } else if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
-            let name_literal = syn::LitStr::new(name, proc_macro2::Span::call_site());
-            quote! { #ctor_macro!(@is_semantic_brush_named #name_literal) }
+            let name = format_ident!("{name}");
+            quote! { #ctor_macro!(@is_semantic_brush_named #name) }
         } else {
             let props_macro = dsl_props_macro_path(&node.type_path, None);
             let name = format_ident!("{name}");
@@ -9528,6 +9604,7 @@ fn generate_view(
         &constructor_shape,
         generated_props_macro,
         is_shape_composition || is_inherited_view_composition,
+        None,
     );
 
     let generated = if is_composed {
@@ -14845,13 +14922,11 @@ fn emit_external_construction(
             .filter(|attribute| !attribute.synthesized)
             .map(|attribute| {
                 let name = &attribute.name;
-                let name_literal =
-                    syn::LitStr::new(&name.to_string(), proc_macro2::Span::call_site());
                 let value = &attribute.value;
                 if attribute.typed {
-                    quote! { (#name_literal => @typed #value), }
+                    quote! { (#name => @typed #value), }
                 } else {
-                    quote! { (#name_literal => #value), }
+                    quote! { (#name => #value), }
                 }
             })
             .collect();
@@ -14867,19 +14942,17 @@ fn emit_external_construction(
             .filter(|attribute| !attribute.synthesized)
             .map(|attribute| {
                 let name = &attribute.name;
-                let name_literal =
-                    syn::LitStr::new(&name.to_string(), proc_macro2::Span::call_site());
                 let value = &attribute.value;
                 if attribute.typed {
                     quote! {
-                        #ctor_macro!(@initial_named_typed #binding, #name_literal, #value, #environment);
+                        #ctor_macro!(@initial_named_typed #binding, #name, #value, #environment);
                     }
                 } else {
                     quote! {
-                        #ctor_macro!(@initial_named #binding, #name_literal, #value, #environment);
+                        #ctor_macro!(@initial_named #binding, #name, #value, #environment);
                     }
                 }
-        });
+            });
         let initial_children = if non_dynamic_children.is_empty() {
             TokenStream::new()
         } else {
@@ -16360,16 +16433,15 @@ fn build_component_value(
                 .into_iter()
                 .filter(|value| !value.synthesized && required.contains(&value.name.to_string()))
                 .map(|value| {
-                    let name_literal =
-                        syn::LitStr::new(&value.name.to_string(), proc_macro2::Span::call_site());
+                    let name = &value.name;
                     // The auto-forwarded input already has the base's declared type.
                     let forwarded =
                         value.typed || value.value.to_string() == value.name.to_string();
                     let value = &value.value;
                     if forwarded {
-                        quote! { (#name_literal => @typed #value), }
+                        quote! { (#name => @typed #value), }
                     } else {
-                        quote! { (#name_literal => #value), }
+                        quote! { (#name => #value), }
                     }
                 })
                 .collect();
@@ -19185,13 +19257,13 @@ fn emit_resync_with_receiver(
             continue;
         }
         if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
-            let name_literal = syn::LitStr::new(name, proc_macro2::Span::call_site());
+            let name_ident = format_ident!("{name}");
             let value = emit_expr(expr, ctx, &self_mode);
             let environment = semantic_brush_resync_environment(node, ctx);
             let reactive = view_expr_has_reactive_dependency(expr, ctx);
             let resync_call = quote! {
                 #ctor_macro!(
-                    @resync_named #receiver, #name_literal, #value, #environment,
+                    @resync_named #receiver, #name_ident, #value, #environment,
                     reactive = #reactive
                 );
             };
@@ -20444,7 +20516,7 @@ mod tests {
             crate::component_frontend::ComponentConstructorReturn::RcSelf,
             Vec::new(),
         );
-        let generated = build_constructor_macro("Thing", &shape, None, false).to_string();
+        let generated = build_constructor_macro("Thing", &shape, None, false, None).to_string();
         assert!(!generated.contains("children"), "{generated}");
     }
 

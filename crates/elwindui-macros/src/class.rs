@@ -2160,14 +2160,23 @@ fn build_props_macro(
             } else {
                 (set, TokenStream2::new())
             };
+            let chain_set = quote! {
+                #[allow(unused_imports)]
+                use #own_ext as _;
+                $crate::#macro_ident!(@set_with_environment_from #bare_ident, $recv, #name, $($rest)*);
+            };
             quote! {
                 (@initial_with_environment_from $recv:expr, #name, $($rest:tt)*) => {{ #construct_set }};
                 (@initial_brush_with_environment_from $recv:expr, #name, $($rest:tt)*) => {{ #mount_set }};
+                (@set_chain_with_environment_from $recv:expr, #name, $($rest:tt)*) => {{ #chain_set }};
             }
         })
         .chain(shape.fixed.iter().map(|name| {
             let ignored = quote! {
                 (@initial_brush_with_environment_from $recv:expr, #name, $($rest:tt)*) => {};
+            };
+            let required_ignored = quote! {
+                (@set_chain_with_environment_from $recv:expr, #name, $($rest:tt)*) => {};
             };
             if shape.fixed_defaulted.contains(name) {
                 let setter = format_ident!("__set_initial_param_{}", name);
@@ -2188,12 +2197,23 @@ fn build_props_macro(
                         use #own_ext as _;
                         $recv.#setter(#converted);
                     }};
+                    (@set_chain_with_environment_from $recv:expr, #name, None, $environment:expr) => {{
+                        #[allow(unused_imports)]
+                        use #own_ext as _;
+                        $recv.#setter(None);
+                    }};
+                    (@set_chain_with_environment_from $recv:expr, #name, $value:expr, $environment:expr) => {{
+                        #[allow(unused_imports)]
+                        use #own_ext as _;
+                        $recv.#setter(#converted);
+                    }};
                     #ignored
                 }
             } else {
                 quote! {
                     (@initial_with_environment_from $recv:expr, #name, $($rest:tt)*) => {};
                     #ignored
+                    #required_ignored
                 }
             }
         }))
@@ -2209,6 +2229,9 @@ fn build_props_macro(
                 (@initial_brush_with_environment_from $recv:expr, $name:ident, $($rest:tt)*) => {
                     #parent_macro!(@initial_brush_with_environment_from &$recv.base, $name, $($rest)*)
                 };
+                (@set_chain_with_environment_from $recv:expr, $name:ident, $($rest:tt)*) => {
+                    #parent_macro!(@set_chain_with_environment_from &$recv.base, $name, $($rest)*)
+                };
             }
         }
         // The construct-time walk reports an undeclared name; the mount-time one only looks for
@@ -2220,6 +2243,11 @@ fn build_props_macro(
                 ));
             };
             (@initial_brush_with_environment_from $recv:expr, $name:ident, $($rest:tt)*) => {};
+            (@set_chain_with_environment_from $recv:expr, $name:ident, $($rest:tt)*) => {
+                compile_error!(concat!(
+                    "`", stringify!($name), "` is not a property this class or an ancestor declares"
+                ));
+            };
         },
     };
     let inherited_access_fallback = match parent {
@@ -3244,6 +3272,9 @@ fn build_props_macro(
             };
             (@initial_brush_with_environment $recv:expr, $name:ident, $($rest:tt)*) => {
                 $crate::#macro_ident!(@initial_brush_with_environment_from $recv, $name, $($rest)*);
+            };
+            (@set_chain_with_environment $recv:expr, $name:ident, $($rest:tt)*) => {
+                $crate::#macro_ident!(@set_chain_with_environment_from $recv, $name, $($rest)*);
             };
             #(#initial_arms)*
             #initial_fallback

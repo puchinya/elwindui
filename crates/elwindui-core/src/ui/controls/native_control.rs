@@ -15,7 +15,7 @@ use super::*;
 /// shared "MeasureNode" abstraction. `collect_render_items<H>` downcasts a leaf's
 /// `try_as_native_control()` result directly to `H` (see that trait method's own doc comment) — no
 /// wrapper struct type needs to be nameable from `elwindui-core` for this to work.
-#[elwindui_macros::class(trait_only, inherits = crate::ui::UIElement, abstract_class)]
+#[elwindui_macros::component(trait_only, inherits crate::ui::UIElement, abstract_class)]
 #[text_style]
 #[prop(semantic_brush, background: Option<crate::graphics::Brush>)]
 #[prop(tooltip: Option<String>)]

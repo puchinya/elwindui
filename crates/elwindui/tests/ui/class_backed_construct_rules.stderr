@@ -1,0 +1,35 @@
+error: `construct`: takes no `self` receiver; it returns the new `Self`
+  --> tests/ui/class_backed_construct_rules.rs:11:18
+   |
+11 |     fn construct(&self) -> Self {
+   |                  ^
+
+error: `construct`: cannot be `async`
+  --> tests/ui/class_backed_construct_rules.rs:21:5
+   |
+21 |     async fn construct() -> Self {
+   |     ^^^^^
+
+error: `construct`: must return `Self`
+  --> tests/ui/class_backed_construct_rules.rs:31:20
+   |
+31 |     fn construct() -> i32 {
+   |                    ^
+
+error: `construct`: declared more than once
+  --> tests/ui/class_backed_construct_rules.rs:44:8
+   |
+44 |     fn construct() -> Self {
+   |        ^^^^^^^^^
+
+error: `construct`: is the constructor, not a virtual method — remove `#[overridable]`/`#[overrides]`
+  --> tests/ui/class_backed_construct_rules.rs:54:5
+   |
+54 |     #[overrides]
+   |     ^
+
+error: `construct`'s arguments (second, first) must be exactly the declared `#[constructor_inputs(first, second)]`, in the same order
+  --> tests/ui/class_backed_construct_rules.rs:66:8
+   |
+66 |     fn construct(second: i32, first: i32) -> Self {
+   |        ^^^^^^^^^

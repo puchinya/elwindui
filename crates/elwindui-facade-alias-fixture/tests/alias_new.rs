@@ -10,3 +10,15 @@ fn new_through_a_renamed_facade_builds_a_core_builtin() {
     let layout = ui_facade::new!(ui_facade::ui::VerticalLayout(spacing: 8.0, margin: 2.0));
     assert_eq!(layout.margin(), 2.0);
 }
+
+/// A generated Component of another crate, built through the renamed facade's `new!`: its
+/// constructor ABI reaches the application environment through the type itself.
+#[test]
+fn new_through_a_renamed_facade_builds_an_external_generated_component() {
+    let component = ui_facade::new!(elwindui_external_component_fixture::ExternalRequiredBase(
+        title: "x",
+        count: 2
+    ));
+    use elwindui_external_component_fixture::ExternalRequiredBaseExt as _;
+    assert_eq!(component.title(), "x");
+}

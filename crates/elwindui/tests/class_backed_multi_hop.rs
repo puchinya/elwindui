@@ -130,3 +130,55 @@ fn cross_crate_generated_raw_generated_chain() {
     assert_eq!(leaf.margin(), 4.0);
     assert_eq!(texts(&*leaf), ["t:true:1", "cross leaf"]);
 }
+
+/// A same-crate class-backed middle over a generated base with a required input, published as
+/// the middle's own constructor input; a generated leaf with its own view auto-forwards it.
+#[elwindui::component(inherits VerticalLayout)]
+struct RequiredGenBase {
+    #[param]
+    title: String,
+
+    body: view! {
+        TextBlock { text: format!("required {title}") }
+    },
+}
+
+#[elwindui::component]
+impl RequiredGenBase {}
+
+#[elwindui::component(inherits crate::RequiredGenBase)]
+#[prop(tag: String)]
+#[constructor_inputs(title)]
+pub struct RequiredRawMiddle {
+    tag: RefCell<String>,
+}
+
+#[elwindui::component]
+impl RequiredRawMiddle {
+    fn set_tag(&self, tag: &str) {
+        *self.tag.borrow_mut() = tag.to_string();
+    }
+
+    fn construct(title: String) -> Self {
+        Self {
+            base: RequiredGenBase::construct(title),
+            tag: RefCell::new(String::new()),
+        }
+    }
+}
+
+#[elwindui::component(inherits crate::RequiredRawMiddle)]
+struct RequiredLeaf {
+    body: view! {
+        TextBlock { text: "required leaf" }
+    },
+}
+
+#[elwindui::component]
+impl RequiredLeaf {}
+
+#[test]
+fn a_same_crate_class_backed_middle_forwards_its_required_inputs() {
+    let leaf = RequiredLeaf::new("x".to_string());
+    assert_eq!(texts(&*leaf), ["required x", "required leaf"]);
+}

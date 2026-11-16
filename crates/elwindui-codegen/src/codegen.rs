@@ -548,18 +548,17 @@ impl syn::visit_mut::VisitMut for ParentConstructRewriter<'_> {
 /// entry). Its required constructor inputs, if any, are known only to its own exported shape
 /// macro (`@required_params`); a builtin answers with none, so this does not decide whether the
 /// class is a generated Component.
+///
+/// PR #312 (contract v3): a same-crate class-backed Component (`crate::RawMiddle`) is not in the
+/// symbol table either; its shape macro answers the same way, so a qualified path of this crate
+/// counts too.
 pub(crate) fn is_external_base(
     table: &SymbolTable,
     module: &Module,
     base: &str,
     base_path: &str,
 ) -> bool {
-    table.resolve(module, base).is_none()
-        && base_path.contains("::")
-        && !matches!(
-            base_path.split("::").next().map(str::trim),
-            Some("crate" | "self" | "super" | "")
-        )
+    table.resolve(module, base).is_none() && base_path.contains("::")
 }
 
 /// The constructor ABI macro path of a cross-crate generated base.
@@ -580,10 +579,28 @@ fn node_ctor_macro_path(
     from: &Module,
     table: &SymbolTable,
 ) -> Option<TokenStream> {
-    dsl_ctor_macro_path(&node.type_path, None).or_else(|| {
-        resolve_context_info(ctx, from, table, &node.type_path)
-            .filter(|info| info.deferred_constructor)
+    let info = resolve_context_info(ctx, from, table, &node.type_path);
+    element_ctor_macro_path(&node.type_path, info).or_else(|| {
+        info.filter(|info| info.deferred_constructor)
             .map(|_| external_ctor_macro_path(&node.type_path))
+    })
+}
+
+/// The constructor ABI of an element type: an external generated Component's, or (PR #312,
+/// contract v3) a same-crate class-backed Component's — a qualified local path with no symbol-table
+/// entry (`crate::RawMiddle`), whose `#[component]` publishes `crate::__elwindui_ctor_<Name>!`.
+fn element_ctor_macro_path(type_path: &str, info: Option<&TypeInfo>) -> Option<TokenStream> {
+    dsl_ctor_macro_path(type_path, None).or_else(|| {
+        let path = syn::parse_str::<syn::Path>(type_path).ok()?;
+        let local = path.segments.len() >= 2
+            && matches!(
+                path.segments
+                    .first()
+                    .map(|s| s.ident.to_string())
+                    .as_deref(),
+                Some("crate" | "self" | "super")
+            );
+        (info.is_none() && local).then(|| external_ctor_macro_path(type_path))
     })
 }
 
@@ -896,7 +913,7 @@ fn new_external_expression(target: &syn::Path, args: &[(syn::Ident, syn::Expr)])
     let environment = format_ident!("__elwindui_new_environment");
     quote! {{
         let #value = #ctor_macro!(@new #target, props = [#(#props_for_new),*]);
-        let #environment = #ctor_macro!(@environment);
+        let #environment = #ctor_macro!(@environment #target);
         #ctor_macro!(@new_initial_params #value, props = [#(#props_for_params),*], environment = #environment);
         #ctor_macro!(@new_initial_props #value, props = [#(#props_for_props),*], environment = #environment);
         #ctor_macro!(@mount #value, #environment);
@@ -1149,6 +1166,21 @@ fn forwarded_required_param_conversion(ty: &syn::Type, name: &syn::Ident) -> Opt
     Some(quote! { #ctor_macro!(@#helper props = [(#name => $value)]) })
 }
 
+/// The hidden associated function a constructor ABI's `@environment` calls on its target type:
+/// the application environment, reached through `framework` (the defining crate's own path to
+/// `elwindui-core`), so that path resolves in the defining crate rather than at the construction
+/// site.
+pub fn application_environment_fn(target: &syn::Ident, framework: &TokenStream) -> TokenStream {
+    quote! {
+        impl #target {
+            #[doc(hidden)]
+            pub fn __elwindui_application_environment() -> #framework::environment::EnvironmentContext {
+                #framework::environment::application_environment()
+            }
+        }
+    }
+}
+
 /// PR #312 Implementation Contract v3 (D3): the constructor ABI (`__elwindui_ctor_<Type>!`) of a
 /// class-backed Component — hand-written storage built by its own `construct`. It is the same
 /// builder every generated Component uses; only the property surface differs: the ABI lists just
@@ -1159,7 +1191,6 @@ pub fn class_constructor_abi(
     type_name: &str,
     inputs: &[(syn::Ident, syn::Type)],
     props_macro: TokenStream,
-    environment: TokenStream,
 ) -> TokenStream {
     let shape = EffectiveConstructorShape {
         params: inputs
@@ -1176,14 +1207,7 @@ pub fn class_constructor_abi(
         writable_after_construct: HashSet::new(),
         non_writable_fields: Vec::new(),
     };
-    build_constructor_macro(
-        type_name,
-        &shape,
-        None,
-        true,
-        Some(props_macro),
-        environment,
-    )
+    build_constructor_macro(type_name, &shape, None, true, Some(props_macro))
 }
 
 /// PR #312 Implementation Contract v3 (D3): the constructor ABI of a class that cannot be built
@@ -1209,7 +1233,6 @@ fn build_constructor_macro(
     props_macro: Option<TokenStream>,
     inheritable_base: bool,
     delegate_props: Option<TokenStream>,
-    environment: TokenStream,
 ) -> TokenStream {
     let macro_ident = format_ident!("__elwindui_ctor_{type_name}");
     let return_name = match shape.constructor_return {
@@ -1844,9 +1867,11 @@ fn build_constructor_macro(
                 )
             }};
 
-            // The application environment as the defining crate reaches it, so a construction site
-            // needs no path of its own to the framework (a Cargo-renamed facade, say).
-            (@environment) => { #environment };
+            // The application environment, through the type's own hidden associated function
+            // (`application_environment_fn`), whose paths resolve in the defining crate: a
+            // construction site needs no path of its own to the framework (a Cargo-renamed
+            // facade, say).
+            (@environment $target:path) => { <$target>::__elwindui_application_environment() };
             #mount_arm
             #ctor_arg_arms
             #new_validation_arms
@@ -5483,13 +5508,14 @@ fn generate_component(
         own_field_shape.constructor_return,
         non_writable_fields,
     );
+    let application_environment =
+        application_environment_fn(&struct_name, &quote! { elwindui::core });
     let constructor_macro = build_constructor_macro(
         &struct_name.to_string(),
         &constructor_shape,
         None,
         false,
         None,
-        quote! { elwindui::core::environment::application_environment() },
     );
     quote! {
         #[allow(non_camel_case_types)]
@@ -5562,6 +5588,7 @@ fn generate_component(
         }
 
         #constructor_macro
+        #application_environment
     }
 }
 
@@ -7559,7 +7586,7 @@ fn generate_view(
         if let Some(info) = resolve_context_info(&ctx, from, table, &node.type_path) {
             let value = is_semantic_brush_property(info, name);
             quote! { #value }
-        } else if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
+        } else if let Some(ctor_macro) = element_ctor_macro_path(&node.type_path, None) {
             let name = format_ident!("{name}");
             quote! { #ctor_macro!(@is_semantic_brush_named #name) }
         } else {
@@ -9759,7 +9786,6 @@ fn generate_view(
         generated_props_macro,
         is_shape_composition || is_inherited_view_composition,
         None,
-        quote! { elwindui::core::environment::application_environment() },
     );
 
     let generated = if is_composed {
@@ -10204,9 +10230,11 @@ fn generate_view(
             #generated_dynamic_host_impl
         }
     };
+    let application_environment = application_environment_fn(&target, &quote! { elwindui::core });
     quote! {
         #generated
         #constructor_macro
+        #application_environment
     }
 }
 
@@ -12693,7 +12721,7 @@ fn emit_external_for_item_subscriptions(
 /// builtin has no ctor macro and no fixed fields, so its props macro is the setter directly.
 fn external_item_set(node: &PlannedNode, name: &syn::Ident, value: &TokenStream) -> TokenStream {
     let environment = quote! { &__elwindui_item_environment };
-    if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
+    if let Some(ctor_macro) = element_ctor_macro_path(&node.type_path, None) {
         return quote! { #ctor_macro!(@resync_item_set __elwindui_item_widget, #name, #value, #environment); };
     }
     let props_macro = dsl_props_macro_path(&node.type_path, None);
@@ -19402,7 +19430,7 @@ fn emit_resync_with_receiver(
         if info.is_some_and(|i| i.onetime_fields.contains(name)) {
             continue;
         }
-        if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
+        if let Some(ctor_macro) = element_ctor_macro_path(&node.type_path, info) {
             let name_ident = format_ident!("{name}");
             let value = emit_expr(expr, ctx, &self_mode);
             let environment = semantic_brush_resync_environment(node, ctx);
@@ -20662,15 +20690,7 @@ mod tests {
             crate::component_frontend::ComponentConstructorReturn::RcSelf,
             Vec::new(),
         );
-        let generated = build_constructor_macro(
-            "Thing",
-            &shape,
-            None,
-            false,
-            None,
-            quote! { elwindui::core::environment::application_environment() },
-        )
-        .to_string();
+        let generated = build_constructor_macro("Thing", &shape, None, false, None).to_string();
         assert!(!generated.contains("children"), "{generated}");
     }
 

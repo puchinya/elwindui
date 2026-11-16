@@ -480,9 +480,15 @@ accessorを呼ぶ。
   struct、case iii)は、struct側が宣言的componentとして登録したうえで、その出力(rust-analyzer shadow)を
   impl側まで保留する。implに`construct`があれば登録を外して`#[class]`として展開し、保留した出力は捨てる。
   なければ保留した出力をimplの出力と一緒に出す。rustcにもrust-analyzerにも正しい形だけが見える。
-- constructor ABIは`@environment`でアプリケーション環境を返す(手書きストレージのcomponentは自分のcrateから
-  Coreへの経路を`$crate`経由で使う)。`new!`の展開は`elwindui::`を直接書かないので、facadeをCargoの別名で
-  依存するcrateからも使える。
+- constructor ABIの`@environment $target`は、型の隠し関連関数`<$target>::__elwindui_application_environment()`
+  (`application_environment_fn`)を呼んでアプリケーション環境を返す。この関数は生成componentでも手書きストレージの
+  componentでも型を定義したcrateで生成されるので、Coreへのパスはそのcrateで解決される。`new!`の展開は
+  `elwindui::`を直接書かないので、facadeをCargoの別名で依存するcrateからも、生成componentも手書きストレージの
+  componentも構築できる。
+- 1段目の基底問い合わせ(`is_external_base`)は、symbol tableで解決できない修飾pathの基底すべて(`crate::`の
+  手書きストレージcomponentを含む)を対象にし、そのshape macroの`@required_params`を正本にする。viewの要素・
+  resync・semantic brushの問い合わせも、そうした型はconstructor ABI(`element_ctor_macro_path`)を通す。
+  `#[fixed]`の入力はclassのshape macroでも`@is_semantic_brush`に`false`を返す。
 - 手書きストレージのcomponentで`inherits`を持つものは、`EmbeddedViewSync`を自分の`base`へそのまま転送する
   実装を持つ。生成componentに埋め込まれたときは上の段から呼ばれる。自分が一番外側のときは、
   `on_constructed`で登録したmount hook(最初のvisual parentが付いたとき1回)で、自分を起点に

@@ -2115,6 +2115,12 @@ fn build_props_macro(
             }
         })
         .collect();
+    // A constructor input is never a semantic brush (asked of every name a derived root sets).
+    let fixed_semantic_brush_arms: Vec<TokenStream2> = shape
+        .fixed
+        .iter()
+        .map(|name| quote! { (@is_semantic_brush_from $origin:ident, #name) => { false }; })
+        .collect();
     // Issue #166 (A2): `@initial_with_environment` — a derived Component's view root setting a
     // pre-mount initial value on its embedded base (`$recv` is a reference to it), from the
     // derived Component's `construct()`. It walks the class chain the `#[class]` attributes declare,
@@ -3243,6 +3249,7 @@ fn build_props_macro(
                 $crate::#macro_ident!(@is_semantic_brush_from #bare_ident, $name)
             };
             #(#semantic_brush_arms)*
+            #(#fixed_semantic_brush_arms)*
             #semantic_brush_fallback
             (@clear $recv:expr, $name:ident) => {
                 $crate::#macro_ident!(@clear_from #bare_ident, $recv, $name);

@@ -1024,31 +1024,16 @@ fn constructor_abi(item: &syn::ItemImpl) -> syn::Result<TokenStream2> {
             (quote! { $crate::#own }, TokenStream2::new())
         }
     };
-    // The application environment as this crate reaches the framework: Core itself through
-    // `$crate`, any other crate through a hidden re-export of its own path to Core, so a
-    // construction site needs no path of its own (a Cargo-renamed facade, say).
-    let core = crate::class::core_path();
-    let (environment, core_reexport) = if core.to_string() == "crate" {
-        (
-            quote! { $crate::environment::application_environment() },
-            TokenStream2::new(),
-        )
-    } else {
-        let alias = quote::format_ident!("__elwindui_core_of_{name}");
-        (
-            quote! { $crate::#alias::environment::application_environment() },
-            quote! {
-                #[doc(hidden)]
-                #[allow(unused_imports)]
-                pub use #core as #alias;
-            },
-        )
-    };
-    let abi =
-        elwindui_codegen::codegen::class_constructor_abi(&name, &args, props_macro, environment);
+    // `@environment` calls this on the type: its path to Core resolves here, in the defining
+    // crate (`crate` inside Core itself).
+    let application_environment = elwindui_codegen::codegen::application_environment_fn(
+        &quote::format_ident!("{name}"),
+        &crate::class::core_path(),
+    );
+    let abi = elwindui_codegen::codegen::class_constructor_abi(&name, &args, props_macro);
     Ok(quote! {
         #abi_props_reexport
-        #core_reexport
+        #application_environment
         #abi
     })
 }

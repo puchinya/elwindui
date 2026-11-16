@@ -10,5 +10,9 @@ publish = false
 [dependencies]
 ui_facade = { package = "elwindui", path = "../elwindui" }
 
+# A generated Component of another crate: its constructor ABI must not need an `elwindui` name here.
+[dev-dependencies]
+elwindui-external-component-fixture = { path = "../elwindui-external-component-fixture" }
+
 [lints]
 workspace = true

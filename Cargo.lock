@@ -352,6 +352,7 @@ name = "elwindui-facade-alias-fixture"
 version = "0.1.0"
 dependencies = [
  "elwindui",
+ "elwindui-external-component-fixture",
 ]
 
 [[package]]

@@ -476,9 +476,18 @@ accessorを呼ぶ。
   `__elwindui_generated_construct(__self_weak, <入力>)`になり、`#[class]`が行う親の`construct`呼び出しの書き換え
   (`Parent::__class_construct(__self_weak.clone(), ..)`)は`ParentConstructRewriter`が同じ規則で行う。
   `construct`の引数名は生成したコンストラクタ入力と同じ順でなければならない。
-- 手書きストレージの判定がimplまで決まらない形(case iii)は、struct側が宣言的componentとして登録・shadowを出した
-  後、impl側で登録を外して`#[class]`として展開し直す。struct側のrust-analyzer shadowと重ならないよう、
-  この展開は`cfg(not(rust_analyzer))`に限る。
+- 手書きストレージの判定がimplまで決まらない形(view・フィールドのDSL属性・structの段のclass属性のいずれもない
+  struct、case iii)は、struct側が宣言的componentとして登録したうえで、その出力(rust-analyzer shadow)を
+  impl側まで保留する。implに`construct`があれば登録を外して`#[class]`として展開し、保留した出力は捨てる。
+  なければ保留した出力をimplの出力と一緒に出す。rustcにもrust-analyzerにも正しい形だけが見える。
+- constructor ABIは`@environment`でアプリケーション環境を返す(手書きストレージのcomponentは自分のcrateから
+  Coreへの経路を`$crate`経由で使う)。`new!`の展開は`elwindui::`を直接書かないので、facadeをCargoの別名で
+  依存するcrateからも使える。
+- 手書きストレージのcomponentで`inherits`を持つものは、`EmbeddedViewSync`を自分の`base`へそのまま転送する
+  実装を持つ。生成componentに埋め込まれたときは上の段から呼ばれる。自分が一番外側のときは、
+  `on_constructed`で登録したmount hook(最初のvisual parentが付いたとき1回)で、自分を起点に
+  `mount_as_base`/`wire_embedded`/`mount_embedded`を行う。これで生成→手書き→生成の多段でも、
+  手書きの段の下の生成componentのviewが組み立てられる。
 
 #### Component override bridge
 

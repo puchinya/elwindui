@@ -15,8 +15,8 @@
 //!
 //! Every other `struct` stays a declarative Component (`elwindui_codegen`), exactly as before.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -26,6 +26,14 @@ use syn::spanned::Spanned;
 #[derive(Clone)]
 struct ClassBackedStruct {
     abstract_class: bool,
+    /// Whether the class `inherits` a base (whose embedded generated levels it must drive).
+    has_base: bool,
+    /// Whether that base is a generated Component (see `base_is_generated`): then the `#[class]`
+    /// expansion is rustc-only and rust-analyzer gets `rust_analyzer_shadow` instead.
+    base_generated: bool,
+    /// The base path and the struct source, for that shadow (as text).
+    base_path: Option<String>,
+    struct_src: String,
     /// `#[constructor_inputs(..)]`, when declared. Kept as text: tokens must not outlive the
     /// macro invocation that produced them.
     constructor_inputs: Option<Vec<String>>,
@@ -33,10 +41,70 @@ struct ClassBackedStruct {
     abi_props: Option<String>,
 }
 
-thread_local! {
-    /// The class-backed `#[component]` structs expanded so far in this crate, so the paired
-    /// `#[component] impl` takes the same class-backed path.
-    static CLASS_BACKED: RefCell<HashMap<String, ClassBackedStruct>> = RefCell::new(HashMap::new());
+/// The crate being compiled, so the process-wide registries below (rust-analyzer's proc-macro
+/// server expands on several threads, for several crates) keep crates apart.
+fn crate_key() -> String {
+    std::env::var("CARGO_CRATE_NAME")
+        .or_else(|_| std::env::var("CARGO_PKG_NAME"))
+        .unwrap_or_default()
+}
+
+/// D1 case (iii): the declarative output (the rust-analyzer shadow) of a struct whose kind only
+/// its `impl` decides, held back until that `impl` is expanded. Kept as text: tokens must not
+/// outlive the macro invocation that produced them.
+fn deferred_shadows() -> &'static Mutex<HashMap<(String, String), String>> {
+    static SHADOWS: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
+    SHADOWS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// D1 case (iii): whether `item` might still turn out to have hand-written storage — no
+/// `view!`/`template_view!` field and no field-level DSL attribute — so only its `impl` decides.
+pub(crate) fn is_undecided_struct(item: &syn::ItemStruct) -> bool {
+    item.fields.iter().all(|field| {
+        !is_view_field(field)
+            && !field.attrs.iter().any(|attr| {
+                DECLARATIVE_FIELD_ATTRS
+                    .iter()
+                    .any(|name| attr.path().is_ident(name))
+            })
+    })
+}
+
+/// Holds back an undecided struct's declarative output until its `impl` is expanded.
+pub(crate) fn defer_struct_shadow(name: &str, tokens: &TokenStream2) {
+    deferred_shadows()
+        .lock()
+        .unwrap()
+        .insert((crate_key(), name.to_string()), tokens.to_string());
+}
+
+/// The held-back declarative output of `name`, for its declarative `impl`.
+pub(crate) fn take_deferred_shadow(item: &syn::ItemImpl) -> TokenStream2 {
+    let Some(name) = impl_type_name(item) else {
+        return TokenStream2::new();
+    };
+    deferred_shadows()
+        .lock()
+        .unwrap()
+        .remove(&(crate_key(), name))
+        .and_then(|text| text.parse().ok())
+        .unwrap_or_default()
+}
+
+/// The class-backed `#[component]` structs expanded so far, by crate and name, so the paired
+/// `#[component] impl` takes the same class-backed path.
+fn class_backed() -> &'static Mutex<HashMap<(String, String), ClassBackedStruct>> {
+    static CLASS_BACKED: OnceLock<Mutex<HashMap<(String, String), ClassBackedStruct>>> =
+        OnceLock::new();
+    CLASS_BACKED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn class_backed_info(name: &str) -> Option<ClassBackedStruct> {
+    class_backed()
+        .lock()
+        .unwrap()
+        .get(&(crate_key(), name.to_string()))
+        .cloned()
 }
 
 /// `#[component(..)]`'s arguments: `inherits Path` (no `=`), and the class-backed modifiers.
@@ -282,16 +350,287 @@ pub(crate) fn expand_struct(args: &ComponentArgs, item: syn::ItemStruct) -> Toke
             }
         }
     }
+    let base_generated = args.base.as_ref().is_some_and(base_is_generated);
     let info = ClassBackedStruct {
         abstract_class: args.abstract_class,
+        has_base: args.base.is_some(),
+        base_generated,
+        base_path: args.base.as_ref().map(|path| quote! { #path }.to_string()),
+        struct_src: quote! { #item }.to_string(),
         constructor_inputs,
         abi_props: args
             .abi_props
             .as_ref()
             .map(|path| quote! { #path }.to_string()),
     };
-    CLASS_BACKED.with(|names| names.borrow_mut().insert(item.ident.to_string(), info));
-    crate::class::expand(args.class_attr(), quote! { #item })
+    class_backed()
+        .lock()
+        .unwrap()
+        .insert((crate_key(), item.ident.to_string()), info);
+    let expanded = crate::class::expand(args.class_attr(), quote! { #item });
+    if base_generated {
+        let expanded = rustc_only(expanded);
+        let shape_stub = rust_analyzer_shape_stub(
+            &item.ident,
+            &item.attrs,
+            args.base.as_ref().expect("base_generated implies a base"),
+        );
+        quote! {
+            #expanded
+            #shape_stub
+        }
+    } else {
+        expanded
+    }
+}
+
+/// rust-analyzer's stand-in for the property-shape macro of a class-backed Component over a
+/// generated base (its real `#[class]` items are rustc-only): a further-derived generated
+/// Component asks it for the required constructor inputs (`#[constructor_inputs]`); any other
+/// query is answered loosely, which is enough for analysis.
+fn rust_analyzer_shape_stub(
+    ident: &syn::Ident,
+    attrs: &[syn::Attribute],
+    base: &syn::Path,
+) -> TokenStream2 {
+    let inputs: Vec<syn::Ident> = attrs
+        .iter()
+        .find(|attr| attr.path().is_ident("constructor_inputs"))
+        .and_then(|attr| {
+            attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Ident, syn::Token![,]>::parse_terminated,
+            )
+            .ok()
+        })
+        .map(|names| names.into_iter().collect())
+        .unwrap_or_default();
+    let macro_ident = quote::format_ident!("__elwindui_props_{ident}");
+    // The class hierarchy surface a further-derived Component's own shadow expects, as the
+    // generated shadow provides it: `{Name}Ext`, the inherit macro and its module, and the template
+    // capability macro, each forwarding to the base's.
+    let base_name = base
+        .segments
+        .last()
+        .expect("non-empty base path")
+        .ident
+        .clone();
+    let ext = quote::format_ident!("{ident}Ext");
+    let inherit = quote::format_ident!("__elwindui_inherit_{ident}");
+    let macros_of = quote::format_ident!("__elwindui_macros_of_{ident}");
+    let capability = quote::format_ident!("__elwindui_template_capabilities_{ident}");
+    let with_last = |last: syn::Ident| {
+        let mut path = base.clone();
+        path.segments.last_mut().expect("non-empty base path").ident = last;
+        path
+    };
+    let base_ext = with_last(quote::format_ident!("{base_name}Ext"));
+    let base_macros_of = {
+        let mut path = base.clone();
+        path.segments.pop();
+        path.segments
+            .push(syn::PathSegment::from(quote::format_ident!(
+                "__elwindui_macros_of_{base_name}"
+            )));
+        path
+    };
+    let base_root_macro = |name: syn::Ident| {
+        let first = base
+            .segments
+            .first()
+            .expect("non-empty base path")
+            .ident
+            .clone();
+        if base.segments.len() == 1 {
+            quote! { #name }
+        } else {
+            quote! { #first::#name }
+        }
+    };
+    let base_capability = base_root_macro(quote::format_ident!(
+        "__elwindui_template_capabilities_{base_name}"
+    ));
+    // Inside an exported `macro_rules!`, a crate-relative path names the defining crate.
+    let exported = |tokens: TokenStream2| {
+        let text = tokens.to_string();
+        match text.strip_prefix("crate ") {
+            Some(rest) => format!("$crate {rest}").parse().unwrap_or(tokens),
+            None => tokens,
+        }
+    };
+    let inherit_base = quote::format_ident!("__elwindui_inherit_{base_name}");
+    let base_inherit = exported(quote! { #base_macros_of::#inherit_base });
+    let base_alias = exported(quote! { #base_macros_of::__ElwindUIOwnExt });
+    let base_concrete = exported(quote! { #base });
+    let base_trait = exported(quote! { #base_ext });
+    let base_capability_exported = exported(base_capability.clone());
+    quote! {
+        #[cfg(rust_analyzer)]
+        #[allow(unexpected_cfgs)]
+        #[doc(hidden)]
+        #[macro_export]
+        #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+        macro_rules! #macro_ident {
+            (@required_params $cb:path, { $($item:tt)* }) => {
+                $cb! { { $($item)* } [#(#inputs),*] }
+            };
+            (@field_type $name:ident) => { () };
+            ($($tokens:tt)*) => {};
+        }
+
+        #[cfg(rust_analyzer)]
+        #[allow(unexpected_cfgs)]
+        pub trait #ext: #base_ext {}
+
+        #[cfg(rust_analyzer)]
+        #[allow(unexpected_cfgs)]
+        impl #ext for #ident {}
+
+        #[cfg(rust_analyzer)]
+        #[allow(unexpected_cfgs)]
+        #base_macros_of::#inherit_base!(#ident, #base_macros_of::__ElwindUIOwnExt, #base, #base, #base_ext;);
+
+        #[cfg(rust_analyzer)]
+        #[allow(unexpected_cfgs)]
+        #[doc(hidden)]
+        #[macro_export]
+        #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+        macro_rules! #inherit {
+            ($SubType:ty, $OwnTrait:path, $OwnConcrete:path, $RootConcrete:path, $BridgePath:path; $($overrides:tt)*) => {
+                impl $OwnTrait for $SubType {}
+                #base_inherit!($SubType, #base_alias, #base_concrete, #base_concrete, #base_trait;);
+            };
+        }
+
+        #[cfg(rust_analyzer)]
+        #[allow(unexpected_cfgs)]
+        #[doc(hidden)]
+        #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+        pub mod #macros_of {
+            pub use crate::#inherit;
+            pub use super::#ext as __ElwindUIOwnExt;
+        }
+
+        #[cfg(rust_analyzer)]
+        #[allow(unexpected_cfgs)]
+        #[doc(hidden)]
+        #[macro_export]
+        #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+        macro_rules! #capability {
+            (@impl $target:ty) => {
+                #base_capability_exported!(@impl $target);
+            };
+            (@if_control { $($tokens:tt)* }) => {
+                #base_capability_exported!(@if_control { $($tokens)* });
+            };
+        }
+    }
+}
+
+/// Whether a class-backed Component's base is a generated Component: a same-crate one is known
+/// from the Component registry; a framework path (`elwindui`, `elwindui_core`) is a builtin; any
+/// other crate's type is taken as generated. A generated Component's own `#[class]` items are
+/// rustc-only (rust-analyzer sees its shadow), so a class over it cannot expand under
+/// rust-analyzer either.
+fn base_is_generated(base: &syn::Path) -> bool {
+    let first = base.segments.first().map(|s| s.ident.to_string());
+    let last = base.segments.last().map(|s| s.ident.to_string());
+    let registered = || {
+        last.as_deref().is_some_and(|name| {
+            elwindui_codegen::component_frontend::registered_component_parts(name).is_some()
+        })
+    };
+    match first.as_deref() {
+        _ if base.segments.len() == 1 => registered(),
+        Some("crate" | "self" | "super") => registered(),
+        Some("elwindui" | "elwindui_core") => false,
+        _ => true,
+    }
+}
+
+/// Limits every item of `tokens` to rustc.
+fn rustc_only(tokens: TokenStream2) -> TokenStream2 {
+    let Ok(file) = syn::parse2::<syn::File>(tokens.clone()) else {
+        return tokens;
+    };
+    let items = file.items.into_iter().map(|item| {
+        quote! {
+            #[cfg(not(rust_analyzer))]
+            #[allow(unexpected_cfgs)]
+            #item
+        }
+    });
+    quote! { #(#items)* }
+}
+
+/// rust-analyzer's view of a class-backed Component over a generated base: the struct with its
+/// `base`, `new`, the hand-written methods as inherent methods, and `Deref` to the base.
+fn rust_analyzer_shadow(info: &ClassBackedStruct, item: &syn::ItemImpl) -> TokenStream2 {
+    let (Ok(mut item_struct), Some(Ok(base))) = (
+        syn::parse_str::<syn::ItemStruct>(&info.struct_src),
+        info.base_path.as_deref().map(syn::parse_str::<syn::Path>),
+    ) else {
+        return TokenStream2::new();
+    };
+    item_struct
+        .attrs
+        .retain(|attr| !is_class_shape_attr(attr) && !attr.path().is_ident("content"));
+    let ident = &item_struct.ident;
+    let vis = &item_struct.vis;
+    let attrs = &item_struct.attrs;
+    let fields = match &item_struct.fields {
+        syn::Fields::Named(named) => named.named.iter().collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    let mut new_inputs = TokenStream2::new();
+    let mut methods = Vec::new();
+    for impl_item in &item.items {
+        let syn::ImplItem::Fn(f) = impl_item else {
+            continue;
+        };
+        if f.sig.ident == "construct" {
+            let inputs = &f.sig.inputs;
+            new_inputs = quote! { #inputs };
+            continue;
+        }
+        if f.sig.ident == "on_constructed" {
+            continue;
+        }
+        let mut f = f.clone();
+        f.attrs.retain(|attr| {
+            !["overrides", "overridable", "inherent"]
+                .iter()
+                .any(|name| attr.path().is_ident(name))
+        });
+        f.vis = syn::parse_quote! { pub };
+        methods.push(f);
+    }
+    quote! {
+        #[cfg(rust_analyzer)]
+        #[allow(unexpected_cfgs, dead_code)]
+        #(#attrs)*
+        #vis struct #ident {
+            pub base: #base,
+            #(#fields,)*
+        }
+
+        #[cfg(rust_analyzer)]
+        #[allow(unexpected_cfgs, dead_code, unused_variables)]
+        impl #ident {
+            pub fn new(#new_inputs) -> std::rc::Rc<Self> {
+                unimplemented!()
+            }
+            #(#methods)*
+        }
+
+        #[cfg(rust_analyzer)]
+        #[allow(unexpected_cfgs)]
+        impl std::ops::Deref for #ident {
+            type Target = #base;
+            fn deref(&self) -> &Self::Target {
+                &self.base
+            }
+        }
+    }
 }
 
 /// Expands a `trait` (a Core interface) through the `#[class]` layer.
@@ -328,7 +667,7 @@ pub(crate) fn is_class_backed_impl(item: &syn::ItemImpl) -> bool {
     let Some(name) = impl_type_name(item) else {
         return false;
     };
-    if CLASS_BACKED.with(|names| names.borrow().contains_key(&name)) {
+    if class_backed_info(&name).is_some() {
         return true;
     }
     if elwindui_codegen::component_frontend::registered_component_parts(&name).is_some() {
@@ -373,9 +712,9 @@ pub(crate) fn late_class_backed_struct(item: &syn::ItemImpl) -> Option<syn::Item
     plain.then_some(item_struct)
 }
 
-/// Expands a case (iii) struct and its `impl`. The struct half already emitted the declarative
-/// rust-analyzer shadow (rust-analyzer cannot see the `impl`'s `construct` when it expands the
-/// struct), so this real expansion is limited to rustc to avoid a second definition there.
+/// Expands a case (iii) struct and its `impl`. The struct half deferred its declarative
+/// rust-analyzer shadow (`defer_struct_shadow`), which is dropped here, so the class-backed
+/// expansion is what both rustc and rust-analyzer see.
 pub(crate) fn expand_late(item_struct: syn::ItemStruct, item: syn::ItemImpl) -> TokenStream2 {
     let name = item_struct.ident.to_string();
     let base = elwindui_codegen::component_frontend::registered_component_struct(&name)
@@ -389,19 +728,13 @@ pub(crate) fn expand_late(item_struct: syn::ItemStruct, item: syn::ItemImpl) -> 
         },
         ..ComponentArgs::default()
     };
+    deferred_shadows()
+        .lock()
+        .unwrap()
+        .remove(&(crate_key(), name.clone()));
     let mut tokens = expand_struct(&args, item_struct);
     tokens.extend(expand_impl(item));
-    let Ok(file) = syn::parse2::<syn::File>(tokens.clone()) else {
-        return tokens;
-    };
-    let items = file.items.into_iter().map(|item| {
-        quote! {
-            #[cfg(not(rust_analyzer))]
-            #[allow(unexpected_cfgs)]
-            #item
-        }
-    });
-    quote! { #(#items)* }
+    tokens
 }
 
 /// D2: the item-local rules for a class-backed Component's `construct`.
@@ -457,7 +790,7 @@ fn validate_construct(item: &syn::ItemImpl) -> syn::Result<()> {
 
 /// Expands a class-backed `impl` through the `#[class]` layer, and publishes the type's
 /// constructor ABI (D3).
-pub(crate) fn expand_impl(item: syn::ItemImpl) -> TokenStream2 {
+pub(crate) fn expand_impl(mut item: syn::ItemImpl) -> TokenStream2 {
     if let Err(error) = validate_construct(&item) {
         return error.to_compile_error();
     }
@@ -465,10 +798,140 @@ pub(crate) fn expand_impl(item: syn::ItemImpl) -> TokenStream2 {
         Ok(abi) => abi,
         Err(error) => error.to_compile_error(),
     };
+    let info = impl_type_name(&item).and_then(|name| class_backed_info(&name));
+    let shadow = info
+        .as_ref()
+        .filter(|info| info.base_generated)
+        .map(|info| rust_analyzer_shadow(info, &item));
+    let embedded = embedded_base_support(&mut item);
     let class = crate::class::expand(TokenStream2::new(), quote! { #item });
-    quote! {
+    let expanded = quote! {
         #class
         #abi
+        #embedded
+    };
+    match shadow {
+        Some(shadow) => {
+            let expanded = rustc_only(expanded);
+            quote! {
+                #expanded
+                #shadow
+            }
+        }
+        None => expanded,
+    }
+}
+
+/// T8: a class-backed Component between generated levels. A generated Component embedded as a
+/// `base` is mounted, wired and subscribed by the level that embeds it (`EmbeddedViewSync`), one
+/// level at a time. A class-backed level forwards those calls to its own `base`; and when it is
+/// itself the outermost object, it starts them once it is attached (its first visual parent), as a
+/// generated outermost Component does from its own `mount`.
+fn embedded_base_support(item: &mut syn::ItemImpl) -> TokenStream2 {
+    let Some(name) = impl_type_name(item) else {
+        return TokenStream2::new();
+    };
+    let has_base = class_backed_info(&name).is_some_and(|info| info.has_base);
+    if !has_base {
+        return TokenStream2::new();
+    }
+    let core = crate::class::core_path();
+    let ty = &item.self_ty;
+    let start_when_outermost: syn::Stmt = syn::parse_quote! {
+        {
+            if let Some(__elwindui_owner) =
+                #core::ui::UIElementExt::as_ui_element(self).visual_collection.owner_rc()
+            {
+                let __elwindui_owner = std::rc::Rc::downgrade(&__elwindui_owner);
+                #core::ui::UIElementExt::add_mount_hook(
+                    self,
+                    Box::new(move || {
+                        let Some(__elwindui_owner) = __elwindui_owner.upgrade() else {
+                            return;
+                        };
+                        let __elwindui_owner: std::rc::Rc<dyn std::any::Any> = __elwindui_owner;
+                        // Embedded in a further-derived level, that level drives this one.
+                        let Ok(__elwindui_this) = __elwindui_owner.downcast::<#ty>() else {
+                            return;
+                        };
+                        let __elwindui_handle =
+                            #core::reactive::EmbeddedHandle::new(std::rc::Rc::clone(&__elwindui_this));
+                        let __elwindui_environment =
+                            #core::ui::UIElementExt::effective_environment(&*__elwindui_this);
+                        #core::reactive::EmbeddedViewSync::__elwindui_mount_as_base(
+                            &*__elwindui_this,
+                            Some(#core::reactive::WiringOwner::downgrade_wiring(&__elwindui_handle)),
+                            __elwindui_environment,
+                        );
+                        #core::reactive::EmbeddedViewSync::__elwindui_wire_embedded(
+                            &*__elwindui_this,
+                            __elwindui_handle.clone(),
+                        );
+                        #core::reactive::EmbeddedViewSync::__elwindui_mount_embedded(
+                            &*__elwindui_this,
+                            __elwindui_handle,
+                        );
+                    }),
+                );
+            }
+        }
+    };
+    let existing = item.items.iter_mut().find_map(|impl_item| match impl_item {
+        syn::ImplItem::Fn(f) if f.sig.ident == "on_constructed" => Some(f),
+        _ => None,
+    });
+    match existing {
+        Some(on_constructed) => on_constructed.block.stmts.insert(0, start_when_outermost),
+        None => item.items.push(syn::parse_quote! {
+            fn on_constructed(&self) {
+                #start_when_outermost
+            }
+        }),
+    }
+    let forward_use = quote! {
+        #[allow(unused_imports)]
+        use #core::reactive::{EmbeddedNotifyForward as _, EmbeddedNotifyIgnore as _};
+    };
+    quote! {
+        impl #core::reactive::EmbeddedViewSync for #ty {
+            fn __elwindui_embedded_property_changed(&self, property: &'static str) {
+                #forward_use
+                (&#core::reactive::EmbeddedNotify(&self.base)).notify_embedded(property);
+            }
+
+            fn __elwindui_mount_as_base(
+                &self,
+                handle: Option<#core::reactive::WeakEmbeddedHandle<Self>>,
+                environment: #core::environment::EnvironmentContext,
+            ) {
+                #forward_use
+                let base_handle = handle
+                    .and_then(|handle| #core::reactive::WiringWeak::upgrade_wiring(&handle))
+                    .map(|handle| {
+                        #core::reactive::WiringOwner::downgrade_wiring(
+                            &handle.map(|level| &level.base),
+                        )
+                    });
+                (&#core::reactive::EmbeddedNotify(&self.base)).mount_as_base(base_handle, environment);
+            }
+
+            fn __elwindui_wire_embedded(&self, this: #core::reactive::EmbeddedHandle<Self>) {
+                #forward_use
+                (&#core::reactive::EmbeddedNotify(&self.base))
+                    .wire_embedded(this.map(|level| &level.base));
+            }
+
+            fn __elwindui_mount_embedded(&self, this: #core::reactive::EmbeddedHandle<Self>) {
+                #forward_use
+                (&#core::reactive::EmbeddedNotify(&self.base))
+                    .mount_embedded(this.map(|level| &level.base));
+            }
+
+            fn __elwindui_root_content_span(&self) -> usize {
+                #forward_use
+                (&#core::reactive::EmbeddedNotify(&self.base)).embedded_span()
+            }
+        }
     }
 }
 
@@ -480,22 +943,18 @@ fn constructor_abi(item: &syn::ItemImpl) -> syn::Result<TokenStream2> {
     let Some(name) = impl_type_name(item) else {
         return Ok(TokenStream2::new());
     };
-    // Without the struct registration (an out-of-order rust-analyzer expansion) nothing is known
-    // about the type's public shape. Real builds always expand the struct first; rust-analyzer
-    // only needs the macro name to exist, so re-exports of it resolve.
-    let Some(info) = CLASS_BACKED.with(|names| names.borrow().get(&name).cloned()) else {
-        let macro_ident = quote::format_ident!("__elwindui_ctor_{name}");
-        return Ok(quote! {
-            #[cfg(rust_analyzer)]
-            #[allow(unexpected_cfgs)]
-            #[doc(hidden)]
-            #[macro_export]
-            #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
-            macro_rules! #macro_ident {
-                ($($tokens:tt)*) => {};
-            }
-        });
-    };
+    // Without the struct registration (an out-of-order rust-analyzer expansion; real builds always
+    // expand the struct first) the struct-side facts are unknown: assume a concrete class without
+    // `#[constructor_inputs]` or `abi_props`, which is enough for analysis.
+    let info = class_backed_info(&name).unwrap_or(ClassBackedStruct {
+        abstract_class: false,
+        has_base: false,
+        base_generated: false,
+        base_path: None,
+        struct_src: String::new(),
+        constructor_inputs: None,
+        abi_props: None,
+    });
     let construct = item.items.iter().find_map(|impl_item| match impl_item {
         syn::ImplItem::Fn(f) if f.sig.ident == "construct" => Some(f),
         _ => None,
@@ -565,9 +1024,31 @@ fn constructor_abi(item: &syn::ItemImpl) -> syn::Result<TokenStream2> {
             (quote! { $crate::#own }, TokenStream2::new())
         }
     };
-    let abi = elwindui_codegen::codegen::class_constructor_abi(&name, &args, props_macro);
+    // The application environment as this crate reaches the framework: Core itself through
+    // `$crate`, any other crate through a hidden re-export of its own path to Core, so a
+    // construction site needs no path of its own (a Cargo-renamed facade, say).
+    let core = crate::class::core_path();
+    let (environment, core_reexport) = if core.to_string() == "crate" {
+        (
+            quote! { $crate::environment::application_environment() },
+            TokenStream2::new(),
+        )
+    } else {
+        let alias = quote::format_ident!("__elwindui_core_of_{name}");
+        (
+            quote! { $crate::#alias::environment::application_environment() },
+            quote! {
+                #[doc(hidden)]
+                #[allow(unused_imports)]
+                pub use #core as #alias;
+            },
+        )
+    };
+    let abi =
+        elwindui_codegen::codegen::class_constructor_abi(&name, &args, props_macro, environment);
     Ok(quote! {
         #abi_props_reexport
+        #core_reexport
         #abi
     })
 }

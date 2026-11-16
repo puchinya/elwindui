@@ -118,8 +118,9 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
         if let Some(item_struct) = component_class::late_class_backed_struct(&item_impl) {
             return component_class::expand_late(item_struct, item_impl).into();
         }
+        let deferred = component_class::take_deferred_shadow(&item_impl);
         return match elwindui_codegen::generate_component_from_item_impl(&item_impl) {
-            Ok(tokens) => tokens.into(),
+            Ok(tokens) => quote::quote! { #deferred #tokens }.into(),
             Err(e) => {
                 let msg = format!("#[elwindui::component]: {e}");
                 quote::quote! { compile_error!(#msg); }.into()
@@ -153,6 +154,12 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
     let base = args.base.as_ref().map(path_to_string);
     match elwindui_codegen::generate_component_from_item_struct(base, &item_struct) {
+        // D1 case (iii): only the `impl` decides whether this struct keeps hand-written storage,
+        // so its declarative output waits for it.
+        Ok(tokens) if component_class::is_undecided_struct(&item_struct) => {
+            component_class::defer_struct_shadow(&item_struct.ident.to_string(), &tokens);
+            proc_macro::TokenStream::new()
+        }
         Ok(tokens) => tokens.into(),
         Err(e) => {
             let msg = format!("#[elwindui::component]: {e}");

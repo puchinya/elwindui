@@ -404,6 +404,7 @@ impl ContentControl {
 - `construct`はcompanion `impl`の無属性の関連関数で、仮想メソッドではない。`self`レシーバ・`async`・`unsafe`・ジェネリクス・`Self`以外の戻り値・重複・`#[overridable]`/`#[overrides]`はエラーになる。手書きストレージのcomponentでは、`impl`に`#[class]`と同じメソッド(無属性のメソッド、`#[inherent]`、`#[overridable]`/`#[overrides]`、`on_constructed`)を書ける。
 - 宣言的componentも`construct`を書ける。生成されるストレージの初期化は`Self::__elwindui_generated_construct(__self_weak, <コンストラクタ入力>)`になり、`construct`はそれを呼んで`Self`を作る。`construct`の引数は、componentのコンストラクタ入力(基底の必須入力が先、自分の必須入力が後)と同じ名前・同じ順でなければならない。
 - 手書きストレージのcomponentの公開コンストラクタ入力は、`#[constructor_inputs(a, b, ..)]`に列挙した`construct`の引数だけである(名前と順が一致しなければエラー)。引数のない`construct`は入力なしで公開構築できる。`#[constructor_inputs]`なしで引数を取る`construct`(ネイティブhandleを受け取る`NativeControl::construct(handle)`など)は内部専用で、`new!`やviewからは構築できない。抽象class・trait_onlyも同様である。手書きのRustから`Base::construct(handle)`を呼ぶのは従来どおりできる。
+- 手書きストレージのcomponentは生成componentの間に置ける(生成componentがそれを継承する、それが生成componentを継承する。同一crateでも別crateでもよい)。viewからはqualified path(`crate::Name { .. }`)で構築できる。基底の必須入力は`#[constructor_inputs]`に列挙すれば、派生へ自動転送される。
 
 ### Lifecycle hooks
 

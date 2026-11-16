@@ -314,3 +314,31 @@ pub struct ExternalOptionalBase {
 
 #[component]
 impl ExternalOptionalBase {}
+
+/// PR #312 contract v3 (T8): a class-backed (hand-written storage) middle level over a generated
+/// base with a required input, which it publishes as its own constructor input.
+#[component(inherits crate::ExternalDefaultsBase)]
+#[prop(badge: String)]
+#[constructor_inputs(title)]
+pub struct ExternalRawMiddle {
+    badge: std::cell::RefCell<String>,
+}
+
+#[component]
+impl ExternalRawMiddle {
+    fn set_badge(&self, badge: &str) {
+        *self.badge.borrow_mut() = badge.to_string();
+    }
+
+    #[inherent]
+    pub fn current_badge(&self) -> String {
+        self.badge.borrow().clone()
+    }
+
+    fn construct(title: String) -> Self {
+        Self {
+            base: ExternalDefaultsBase::construct(title),
+            badge: std::cell::RefCell::new(String::new()),
+        }
+    }
+}

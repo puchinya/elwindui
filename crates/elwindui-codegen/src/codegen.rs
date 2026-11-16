@@ -896,7 +896,7 @@ fn new_external_expression(target: &syn::Path, args: &[(syn::Ident, syn::Expr)])
     let environment = format_ident!("__elwindui_new_environment");
     quote! {{
         let #value = #ctor_macro!(@new #target, props = [#(#props_for_new),*]);
-        let #environment = elwindui::core::environment::application_environment();
+        let #environment = #ctor_macro!(@environment);
         #ctor_macro!(@new_initial_params #value, props = [#(#props_for_params),*], environment = #environment);
         #ctor_macro!(@new_initial_props #value, props = [#(#props_for_props),*], environment = #environment);
         #ctor_macro!(@mount #value, #environment);
@@ -1159,6 +1159,7 @@ pub fn class_constructor_abi(
     type_name: &str,
     inputs: &[(syn::Ident, syn::Type)],
     props_macro: TokenStream,
+    environment: TokenStream,
 ) -> TokenStream {
     let shape = EffectiveConstructorShape {
         params: inputs
@@ -1175,7 +1176,14 @@ pub fn class_constructor_abi(
         writable_after_construct: HashSet::new(),
         non_writable_fields: Vec::new(),
     };
-    build_constructor_macro(type_name, &shape, None, true, Some(props_macro))
+    build_constructor_macro(
+        type_name,
+        &shape,
+        None,
+        true,
+        Some(props_macro),
+        environment,
+    )
 }
 
 /// PR #312 Implementation Contract v3 (D3): the constructor ABI of a class that cannot be built
@@ -1201,6 +1209,7 @@ fn build_constructor_macro(
     props_macro: Option<TokenStream>,
     inheritable_base: bool,
     delegate_props: Option<TokenStream>,
+    environment: TokenStream,
 ) -> TokenStream {
     let macro_ident = format_ident!("__elwindui_ctor_{type_name}");
     let return_name = match shape.constructor_return {
@@ -1835,6 +1844,9 @@ fn build_constructor_macro(
                 )
             }};
 
+            // The application environment as the defining crate reaches it, so a construction site
+            // needs no path of its own to the framework (a Cargo-renamed facade, say).
+            (@environment) => { #environment };
             #mount_arm
             #ctor_arg_arms
             #new_validation_arms
@@ -5477,6 +5489,7 @@ fn generate_component(
         None,
         false,
         None,
+        quote! { elwindui::core::environment::application_environment() },
     );
     quote! {
         #[allow(non_camel_case_types)]
@@ -9746,6 +9759,7 @@ fn generate_view(
         generated_props_macro,
         is_shape_composition || is_inherited_view_composition,
         None,
+        quote! { elwindui::core::environment::application_environment() },
     );
 
     let generated = if is_composed {
@@ -20648,7 +20662,15 @@ mod tests {
             crate::component_frontend::ComponentConstructorReturn::RcSelf,
             Vec::new(),
         );
-        let generated = build_constructor_macro("Thing", &shape, None, false, None).to_string();
+        let generated = build_constructor_macro(
+            "Thing",
+            &shape,
+            None,
+            false,
+            None,
+            quote! { elwindui::core::environment::application_environment() },
+        )
+        .to_string();
         assert!(!generated.contains("children"), "{generated}");
     }
 

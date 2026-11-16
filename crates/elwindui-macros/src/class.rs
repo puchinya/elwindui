@@ -4217,7 +4217,7 @@ pub fn expand(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
 /// compiling* crate's own `Cargo.toml`) rather than hardcoding crate names — any crate that ends
 /// up depending on `elwindui-core`, directly or only transitively through the `elwindui` facade,
 /// resolves correctly with no changes to this function.
-fn core_path() -> TokenStream2 {
+pub(crate) fn core_path() -> TokenStream2 {
     use proc_macro_crate::{FoundCrate, crate_name};
     match crate_name("elwindui-core") {
         Ok(FoundCrate::Itself) => quote! { crate },

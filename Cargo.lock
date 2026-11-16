@@ -348,6 +348,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "elwindui-facade-alias-fixture"
+version = "0.1.0"
+dependencies = [
+ "elwindui",
+]
+
+[[package]]
 name = "elwindui-hotreload"
 version = "0.1.0"
 

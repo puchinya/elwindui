@@ -551,14 +551,20 @@ impl syn::visit_mut::VisitMut for ParentConstructRewriter<'_> {
 ///
 /// PR #312 (contract v3): a same-crate class-backed Component (`crate::RawMiddle`) is not in the
 /// symbol table either; its shape macro answers the same way, so a qualified path of this crate
-/// counts too.
+/// counts too — but only when that Component registered its constructor ABI. A same-crate
+/// low-level `#[class]` has none, and keeps the ordinary (non-deferred) base path.
 pub(crate) fn is_external_base(
     table: &SymbolTable,
     module: &Module,
     base: &str,
     base_path: &str,
 ) -> bool {
-    table.resolve(module, base).is_none() && base_path.contains("::")
+    table.resolve(module, base).is_none()
+        && base_path.contains("::")
+        && match dsl_type_origin(base_path, None) {
+            DslTypeOrigin::Local => has_class_backed_constructor(base_path),
+            _ => true,
+        }
 }
 
 /// The constructor ABI macro path of a cross-crate generated base.
@@ -588,20 +594,20 @@ fn node_ctor_macro_path(
 
 /// The constructor ABI of an element type: an external generated Component's, or (PR #312,
 /// contract v3) a same-crate class-backed Component's — a qualified local path with no symbol-table
-/// entry (`crate::RawMiddle`), whose `#[component]` publishes `crate::__elwindui_ctor_<Name>!`.
+/// entry (`crate::RawMiddle`) whose `#[component]` registered the `crate::__elwindui_ctor_<Name>!`
+/// it publishes. A same-crate low-level `#[class]` publishes no constructor ABI, so it is never
+/// inferred from the path shape alone: it keeps the `Type::new()` + property-shape path.
 fn element_ctor_macro_path(type_path: &str, info: Option<&TypeInfo>) -> Option<TokenStream> {
     dsl_ctor_macro_path(type_path, None).or_else(|| {
-        let path = syn::parse_str::<syn::Path>(type_path).ok()?;
-        let local = path.segments.len() >= 2
-            && matches!(
-                path.segments
-                    .first()
-                    .map(|s| s.ident.to_string())
-                    .as_deref(),
-                Some("crate" | "self" | "super")
-            );
-        (info.is_none() && local).then(|| external_ctor_macro_path(type_path))
+        let local = matches!(dsl_type_origin(type_path, None), DslTypeOrigin::Local);
+        (info.is_none() && local && has_class_backed_constructor(type_path))
+            .then(|| external_ctor_macro_path(type_path))
     })
+}
+
+/// Whether `type_path` names a same-crate class-backed Component with a constructor ABI.
+fn has_class_backed_constructor(type_path: &str) -> bool {
+    crate::component_frontend::has_class_backed_constructor(&dsl_type_ident(type_path).to_string())
 }
 
 fn dsl_ctor_macro_path(type_path: &str, info: Option<&TypeInfo>) -> Option<TokenStream> {
@@ -902,6 +908,17 @@ fn new_external_expression(target: &syn::Path, args: &[(syn::Ident, syn::Expr)])
     } else {
         quote! { #first::#macro_ident }
     };
+    new_expression_through_ctor(target, &ctor_macro, args)
+}
+
+/// `new!` through a constructor ABI macro (`ctor_macro`): construct, initial Params and Props,
+/// then mount — the same protocol for an external generated Component and a same-crate
+/// class-backed one.
+fn new_expression_through_ctor(
+    target: &syn::Path,
+    ctor_macro: &TokenStream,
+    args: &[(syn::Ident, syn::Expr)],
+) -> TokenStream {
     let props: Vec<_> = args
         .iter()
         .map(|(name, value)| quote! { (#name => #value) })
@@ -969,7 +986,21 @@ pub fn generate_new_expression(
     let sibling_modules = crate::component_frontend::sibling_component_modules("");
     let table = build_symbol_table(&sibling_modules);
     let info = table.resolve_unqualified(&type_name);
-    match dsl_type_origin(&target.to_token_stream().to_string(), info) {
+    // A same-crate class-backed `#[component]` (contract v3, D3) is not a generated Component:
+    // it is built through the constructor ABI it registered, under either spelling.
+    let target_spelling = target.to_token_stream().to_string();
+    let origin = dsl_type_origin(&target_spelling, info);
+    if info.is_none()
+        && matches!(
+            origin,
+            DslTypeOrigin::Local | DslTypeOrigin::UnresolvedUnqualified
+        )
+        && crate::component_frontend::has_class_backed_constructor(&type_name)
+    {
+        let ctor_macro = external_ctor_macro_path(&type_name);
+        return Ok(new_expression_through_ctor(target, &ctor_macro, args));
+    }
+    match origin {
         DslTypeOrigin::Local => {
             let (source_component, view) = crate::component_frontend::registered_component_parts(
                 &type_name,

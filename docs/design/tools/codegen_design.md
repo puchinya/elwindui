@@ -485,9 +485,15 @@ accessorを呼ぶ。
   componentでも型を定義したcrateで生成されるので、Coreへのパスはそのcrateで解決される。`new!`の展開は
   `elwindui::`を直接書かないので、facadeをCargoの別名で依存するcrateからも、生成componentも手書きストレージの
   componentも構築できる。
-- 1段目の基底問い合わせ(`is_external_base`)は、symbol tableで解決できない修飾pathの基底すべて(`crate::`の
-  手書きストレージcomponentを含む)を対象にし、そのshape macroの`@required_params`を正本にする。viewの要素・
-  resync・semantic brushの問い合わせも、そうした型はconstructor ABI(`element_ctor_macro_path`)を通す。
+- 手書きストレージのcomponentは、`construct`からconstructor ABIを出したときに、その名前を
+  `component_frontend::register_class_backed_constructor`(crateごとのレジストリ)へ登録する。同一クレートの型が
+  constructor ABIを持つかどうかは、この登録だけで決める。修飾pathの形(`crate::`で始まり、symbol tableにない)から
+  は推測しない。低レベルの`#[class]`はconstructor ABIを出さないので、従来どおり`Type::new()`とprops macroで構築する。
+- 1段目の基底問い合わせ(`is_external_base`)は、symbol tableで解決できない修飾pathの基底を対象にし、そのshape
+  macroの`@required_params`を正本にする。同一クレートの修飾pathは、上の登録がある手書きストレージcomponentだけを
+  対象にする。viewの要素・resync・semantic brushの問い合わせも、そうした型はconstructor ABI
+  (`element_ctor_macro_path`)を通す。`new!`も、登録がある型なら修飾名でも裸名でも`crate::__elwindui_ctor_<Name>!`
+  で構築する。登録は展開順に依存するので、同一クレートで使う側より前に型を定義する(生成componentの登録と同じ)。
   `#[fixed]`の入力はclassのshape macroでも`@is_semantic_brush`に`false`を返す。
 - 手書きストレージのcomponentで`inherits`を持つものは、`EmbeddedViewSync`を自分の`base`へそのまま転送する
   実装を持つ。生成componentに埋め込まれたときは上の段から呼ばれる。自分が一番外側のときは、

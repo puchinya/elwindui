@@ -665,6 +665,32 @@ fn same_crate_components() -> &'static Mutex<HashMap<(String, String), StoredCom
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// PR #312 (contract v3, D3): the same-crate class-backed `#[component]`s that published a
+/// constructor ABI (`crate::__elwindui_ctor_<Name>!`), by crate and name. A class-backed type is not
+/// a generated Component, so it is absent from `same_crate_components`; construction sites
+/// (`new!`, a `view!` element) consult this set instead of guessing the ABI from the path shape —
+/// a low-level `#[class]` in the same crate has no constructor ABI and keeps the `Type::new()` path.
+fn class_backed_constructors() -> &'static Mutex<HashSet<(String, String)>> {
+    static REGISTRY: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Records that the same-crate class-backed Component `name` exports a constructor ABI.
+pub fn register_class_backed_constructor(name: &str) {
+    class_backed_constructors()
+        .lock()
+        .unwrap()
+        .insert((compiling_crate_key(), name.to_string()));
+}
+
+/// Whether the same-crate class-backed Component `name` exports a constructor ABI.
+pub fn has_class_backed_constructor(name: &str) -> bool {
+    class_backed_constructors()
+        .lock()
+        .unwrap()
+        .contains(&(compiling_crate_key(), name.to_string()))
+}
+
 /// Registers `name`'s already-successfully-generated `#[elwindui::component(inherits base)] struct
 /// item_struct { .. }` so a later same-crate `#[elwindui::component]` invocation can resolve it as a
 /// sibling element type — see `same_crate_components`'s own doc comment. Only call this after this

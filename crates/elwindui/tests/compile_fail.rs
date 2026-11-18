@@ -29,3 +29,9 @@ fn class_backed_and_declarative_shapes_are_never_mixed() {
     let cases = trybuild::TestCases::new();
     cases.compile_fail("tests/ui/class_backed_shape_mixing.rs");
 }
+
+#[test]
+fn new_of_an_unknown_local_type_is_rejected() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/new_unknown_local_type.rs");
+}

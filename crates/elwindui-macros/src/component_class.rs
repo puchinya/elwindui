@@ -795,7 +795,14 @@ pub(crate) fn expand_impl(mut item: syn::ItemImpl) -> TokenStream2 {
         return error.to_compile_error();
     }
     let abi = match constructor_abi(&item) {
-        Ok(abi) => abi,
+        Ok(abi) => {
+            if !abi.is_empty()
+                && let Some(name) = impl_type_name(&item)
+            {
+                elwindui_codegen::component_frontend::register_class_backed_constructor(&name);
+            }
+            abi
+        }
         Err(error) => error.to_compile_error(),
     };
     let info = impl_type_name(&item).and_then(|name| class_backed_info(&name));

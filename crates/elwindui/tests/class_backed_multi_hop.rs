@@ -107,6 +107,22 @@ fn a_same_crate_class_backed_component_is_built_from_a_view() {
     assert_eq!(texts(middle), ["base false"]);
 }
 
+/// Contract v3 D3: `new!` builds a same-crate class-backed Component through the constructor ABI
+/// it publishes, written qualified or bare.
+#[test]
+fn new_builds_a_same_crate_class_backed_component() {
+    let qualified = elwindui::new!(crate::RawMiddle(note: "named", margin: 4.0));
+    assert_eq!(qualified.current_note(), "named");
+    assert_eq!(qualified.margin(), 4.0);
+
+    let bare = elwindui::new!(RawMiddle(note: "bare"));
+    assert_eq!(bare.current_note(), "bare");
+
+    // A generated Component of the same file keeps its own `new!` path.
+    let leaf = elwindui::new!(GenLeaf());
+    assert_eq!(leaf.base.current_note(), "leaf note");
+}
+
 /// The same chain across crates: a generated leaf here over the other crate's class-backed middle,
 /// whose own generated base has a required input (auto-forwarded through the middle's published
 /// `#[constructor_inputs(title)]`).
@@ -181,4 +197,55 @@ impl RequiredLeaf {}
 fn a_same_crate_class_backed_middle_forwards_its_required_inputs() {
     let leaf = RequiredLeaf::new("x".to_string());
     assert_eq!(texts(&*leaf), ["required x", "required leaf"]);
+}
+
+/// A same-crate low-level `#[class]` publishes no constructor ABI: a view builds it through
+/// `Type::new()` and its property shape, as before contract v3.
+#[elwindui::class(inherits = elwindui::core::ui::Control)]
+#[prop(label: String)]
+pub struct LegacyControl {
+    label: RefCell<String>,
+}
+
+#[elwindui::class]
+impl LegacyControl {
+    fn set_label(&self, label: &str) {
+        *self.label.borrow_mut() = label.to_string();
+    }
+
+    fn construct() -> Self {
+        Self {
+            base: elwindui::core::ui::Control::construct(),
+            label: RefCell::new(String::new()),
+        }
+    }
+}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct UsesLegacyAndRaw {
+    body: view! {
+        crate::LegacyControl { label: "legacy", margin: 5.0 }
+        crate::RequiredRawMiddle { title: "required", tag: "t" }
+    },
+}
+
+#[elwindui::component]
+impl UsesLegacyAndRaw {}
+
+#[test]
+fn a_view_builds_a_same_crate_legacy_class_and_a_class_backed_component() {
+    let host = UsesLegacyAndRaw::new();
+    let children = host.visual_children();
+    let legacy = children[0]
+        .as_any()
+        .downcast_ref::<LegacyControl>()
+        .expect("the view builds the low-level class");
+    assert_eq!(*legacy.label.borrow(), "legacy");
+    assert_eq!(legacy.margin(), 5.0);
+    let raw = children[1]
+        .as_any()
+        .downcast_ref::<RequiredRawMiddle>()
+        .expect("the view builds the class-backed Component through its constructor ABI");
+    assert_eq!(*raw.tag.borrow(), "t");
+    assert_eq!(texts(raw), ["required required"]);
 }

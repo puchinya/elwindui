@@ -1,0 +1,15 @@
+error: macro expansion ignores `;` and any tokens following
+ --> tests/ui/new_unknown_local_type.rs:7:13
+  |
+7 |     let _ = elwindui::new!(crate::NoSuchComponent(note: "x"));
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ caused by the macro expansion here
+  |
+  = note: the usage of `elwindui::new!` is likely invalid in expression context
+
+error: new!: local generated component 'NoSuchComponent' is not registered
+ --> tests/ui/new_unknown_local_type.rs:7:13
+  |
+7 |     let _ = elwindui::new!(crate::NoSuchComponent(note: "x"));
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `elwindui::new` (in Nightly builds, run with -Z macro-backtrace for more info)

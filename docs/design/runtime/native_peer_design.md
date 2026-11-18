@@ -47,11 +47,11 @@ Invariants kept from the existing design:
 
 ```text
 elwindui-macros  <-  elwindui-core  <-  elwindui-backend-{winui3,appkit,gtk4}  <-  elwindui (facade)
-                     ui::native::peer      native_ui::*Peer impls + Factory
+                     ui::native            native_ui::*Peer impls + Factory
                      ui::controls::*       (no public Component structs)
 ```
 
-- `elwindui_core::ui::native::peer` (new) owns the peer traits, `NativePeerFactory`, the registry and the
+- `elwindui_core::ui::native` (new) owns the peer traits, `NativePeerFactory`, the registry and the
   diagnostic helpers.
 - `elwindui_core::ui::controls::*` owns the concrete Component structs. They are written as class-backed
   `#[component] struct` + `#[component] impl` (the PR #312 form), with `#[prop]`/`#[content]` declared once.
@@ -64,17 +64,19 @@ elwindui-macros  <-  elwindui-core  <-  elwindui-backend-{winui3,appkit,gtk4}  <
 ## 4. Peer contract
 
 ```rust
-// elwindui_core::ui::native::peer (sketch; exact method lists are fixed per stage PR)
+// elwindui_core::ui::native (control-specific traits are added per stage PR)
 pub trait NativePeer {
     /// Type-erased native handle for render/host reconciliation (backend `AnyView`).
     fn handle(&self) -> &dyn Any;
     fn measure(&self, available: Size) -> Size;
-    fn set_background(&self, brush: Option<&Brush>);
+    fn apply_background(&self, background: Option<&Brush>) -> bool; // false = native failure
     fn set_tooltip(&self, tooltip: Option<&str>);
-    fn apply_text_style(&self, style: &CascadedTextStyle) -> bool;
-    fn set_accessibility(&self, semantics: &AccessibilitySemantics);
+    fn supports_text_style(&self) -> bool;
+    fn apply_text_style(&self, style: &CascadedTextStyle) -> bool;  // false = retry later
+    /// Re-push the text style on every measure (AppKit `NSButton` loses attributed titles).
+    fn refresh_text_style_on_measure(&self) -> bool { false }
     /// Detach native targets/subscriptions. Idempotent. After it, no callback may reach Core.
-    fn dispose(&self);
+    fn dispose(&self) {}
 }
 
 pub trait ButtonPeer: NativePeer {
@@ -90,7 +92,8 @@ pub trait ButtonPeer: NativePeer {
 Rules:
 
 - `NativePeer` covers only the existing `NativeControl` surface (background, tooltip, text style, measure,
-  handle, accessibility, dispose). Control-specific traits add only that control's public properties and
+  handle, dispose). Accessibility semantics stay Core-owned intrinsic semantics on `UIElement`; the
+  backend host projects them as before, so peers have no accessibility method. Control-specific traits add only that control's public properties and
   OS→Core notifications.
 - Peer traits are plain Rust traits, not `#[component(trait_only)]`. They are `pub` in `elwindui-core` only
   because backends live in other crates. They are a backend-implementer surface, not a DSL surface.
@@ -108,7 +111,10 @@ pub trait NativePeerFactory {
     fn create_window(&self, owner: WindowPeerOwner) -> Rc<dyn WindowPeer> { unsupported(..) }
 }
 pub fn register_native_peer_factory(factory: Rc<dyn NativePeerFactory>);
-pub fn with_native_peer_factory<R>(f: impl FnOnce(&dyn NativePeerFactory) -> R) -> R;
+pub fn clear_native_peer_factory();
+pub fn has_native_peer_factory() -> bool;
+/// Panics with the D3 diagnostic when this thread has no factory.
+pub fn create_native_peer<R>(control: &'static str, create: impl FnOnce(&dyn NativePeerFactory) -> R) -> R;
 ```
 
 - The registry is a **UI-thread thread-local**, following the `graphics/text.rs` `TEXT_BACKEND` precedent.
@@ -137,7 +143,15 @@ into a host.
 ## 5. Core Component storage and data flow
 
 - `NativeControl` becomes `#[component(inherits UIElement, abstract_class)] struct NativeControl` with
-  `#[prop] background`, `#[prop] tooltip` and a private `peer: RefCell<Option<Rc<dyn NativePeer>>>`.
+  `#[prop] background`, `#[prop] tooltip`, a private `peer: OnceCell<Rc<dyn NativePeer>>` (set at most
+  once, which also lets `try_as_native_control` return a borrow of the handle) and
+  `self_weak: Weak<dyn NativeControlExt>` captured from `__self_weak` in `construct`.
+- `NativeControl::construct(peer: Option<Rc<dyn NativePeer>>)` is internal (no constructor inputs).
+  `None` is the lazy path. `Some(peer)` is the transitional eager path for controls not yet migrated
+  (their backend `struct_only` implementors wrap their handle in a `HandlePeer`).
+- Realization reaches the most-derived control's `#[doc(hidden)] #[overridable] fn __create_native_peer`
+  through `self_weak`, because a method running on the base storage cannot dispatch to an override by
+  itself.
 - Each concrete control stores its own typed slot, for example `peer: RefCell<Option<Rc<dyn ButtonPeer>>>`.
   At realization it gives the same `Rc` (upcast) to the `NativeControl` slot. There is exactly one logical
   peer per Component.
@@ -165,10 +179,12 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
    +--------------------- Drop ------------------+--> dispose() (exactly once)
 ```
 
-- **Realization entry** is `NativeControl::ensure_realized()`, which is idempotent. It is called from the
-  element's mount path after the visual-parent edge and host bindings exist, and as a guard at the start
-  of `measure_override` and `try_as_native_control`. A hosted control therefore can never be measured or
-  rendered unrealized, whatever order mount hooks and the host run in.
+- **Realization entry** is the idempotent `NativeControlExt::__native_peer()`, called at the start of
+  `measure_override` and `try_as_native_control`. Both run only for a control that takes part in hosted
+  layout or render collection, i.e. a mounted control under a backend host, so this is D1's "at mount"
+  realization without a separate mount hook. A mount hook was rejected because Visual-parent attach also
+  happens in host-less trees (Core unit tests, detached subtrees), which would then need a factory.
+  The backend `__IntoAnyView::into_any_view` (below) also realizes, because it hands the handle out.
 - Realization order: factory `create_*` → push every stored logical property (base first, then
   control-specific) → install OS→Core callbacks → accessibility semantics → `invalidate_measure`.
 - **Unmount** detaches the native widget from its host (host reconciliation) but **keeps the peer**.
@@ -227,6 +243,11 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   zero-argument `construct()`. Their constructor ABI `__elwindui_ctor_<Name>` is therefore exported by
   `elwindui-core`, together with `__elwindui_props_<Name>`. `abi_props` is no longer needed because the
   props macro and the ABI belong to the same declaring class.
+- A generated component whose view root is a native builtin keeps its `into_any_view(self: Rc<Self>) ->
+  elwindui::backend::AnyView`. Core-owned controls cannot name `AnyView`, so each backend exports a
+  `#[doc(hidden)] trait __IntoAnyView` implemented for `Rc<T: NativeControlExt>`, and the generated method
+  brings it into scope. Inherent `into_any_view` methods (unmigrated controls, generated components)
+  still win method resolution.
 - `elwindui::ui::Button` keeps resolving as a **Builtin** path in codegen (`dsl_type_origin`). Qualified
   paths, Cargo-renamed facades, same/cross-crate inheritance, required-input forwarding, multi-hop and
   rust-analyzer shadow keep using the PR #312 class-backed registry (`register_class_backed_constructor`).

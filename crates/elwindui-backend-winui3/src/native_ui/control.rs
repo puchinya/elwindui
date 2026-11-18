@@ -17,7 +17,7 @@ use std::cell::RefCell;
 /// `elwindui-core` doesn't define this generically). Holding `handle: AnyView` here once, instead
 /// of on each of `TextArea`/`Button`/`TabView` individually, is what lets `inherits = NativeControl`
 /// resolve `base`'s field type to this same struct.
-#[elwindui_macros::class(struct_only = elwindui_core::ui::NativeControlExt, inherits = elwindui_core::ui::UIElement)]
+#[elwindui_macros::component(struct_only = elwindui_core::ui::NativeControlExt, inherits elwindui_core::ui::UIElement)]
 pub struct NativeControl {
     handle: AnyView,
     background: RefCell<Option<Brush>>,
@@ -27,7 +27,7 @@ pub struct NativeControl {
     applied: RefCell<Option<CascadedTextStyle>>,
 }
 
-#[elwindui_macros::class]
+#[elwindui_macros::component]
 impl NativeControl {
     #[overrides]
     fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {

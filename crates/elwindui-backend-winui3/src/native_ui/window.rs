@@ -10,13 +10,13 @@ use std::rc::Rc;
 /// actually inherits this — hence `struct_only`'s target being `elwindui_core::ui::WindowExt`
 /// itself. `Window` is deliberately *not* a `UIElement` (no `inherits` here at all) — like AppKit's
 /// `Window`, it's a separate top-level concept, not embeddable as a child.
-#[elwindui_macros::class(struct_only = elwindui_core::ui::WindowExt)]
+#[elwindui_macros::component(struct_only = elwindui_core::ui::WindowExt, abi_props = elwindui_core::__elwindui_props_Window)]
 pub struct Window {
     inner: InnerWindow,
     content: RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>,
 }
 
-#[elwindui_macros::class]
+#[elwindui_macros::component]
 impl Window {
     // The bare (not `Rc`-wrapped) value `#[class]`'s auto-generated `new` wraps — this is also what
     // lets a `component X inherits Window` (host composition) embed a real `Window` directly as its

@@ -1625,6 +1625,23 @@ impl Parse for PropDecl {
 #[derive(Default)]
 struct PropDecls {
     props: Vec<PropDecl>,
+    /// Issue #166 (A2): `#[fixed(name)]` — a read-only constructor input (`#[param]`) of a
+    /// generated Component. Only readable through `@inherited_get`, so a derived Component (in any
+    /// crate) can read an inherited `#[param]` by its bare name; it has no setter, field-type or
+    /// content protocol.
+    fixed: Vec<Ident>,
+    /// Issue #166 (A2): the `#[fixed(name, default)]` subset of `fixed` — a defaulted constructor
+    /// input, which (unlike a required one) still takes a pre-mount initial value through the
+    /// `@initial_with_environment` protocol.
+    fixed_defaulted: Vec<Ident>,
+    /// Issue #166 (A2): the declared type of a `#[fixed(name: Type, ..)]` input, used to convert a
+    /// derived root's initial value the same way the constructor ABI converts constructor values.
+    fixed_types: Vec<(Ident, Type)>,
+    /// Issue #166 (A2): `#[constructor_inputs(a, b, ..)]` — a generated Component's required
+    /// constructor inputs in constructor order (inherited ones first). Every class answers
+    /// `@required_params` with this list, empty for a class that declares none (every builtin), so
+    /// a derived Component in another crate asks any base the same way.
+    constructor_inputs: Vec<Ident>,
     /// `#[content(children)]` — which property receives bare nested child elements. Routinely names
     /// a property an *ancestor* declares (`VerticalLayout`'s content is `Layout`'s `children`), so
     /// it is validated by the deferred `@assert_declared` probe rather than locally.
@@ -1638,7 +1655,10 @@ struct PropDecls {
 
 impl PropDecls {
     fn is_declared(&self) -> bool {
-        !self.props.is_empty() || self.content_field.is_some() || self.text_style
+        !self.props.is_empty()
+            || !self.fixed.is_empty()
+            || self.content_field.is_some()
+            || self.text_style
     }
 
     fn content_field(&self) -> Option<&Ident> {
@@ -1665,6 +1685,41 @@ fn take_prop_decls(attrs: &[syn::Attribute]) -> syn::Result<(PropDecls, Vec<syn:
                 ));
             }
             shape.content_field = Some(attr.parse_args::<Ident>()?);
+        } else if attr.path().is_ident("fixed") {
+            // `#[fixed(name)]`, `#[fixed(name: Type)]`, optionally followed by `, default`.
+            let (name, ty, defaulted) =
+                attr.parse_args_with(|input: syn::parse::ParseStream| {
+                    let name: Ident = input.parse()?;
+                    let ty = if input.peek(syn::Token![:]) {
+                        input.parse::<syn::Token![:]>()?;
+                        Some(input.parse::<Type>()?)
+                    } else {
+                        None
+                    };
+                    if input.is_empty() {
+                        return Ok((name, ty, false));
+                    }
+                    input.parse::<syn::Token![,]>()?;
+                    let marker: Ident = input.parse()?;
+                    if marker != "default" {
+                        return Err(syn::Error::new(marker.span(), "expected `default`"));
+                    }
+                    Ok((name, ty, true))
+                })?;
+            if defaulted {
+                shape.fixed_defaulted.push(name.clone());
+            }
+            if let Some(ty) = ty {
+                shape.fixed_types.push((name.clone(), ty));
+            }
+            shape.fixed.push(name);
+        } else if attr.path().is_ident("constructor_inputs") {
+            shape.constructor_inputs = attr
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<Ident, syn::Token![,]>::parse_terminated,
+                )?
+                .into_iter()
+                .collect();
         } else if attr.path().is_ident("text_style") {
             shape.text_style = true;
         } else {
@@ -1785,6 +1840,47 @@ fn build_dyn_default_methods(
         out.push(quote! { fn #per_method(&self) -> &dyn #ext_ty_call; });
     }
     out
+}
+
+/// Issue #166 (A2): converts a derived root's initial value for a defaulted constructor input
+/// (`#[fixed(name: Type, default)]`) the way the constructor ABI converts a constructor value
+/// (`elwindui-codegen`'s `generated_constructor_value`): `String`/`Vec` targets accept a literal
+/// or slice, and an `Option<T>` input wraps the value in `Some` (a literal `None` has its own arm).
+/// Without a declared type the value is converted with `Into`.
+fn fixed_initial_value(ty: Option<&Type>, value: TokenStream2) -> TokenStream2 {
+    fn last_segment(ty: &Type) -> Option<&syn::PathSegment> {
+        match ty {
+            Type::Path(path) if path.qself.is_none() => path.path.segments.last(),
+            _ => None,
+        }
+    }
+    fn option_inner(ty: &Type) -> Option<&Type> {
+        let segment = last_segment(ty).filter(|segment| segment.ident == "Option")?;
+        match &segment.arguments {
+            syn::PathArguments::AngleBracketed(args) => match args.args.first()? {
+                syn::GenericArgument::Type(inner) => Some(inner),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    let Some(ty) = ty else {
+        return quote! { ::core::convert::Into::into(#value) };
+    };
+    let (target, is_option) = match option_inner(ty) {
+        Some(inner) => (inner, true),
+        None => (ty, false),
+    };
+    let value = match last_segment(target).map(|segment| segment.ident.to_string()) {
+        Some(ident) if ident == "String" => quote! { (#value).to_string() },
+        Some(ident) if ident == "Vec" => quote! { (#value).to_vec() },
+        _ => value,
+    };
+    if is_option {
+        quote! { ::core::option::Option::Some(#value) }
+    } else {
+        value
+    }
 }
 
 /// Builds the `__elwindui_inherit_{Name}!`/`__elwindui_inherit_{Name}_skip!`/
@@ -2006,6 +2102,160 @@ fn build_props_macro(
             }
         })
         .collect();
+    let inherited_fixed_arms: Vec<TokenStream2> = shape
+        .fixed
+        .iter()
+        .map(|name| {
+            quote! {
+                (@inherited_get_from $origin:ident, $recv:expr, #name) => {{
+                    #[allow(unused_imports)]
+                    use #own_ext as _;
+                    $recv.#name()
+                }};
+            }
+        })
+        .collect();
+    // A constructor input is never a semantic brush (asked of every name a derived root sets).
+    let fixed_semantic_brush_arms: Vec<TokenStream2> = shape
+        .fixed
+        .iter()
+        .map(|name| quote! { (@is_semantic_brush_from $origin:ident, #name) => { false }; })
+        .collect();
+    // Issue #166 (A2): `@initial_with_environment` — a derived Component's view root setting a
+    // pre-mount initial value on its embedded base (`$recv` is a reference to it), from the
+    // derived Component's `construct()`. It walks the class chain the `#[class]` attributes declare,
+    // stepping into each class's own `base` value, so every class applies the names it declares
+    // itself, on itself, through its own trait:
+    // - a `#[prop]` (and a `#[text_style]` property) through this class's `@set_with_environment`,
+    //   except a semantic brush, which needs the mount environment and is applied by the
+    //   mount-time `@initial_brush_with_environment` below instead;
+    // - a defaulted constructor input (`#[fixed(name: Type, default)]`) through its hidden initial
+    //   setter, converting the value as the constructor ABI does;
+    // - a required constructor input (`#[fixed(name)]`) not at all: it was passed to the
+    //   constructor already.
+    // `@initial_brush_with_environment` is the same walk run once the derived Component is
+    // mounted, with its mount environment: it applies only the semantic brushes.
+    let constructor_inputs = &shape.constructor_inputs;
+    let initial_props: Vec<(Ident, bool)> = shape
+        .props
+        .iter()
+        .filter(|p| takes_set_arm(p) && !p.routed)
+        .map(|p| (p.name.clone(), p.semantic_brush))
+        .chain(
+            shape
+                .text_style
+                .then(|| {
+                    elwindui_codegen::TEXT_STYLE_FIELDS
+                        .iter()
+                        .map(|(name, _, semantic_brush)| (format_ident!("{name}"), *semantic_brush))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        )
+        .collect();
+    let initial_arms: Vec<TokenStream2> = initial_props
+        .iter()
+        .map(|(name, semantic_brush)| {
+            let set = quote! {
+                #[allow(unused_imports)]
+                use #own_ext as _;
+                $crate::#macro_ident!(@set_with_environment_from #bare_ident, $recv, #name, $($rest)*);
+            };
+            let (construct_set, mount_set) = if *semantic_brush {
+                (TokenStream2::new(), set)
+            } else {
+                (set, TokenStream2::new())
+            };
+            let chain_set = quote! {
+                #[allow(unused_imports)]
+                use #own_ext as _;
+                $crate::#macro_ident!(@set_with_environment_from #bare_ident, $recv, #name, $($rest)*);
+            };
+            quote! {
+                (@initial_with_environment_from $recv:expr, #name, $($rest:tt)*) => {{ #construct_set }};
+                (@initial_brush_with_environment_from $recv:expr, #name, $($rest:tt)*) => {{ #mount_set }};
+                (@set_chain_with_environment_from $recv:expr, #name, $($rest:tt)*) => {{ #chain_set }};
+            }
+        })
+        .chain(shape.fixed.iter().map(|name| {
+            let ignored = quote! {
+                (@initial_brush_with_environment_from $recv:expr, #name, $($rest:tt)*) => {};
+            };
+            let required_ignored = quote! {
+                (@set_chain_with_environment_from $recv:expr, #name, $($rest:tt)*) => {};
+            };
+            if shape.fixed_defaulted.contains(name) {
+                let setter = format_ident!("__set_initial_param_{}", name);
+                let ty = shape
+                    .fixed_types
+                    .iter()
+                    .find(|(fixed, _)| fixed == name)
+                    .map(|(_, ty)| ty);
+                let converted = fixed_initial_value(ty, quote! { $value });
+                quote! {
+                    (@initial_with_environment_from $recv:expr, #name, None, $environment:expr) => {{
+                        #[allow(unused_imports)]
+                        use #own_ext as _;
+                        $recv.#setter(None);
+                    }};
+                    (@initial_with_environment_from $recv:expr, #name, $value:expr, $environment:expr) => {{
+                        #[allow(unused_imports)]
+                        use #own_ext as _;
+                        $recv.#setter(#converted);
+                    }};
+                    (@set_chain_with_environment_from $recv:expr, #name, None, $environment:expr) => {{
+                        #[allow(unused_imports)]
+                        use #own_ext as _;
+                        $recv.#setter(None);
+                    }};
+                    (@set_chain_with_environment_from $recv:expr, #name, $value:expr, $environment:expr) => {{
+                        #[allow(unused_imports)]
+                        use #own_ext as _;
+                        $recv.#setter(#converted);
+                    }};
+                    #ignored
+                }
+            } else {
+                quote! {
+                    (@initial_with_environment_from $recv:expr, #name, $($rest:tt)*) => {};
+                    #ignored
+                    #required_ignored
+                }
+            }
+        }))
+        .collect();
+    let initial_fallback = match parent {
+        Some((parent_bare, parent_ty)) => {
+            let parent_macro =
+                inherit_macro_self_ref_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
+            quote! {
+                (@initial_with_environment_from $recv:expr, $name:ident, $($rest:tt)*) => {
+                    #parent_macro!(@initial_with_environment_from &$recv.base, $name, $($rest)*)
+                };
+                (@initial_brush_with_environment_from $recv:expr, $name:ident, $($rest:tt)*) => {
+                    #parent_macro!(@initial_brush_with_environment_from &$recv.base, $name, $($rest)*)
+                };
+                (@set_chain_with_environment_from $recv:expr, $name:ident, $($rest:tt)*) => {
+                    #parent_macro!(@set_chain_with_environment_from &$recv.base, $name, $($rest)*)
+                };
+            }
+        }
+        // The construct-time walk reports an undeclared name; the mount-time one only looks for
+        // semantic brushes, so it ends quietly.
+        None => quote! {
+            (@initial_with_environment_from $recv:expr, $name:ident, $($rest:tt)*) => {
+                compile_error!(concat!(
+                    "`", stringify!($name), "` is not a property this class or an ancestor declares"
+                ));
+            };
+            (@initial_brush_with_environment_from $recv:expr, $name:ident, $($rest:tt)*) => {};
+            (@set_chain_with_environment_from $recv:expr, $name:ident, $($rest:tt)*) => {
+                compile_error!(concat!(
+                    "`", stringify!($name), "` is not a property this class or an ancestor declares"
+                ));
+            };
+        },
+    };
     let inherited_access_fallback = match parent {
         Some((parent_bare, parent_ty)) => {
             let parent_macro =
@@ -2999,6 +3249,7 @@ fn build_props_macro(
                 $crate::#macro_ident!(@is_semantic_brush_from #bare_ident, $name)
             };
             #(#semantic_brush_arms)*
+            #(#fixed_semantic_brush_arms)*
             #semantic_brush_fallback
             (@clear $recv:expr, $name:ident) => {
                 $crate::#macro_ident!(@clear_from #bare_ident, $recv, $name);
@@ -3018,7 +3269,22 @@ fn build_props_macro(
                 $crate::#macro_ident!(@inherited_op_assign_from #bare_ident, $recv, $name, $op, $value)
             };
             #(#inherited_access_arms)*
+            #(#inherited_fixed_arms)*
             #inherited_access_fallback
+            (@required_params $cb:path, { $($item:tt)* }) => {
+                $cb! { { $($item)* } [#(#constructor_inputs),*] }
+            };
+            (@initial_with_environment $recv:expr, $name:ident, $($rest:tt)*) => {
+                $crate::#macro_ident!(@initial_with_environment_from $recv, $name, $($rest)*);
+            };
+            (@initial_brush_with_environment $recv:expr, $name:ident, $($rest:tt)*) => {
+                $crate::#macro_ident!(@initial_brush_with_environment_from $recv, $name, $($rest)*);
+            };
+            (@set_chain_with_environment $recv:expr, $name:ident, $($rest:tt)*) => {
+                $crate::#macro_ident!(@set_chain_with_environment_from $recv, $name, $($rest)*);
+            };
+            #(#initial_arms)*
+            #initial_fallback
             #(#field_type_arms)*
             #field_type_fallback
             (@routed $recv:expr, $name:ident, $value:expr) => {
@@ -3958,7 +4224,7 @@ pub fn expand(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
 /// compiling* crate's own `Cargo.toml`) rather than hardcoding crate names — any crate that ends
 /// up depending on `elwindui-core`, directly or only transitively through the `elwindui` facade,
 /// resolves correctly with no changes to this function.
-fn core_path() -> TokenStream2 {
+pub(crate) fn core_path() -> TokenStream2 {
     use proc_macro_crate::{FoundCrate, crate_name};
     match crate_name("elwindui-core") {
         Ok(FoundCrate::Itself) => quote! { crate },

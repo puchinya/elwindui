@@ -50,7 +50,7 @@ pub enum ButtonRole {
 /// property of the same `NSButton`/`Button` widget this already wraps.
 ///
 /// `tooltip` is not declared here: it comes from `NativeControl`, so every native leaf has it.
-#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]
+#[elwindui_macros::component(trait_only, inherits crate::ui::NativeControl, sealed)]
 #[prop(text: String)]
 #[prop(enabled: Option<bool>)]
 #[prop(role: Option<crate::ui::ButtonRole>)]

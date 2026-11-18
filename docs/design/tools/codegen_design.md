@@ -402,13 +402,104 @@ accessorを呼ぶ。
   `ViewCtx::weak_wiring`により所有者を弱参照(`WiringOwner::downgrade_wiring`)で捕捉し、実行時に
   `WiringWeak::upgrade_wiring`で取り直す(所有者が無ければ何もしない)。強参照で捕捉すると
   `所有者 → 子 → ハンドラ → 所有者`の循環で、drop・unmountの後も解放されない。購読・unmount hookの
-  弱参照も同じtraitを使い、`Rc<Self>`と`EmbeddedHandle<Self>`の両方で同じ生成コードが動く。rootウィジェット
-  だけをtreeへ渡すshape合成以外のcomponentは、component自身を保持する経路が他に無い場合があるため従来どおり。
+  弱参照も同じtraitを使い、`Rc<Self>`と`EmbeddedHandle<Self>`の両方で同じ生成コードが動く。ホスト合成
+  (`inherits Window`)も同じく弱参照にする。表示中はアプリケーション層のWindow registry(Issue #254)が
+  所有者の強参照を持つので、`close()`後は子要素に残ったハンドラが所有者を延命しない。templateの保存先
+  (`ViewCtx::is_template_storage`)はtemplated parentへの既存の弱参照経路を使う。
 - `for`のitem factoryは計画(`plan_dynamic_entry`)の時点で生成されるため、計画の前に暫定の
   `ViewCtx::mutable_own_fields`を設定し、`for`要素のハンドラからも自分の可変Propを読み書きできるようにする。
   item購読内でウィジェットを束縛する名前は`__elwindui_item_widget`で、ループ変数名`item`と衝突しない。
 - 自分の可変Propへの複合代入(`count += 1`)は、継承Propと同じく自分のgetterで取った一時値へ元の`op=`を
   適用してsetterへ渡す。
+- **基底の必須入力の自動転送(A2)**: 既定値の無い基底の`#[param]`/`#[bindable]`のうち、派生の合成rootが
+  設定していないものは、`resolve_effective_fields`が派生の実効フィールドに残し、`generate_view`が合成rootへ
+  同名転送(`name: name`)の属性を合成する。以後は既存のroot同名転送と同じ扱いで、コンストラクタ引数には
+  なるが派生側に格納領域・getterは作らない(`ViewCtx::forwarded_inherited_fields`。構築後の読み取りは
+  `inherited_field_read`、継承した`#[bindable]`の購読は埋め込まれた基底自身)。各生成componentは自分の
+  `#[param]`を`#[fixed(name)]`として`#[class]`へ宣言し、shape macroの`@inherited_get`が宣言元のgetterへ
+  解決できるようにする。
+- **別クレートの基底の必須入力**: 派生のproc-macro展開時には別クレートの基底の必須入力が見えないため、
+  2段階で生成する。
+  - 1段目(`generate_component_impl_real`)は、基底が別クレートのclass(`is_external_base`。修飾pathで
+    tableにないもの)または`TypeInfo::deferred_constructor`な同一クレートのcomponentなら生成せず、基底の
+    shape macro(props macro)の`@required_params`を呼ぶ。`#[class]`はすべてこのarmを持ち、
+    `#[constructor_inputs(..)]`で宣言されたコンストラクタ引数名(生成componentが継承分を先頭にした
+    コンストラクタ順で宣言する。builtinは宣言しないので空)を並べて`elwindui::__component_with_base_params!`を
+    呼び戻す。基底が生成componentかbuiltinかはここで判定しない(`inherits elwindui::core::ui::VerticalLayout`
+    のような修飾pathのbuiltinも、必須入力なしとして同じ経路を通る)。
+  - 2段目(`generate_component_with_base_params`)は受け取った名前を`ExternalBaseParamsScope`に置いて通常の
+    生成を行う。`synthesize_external_base_fields`はそれらを実効フィールドの先頭へ
+    基底の型エイリアス`<基底のpath>::__elwindui_required__<N>_<Base>_<name>`型で加える
+    (`required_param_alias_path`。`{Name}Ext`などと同じく、生成componentと同じ場所にある兄弟item)。
+    継承の基底になれる生成component(shape合成・inherited view composition)は自分のコンストラクタ引数ごとに
+    `#[doc(hidden)] pub type`のエイリアスを生成する。公開traitの関連型(implの`type Ty`)にすると、引数の型が
+    componentより非公開なときにE0446(hard error)となり、既存のcomponentがコンパイルできなくなる。
+    エイリアスなら`private_interfaces` lintで済み、生成側で`allow`する。別クレートの派生がそのエイリアスを
+    使えるのは型が派生側から見える場合だけである。その他のcomponentにはエイリアスを生成しない。
+    基底値は`Base::construct(..)`を直接呼び(`#[class]`の`construct`書き換えに見える形)、各引数の変換だけを
+    基底ABIの`@__ctor_arg_<name>`に任せる。派生自身のconstructor ABI macroでも、エイリアス型の引数の変換は
+    基底ABIへ委ねる(`forwarded_required_param_conversion`。エイリアス名から基底のpathを復元する)。
+    `<N>`は`<Base>`の文字数である。型名にもフィールド名にも`_`や`__`を含められるので、区切り文字ではなく
+    この長さで`<Base>`を一意に復元する(`required_param_alias_base`)。
+  - shape合成のrootが基底に設定した静的な値(祖先の通常Prop・既定値付きParam、builtinの`spacing`・`margin`など)は、
+    基底を構築した直後に`shape_root_initial_sets`で初期値として設定する(rootのresyncは`reactive = false`の値を
+    設定しないため)。設定するのはauthorした通常の値だけで、reactiveな値・要素・closureは従来どおりmount時の経路で扱う。
+    - 基底が同一クレートでも別クレートでも同じで、すべての名前を基底のprops macro(shape macro)の
+      `@initial_with_environment &<root>, name, value, env`へ渡す。どのclassがその名前を宣言しているか
+      (生成componentかbuiltinか、何段上か)をcodegenは判定しない。`#[class]`の属性で宣言された連鎖を
+      macroがたどり、最終的な解決はコンパイラに任せる(`class_macro_design`の`@initial_with_environment`)。
+    - semantic brushの値は同じ名前を`__build_view`からも`@initial_brush_with_environment &self.base, ..`へ渡し、
+      mount時の環境で解決する。どの名前がsemantic brushかはclassの属性(`semantic_brush`)で決まる。
+    - 生成componentは既定値付きParamを`#[fixed(name: Type, default)]`、必須Paramを`#[fixed(name)]`として宣言する。
+    - これらの文は`construct()`の中で`Self { .. }`より前に実行される。値が派生自身のコンストラクタの
+      ローカル(必須引数・既定値付きフィールド)を参照すると`Self`へ渡す前にmoveしてしまうので、
+      参照するローカルだけをブロック内で`Clone::clone`した値に束縛し直す
+      (`clone_referenced_construct_locals`)。
+  - 2段目のtokenは基底クレートのmacro展開の中で作られるので、1段目のattribute展開が渡すanchor identの
+    解決文脈へ付け替える(`resolve_tokens_at`)。これで生成する`macro_rules!`の`$crate`やlintの扱いが、
+    直接生成した場合と同じになる。
+  - 同一クレートでそのcomponentを使う側は`TypeInfo::deferred_constructor`を見て、継承するなら同じ2段階生成を、
+    `view`から構築するなら`crate::__elwindui_ctor_<Name>!`による名前付き構築(外部生成componentと同じ経路)を使う。
+
+#### 手書きストレージのcomponentとconstructor ABI(PR #312 contract v3)
+
+- constructor ABI(`__elwindui_ctor_<Type>!`)の名前はidentで受け渡す(`new!`、外部構築の`@new`/`@initial_named`、
+  `@__ctor_arg_*`、`@resync_named`、`@is_semantic_brush_named`)。ABIが列挙しない名前をclassのprops macroへ
+  渡せるようにするためである(文字列リテラルはmacro_rulesでidentに変換できない)。
+- 手書きストレージのcomponentのABIは`codegen::class_constructor_abi`が、生成componentと同じ
+  `build_constructor_macro`で作る。列挙するのは`#[constructor_inputs]`の入力だけで、ほかの名前は
+  `delegate_props`(自分のprops macro、または`abi_props`の再エクスポート`$crate::__elwindui_abi_props_<Type>`)の
+  `@set_chain_with_environment`(値の設定)と`@field_type`(`new!`の名前検査)へ渡す。`new`はclassの`new`で、
+  mountは取り付けた側が行う。抽象classと内部専用の`construct`は`unconstructible_class_abi`(どの使い方も
+  compile error)になる。facadeはbuiltinのABIをルートで再エクスポートする(具象型を定義するcrateが一つの所有者)。
+- 宣言的componentに`construct`がある場合(`CustomConstructScope`)、生成した初期化は`#[class]` implの外の
+  `__elwindui_generated_construct(__self_weak, <入力>)`になり、`#[class]`が行う親の`construct`呼び出しの書き換え
+  (`Parent::__class_construct(__self_weak.clone(), ..)`)は`ParentConstructRewriter`が同じ規則で行う。
+  `construct`の引数名は生成したコンストラクタ入力と同じ順でなければならない。
+- 手書きストレージの判定がimplまで決まらない形(view・フィールドのDSL属性・structの段のclass属性のいずれもない
+  struct、case iii)は、struct側が宣言的componentとして登録したうえで、その出力(rust-analyzer shadow)を
+  impl側まで保留する。implに`construct`があれば登録を外して`#[class]`として展開し、保留した出力は捨てる。
+  なければ保留した出力をimplの出力と一緒に出す。rustcにもrust-analyzerにも正しい形だけが見える。
+- constructor ABIの`@environment $target`は、型の隠し関連関数`<$target>::__elwindui_application_environment()`
+  (`application_environment_fn`)を呼んでアプリケーション環境を返す。この関数は生成componentでも手書きストレージの
+  componentでも型を定義したcrateで生成されるので、Coreへのパスはそのcrateで解決される。`new!`の展開は
+  `elwindui::`を直接書かないので、facadeをCargoの別名で依存するcrateからも、生成componentも手書きストレージの
+  componentも構築できる。
+- 手書きストレージのcomponentは、`construct`からconstructor ABIを出したときに、その名前を
+  `component_frontend::register_class_backed_constructor`(crateごとのレジストリ)へ登録する。同一クレートの型が
+  constructor ABIを持つかどうかは、この登録だけで決める。修飾pathの形(`crate::`で始まり、symbol tableにない)から
+  は推測しない。低レベルの`#[class]`はconstructor ABIを出さないので、従来どおり`Type::new()`とprops macroで構築する。
+- 1段目の基底問い合わせ(`is_external_base`)は、symbol tableで解決できない修飾pathの基底を対象にし、そのshape
+  macroの`@required_params`を正本にする。同一クレートの修飾pathは、上の登録がある手書きストレージcomponentだけを
+  対象にする。viewの要素・resync・semantic brushの問い合わせも、そうした型はconstructor ABI
+  (`element_ctor_macro_path`)を通す。`new!`も、登録がある型なら修飾名でも裸名でも`crate::__elwindui_ctor_<Name>!`
+  で構築する。登録は展開順に依存するので、同一クレートで使う側より前に型を定義する(生成componentの登録と同じ)。
+  `#[fixed]`の入力はclassのshape macroでも`@is_semantic_brush`に`false`を返す。
+- 手書きストレージのcomponentで`inherits`を持つものは、`EmbeddedViewSync`を自分の`base`へそのまま転送する
+  実装を持つ。生成componentに埋め込まれたときは上の段から呼ばれる。自分が一番外側のときは、
+  `on_constructed`で登録したmount hook(最初のvisual parentが付いたとき1回)で、自分を起点に
+  `mount_as_base`/`wire_embedded`/`mount_embedded`を行う。これで生成→手書き→生成の多段でも、
+  手書きの段の下の生成componentのviewが組み立てられる。
 
 #### Component override bridge
 

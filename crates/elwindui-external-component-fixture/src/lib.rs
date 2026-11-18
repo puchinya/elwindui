@@ -5,7 +5,11 @@
 //! same qualified path and defining-crate props-macro boundary as an application that depends on
 //! both crates.
 
-#![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+#![allow(
+    macro_expanded_macro_exports_accessed_by_absolute_paths,
+    non_camel_case_types,
+    non_snake_case
+)]
 
 use std::rc::Rc;
 
@@ -214,3 +218,127 @@ pub struct ExternalInheritMiddle {
 
 #[component]
 impl ExternalInheritMiddle {}
+
+/// Issue #166 (A2): an external shape-composed base with required constructor inputs, so a
+/// downstream derived Component with its own view proves they are auto-forwarded across crates.
+#[component(inherits VerticalLayout)]
+pub struct ExternalRequiredBase {
+    #[param]
+    title: String,
+    #[param]
+    count: usize,
+    body: view! {
+        TextBlock { text: format!("{title}:{count}") }
+    },
+}
+
+#[component]
+impl ExternalRequiredBase {}
+
+/// Issue #166 (A2): a derived Component with its own view in the defining crate that leaves
+/// `ExternalRequiredBase`'s required inputs to auto-forwarding and adds one of its own, so a
+/// downstream crate inherits a two-level chain of required inputs.
+#[component(inherits crate::ExternalRequiredBase)]
+pub struct ExternalRequiredMiddle {
+    #[param]
+    suffix: String,
+    body: view! {
+        TextBlock { text: format!("{title}{suffix}") }
+    },
+}
+
+#[component]
+impl ExternalRequiredMiddle {}
+
+/// Issue #166 (A2): an external shape-composed base with a required input next to an ordinary
+/// Prop and a defaulted Param, so a downstream derived root that sets the latter two proves they are
+/// still applied when the base is constructed through its constructor ABI.
+#[component(inherits VerticalLayout)]
+pub struct ExternalDefaultsBase {
+    #[param]
+    title: String,
+    #[prop(default = false)]
+    flag: bool,
+    #[param(default = 1)]
+    step: i32,
+    #[prop(default = String::new())]
+    note: String,
+    body: view! {
+        TextBlock { text: format!("{title}:{flag}:{step}{note}") }
+    },
+}
+
+#[component]
+impl ExternalDefaultsBase {}
+
+/// Issue #166 (A2): a middle level with its own view that references none of
+/// `ExternalDefaultsBase`'s ordinary Props or defaulted Params, so a downstream leaf's root values
+/// for them must still reach the base two hops up.
+#[component(inherits crate::ExternalDefaultsBase)]
+pub struct ExternalDefaultsMiddle {
+    body: view! {
+        TextBlock { text: "defaults middle" }
+    },
+}
+
+#[component]
+impl ExternalDefaultsMiddle {}
+
+/// Issue #166 (A2): a Component and a required input whose names contain `__`, so the
+/// required-input type alias naming must stay unambiguous for a downstream derived Component.
+#[component(inherits VerticalLayout)]
+pub struct Odd__Name {
+    #[param]
+    item__id: String,
+    body: view! {
+        TextBlock { text: format!("odd {item__id}") }
+    },
+}
+
+#[component]
+impl Odd__Name {}
+
+/// Issue #166 (A2): an external base with defaulted `Option<String>` and `String` Params, so a
+/// downstream derived root's `label: "x"` and `caption: "c"` prove the value is converted for
+/// the declared type (`Some("x".to_string())`, `"c".to_string()`).
+#[component(inherits VerticalLayout)]
+pub struct ExternalOptionalBase {
+    #[param(default = None)]
+    label: Option<String>,
+    #[param(default = String::from("none"))]
+    caption: String,
+    body: view! {
+        TextBlock { text: format!("{label:?}:{caption}") }
+    },
+}
+
+#[component]
+impl ExternalOptionalBase {}
+
+/// PR #312 contract v3 (T8): a class-backed (hand-written storage) middle level over a generated
+/// base with a required input, which it publishes as its own constructor input.
+#[component(inherits crate::ExternalDefaultsBase)]
+#[prop(badge: String)]
+#[constructor_inputs(title)]
+pub struct ExternalRawMiddle {
+    badge: std::cell::RefCell<String>,
+}
+
+#[component]
+impl ExternalRawMiddle {
+    fn set_badge(&self, badge: &str) {
+        *self.badge.borrow_mut() = badge.to_string();
+    }
+
+    #[inherent]
+    pub fn current_badge(&self) -> String {
+        self.badge.borrow().clone()
+    }
+
+    fn construct(title: String) -> Self {
+        Self {
+            base: ExternalDefaultsBase::construct(title),
+            badge: std::cell::RefCell::new(String::new()),
+        }
+    }
+}

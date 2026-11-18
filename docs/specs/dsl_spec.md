@@ -323,6 +323,16 @@ impl ContentWrapper {}
 
 継承したフィールドは、派生component自身の`view`のroot要素が**同名の属性へ裸の同名で転送**している場合(例:rootの`padding: padding`)のみ、派生側の実効フィールド(＝コンストラクタ引数)になる。これは従来どおりのコンストラクタ転送であり、このABIは変わらない。リテラル値で上書きしている場合(例:`Rectangle { fill: "#3a3a3c" }`)や、そもそも参照していない場合は、その基底フィールドは派生側の公開APIには現れない。root要素の同名転送以外の位置(他の要素の属性値・式・イベントハンドラ・ライフサイクルフック)での裸参照は、次段落の継承フィールドアクセスであり、派生側のコンストラクタ引数を増やさない。
 
+**基底の必須入力の自動転送(Issue #166)。** 基底が既定値を持たない必須の`#[param]`/`#[bindable]`(基底のコンストラクタ引数)を持つ場合、自前の`view`を持つ派生componentでも、`view`を持たない派生componentと同じ規則で扱う。
+
+- 派生の`view`のroot要素がその属性を設定していなければ、自動的に派生のコンストラクタ引数になる(rootへ`title: title`と書いたのと同じ同名転送)。引数の順序は、基底のコンストラクタの順序の引数が先、派生自身の引数が後である。多段継承でも同じで、`Base -> Middle -> Derived`では`Base`の必須入力、`Middle`の必須入力、`Derived`の必須入力の順になる。
+- 派生の`view`のroot要素がその属性に値を設定していれば(例:`title: "fixed"`)、その値で基底を構築し、派生のコンストラクタ引数にはしない。
+- `title: title`のように明示的に同名転送しても、引数は1つだけである(自動転送と同じ)。
+- 転送した入力は基底だけが保持する。派生componentはそのgetter・`{Derived}Property`のvariant・格納領域を生成せず、派生の`view`から裸の名前で読むと基底の値になる(次段落の継承フィールドアクセス)。転送した`#[bindable]`の購読は基底自身が行う。
+- 基底が別クレートの生成componentでも同じである。派生側でトレイトのimportや型の記述は不要で、引数の型は基底側で宣言した型になる。その派生componentを同じクレート内でさらに継承したり、別のcomponentの`view`から構築したりしてもよい。
+- 派生の`view`のroot要素が基底の通常`#[prop]`や既定値付き`#[param]`に値を設定した場合(例:`flag: true`)、その値は基底を構築した直後に初期値として設定される。基底が同一クレートでも別クレートでも同じであり、その`#[prop]`/`#[param]`を宣言したのが中間の祖先より上の祖先(`Base -> Middle -> Derived`の`Base`で、`Middle`の`view`がそのフィールドを参照しない場合)でも同じである。値に派生自身のコンストラクタ引数を使っても(`payload: source`)、派生はその引数を保持したままである(値は複製して設定する)。同じroot要素に書いたbuiltinの属性(基底が合成する`VerticalLayout`の`spacing`、`UIElement`の`margin`など)も、何段上の基底であっても同じく構築直後に設定される。既定値付き`#[param]`への値はコンストラクタ引数と同じく宣言型に変換される(`Option<String>`へ`"x"`なら`Some("x".to_string())`)。semantic brushの値(`background: BrushStyle::Primary`など)は、派生componentがmountされた環境(`EnvironmentScope`を含む)で解決される。
+- 必須入力の型がcomponentより非公開でも、そのcomponentはコンパイルでき、同一クレート内の派生へは自動転送できる。別クレートの派生は、派生側から名前を参照できない型の入力を継承できない。
+
 **祖先が宣言したフィールドへの派生`view`からのアクセス(Issue #166)。** 自前の`view`を持つ派生componentは、祖先(ユーザー定義component・builtinのいずれも、同一クレートでも別クレートでもよい)が宣言した公開フィールドを、`view`の属性値・`format!`等の式・イベントハンドラ本体・ライフサイクルフックの中から**裸の名前のまま**読み書きできる。
 
 - 読み取り(`TextBlock { text: heading }`、`format!("{heading}")`)は、そのフィールドを**宣言した祖先**のgetterで行われる。書き込み(`heading = value`、`count += 1`のような複合代入を含む)は宣言した祖先のsetterで行われ、値の格納先・型付き通知(`{Declarer}Property`)は宣言した祖先の1か所だけにある。派生componentはそのフィールドのgetter/setter・`{Derived}Property`のvariant・コンストラクタ引数・格納領域を生成しない(前段落のroot同名転送だけは従来どおりコンストラクタ引数になる)(継承フィールドのアクセサは常に宣言元の1経路で、`E0034`の曖昧さは生じない)。多段継承(`Base -> Middle -> Derived`)でも同じである。
@@ -333,7 +343,7 @@ impl ContentWrapper {}
 - 祖先のフィールドに依存する動的領域(`if`/`match`/`for`)も、そのフィールドの変更時にだけ再評価される。動的領域は派生`view`のroot直下に直接書いてもよい。
 - 派生`view`のroot直下の子(静的な子・動的領域とも)は、基底の`view`が置いた子の後ろに、記述した順で並ぶ(さらに派生したcomponentの子はその後ろ)。
 - 基底の`view`は、派生componentに埋め込まれても単体のときと同じく動作する(自分のプロパティへの依存の再同期・動的領域・イベントハンドラ・`#[bindable]`/Environment/semantic brushの購読・lifecycle hook)。lifecycle hookの順序は§3「Lifecycle hooks」を参照。
-- `inherits`した基底のUI要素そのものになるcomponent(継承による合成)では、子要素に保存されたイベントハンドラや購読はcomponent自身を延命しない。最後の強参照が無くなれば、明示的なunmountの有無にかかわらず解放される。
+- `inherits`した基底のUI要素そのものになるcomponent(継承による合成)では、子要素に保存されたイベントハンドラや購読はcomponent自身を延命しない。最後の強参照が無くなれば、明示的なunmountの有無にかかわらず解放される。`Window`を継承するcomponent(ホスト合成)も同じで、表示中はアプリケーションのWindow管理が保持し、`close()`後は子要素に保存されたイベントハンドラが残っていても解放される(残ったハンドラは何もしない)。
 - `view`を持たずにlayout builtin(`VerticalLayout`/`HorizontalLayout`/`Grid`)を直接継承するcomponentは、空の`body`を持つcomponentと同じくそのlayoutを合成したUI要素になり、さらに継承の基底として使える(派生側はそのプロパティ・子要素の格納先・動的領域を引き継ぐ)。
 
 **メソッド継承とオーバーライド**(C#の`virtual`/`override`/`base.Method()`相当)。
@@ -378,6 +388,23 @@ impl ContentControl {
 - `#[elwindui_macros::class]`(ビルトインのRustクラス階層マクロ、`docs/specs/macro_class_spec.md`§8.3)にも同じ`#[overridable]`/`#[overrides]`がある。componentのcompanion `impl`で宣言したoverride metadataは、合成される`#[class]` implへそのまま渡され、最終的なruntime dispatchは既存のclass-managed ancestor chainが担う。したがって属性名・意味論・dispatch authorityは一つのoverride modelを共有し、component側に別のvtableや転送表を持たない
 
 `#[computed]`フィールドも同様に、基底の同名フィールドを`#[overrides]`なしで再宣言するとエラーになり、`#[overrides]`を付けると上書きとして扱われる(型は基底と一致していなければならない)。
+
+### 手書きストレージを持つcomponent(PR #312、Implementation Contract v3)
+
+属性は`#[component(..)]`の一つだけである。生成されたストレージを持つcomponent(宣言的component)か、手書きのRustストレージを持つcomponentかは、ソースの形から決まる。`manual`のようなモード指定はない(未知の引数としてエラーになる)。
+
+- 次のいずれかに当たる型は手書きストレージを持つ。元のRustフィールド(`Cell`・`RefCell`・ネイティブhandleなど)はそのまま残り、既存の`#[class]`層で展開される。
+  - (i) structの段に`#[class]`の形の属性(`#[prop(name: Type)]`・`#[text_style]`・`#[fixed(..)]`・`#[constructor_inputs(..)]`)がある。
+  - (ii) `struct_only = Trait`の宣言である。
+  - (iii) `view!`/`template_view!`フィールドもフィールドのDSL属性もなく、companion `impl`に`fn construct(..) -> Self`がある。これは`impl`を読んだ時点で決まる。
+- それ以外は従来どおり宣言的componentである(viewを持たず無属性フィールドだけのstructと空の`impl`も、従来どおり宣言的)。
+- 引数は`inherits Path`(`=`なし)、`trait_only`、`struct_only = Trait`、`abi_props = <props macro path>`、`abstract_class`、`sealed`、`no_ancestor_forward`。`trait_only`と`struct_only`は同時に指定できない。`abi_props`は`struct_only`でのみ指定できる。
+- Core interfaceは`#[component(trait_only, inherits Path)] trait Name { .. }`と書く。backendの実装は`#[component(struct_only = TraitPath, inherits Path, abi_props = elwindui_core::__elwindui_props_Name)] struct Name { .. }`と書く。公開property(`#[prop]`/`#[content]`)はCore interfaceが宣言し、`abi_props`がその宣言元を明示する(trait名から推測しない)。
+- 手書きストレージの形と宣言的componentの形(`view!`フィールド、フィールドのDSL属性)を混ぜるとエラーになる。`trait_only`をstructに、`struct_only`をtraitに付けてもエラーになる。
+- `construct`はcompanion `impl`の無属性の関連関数で、仮想メソッドではない。`self`レシーバ・`async`・`unsafe`・ジェネリクス・`Self`以外の戻り値・重複・`#[overridable]`/`#[overrides]`はエラーになる。手書きストレージのcomponentでは、`impl`に`#[class]`と同じメソッド(無属性のメソッド、`#[inherent]`、`#[overridable]`/`#[overrides]`、`on_constructed`)を書ける。
+- 宣言的componentも`construct`を書ける。生成されるストレージの初期化は`Self::__elwindui_generated_construct(__self_weak, <コンストラクタ入力>)`になり、`construct`はそれを呼んで`Self`を作る。`construct`の引数は、componentのコンストラクタ入力(基底の必須入力が先、自分の必須入力が後)と同じ名前・同じ順でなければならない。
+- 手書きストレージのcomponentの公開コンストラクタ入力は、`#[constructor_inputs(a, b, ..)]`に列挙した`construct`の引数だけである(名前と順が一致しなければエラー)。引数のない`construct`は入力なしで公開構築できる。`#[constructor_inputs]`なしで引数を取る`construct`(ネイティブhandleを受け取る`NativeControl::construct(handle)`など)は内部専用で、`new!`やviewからは構築できない。抽象class・trait_onlyも同様である。手書きのRustから`Base::construct(handle)`を呼ぶのは従来どおりできる。
+- 手書きストレージのcomponentは生成componentの間に置ける(生成componentがそれを継承する、それが生成componentを継承する。同一crateでも別crateでもよい)。viewからはqualified path(`crate::Name { .. }`)で構築できる。基底の必須入力は`#[constructor_inputs]`に列挙すれば、派生へ自動転送される。
 
 ### Lifecycle hooks
 

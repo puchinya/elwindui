@@ -5,13 +5,13 @@ use super::*;
 /// `VerticalLayout`'s own class trait (docs/design/runtime/ui_tree_design.md). `spacing` lives here
 /// (not on `Layout`) since it's meaningless to `Grid`, `Layout`'s other concrete subclass — see
 /// `Layout`'s own doc comment.
-#[elwindui_macros::class(inherits = crate::ui::Layout)]
+#[elwindui_macros::component(inherits crate::ui::Layout)]
 #[prop(spacing: Option<f32>)]
 pub struct VerticalLayout {
     spacing: Cell<f32>,
 }
 
-#[elwindui_macros::class]
+#[elwindui_macros::component]
 impl VerticalLayout {
     #[overrides]
     fn measure_override(&self, available: Size) -> Size {

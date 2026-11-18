@@ -15,7 +15,7 @@ use std::cell::RefCell;
 /// `text_style`/`applied` add font support (指示書 §17): every leaf sharing this one base struct
 /// gets `TextStyleOwner` (storage + inherited resolution) and font application for free, without
 /// each of `Button`/`TextArea`/`TextBox`/`PasswordBox`/`ScrollView`/`TabView` repeating it.
-#[elwindui_macros::class(struct_only = elwindui_core::ui::NativeControlExt, inherits = elwindui_core::ui::UIElement)]
+#[elwindui_macros::component(struct_only = elwindui_core::ui::NativeControlExt, inherits elwindui_core::ui::UIElement)]
 pub struct NativeControl {
     handle: AnyView,
     background: RefCell<Option<Brush>>,
@@ -25,7 +25,7 @@ pub struct NativeControl {
     applied: RefCell<Option<CascadedTextStyle>>,
 }
 
-#[elwindui_macros::class]
+#[elwindui_macros::component]
 impl NativeControl {
     #[overrides]
     fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {

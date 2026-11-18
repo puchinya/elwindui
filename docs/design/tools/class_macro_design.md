@@ -105,7 +105,47 @@ Only `@set`'s `wrap_prop_value` knows how to shape a value into a declared prope
 適用してsetterへ渡す」へ展開し、それ以外の名前は親classのshape macroへ転送する。親を持たない終端では、
 元の裸の名前(`name` / `name = value` / `name op= value`)をそのまま返し、未宣言名をpropertyとして
 推測しない。生成componentは公開writable Propだけをclass propertyとして
-宣言するため、`#[state]`・computed・paramはこの経路では解決されない。
+宣言するため、`#[state]`・computedはこの経路では解決されない。`#[param]`は`#[fixed(name)]`(読み取り専用の
+コンストラクタ入力)として宣言され、`@inherited_get`だけが宣言元のgetterへ解決する(`@set`・`@field_type`等の
+property protocolには参加しない)。派生componentへ自動転送された基底の必須入力を裸名で読むための経路である。
+
+`@initial_with_environment $recv, name, value, environment`(Issue #166)は、派生componentの`view`のrootが、
+埋め込んだ基底(`$recv`はその参照)にmount前の初期値を設定するための経路である。各classは自分が宣言した名前だけを、
+自分の値に自分のtraitで設定し、それ以外の名前は自分の`base`(`&$recv.base`)と共に親classのshape macroへ転送する。
+派生classは祖先のtraitをすべて実装しているわけではなく、隠しinitial setterも委譲されないため、受け手を宣言元の
+値そのものにする。
+
+- `#[prop]`・`#[text_style]`のpropertyは、そのclassの`@set_with_environment`で設定する。semantic brushの
+  propertyはここでは設定しない(下の`@initial_brush_with_environment`で設定する)。
+- `#[fixed(name: Type, default)]`(既定値付きのコンストラクタ入力)は、隠しinitial setter
+  `__set_initial_param_<name>`で設定する。値はconstructor ABIと同じく宣言型で変換する
+  (`String`/`Vec`は`.to_string()`/`.to_vec()`、`Option<T>`は`Some(..)`で包み、`None`はそのまま)。
+- `#[fixed(name)]`(必須のコンストラクタ入力)は、構築時にコンストラクタへ渡し済みなので何もしない。
+- 親を持たない終端まで宣言元がなければ`compile_error!`にする。
+
+`@required_params $cb, { .. }`(Issue #166)は、`#[constructor_inputs(a, b, ..)]`で宣言されたコンストラクタ
+引数名を`$cb! { { .. } [a, b, ..] }`として返す。宣言のないclass(builtin)は空のリストを返すので、別クレートの
+派生componentはどの基底にも同じ形で問い合わせられる。
+
+`@initial_brush_with_environment`は同じ連鎖を、派生componentがmountされた後(`__build_view`)にmount時の
+環境で実行する。semantic brushのpropertyだけを設定し、それ以外の名前は何もしない(未宣言名の報告は構築時の
+`@initial_with_environment`が行う)。semantic brushは派生componentが置かれた環境(`EnvironmentScope`など)で
+解決する必要があり、構築時にはその環境がまだ決まっていないためである。
+
+`@set_chain_with_environment $recv, name, value, environment`(PR #312 contract v3)は、
+`@initial_with_environment`と同じく宣言元のclassを`&$recv.base`でたどり、そのclassの値に自分のtraitで設定する。
+semantic brushもその場で`environment`で解決して設定する。手書きストレージのcomponentのconstructor ABIが、
+自分では列挙しない名前(祖先やCore interfaceのproperty)をこの経路へ渡す。呼び出し側でtraitを
+importしなくても設定できる。
+
+### `#[component]`のclass-backed形(PR #312 contract v3)
+
+`elwindui_macros::component`は、手書きストレージを持つcomponent(`trait_only`のtrait、`struct_only`のstruct、
+structの段に`#[class]`の形の属性を持つstruct、`construct`だけで判定されるstruct)を、引数を`#[class]`の形
+(`inherits = Path`など)に変えてこの層(`class::expand`)へそのまま渡す(`component_class.rs`)。`#[class]`自体の
+展開は変えない。struct側の情報(抽象か、`#[constructor_inputs]`、`abi_props`)はimpl側でconstructor ABIを
+生成するために保存する(トークンはマクロ呼び出しをまたいで保持できないので文字列で保存する)。
+`#[constructor_inputs(..)]`は`@required_params`の答えにもなる。
 
 ## Validation boundary
 

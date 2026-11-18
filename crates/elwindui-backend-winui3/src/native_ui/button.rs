@@ -9,12 +9,12 @@ use elwindui_core::accessibility::{
 use elwindui_core::ui::UIElementExt;
 use std::rc::Rc;
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::ButtonExt, inherits = crate::NativeControl)]
+#[elwindui_macros::component(struct_only = elwindui_core::ui::ButtonExt, inherits crate::NativeControl, abi_props = elwindui_core::__elwindui_props_Button)]
 pub struct Button {
     inner: InnerButton,
 }
 
-#[elwindui_macros::class]
+#[elwindui_macros::component]
 impl Button {
     #[overrides]
     fn perform_accessibility_action(&self, action: AccessibilityAction) -> bool {

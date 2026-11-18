@@ -1,0 +1,18 @@
+[package]
+name = "elwindui-facade-alias-fixture"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# PR #312 Implementation Contract v3 (T12): depends on the facade only under a Cargo-renamed name,
+# so `new!` must reach each builtin's constructor ABI (and the application environment) through
+# the authored path alone, without any `elwindui::` path in its expansion.
+[dependencies]
+ui_facade = { package = "elwindui", path = "../elwindui" }
+
+# A generated Component of another crate: its constructor ABI must not need an `elwindui` name here.
+[dev-dependencies]
+elwindui-external-component-fixture = { path = "../elwindui-external-component-fixture" }
+
+[lints]
+workspace = true

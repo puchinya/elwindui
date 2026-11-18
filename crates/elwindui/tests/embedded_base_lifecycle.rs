@@ -8,9 +8,8 @@
 //! - Lifecycle: an embedded base runs its own `on_mount` / `on_update` / `on_unmount` exactly once
 //!   each — `on_mount` from the base up, `on_unmount` from the most-derived level down.
 //! - Subscriptions: the base's `#[bindable]` viewmodel keeps updating its own view while embedded,
-//!   and every subscription is released on unmount. (A required `#[bindable]` base field reaches a
-//!   derived constructor only through a view-less derived Component, which forwards the base's
-//!   constructor inputs; a derived Component with its own view cannot supply it.)
+//!   and every subscription is released on unmount. (A required `#[bindable]` base field is
+//!   auto-forwarded as a derived constructor input; see `inherited_required_params.rs`.)
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 

@@ -23,7 +23,7 @@ use super::*;
 /// its concrete subclasses (`VerticalLayout`/`HorizontalLayout`) are, each calling `Layout::
 /// construct()` for their own `base` field (see e.g. `Shape::construct`/`Control::construct` for the
 /// same shape one level up the hierarchy, where the base *is* directly instantiable).
-#[elwindui_macros::class(inherits = crate::ui::UIElement, abstract_class)]
+#[elwindui_macros::component(inherits crate::ui::UIElement, abstract_class)]
 #[content(children)]
 #[prop(children: crate::ui::UIElementCollection)]
 #[prop(semantic_brush, background: Option<crate::graphics::Brush>)]
@@ -34,7 +34,7 @@ pub struct Layout {
     pub background: RefCell<Option<Brush>>,
 }
 
-#[elwindui_macros::class]
+#[elwindui_macros::component]
 impl Layout {
     /// Not `#[inherent]` — a plain method here becomes a default `LayoutExt` trait method
     /// (dispatched through `__dyn_layout`, docs/specs/macro_class_spec.md), so

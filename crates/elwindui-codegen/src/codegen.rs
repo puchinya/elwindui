@@ -48,6 +48,11 @@ pub struct SymbolTable {
 
 #[derive(Clone)]
 pub struct TypeInfo {
+    /// Issue #166 (A2): this Component's constructor inputs are only fully known through its own
+    /// constructor ABI macro, because a base in its inheritance chain is a generated Component of
+    /// another crate (`__component_with_base_params`). Same-crate code constructs or inherits it
+    /// through that macro rather than from this table's `param_fields`.
+    pub deferred_constructor: bool,
     pub fields: HashMap<String, FieldKind>,
     /// Required fixed construction inputs (`#[param]`/`#[bindable]` without a default), in
     /// declaration order. Ordinary Props are intentionally absent: they are runtime-mutable
@@ -311,7 +316,7 @@ fn dsl_authored_path(type_path: &str) -> syn::Path {
 /// Resolves the defining crate's exported `__elwindui_props_<Type>!` macro.  `#[macro_export]`
 /// places that macro at the defining crate root, so only the first segment of a qualified Rust
 /// path is retained (`crate_alias::widgets::Thing` -> `crate_alias::__elwindui_props_Thing`).
-fn dsl_props_macro_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
+pub(crate) fn dsl_props_macro_path(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
     let ident = format_ident!("__elwindui_props_{}", dsl_type_ident(type_path));
     match dsl_type_origin(type_path, info) {
         DslTypeOrigin::Builtin | DslTypeOrigin::UnresolvedUnqualified => {
@@ -381,6 +386,230 @@ fn rewrite_crate_tokens(tokens: TokenStream) -> TokenStream {
 /// generated components use the same-crate registry, while builtin and unresolved-unqualified
 /// construction keep their existing builtin fallback. The macro itself is exported at the defining
 /// crate root, so a nested authored path retains only its first crate/alias segment here.
+/// Issue #166 (A2): name of the hidden type alias an inheritable Component emits beside itself for
+/// each required constructor input, so a derived Component in another crate can name the input's
+/// type. A `pub type` alias of a less visible type is only the `private_interfaces` lint (allowed
+/// on the alias), unlike a public trait impl's associated type, which is a hard E0446 error.
+const REQUIRED_PARAM_ALIAS_PREFIX: &str = "__elwindui_required__";
+
+/// The alias is `__elwindui_required__<N>_<Type>_<field>`, where `<N>` is the character count of
+/// `<Type>`. Both names may themselves contain `_` or `__`, so the length prefix (not a separator)
+/// is what lets `required_param_alias_base` recover `<Type>` exactly.
+pub(crate) fn required_param_alias_ident(type_name: &str, name: &str) -> syn::Ident {
+    let type_len = type_name.chars().count();
+    format_ident!("{REQUIRED_PARAM_ALIAS_PREFIX}{type_len}_{type_name}_{name}")
+}
+
+/// The alias of `base_path`'s required input `name`, at the same path as the Component itself
+/// (the convention every generated sibling item, such as `{Name}Ext`, already follows).
+pub(crate) fn required_param_alias_path(base_path: &str, name: &str) -> String {
+    let type_name = dsl_type_ident(base_path).to_string();
+    let alias = required_param_alias_ident(&type_name, name);
+    match base_path.rsplit_once("::") {
+        Some((parent, _)) => format!("{parent}::{alias}"),
+        None => alias.to_string(),
+    }
+}
+
+/// Recovers the Component path from a `required_param_alias_path` type, if `ty` is one.
+fn required_param_alias_base(ty: &syn::Type) -> Option<String> {
+    let syn::Type::Path(type_path) = ty else {
+        return None;
+    };
+    if type_path.qself.is_some() {
+        return None;
+    }
+    let last = type_path.path.segments.last()?;
+    let rest = last
+        .ident
+        .to_string()
+        .strip_prefix(REQUIRED_PARAM_ALIAS_PREFIX)?
+        .to_string();
+    let (type_len, rest) = rest.split_once('_')?;
+    let type_len: usize = type_len.parse().ok()?;
+    let type_end = rest.char_indices().nth(type_len).map(|(index, _)| index)?;
+    let (type_name, field) = rest.split_at(type_end);
+    if type_name.is_empty() || !field.starts_with('_') || field.len() == 1 {
+        return None;
+    }
+    let mut base = type_path.path.clone();
+    base.segments.last_mut()?.ident = format_ident!("{type_name}");
+    Some(quote! { #base }.to_string().replace(' ', ""))
+}
+
+thread_local! {
+    /// Issue #166 (A2): required constructor inputs of a generated base from another crate, keyed
+    /// by the derived Component being generated in phase two
+    /// (`generate_component_with_base_params`). Empty outside that phase.
+    static EXTERNAL_BASE_PARAMS: std::cell::RefCell<HashMap<String, Vec<String>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// The required constructor inputs of `component`'s cross-crate generated base, when known.
+pub(crate) fn external_base_params(component: &str) -> Option<Vec<String>> {
+    EXTERNAL_BASE_PARAMS.with(|params| params.borrow().get(component).cloned())
+}
+
+/// Scope guard publishing a derived Component's cross-crate base inputs for one generation.
+pub(crate) struct ExternalBaseParamsScope {
+    component: String,
+}
+
+impl ExternalBaseParamsScope {
+    pub(crate) fn enter(component: &str, names: Vec<String>) -> Self {
+        EXTERNAL_BASE_PARAMS.with(|params| {
+            params.borrow_mut().insert(component.to_string(), names);
+        });
+        Self {
+            component: component.to_string(),
+        }
+    }
+}
+
+impl Drop for ExternalBaseParamsScope {
+    fn drop(&mut self) {
+        EXTERNAL_BASE_PARAMS.with(|params| {
+            params.borrow_mut().remove(&self.component);
+        });
+    }
+}
+
+thread_local! {
+    /// PR #312 Implementation Contract v3 (D2): the hand-written `construct` of a declarative
+    /// Component, by Component name, while its `impl` is being generated.
+    static CUSTOM_CONSTRUCT: std::cell::RefCell<HashMap<String, String>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Holds `component`'s hand-written `construct` (D2) for the duration of its generation.
+pub(crate) struct CustomConstructScope {
+    component: String,
+}
+
+impl CustomConstructScope {
+    pub(crate) fn enter(component: &str, construct: &syn::ImplItemFn) -> Self {
+        CUSTOM_CONSTRUCT.with(|map| {
+            map.borrow_mut()
+                .insert(component.to_string(), quote! { #construct }.to_string());
+        });
+        Self {
+            component: component.to_string(),
+        }
+    }
+}
+
+impl Drop for CustomConstructScope {
+    fn drop(&mut self) {
+        CUSTOM_CONSTRUCT.with(|map| {
+            map.borrow_mut().remove(&self.component);
+        });
+    }
+}
+
+fn custom_construct(component: &str) -> Option<syn::ImplItemFn> {
+    CUSTOM_CONSTRUCT
+        .with(|map| map.borrow().get(component).cloned())
+        .and_then(|text| syn::parse_str(&text).ok())
+}
+
+/// D2: the generated storage initializer of a Component with a hand-written `construct` lives in
+/// a private helper outside the `#[class]` impl, so the `#[class]` layer no longer rewrites its
+/// call to the parent's `construct`; this does the same rewrite (`Parent::construct(..)` becomes
+/// `Parent::__class_construct(__self_weak.clone(), ..)`).
+struct ParentConstructRewriter<'a> {
+    parent: &'a str,
+}
+
+impl syn::visit_mut::VisitMut for ParentConstructRewriter<'_> {
+    fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
+        syn::visit_mut::visit_expr_mut(self, expr);
+        let syn::Expr::Call(call) = expr else {
+            return;
+        };
+        let syn::Expr::Path(func) = &mut *call.func else {
+            return;
+        };
+        let segments = &func.path.segments;
+        if segments.len() < 2
+            || segments.last().is_none_or(|s| s.ident != "construct")
+            || segments[segments.len() - 2].ident != self.parent
+        {
+            return;
+        }
+        func.path.segments.last_mut().unwrap().ident = format_ident!("__class_construct");
+        call.args
+            .insert(0, syn::parse_quote! { __self_weak.clone() });
+    }
+}
+
+/// Whether `base` (written as `base_path`) is a generated Component defined in another crate:
+/// not resolvable in this crate's symbol table and named through a crate-qualified path.
+/// Issue #166 (A2): whether `base` is a class of another crate (a qualified path with no table
+/// entry). Its required constructor inputs, if any, are known only to its own exported shape
+/// macro (`@required_params`); a builtin answers with none, so this does not decide whether the
+/// class is a generated Component.
+///
+/// PR #312 (contract v3): a same-crate class-backed Component (`crate::RawMiddle`) is not in the
+/// symbol table either; its shape macro answers the same way, so a qualified path of this crate
+/// counts too — but only when that Component registered its constructor ABI. A same-crate
+/// low-level `#[class]` has none, and keeps the ordinary (non-deferred) base path.
+pub(crate) fn is_external_base(
+    table: &SymbolTable,
+    module: &Module,
+    base: &str,
+    base_path: &str,
+) -> bool {
+    table.resolve(module, base).is_none()
+        && base_path.contains("::")
+        && match dsl_type_origin(base_path, None) {
+            DslTypeOrigin::Local => has_class_backed_constructor(base_path),
+            _ => true,
+        }
+}
+
+/// The constructor ABI macro path of a cross-crate generated base.
+pub(crate) fn external_ctor_macro_path(base_path: &str) -> TokenStream {
+    dsl_ctor_macro_path(base_path, None).unwrap_or_else(|| {
+        // A same-crate base with a deferred constructor: its ABI macro is exported at this
+        // crate's root.
+        let ident = format_ident!("__elwindui_ctor_{}", dsl_type_ident(base_path));
+        quote! { crate::#ident }
+    })
+}
+
+/// The constructor ABI macro a construction site uses for `node`: an external generated
+/// Component's, or (Issue #166, A2) a same-crate Component's whose constructor is deferred.
+fn node_ctor_macro_path(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> Option<TokenStream> {
+    let info = resolve_context_info(ctx, from, table, &node.type_path);
+    element_ctor_macro_path(&node.type_path, info).or_else(|| {
+        info.filter(|info| info.deferred_constructor)
+            .map(|_| external_ctor_macro_path(&node.type_path))
+    })
+}
+
+/// The constructor ABI of an element type: an external generated Component's, or (PR #312,
+/// contract v3) a same-crate class-backed Component's — a qualified local path with no symbol-table
+/// entry (`crate::RawMiddle`) whose `#[component]` registered the `crate::__elwindui_ctor_<Name>!`
+/// it publishes. A same-crate low-level `#[class]` publishes no constructor ABI, so it is never
+/// inferred from the path shape alone: it keeps the `Type::new()` + property-shape path.
+fn element_ctor_macro_path(type_path: &str, info: Option<&TypeInfo>) -> Option<TokenStream> {
+    dsl_ctor_macro_path(type_path, None).or_else(|| {
+        let local = matches!(dsl_type_origin(type_path, None), DslTypeOrigin::Local);
+        (info.is_none() && local && has_class_backed_constructor(type_path))
+            .then(|| external_ctor_macro_path(type_path))
+    })
+}
+
+/// Whether `type_path` names a same-crate class-backed Component with a constructor ABI.
+fn has_class_backed_constructor(type_path: &str) -> bool {
+    crate::component_frontend::has_class_backed_constructor(&dsl_type_ident(type_path).to_string())
+}
+
 fn dsl_ctor_macro_path(type_path: &str, info: Option<&TypeInfo>) -> Option<TokenStream> {
     let ident = format_ident!("__elwindui_ctor_{}", dsl_type_ident(type_path));
     match dsl_type_origin(type_path, info) {
@@ -679,12 +908,20 @@ fn new_external_expression(target: &syn::Path, args: &[(syn::Ident, syn::Expr)])
     } else {
         quote! { #first::#macro_ident }
     };
+    new_expression_through_ctor(target, &ctor_macro, args)
+}
+
+/// `new!` through a constructor ABI macro (`ctor_macro`): construct, initial Params and Props,
+/// then mount — the same protocol for an external generated Component and a same-crate
+/// class-backed one.
+fn new_expression_through_ctor(
+    target: &syn::Path,
+    ctor_macro: &TokenStream,
+    args: &[(syn::Ident, syn::Expr)],
+) -> TokenStream {
     let props: Vec<_> = args
         .iter()
-        .map(|(name, value)| {
-            let name = syn::LitStr::new(&name.to_string(), name.span());
-            quote! { (#name => #value) }
-        })
+        .map(|(name, value)| quote! { (#name => #value) })
         .collect();
     let props_for_new = props.clone();
     let props_for_params = props.clone();
@@ -693,7 +930,7 @@ fn new_external_expression(target: &syn::Path, args: &[(syn::Ident, syn::Expr)])
     let environment = format_ident!("__elwindui_new_environment");
     quote! {{
         let #value = #ctor_macro!(@new #target, props = [#(#props_for_new),*]);
-        let #environment = elwindui::core::environment::application_environment();
+        let #environment = #ctor_macro!(@environment #target);
         #ctor_macro!(@new_initial_params #value, props = [#(#props_for_params),*], environment = #environment);
         #ctor_macro!(@new_initial_props #value, props = [#(#props_for_props),*], environment = #environment);
         #ctor_macro!(@mount #value, #environment);
@@ -749,7 +986,21 @@ pub fn generate_new_expression(
     let sibling_modules = crate::component_frontend::sibling_component_modules("");
     let table = build_symbol_table(&sibling_modules);
     let info = table.resolve_unqualified(&type_name);
-    match dsl_type_origin(&target.to_token_stream().to_string(), info) {
+    // A same-crate class-backed `#[component]` (contract v3, D3) is not a generated Component:
+    // it is built through the constructor ABI it registered, under either spelling.
+    let target_spelling = target.to_token_stream().to_string();
+    let origin = dsl_type_origin(&target_spelling, info);
+    if info.is_none()
+        && matches!(
+            origin,
+            DslTypeOrigin::Local | DslTypeOrigin::UnresolvedUnqualified
+        )
+        && crate::component_frontend::has_class_backed_constructor(&type_name)
+    {
+        let ctor_macro = external_ctor_macro_path(&type_name);
+        return Ok(new_expression_through_ctor(target, &ctor_macro, args));
+    }
+    match origin {
         DslTypeOrigin::Local => {
             let (source_component, view) = crate::component_frontend::registered_component_parts(
                 &type_name,
@@ -935,10 +1186,84 @@ fn constructor_vec_item(ty: &syn::Type) -> Option<&syn::Type> {
 /// real `new` in its exact declaration order. Initial non-constructor assignments are routed
 /// through the defining crate's existing props-shape macro; constructor-consumed fields are
 /// deliberately no-ops there, preventing a second setter call.
+/// Issue #166 (A2): for a constructor input typed through a base's required-input alias
+/// (`required_param_alias_path`), the conversion of an authored value delegated to that base's
+/// constructor ABI (`@__ctor_arg_<name>`), spelled for use inside this crate's exported
+/// constructor macro.
+fn forwarded_required_param_conversion(ty: &syn::Type, name: &syn::Ident) -> Option<TokenStream> {
+    let base_text = required_param_alias_base(ty)?;
+    let ctor_macro = rewrite_crate_tokens(external_ctor_macro_path(&base_text));
+    let helper = format_ident!("__ctor_arg_{name}");
+    Some(quote! { #ctor_macro!(@#helper props = [(#name => $value)]) })
+}
+
+/// The hidden associated function a constructor ABI's `@environment` calls on its target type:
+/// the application environment, reached through `framework` (the defining crate's own path to
+/// `elwindui-core`), so that path resolves in the defining crate rather than at the construction
+/// site.
+pub fn application_environment_fn(target: &syn::Ident, framework: &TokenStream) -> TokenStream {
+    quote! {
+        impl #target {
+            #[doc(hidden)]
+            pub fn __elwindui_application_environment() -> #framework::environment::EnvironmentContext {
+                #framework::environment::application_environment()
+            }
+        }
+    }
+}
+
+/// PR #312 Implementation Contract v3 (D3): the constructor ABI (`__elwindui_ctor_<Type>!`) of a
+/// class-backed Component — hand-written storage built by its own `construct`. It is the same
+/// builder every generated Component uses; only the property surface differs: the ABI lists just
+/// the public constructor inputs (`#[constructor_inputs(..)]`, in `construct`'s order), and every
+/// other name goes to `props_macro`, the class property shape that declares it (the class's own,
+/// or a Core interface's for a `struct_only` implementor).
+pub fn class_constructor_abi(
+    type_name: &str,
+    inputs: &[(syn::Ident, syn::Type)],
+    props_macro: TokenStream,
+) -> TokenStream {
+    let shape = EffectiveConstructorShape {
+        params: inputs
+            .iter()
+            .map(|(name, ty)| EffectiveConstructorField {
+                name: name.clone(),
+                ty: ty.clone(),
+                hidden_setter: false,
+            })
+            .collect(),
+        defaulted_params: Vec::new(),
+        props: Vec::new(),
+        constructor_return: crate::component_frontend::ComponentConstructorReturn::RcSelf,
+        writable_after_construct: HashSet::new(),
+        non_writable_fields: Vec::new(),
+    };
+    build_constructor_macro(type_name, &shape, None, true, Some(props_macro))
+}
+
+/// PR #312 Implementation Contract v3 (D3): the constructor ABI of a class that cannot be built
+/// from outside — abstract, or with an internal-only `construct` (a non-empty argument list not
+/// published with `#[constructor_inputs]`, such as a native handle). Any use is a compile error
+/// naming `reason`; hand-written Rust may still call `Type::construct(..)` directly.
+pub fn unconstructible_class_abi(type_name: &str, reason: &str) -> TokenStream {
+    let macro_ident = format_ident!("__elwindui_ctor_{type_name}");
+    let message = format!("`{type_name}` cannot be constructed by new! or a view: {reason}");
+    quote! {
+        #[doc(hidden)]
+        #[macro_export]
+        #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+        macro_rules! #macro_ident {
+            ($($tokens:tt)*) => { compile_error!(#message) };
+        }
+    }
+}
+
 fn build_constructor_macro(
     type_name: &str,
     shape: &EffectiveConstructorShape,
     props_macro: Option<TokenStream>,
+    inheritable_base: bool,
+    delegate_props: Option<TokenStream>,
 ) -> TokenStream {
     let macro_ident = format_ident!("__elwindui_ctor_{type_name}");
     let return_name = match shape.constructor_return {
@@ -957,20 +1282,37 @@ fn build_constructor_macro(
             quote! { $crate::#macro_ident!(@#helper props = [$($props)*]) }
         })
         .collect();
+    // Only a Component that can be an inheritance base needs its input types exported. The alias
+    // keeps a less visible input type a lint (allowed here), never an E0446 error; a derived
+    // Component in another crate can still only use it when the type is public there.
+    let required_param_aliases: TokenStream = shape
+        .params
+        .iter()
+        .filter(|_| inheritable_base)
+        .map(|param| {
+            let alias = required_param_alias_ident(type_name, &param.name.to_string());
+            let ty = &param.ty;
+            quote! {
+                /// Constructor input type of an inheritable Component (Issue #166).
+                #[doc(hidden)]
+                #[allow(non_camel_case_types, dead_code, private_interfaces)]
+                pub type #alias = #ty;
+            }
+        })
+        .collect();
 
     let mut ctor_arg_arms = TokenStream::new();
     for param in &shape.params {
         let helper = format_ident!("__ctor_arg_{}", param.name);
         let name = &param.name;
-        let name_literal =
-            syn::LitStr::new(&param.name.to_string(), proc_macro2::Span::call_site());
-        let converted = generated_constructor_value(&param.ty, quote! { $value });
+        // Issue #166 (A2): an auto-forwarded base input is typed through the base's
+        // required-input alias, so only the base's own constructor ABI knows how to convert a value.
+        let converted = forwarded_required_param_conversion(&param.ty, &param.name)
+            .unwrap_or_else(|| generated_constructor_value(&param.ty, quote! { $value }));
         let option_some_arms = constructor_option_inner(&param.ty)
             .map(|inner| {
                 let converted_inner = generated_constructor_value(inner, quote! { $some_value });
                 quote! {
-                    (@#helper props = [(#name_literal => Some($some_value:expr)), $($rest:tt)*]) => { Some(#converted_inner) };
-                    (@#helper props = [(#name_literal => Some($some_value:expr))]) => { Some(#converted_inner) };
                     (@#helper props = [(#name => Some($some_value:expr)), $($rest:tt)*]) => { Some(#converted_inner) };
                     (@#helper props = [(#name => Some($some_value:expr))]) => { Some(#converted_inner) };
                 }
@@ -978,25 +1320,6 @@ fn build_constructor_macro(
             .unwrap_or_default();
         let missing = format!("missing required constructor field `{name}` for `{type_name}`");
         ctor_arg_arms.extend(quote! {
-            (@#helper props = [(#name_literal => @typed $value:expr), $($rest:tt)*]) => { $value };
-            (@#helper props = [(#name_literal => @typed $value:expr)]) => { $value };
-            (@#helper props = [(#name_literal => None), $($rest:tt)*]) => { None };
-            (@#helper props = [(#name_literal => None)]) => { None };
-            #option_some_arms
-            (@#helper props = [(#name_literal => $value:expr), $($rest:tt)*]) => { #converted };
-            (@#helper props = [(#name_literal => $value:expr)]) => { #converted };
-            (@#helper props = [($other:literal => @typed $value:expr), $($rest:tt)*]) => {
-                $crate::#macro_ident!(@#helper props = [$($rest)*])
-            };
-            (@#helper props = [($other:literal => @typed $value:expr)]) => {
-                $crate::#macro_ident!(@#helper props = [])
-            };
-            (@#helper props = [($other:literal => $value:expr), $($rest:tt)*]) => {
-                $crate::#macro_ident!(@#helper props = [$($rest)*])
-            };
-            (@#helper props = [($other:literal => $value:expr)]) => {
-                $crate::#macro_ident!(@#helper props = [])
-            };
             (@#helper props = [(#name => @typed $value:expr), $($rest:tt)*]) => { $value };
             (@#helper props = [(#name => @typed $value:expr)]) => { $value };
             (@#helper props = [(#name => None), $($rest:tt)*]) => { None };
@@ -1033,66 +1356,71 @@ fn build_constructor_macro(
         .chain(shape.defaulted_params.iter())
         .chain(shape.props.iter())
     {
-        let name_literal =
-            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
+        let name = &field.name;
         new_validation_arms.extend(quote! {
-            (@validate_new props = [(#name_literal => @typed $value:expr), $($rest:tt)*]) => {
+            (@validate_new props = [(#name => @typed $value:expr), $($rest:tt)*]) => {
                 $crate::#macro_ident!(@validate_new props = [$($rest)*]);
             };
-            (@validate_new props = [(#name_literal => @typed $value:expr)]) => {};
-            (@validate_new props = [(#name_literal => $value:expr), $($rest:tt)*]) => {
+            (@validate_new props = [(#name => @typed $value:expr)]) => {};
+            (@validate_new props = [(#name => $value:expr), $($rest:tt)*]) => {
                 $crate::#macro_ident!(@validate_new props = [$($rest)*]);
             };
-            (@validate_new props = [(#name_literal => $value:expr)]) => {};
+            (@validate_new props = [(#name => $value:expr)]) => {};
         });
     }
     for name in &shape.non_writable_fields {
         let name_literal = syn::LitStr::new(name, proc_macro2::Span::call_site());
+        let name = format_ident!("{name}");
         new_validation_arms.extend(quote! {
-            (@validate_new props = [(#name_literal => @typed $value:expr), $($rest:tt)*]) => {
+            (@validate_new props = [(#name => @typed $value:expr), $($rest:tt)*]) => {
                 compile_error!(concat!(
                     "field `", #name_literal, "` is not writable by new! on `", #type_name, "`"
                 ));
             };
-            (@validate_new props = [(#name_literal => @typed $value:expr)]) => {
+            (@validate_new props = [(#name => @typed $value:expr)]) => {
                 compile_error!(concat!(
                     "field `", #name_literal, "` is not writable by new! on `", #type_name, "`"
                 ));
             };
-            (@validate_new props = [(#name_literal => $value:expr), $($rest:tt)*]) => {
+            (@validate_new props = [(#name => $value:expr), $($rest:tt)*]) => {
                 compile_error!(concat!(
                     "field `", #name_literal, "` is not writable by new! on `", #type_name, "`"
                 ));
             };
-            (@validate_new props = [(#name_literal => $value:expr)]) => {
+            (@validate_new props = [(#name => $value:expr)]) => {
                 compile_error!(concat!(
                     "field `", #name_literal, "` is not writable by new! on `", #type_name, "`"
                 ));
             };
         });
     }
-    let new_validation_fallback = quote! {
-        (@validate_new props = []) => {};
-        (@validate_new props = [($name:literal => @typed $value:expr), $($rest:tt)*]) => {
-            compile_error!(concat!(
-                "unknown constructor field `", $name, "` on `", #type_name, "`"
-            ));
-        };
-        (@validate_new props = [($name:literal => @typed $value:expr)]) => {
-            compile_error!(concat!(
-                "unknown constructor field `", $name, "` on `", #type_name, "`"
-            ));
-        };
-        (@validate_new props = [($name:literal => $value:expr), $($rest:tt)*]) => {
-            compile_error!(concat!(
-                "unknown constructor field `", $name, "` on `", #type_name, "`"
-            ));
-        };
-        (@validate_new props = [($name:literal => $value:expr)]) => {
-            compile_error!(concat!(
-                "unknown constructor field `", $name, "` on `", #type_name, "`"
-            ));
-        };
+    let new_validation_fallback = match &delegate_props {
+        // A class-backed Component (PR #312 contract v3, D3) enumerates only its own constructor
+        // inputs: any other name is checked against the class chain's property shape.
+        Some(props_macro) => quote! {
+            (@validate_new props = []) => {};
+            (@validate_new props = [($name:ident => @typed $value:expr) $(, $($rest:tt)*)?]) => {
+                let _: ::core::option::Option<#props_macro!(@field_type $name)> = None;
+                $crate::#macro_ident!(@validate_new props = [$($($rest)*)?]);
+            };
+            (@validate_new props = [($name:ident => $value:expr) $(, $($rest:tt)*)?]) => {
+                let _: ::core::option::Option<#props_macro!(@field_type $name)> = None;
+                $crate::#macro_ident!(@validate_new props = [$($($rest)*)?]);
+            };
+        },
+        None => quote! {
+            (@validate_new props = []) => {};
+            (@validate_new props = [($name:ident => @typed $value:expr) $(, $($rest:tt)*)?]) => {
+                compile_error!(concat!(
+                    "unknown constructor field `", stringify!($name), "` on `", #type_name, "`"
+                ));
+            };
+            (@validate_new props = [($name:ident => $value:expr) $(, $($rest:tt)*)?]) => {
+                compile_error!(concat!(
+                    "unknown constructor field `", stringify!($name), "` on `", #type_name, "`"
+                ));
+            };
+        },
     };
 
     let mut initial_field_arms = TokenStream::new();
@@ -1103,8 +1431,6 @@ fn build_constructor_macro(
         .chain(shape.props.iter().map(|field| (field, false)))
     {
         let name = format_ident!("{}", field.name);
-        let name_literal =
-            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
         let converted = generated_constructor_value(&field.ty, quote! { $value });
         let setter_name = if is_param {
             format_ident!("__set_initial_param_{}", field.name)
@@ -1163,11 +1489,11 @@ fn build_constructor_macro(
             }
         };
         initial_field_arms.extend(quote! {
-            (@initial_named_typed $recv:expr, #name_literal, $value:expr, $environment:expr) => {
+            (@initial_named_typed $recv:expr, #name, $value:expr, $environment:expr) => {
                 #set_typed
             };
-            (@initial_named $recv:expr, #name_literal, None, $environment:expr) => { #set_none };
-            (@initial_named $recv:expr, #name_literal, $value:expr, $environment:expr) => { #set_value };
+            (@initial_named $recv:expr, #name, None, $environment:expr) => { #set_none };
+            (@initial_named $recv:expr, #name, $value:expr, $environment:expr) => { #set_value };
             (@initial_typed $recv:expr, #name, $value:expr, $environment:expr) => {
                 #set_typed
             };
@@ -1266,15 +1592,16 @@ fn build_constructor_macro(
     let mut new_initial_param_calls = TokenStream::new();
     for field in &shape.defaulted_params {
         let helper = format_ident!("__new_initial_param_{}", field.name);
+        let name = &field.name;
         let name_literal =
             syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
         let option_some_lookup_arms = constructor_option_inner(&field.ty)
             .map(|_| {
                 quote! {
-                    (@#helper $recv:expr, props = [(#name_literal => Some($some_value:expr)), $($rest:tt)*], environment = $environment:expr) => {
+                    (@#helper $recv:expr, props = [(#name => Some($some_value:expr)), $($rest:tt)*], environment = $environment:expr) => {
                         $crate::#macro_ident!(@new_initial $recv, #name_literal, Some($some_value), $environment);
                     };
-                    (@#helper $recv:expr, props = [(#name_literal => Some($some_value:expr))], environment = $environment:expr) => {
+                    (@#helper $recv:expr, props = [(#name => Some($some_value:expr))], environment = $environment:expr) => {
                         $crate::#macro_ident!(@new_initial $recv, #name_literal, Some($some_value), $environment);
                     };
                 }
@@ -1282,16 +1609,16 @@ fn build_constructor_macro(
             .unwrap_or_default();
         new_initial_lookup_arms.extend(quote! {
             #option_some_lookup_arms
-            (@#helper $recv:expr, props = [(#name_literal => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
+            (@#helper $recv:expr, props = [(#name => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
                 $crate::#macro_ident!(@new_initial $recv, #name_literal, $value, $environment);
             };
-            (@#helper $recv:expr, props = [(#name_literal => $value:expr)], environment = $environment:expr) => {
+            (@#helper $recv:expr, props = [(#name => $value:expr)], environment = $environment:expr) => {
                 $crate::#macro_ident!(@new_initial $recv, #name_literal, $value, $environment);
             };
-            (@#helper $recv:expr, props = [($other:literal => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
+            (@#helper $recv:expr, props = [($other:ident => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
                 $crate::#macro_ident!(@#helper $recv, props = [$($rest)*], environment = $environment);
             };
-            (@#helper $recv:expr, props = [($other:literal => $value:expr)], environment = $environment:expr) => {};
+            (@#helper $recv:expr, props = [($other:ident => $value:expr)], environment = $environment:expr) => {};
             (@#helper $recv:expr, props = [], environment = $environment:expr) => {};
         });
         new_initial_param_calls.extend(quote! {
@@ -1301,32 +1628,48 @@ fn build_constructor_macro(
     let mut new_initial_prop_calls = TokenStream::new();
     for field in &shape.props {
         let helper = format_ident!("__new_initial_prop_{}", field.name);
+        let name = &field.name;
         let name_literal =
             syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
         new_initial_lookup_arms.extend(quote! {
-            (@#helper $recv:expr, props = [(#name_literal => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
+            (@#helper $recv:expr, props = [(#name => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
                 $crate::#macro_ident!(@new_initial $recv, #name_literal, $value, $environment);
             };
-            (@#helper $recv:expr, props = [(#name_literal => $value:expr)], environment = $environment:expr) => {
+            (@#helper $recv:expr, props = [(#name => $value:expr)], environment = $environment:expr) => {
                 $crate::#macro_ident!(@new_initial $recv, #name_literal, $value, $environment);
             };
-            (@#helper $recv:expr, props = [($other:literal => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
+            (@#helper $recv:expr, props = [($other:ident => $value:expr), $($rest:tt)*], environment = $environment:expr) => {
                 $crate::#macro_ident!(@#helper $recv, props = [$($rest)*], environment = $environment);
             };
-            (@#helper $recv:expr, props = [($other:literal => $value:expr)], environment = $environment:expr) => {};
+            (@#helper $recv:expr, props = [($other:ident => $value:expr)], environment = $environment:expr) => {};
             (@#helper $recv:expr, props = [], environment = $environment:expr) => {};
         });
         new_initial_prop_calls.extend(quote! {
             $crate::#macro_ident!(@#helper $recv, props = [$($props)*], environment = $environment);
         });
     }
-    let new_initial_dispatchers = quote! {
-        (@new_initial_params $recv:expr, props = [$($props:tt)*], environment = $environment:expr) => {{
-            #new_initial_param_calls
-        }};
-        (@new_initial_props $recv:expr, props = [$($props:tt)*], environment = $environment:expr) => {{
-            #new_initial_prop_calls
-        }};
+    let new_initial_dispatchers = match &delegate_props {
+        // A class-backed Component sets every named value that is not a constructor input through
+        // its class chain's property shape (`@initial_named`'s delegating arm).
+        Some(_) => quote! {
+            (@new_initial_params $recv:expr, props = [$($props:tt)*], environment = $environment:expr) => {};
+            (@new_initial_props $recv:expr, props = [$($props:tt)*], environment = $environment:expr) => {{
+                $crate::#macro_ident!(@__new_initial_each $recv, [$($props)*], $environment);
+            }};
+            (@__new_initial_each $recv:expr, [], $environment:expr) => {};
+            (@__new_initial_each $recv:expr, [($name:ident => $($value:tt)*) $(, $($rest:tt)*)?], $environment:expr) => {
+                $crate::#macro_ident!(@initial_named $recv, $name, $($value)*, $environment);
+                $crate::#macro_ident!(@__new_initial_each $recv, [$($($rest)*)?], $environment);
+            };
+        },
+        None => quote! {
+            (@new_initial_params $recv:expr, props = [$($props:tt)*], environment = $environment:expr) => {{
+                #new_initial_param_calls
+            }};
+            (@new_initial_props $recv:expr, props = [$($props:tt)*], environment = $environment:expr) => {{
+                #new_initial_prop_calls
+            }};
+        },
     };
     let new_initial_unknown = quote! {
         (@new_initial $recv:expr, $name:literal, $value:expr, $environment:expr) => {
@@ -1336,45 +1679,55 @@ fn build_constructor_macro(
             ));
         };
     };
-    let initial_named_unknown = quote! {
-        (@initial_named_typed $recv:expr, $name:literal, $value:expr, $environment:expr) => {
-            compile_error!(concat!(
-                "field `", $name, "` is not an externally writable property of `",
-                #type_name, "`"
-            ));
-        };
-        (@initial_named $recv:expr, $name:literal, $value:expr, $environment:expr) => {
-            compile_error!(concat!(
-                "field `", $name, "` is not an externally writable property of `",
-                #type_name, "`"
-            ));
-        };
+    let initial_named_unknown = match &delegate_props {
+        // A class-backed Component: any other name is a property some class in its chain declares.
+        // `@set_chain_with_environment` sets the name on the class in the chain that declares it,
+        // on that class's own value, through its own trait — no trait import is needed here.
+        Some(props_macro) => quote! {
+            (@initial_named_typed $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                #props_macro!(@set_chain_with_environment &$recv, $name, $value, $environment);
+            };
+            (@initial_named $recv:expr, $name:ident, $($rest:tt)*) => {
+                #props_macro!(@set_chain_with_environment &$recv, $name, $($rest)*);
+            };
+        },
+        None => quote! {
+            (@initial_named_typed $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                compile_error!(concat!(
+                    "field `", stringify!($name), "` is not an externally writable property of `",
+                    #type_name, "`"
+                ));
+            };
+            (@initial_named $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                compile_error!(concat!(
+                    "field `", stringify!($name), "` is not an externally writable property of `",
+                    #type_name, "`"
+                ));
+            };
+        },
     };
     let initial_named_required_arms: TokenStream = shape
         .params
         .iter()
         .map(|param| {
-            let name_literal =
-                syn::LitStr::new(&param.name.to_string(), proc_macro2::Span::call_site());
+            let name = &param.name;
             quote! {
-                (@initial_named_typed $recv:expr, #name_literal, $value:expr, $environment:expr) => {};
-                (@initial_named $recv:expr, #name_literal, $value:expr, $environment:expr) => {};
+                (@initial_named_typed $recv:expr, #name, $value:expr, $environment:expr) => {};
+                (@initial_named $recv:expr, #name, $value:expr, $environment:expr) => {};
             }
         })
         .collect();
     let mut resync_fixed_arms = TokenStream::new();
     for field in shape.params.iter().chain(shape.defaulted_params.iter()) {
         let name = format_ident!("{}", field.name);
-        let name_literal =
-            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
         let message = format!(
             "{type_name}.{name} is a fixed constructor field and cannot be updated reactively"
         );
         resync_fixed_arms.extend(quote! {
-            (@resync_named $recv:expr, #name_literal, $value:expr, $environment:expr, reactive = true) => {
+            (@resync_named $recv:expr, #name, $value:expr, $environment:expr, reactive = true) => {
                 compile_error!(#message);
             };
-            (@resync_named $recv:expr, #name_literal, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_named $recv:expr, #name, $value:expr, $environment:expr, reactive = false) => {};
             (@resync_set $recv:expr, #name, $value:expr, $environment:expr, reactive = true) => {
                 compile_error!(#message);
             };
@@ -1385,8 +1738,6 @@ fn build_constructor_macro(
     let mut resync_prop_arms = TokenStream::new();
     for field in &shape.props {
         let name = format_ident!("{}", field.name);
-        let name_literal =
-            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
         let setter = format_ident!("set_{}", field.name);
         let set = if field.hidden_setter {
             quote! { $recv.#setter($value); }
@@ -1406,10 +1757,10 @@ fn build_constructor_macro(
             }
         };
         resync_prop_arms.extend(quote! {
-            (@resync_named $recv:expr, #name_literal, $value:expr, $environment:expr, reactive = true) => {
+            (@resync_named $recv:expr, #name, $value:expr, $environment:expr, reactive = true) => {
                 #set
             };
-            (@resync_named $recv:expr, #name_literal, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_named $recv:expr, #name, $value:expr, $environment:expr, reactive = false) => {};
             (@resync_set $recv:expr, #name, $value:expr, $environment:expr, reactive = true) => {
                 #set
             };
@@ -1419,15 +1770,28 @@ fn build_constructor_macro(
             };
         });
     }
-    let resync_fallback = match &props_macro {
-        Some(props_macro) => quote! {
-            (@resync_named $recv:expr, $name:literal, $value:expr, $environment:expr, reactive = true) => {
+    let resync_fallback = match (&delegate_props, &props_macro) {
+        (Some(delegate), _) => quote! {
+            (@resync_named $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = true) => {
+                #delegate!(@set_chain_with_environment &$recv, $name, $value, $environment);
+            };
+            (@resync_named $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_set $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = true) => {
+                #delegate!(@set_chain_with_environment &$recv, $name, $value, $environment);
+            };
+            (@resync_set $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_item_set $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                #delegate!(@set_chain_with_environment &$recv, $name, $value, $environment);
+            };
+        },
+        (None, Some(props_macro)) => quote! {
+            (@resync_named $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = true) => {
                 compile_error!(concat!(
-                    "field `", $name, "` is not an externally writable property of `",
+                    "field `", stringify!($name), "` is not an externally writable property of `",
                     #type_name, "`"
                 ));
             };
-            (@resync_named $recv:expr, $name:literal, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_named $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = false) => {};
             (@resync_set $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = true) => {
                 #props_macro!(@set_with_environment $recv, $name, $value, $environment);
             };
@@ -1436,14 +1800,14 @@ fn build_constructor_macro(
                 #props_macro!(@set_with_environment $recv, $name, $value, $environment);
             };
         },
-        None => quote! {
-            (@resync_named $recv:expr, $name:literal, $value:expr, $environment:expr, reactive = true) => {
+        (None, None) => quote! {
+            (@resync_named $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = true) => {
                 compile_error!(concat!(
-                    "field `", $name, "` is not an externally writable property of `",
+                    "field `", stringify!($name), "` is not an externally writable property of `",
                     #type_name, "`"
                 ));
             };
-            (@resync_named $recv:expr, $name:literal, $value:expr, $environment:expr, reactive = false) => {};
+            (@resync_named $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = false) => {};
             (@resync_set $recv:expr, $name:ident, $value:expr, $environment:expr, reactive = true) => {
                 compile_error!(concat!(
                     "field ",
@@ -1465,26 +1829,28 @@ fn build_constructor_macro(
     };
     let mut semantic_brush_named_arms = TokenStream::new();
     for field in shape.params.iter().chain(shape.defaulted_params.iter()) {
-        let name_literal =
-            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
+        let name = &field.name;
         semantic_brush_named_arms.extend(quote! {
-            (@is_semantic_brush_named #name_literal) => { false };
+            (@is_semantic_brush_named #name) => { false };
         });
     }
     for field in &shape.props {
         let name = format_ident!("{}", field.name);
-        let name_literal =
-            syn::LitStr::new(&field.name.to_string(), proc_macro2::Span::call_site());
         let value = match &props_macro {
             Some(props_macro) => quote! { #props_macro!(@is_semantic_brush #name) },
             None => quote! { false },
         };
         semantic_brush_named_arms.extend(quote! {
-            (@is_semantic_brush_named #name_literal) => { #value };
+            (@is_semantic_brush_named #name) => { #value };
         });
     }
-    let semantic_brush_named_fallback = quote! {
-        (@is_semantic_brush_named $name:literal) => { false };
+    let semantic_brush_named_fallback = match &delegate_props {
+        Some(props_macro) => quote! {
+            (@is_semantic_brush_named $name:ident) => { #props_macro!(@is_semantic_brush $name) };
+        },
+        None => quote! {
+            (@is_semantic_brush_named $name:ident) => { false };
+        },
     };
     let writable_arms: TokenStream = shape
         .writable_after_construct
@@ -1494,17 +1860,25 @@ fn build_constructor_macro(
             quote! { (@writable_after_construct #name) => { true }; }
         })
         .collect();
-    let new_method = match shape.constructor_return {
-        crate::component_frontend::ComponentConstructorReturn::SelfValue => format_ident!("new"),
-        crate::component_frontend::ComponentConstructorReturn::RcSelf => {
+    // A class-backed Component is built by its `#[class]` `new` and mounted by whatever attaches
+    // it, like every builtin.
+    let new_method = match (shape.constructor_return, &delegate_props) {
+        (_, Some(_)) => format_ident!("new"),
+        (crate::component_frontend::ComponentConstructorReturn::SelfValue, None) => {
+            format_ident!("new")
+        }
+        (crate::component_frontend::ComponentConstructorReturn::RcSelf, None) => {
             format_ident!("__new_unmounted")
         }
     };
-    let mount_arm = match shape.constructor_return {
-        crate::component_frontend::ComponentConstructorReturn::SelfValue => quote! {
+    let mount_arm = match (delegate_props.is_some(), shape.constructor_return) {
+        (true, _) => quote! {
             (@mount $recv:expr, $environment:expr) => {};
         },
-        crate::component_frontend::ComponentConstructorReturn::RcSelf => quote! {
+        (false, crate::component_frontend::ComponentConstructorReturn::SelfValue) => quote! {
+            (@mount $recv:expr, $environment:expr) => {};
+        },
+        (false, crate::component_frontend::ComponentConstructorReturn::RcSelf) => quote! {
             (@mount $recv:expr, $environment:expr) => {
                 $recv.__mount($environment);
             };
@@ -1523,6 +1897,12 @@ fn build_constructor_macro(
                     #(#ctor_args),*
                 )
             }};
+
+            // The application environment, through the type's own hidden associated function
+            // (`application_environment_fn`), whose paths resolve in the defining crate: a
+            // construction site needs no path of its own to the framework (a Cargo-renamed
+            // facade, say).
+            (@environment $target:path) => { <$target>::__elwindui_application_environment() };
             #mount_arm
             #ctor_arg_arms
             #new_validation_arms
@@ -1543,6 +1923,7 @@ fn build_constructor_macro(
             #writable_arms
             (@writable_after_construct $name:ident) => { false };
         }
+        #required_param_aliases
     }
 }
 
@@ -1986,6 +2367,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             own_on_unmount: own_view.and_then(|v| v.on_unmount.clone()),
                             // Finalized in the same later pass as `is_native`, for the same reason.
                             composed_shape: None,
+                            deferred_constructor: false,
                             host_composition_base: None,
                             sealed: c.sealed,
                             is_abstract: c.is_abstract,
@@ -2061,6 +2443,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             own_on_mount: None,
                             own_on_unmount: None,
                             composed_shape: None,
+                            deferred_constructor: false,
                             host_composition_base: None,
                             sealed: false,
                             is_abstract: false,
@@ -2138,6 +2521,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             own_on_mount: None,
                             own_on_unmount: None,
                             composed_shape: None,
+                            deferred_constructor: false,
                             host_composition_base: None,
                             sealed: false,
                             is_abstract: false,
@@ -2184,8 +2568,13 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
             )
         })
         .collect();
+    let mut deferred_memo: HashMap<(Vec<String>, String), bool> = HashMap::new();
+    for key in &keys {
+        resolve_deferred_constructor(key, modules, &table, &mut deferred_memo);
+    }
     let mut types = table.types;
     for (key, info) in types.iter_mut() {
+        info.deferred_constructor = deferred_memo.get(key).copied().unwrap_or(false);
         info.is_native = memo.get(key).copied().unwrap_or(false);
         info.composed_shape = composed_shape_memo.get(key).cloned().flatten();
         info.host_composition_base = host_composition_memo
@@ -2336,6 +2725,17 @@ pub(crate) fn resolve_effective_fields<'m>(
     let Some(base) = c.base.as_deref() else {
         return c.fields.clone();
     };
+    // Issue #166 (A2): a base whose constructor inputs were delivered by its constructor ABI
+    // (phase two) is treated exactly like a cross-crate base, even when it is a same-crate
+    // Component whose own table entry cannot list them.
+    if external_base_params(&c.name).is_some() {
+        return synthesize_external_base_fields(
+            c,
+            base,
+            c.base_path.as_deref(),
+            find_view(from, &c.name),
+        );
+    }
     let Some((base_module, base_c)) = find_component_and_module(from, base, modules) else {
         return synthesize_external_base_fields(
             c,
@@ -2374,6 +2774,11 @@ pub(crate) fn resolve_effective_fields<'m>(
             } else {
                 HashSet::new()
             };
+            // Issue #166 (A2): a required base `#[param]` / `#[bindable]` (no initializer) that the
+            // composed root leaves unset is auto-forwarded as a constructor input of this
+            // Component (see `generate_view`'s synthesized `name: name` root forward), so it stays
+            // in the effective field set even when the view never mentions it.
+            let auto_forwards_required = !view.is_template && view.implicit_owner.is_none();
             base_fields
                 .into_iter()
                 .filter(|f| {
@@ -2383,6 +2788,11 @@ pub(crate) fn resolve_effective_fields<'m>(
                         || common_fields.contains(f.name.as_str())
                         || view_references_bare_name(view, &f.name)
                         || template_parent_fields.contains(&f.name)
+                        || (auto_forwards_required
+                            && f.initializer.is_none()
+                            && f.kind == FieldKind::Param
+                            && !crate::attr_frontend::is_event_schema_field(f)
+                            && !view.root.attributes.iter().any(|a| a.name == f.name))
                 })
                 .collect()
         }
@@ -2423,8 +2833,35 @@ fn synthesize_external_base_fields(
     base_path: Option<&str>,
     view: Option<&ViewDef>,
 ) -> Vec<FieldDef> {
+    // Issue #166 (A2): the base's required constructor inputs, delivered by its constructor ABI
+    // macro in phase two (`generate_component_with_base_params`). Each one the composed root does
+    // not set to a value of its own is auto-forwarded as a constructor input of `c`, typed through
+    // the base's required-input alias (the field's own type may not be nameable here). They lead
+    // the effective field list, so constructor order is base-first.
+    let external_required: Vec<FieldDef> = external_base_params(&c.name)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| !c.fields.iter().any(|f| &f.name == name))
+        .filter(|name| {
+            view.is_none_or(|view| {
+                view.root.attributes.iter().all(|a| {
+                    &a.name != name
+                        || matches!(&a.value, ViewExpr::Path(p) if p.len() == 1 && &p[0] == name)
+                })
+            })
+        })
+        .map(|name| FieldDef {
+            ty: required_param_alias_path(base_path.unwrap_or(base), &name),
+            name,
+            kind: FieldKind::Param,
+            attrs: Vec::new(),
+            initializer: None,
+        })
+        .collect();
     let Some(view) = view else {
-        return c.fields.clone();
+        let mut result = external_required;
+        result.extend(c.fields.iter().cloned());
+        return result;
     };
     // Issue #162: a hidden Component lowered from a `ViewExpr::DeferredView`
     // (`ViewDef::implicit_owner`) already resolves every otherwise-unresolved bare name through its
@@ -2455,7 +2892,9 @@ fn synthesize_external_base_fields(
     // an external/local qualified inherits path so the deferred type query reaches that defining
     // crate's shape macro root instead of falling back to the builtin crate.
     let props_macro = dsl_props_macro_path(base_path.unwrap_or(base), None).to_string();
-    let mut result = c.fields.clone();
+    bare_names.retain(|name| !external_required.iter().any(|f| &f.name == name));
+    let mut result = external_required;
+    result.extend(c.fields.iter().cloned());
     result.extend(bare_names.into_iter().map(|name| FieldDef {
         ty: format!("{props_macro}!(@field_type {name})"),
         name,
@@ -3473,6 +3912,44 @@ fn resolve_is_native(
 /// Recursively resolves the virtual-builtin shape (if any) the component at `key` composes over via
 /// a real `base: <Impl>` field — see `TypeInfo::composed_shape`'s doc comment and
 /// `codegen::generate_view`'s `composed_shape`-driven branch.
+/// Issue #166 (A2): whether the component at `key` inherits, directly or through same-crate
+/// ancestors, a generated Component of another crate (see `TypeInfo::deferred_constructor`).
+fn resolve_deferred_constructor(
+    key: &(Vec<String>, String),
+    modules: &[Module],
+    table: &SymbolTable,
+    memo: &mut HashMap<(Vec<String>, String), bool>,
+) -> bool {
+    if let Some(cached) = memo.get(key) {
+        return *cached;
+    }
+    memo.insert(key.clone(), false);
+    let result = modules
+        .iter()
+        .filter(|module| module.path == key.0)
+        .find_map(|module| {
+            module.items.iter().find_map(|item| match item {
+                Item::Component(c) if c.name == key.1 => Some((module, c)),
+                _ => None,
+            })
+        })
+        .is_some_and(|(module, c)| {
+            let (Some(base), base_path) = (c.base.as_deref(), c.base_path.as_deref()) else {
+                return false;
+            };
+            if let Some(base_path) = base_path {
+                if is_external_base(table, module, base, base_path) {
+                    return true;
+                }
+            }
+            table.resolve_key(module, base).is_some_and(|base_key| {
+                resolve_deferred_constructor(&base_key, modules, table, memo)
+            })
+        });
+    memo.insert(key.clone(), result);
+    result
+}
+
 fn resolve_composed_shape(
     key: &(Vec<String>, String),
     component_meta: &HashMap<(Vec<String>, String), (usize, Option<String>, Option<String>, bool)>,
@@ -5062,8 +5539,15 @@ fn generate_component(
         own_field_shape.constructor_return,
         non_writable_fields,
     );
-    let constructor_macro =
-        build_constructor_macro(&struct_name.to_string(), &constructor_shape, None);
+    let application_environment =
+        application_environment_fn(&struct_name, &quote! { elwindui::core });
+    let constructor_macro = build_constructor_macro(
+        &struct_name.to_string(),
+        &constructor_shape,
+        None,
+        false,
+        None,
+    );
     quote! {
         #[allow(non_camel_case_types)]
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5135,6 +5619,7 @@ fn generate_component(
         }
 
         #constructor_macro
+        #application_environment
     }
 }
 
@@ -5334,6 +5819,64 @@ fn generate_view(
         .and_then(|i| i.host_composition_base.clone());
     let is_host_composition = host_composition_base.is_some();
     let is_composed = composed_shape.is_some() || is_host_composition;
+    // Issue #166 (A2): a required base `#[param]` / `#[bindable]` (no initializer) that this
+    // Component's own composed view leaves unset is auto-forwarded — exactly like a view-less
+    // derived Component: it becomes a constructor parameter of this Component (effective field
+    // order, so base-first) and reaches the base construction through a synthesized same-name root
+    // forward (`name: name`), which every downstream step already treats as the established root
+    // forwarding form (constructor surface, no derived storage/accessor — D1/D6). A value the
+    // derived view sets itself (`title: "fixed"`) wins and adds no parameter; an authored
+    // `title: title` is the same forward, never a duplicate.
+    let auto_forwarded_view;
+    let view: &ViewDef = if has_own_view
+        && composed_shape.is_some()
+        && !view.is_template
+        && view.implicit_owner.is_none()
+    {
+        let declared: HashSet<&str> = source_component
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        let missing: Vec<String> = component
+            .fields
+            .iter()
+            .filter(|f| {
+                !declared.contains(f.name.as_str())
+                    // A cross-crate base field synthesized only from a bare reference
+                    // (`synthesize_external_base_fields`) is not known to be required.
+                    && !f.ty.contains("@field_type")
+                    && f.initializer.is_none()
+                    && f.kind == FieldKind::Param
+                    && !crate::attr_frontend::is_event_schema_field(f)
+                    && !view.root.attributes.iter().any(|a| a.name == f.name)
+            })
+            .map(|f| f.name.clone())
+            .collect();
+        if missing.is_empty() {
+            view
+        } else {
+            let mut owned = view.clone();
+            let span = crate::ast::SourceSpan {
+                start: 0,
+                end: 0,
+                line: 1,
+                column: 1,
+            };
+            for name in missing {
+                owned.root.attributes.push(ViewAttribute {
+                    value: ViewExpr::Path(vec![name.clone()]),
+                    name,
+                    kind: AssignmentKind::Normal,
+                    span,
+                });
+            }
+            auto_forwarded_view = owned;
+            &auto_forwarded_view
+        }
+    } else {
+        view
+    };
     // `#[class]` derives an `XExt` trait from the component struct `X`.
     let struct_ident = target.clone();
 
@@ -5472,6 +6015,7 @@ fn generate_view(
     // dependencies before dependents (the same assumption DSL authors already have to satisfy
     // for a `#[computed]` field to read sensibly top-to-bottom); this doesn't topologically sort.
     let mut own_default_construct_stmts = TokenStream::new();
+    let mut own_default_construct_locals: Vec<syn::Ident> = Vec::new();
     for f in component.fields.iter().filter(|f| {
         (!(is_shape_composition || is_inherited_view_composition)
             || source_field_names.contains(f.name.as_str()))
@@ -5488,6 +6032,7 @@ fn generate_view(
         };
         let init_expr = rewrite_t_macro_bare(coerce_to_owned_string(&f.ty, raw_expr.clone()));
         own_default_construct_stmts.extend(quote! { let #field_ident: #ty = #init_expr; });
+        own_default_construct_locals.push(field_ident);
     }
     // `#[environment(name)]` fields no longer resolve here (CI-5 of #80,
     // docs/design/runtime/component_lifecycle_design.md §4d) — real resolution happens in
@@ -5530,9 +6075,13 @@ fn generate_view(
         own_fields,
         mutable_own_fields: HashSet::new(),
         inherited_fields: HashSet::new(),
+        forwarded_inherited_fields: HashSet::new(),
         inherited_props_macro: None,
         composition_base_prefix_root: None,
-        weak_wiring: is_shape_composition || is_inherited_view_composition,
+        // Issue #166 (A1): host composition (`inherits Window`) too — while shown, the application
+        // window registry is the owner's strong lifetime authority (Issue #254), so stored callbacks
+        // must not keep it alive after close.
+        weak_wiring: is_shape_composition || is_inherited_view_composition || is_host_composition,
         property_dependencies: own_dependents_of.clone(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
@@ -5785,6 +6334,10 @@ fn generate_view(
         component
             .fields
             .iter()
+            // Issue #166 (A2): an inherited `#[bindable]` (auto-forwarded into the embedded base)
+            // is subscribed by the base itself (`EmbeddedViewSync::__elwindui_mount_embedded`) and
+            // has no storage on this Component.
+            .filter(|f| !inherited_shape_field_names.contains(&f.name))
             .filter(|f| {
                 f.attrs.iter().any(|a| matches!(a, Attr::Bindable)) || is_reserved_weak_owner(f)
             })
@@ -6080,15 +6633,36 @@ fn generate_view(
     let required_own_names: Vec<syn::Ident> = own_struct_param_names.clone();
     let required_own_types: Vec<syn::Type> = own_struct_param_types.clone();
     // `new(..)`/`create_<snake case>(..)`'s own argument list — required Params only.
+    // Issue #166 (A2): an inherited param the composed root forwards by the same name (authored
+    // `name: name`, or synthesized above for a required base param the view leaves unset) stays a
+    // constructor parameter; it is consumed by the base construction and never stored again here.
+    let root_forwarded_inherited: HashSet<String> = if is_shape_composition {
+        view.root
+            .attributes
+            .iter()
+            .filter(|a| matches!(&a.value, ViewExpr::Path(p) if p.len() == 1 && p[0] == a.name))
+            .map(|a| a.name.clone())
+            .filter(|name| inherited_shape_field_names.contains(name))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    ctx.forwarded_inherited_fields = root_forwarded_inherited.clone();
     let ctor_param_names: Vec<syn::Ident> = param_names
         .iter()
-        .filter(|n| !inherited_shape_field_names.contains(&n.to_string()))
+        .filter(|n| {
+            let n = n.to_string();
+            !inherited_shape_field_names.contains(&n) || root_forwarded_inherited.contains(&n)
+        })
         .cloned()
         .collect();
     let ctor_param_types: Vec<syn::Type> = param_names
         .iter()
         .zip(param_types.iter())
-        .filter(|(n, _)| !inherited_shape_field_names.contains(&n.to_string()))
+        .filter(|(n, _)| {
+            let n = n.to_string();
+            !inherited_shape_field_names.contains(&n) || root_forwarded_inherited.contains(&n)
+        })
         .map(|(_, t)| t.clone())
         .collect();
 
@@ -6508,6 +7082,9 @@ fn generate_view(
 
     let mut struct_fields = TokenStream::new();
     let mut construct_stmts = own_default_construct_stmts;
+    // Issue #166 (A2): the shape-composition root's mount-time initial values (semantic brushes),
+    // run from `__build_view` once the mount environment is known (`shape_root_initial_sets`).
+    let mut root_mount_initial_stmts = TokenStream::new();
     // CI-4 of #80 (docs/design/runtime/component_lifecycle_design.md §4b): plan-driven descendant
     // construction — every ordinary (non-root-composition) `PlannedNode` — is emitted here instead
     // of into `construct_stmts`, so it runs from `__build_view()` (post-`Rc::new_cyclic`, once this
@@ -6543,7 +7120,11 @@ fn generate_view(
             continue;
         }
         let own_field_ident = format_ident!("{}", own_field_name);
-        let own_field_get = if is_composed
+        let own_field_get = if root_forwarded_inherited.contains(own_field_name) {
+            // Issue #166 (A2): a root-forwarded inherited constructor input has no accessor on
+            // this Component; read it from the declaring ancestor like any inherited field.
+            inherited_field_read(&ctx, &EmitMode::Construction, own_field_name)
+        } else if is_composed
             && source_component.content_field.as_deref() == Some(own_field_name.as_str())
         {
             // Keep a generated component's typed content getter distinct from a same-named
@@ -7036,9 +7617,9 @@ fn generate_view(
         if let Some(info) = resolve_context_info(&ctx, from, table, &node.type_path) {
             let value = is_semantic_brush_property(info, name);
             quote! { #value }
-        } else if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
-            let name_literal = syn::LitStr::new(name, proc_macro2::Span::call_site());
-            quote! { #ctor_macro!(@is_semantic_brush_named #name_literal) }
+        } else if let Some(ctor_macro) = element_ctor_macro_path(&node.type_path, None) {
+            let name = format_ident!("{name}");
+            quote! { #ctor_macro!(@is_semantic_brush_named #name) }
         } else {
             let props_macro = dsl_props_macro_path(&node.type_path, None);
             let name = format_ident!("{name}");
@@ -7223,6 +7804,19 @@ fn generate_view(
                                 )
                             });
                     construct_stmts.extend(quote! { let #binding: #base_impl_ty = #value; });
+                    let (root_construct_sets, root_mount_sets) = shape_root_initial_sets(
+                        node,
+                        &ctx,
+                        from,
+                        table,
+                        &required_own_names
+                            .iter()
+                            .chain(&own_default_construct_locals)
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    );
+                    construct_stmts.extend(root_construct_sets);
+                    root_mount_initial_stmts.extend(root_mount_sets);
                 }
                 continue;
             }
@@ -8304,6 +8898,35 @@ fn generate_view(
         } else {
             Vec::new()
         };
+    // Issue #166 (A2): this Component's own `#[param]`s (required and defaulted) are readable by a
+    // derived Component through the exported shape macro's `@inherited_get` (`#[fixed(name)]`),
+    // so an inherited constructor input resolves by bare name in any crate. A defaulted one
+    // (`#[fixed(name: Type, default)]`) also takes a derived root's initial value through
+    // `@initial_with_environment`, converted for its declared type.
+    // Issue #166 (A2): the required constructor inputs in constructor order, answered by the
+    // exported shape macro's `@required_params` to a derived Component in another crate (which asks
+    // every base, generated or builtin, through the same shape macro).
+    let generated_class_constructor_inputs = (is_shape_composition
+        || is_inherited_view_composition)
+        .then(|| quote! { #[constructor_inputs(#(#ctor_param_names),*)] });
+    let generated_class_fixed_decls: Vec<TokenStream> =
+        if is_shape_composition || is_inherited_view_composition {
+            own_field_shape
+                .constructor_params
+                .iter()
+                .map(|(name, _)| {
+                    let name = format_ident!("{name}");
+                    quote! { #[fixed(#name)] }
+                })
+                .chain(own_field_shape.defaulted_params.iter().map(|(name, ty)| {
+                    let name = format_ident!("{name}");
+                    let ty: syn::Type = syn::parse_str(ty).expect("field type must parse");
+                    quote! { #[fixed(#name: #ty, default)] }
+                }))
+                .collect()
+        } else {
+            Vec::new()
+        };
     let generated_class_content_decl = if is_shape_composition || is_inherited_view_composition {
         source_component.content_field.as_ref().map(|field| {
             let field = format_ident!("{}", field);
@@ -9115,8 +9738,86 @@ fn generate_view(
         own_field_shape.constructor_return,
         non_writable_fields,
     );
-    let constructor_macro =
-        build_constructor_macro(&target_name, &constructor_shape, generated_props_macro);
+    // D2 (PR #312 Implementation Contract v3): a hand-written `construct` replaces the generated
+    // one in the `#[class]` impl; the generated storage initializer becomes the private
+    // `__elwindui_generated_construct(__self_weak, <inputs>)` it can call. Its inputs must be the
+    // generated constructor inputs, in order (base-first, then this Component's own).
+    let generated_construct_body = quote! {
+        let __self_weak_erased: std::rc::Weak<dyn std::any::Any> = __self_weak.clone();
+        #construct_stmts
+        let __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(
+            std::rc::Rc<std::cell::Cell<bool>>,
+            std::rc::Rc<dyn Fn(#component_property_enum)>,
+        )>>> = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(
+            std::rc::Rc<std::cell::Cell<bool>>,
+            std::rc::Rc<dyn Fn(#component_property_enum)>,
+        )>::new()));
+        Self { #(#plain_required_names,)* #cell_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers, __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created), __closed: std::cell::Cell::new(false), __elwindui_embedded_self: std::cell::RefCell::new(None) }
+    };
+    let (class_construct, generated_construct_helper) = match custom_construct(&target_name) {
+        None => (
+            quote! {
+                fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
+                    #generated_construct_body
+                }
+            },
+            TokenStream::new(),
+        ),
+        Some(construct) => {
+            let names: Vec<String> = construct
+                .sig
+                .inputs
+                .iter()
+                .filter_map(|input| match input {
+                    syn::FnArg::Typed(typed) => match typed.pat.as_ref() {
+                        syn::Pat::Ident(pat) => Some(pat.ident.to_string()),
+                        _ => None,
+                    },
+                    syn::FnArg::Receiver(_) => None,
+                })
+                .collect();
+            let expected: Vec<String> = ctor_param_names.iter().map(|n| n.to_string()).collect();
+            let mismatch = (names != expected).then(|| {
+                let message = format!(
+                    "`{target_name}::construct`: its arguments ({}) must be the Component's \
+                     constructor inputs, in order ({})",
+                    names.join(", "),
+                    expected.join(", ")
+                );
+                quote! { compile_error!(#message); }
+            });
+            let mut helper_body: syn::Block = syn::parse2(quote! { { #generated_construct_body } })
+                .expect("generated construct body is a block");
+            if let Some(parent) = component.base.as_deref() {
+                let parent = parent.rsplit("::").next().unwrap_or(parent);
+                syn::visit_mut::VisitMut::visit_block_mut(
+                    &mut ParentConstructRewriter { parent },
+                    &mut helper_body,
+                );
+            }
+            (
+                quote! { #construct },
+                quote! {
+                    #mismatch
+                    impl #target {
+                        #[doc(hidden)]
+                        #[allow(clippy::too_many_arguments, dead_code)]
+                        fn __elwindui_generated_construct(
+                            __self_weak: std::rc::Weak<dyn #target_ext>,
+                            #(#ctor_param_names: #ctor_param_types),*
+                        ) -> Self #helper_body
+                    }
+                },
+            )
+        }
+    };
+    let constructor_macro = build_constructor_macro(
+        &target_name,
+        &constructor_shape,
+        generated_props_macro,
+        is_shape_composition || is_inherited_view_composition,
+        None,
+    );
 
     let generated = if is_composed {
         // A component-level template takes the specialized path above and returns from
@@ -9132,6 +9833,7 @@ fn generate_view(
         } else {
             quote! {
                 #own_environment_resolve_stmts
+                #root_mount_initial_stmts
                 #body_prepare_stmt
                 #child_construct_stmts
                 #content_attach_stmt
@@ -9262,6 +9964,8 @@ fn generate_view(
 
             #[elwindui::class(inherits = #inherits_path)]
             #(#generated_class_prop_decls)*
+            #(#generated_class_fixed_decls)*
+            #generated_class_constructor_inputs
             #generated_class_content_decl
             pub struct #target {
                 #(#plain_required_names: #plain_required_types,)*
@@ -9294,20 +9998,11 @@ fn generate_view(
                 __elwindui_embedded_self: std::cell::RefCell<Option<elwindui::core::reactive::WeakEmbeddedHandle<Self>>>,
             }
 
+            #generated_construct_helper
+
             #[elwindui::class]
             impl #target {
-                fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
-                    let __self_weak_erased: std::rc::Weak<dyn std::any::Any> = __self_weak.clone();
-                    #construct_stmts
-                    let __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(
-                        std::rc::Rc<std::cell::Cell<bool>>,
-                        std::rc::Rc<dyn Fn(#component_property_enum)>,
-                    )>>> = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(
-                        std::rc::Rc<std::cell::Cell<bool>>,
-                        std::rc::Rc<dyn Fn(#component_property_enum)>,
-                    )>::new()));
-                    Self { #(#plain_required_names,)* #cell_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers, __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created), __closed: std::cell::Cell::new(false), __elwindui_embedded_self: std::cell::RefCell::new(None) }
-                }
+                #class_construct
 
                 // Runs automatically, exactly once, right after `#[class]`'s auto-generated `new()`
                 // completes its `Rc::new_cyclic` (parent-pointer wiring, event wiring, the initial
@@ -9566,9 +10261,11 @@ fn generate_view(
             #generated_dynamic_host_impl
         }
     };
+    let application_environment = application_environment_fn(&target, &quote! { elwindui::core });
     quote! {
         #generated
         #constructor_macro
+        #application_environment
     }
 }
 
@@ -9654,6 +10351,11 @@ struct ViewCtx {
     /// declaring ancestor owns storage and accessors, so a read lowers to `<recv>.base.<name>()`
     /// and a write to `<recv>.base.set_<name>(..)` — never to own storage of this Component.
     inherited_fields: HashSet<String>,
+    /// Issue #166 (A2): inherited constructor inputs this Component forwards into its composed
+    /// root (`name: name`, authored or auto-forwarded). They are constructor locals while the base
+    /// value is built, but have no storage or accessor on this Component afterwards, so every
+    /// post-construction read goes through the declaring ancestor (`inherited_field_read`).
+    forwarded_inherited_fields: HashSet<String>,
     /// Issue #166: the immediate base's `__elwindui_props_<Base>!` shape macro. When set, an
     /// otherwise-unresolved bare snake_case name in raw Rust (handler bodies, `format!` arguments)
     /// is routed through its `@inherited_get`/`@inherited_set` arms, which resolve the name against
@@ -10005,6 +10707,7 @@ pub(crate) fn lower_template_body(
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
         inherited_fields: HashSet::new(),
+        forwarded_inherited_fields: HashSet::new(),
         inherited_props_macro: None,
         composition_base_prefix_root: None,
         weak_wiring: false,
@@ -12049,7 +12752,7 @@ fn emit_external_for_item_subscriptions(
 /// builtin has no ctor macro and no fixed fields, so its props macro is the setter directly.
 fn external_item_set(node: &PlannedNode, name: &syn::Ident, value: &TokenStream) -> TokenStream {
     let environment = quote! { &__elwindui_item_environment };
-    if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
+    if let Some(ctor_macro) = element_ctor_macro_path(&node.type_path, None) {
         return quote! { #ctor_macro!(@resync_item_set __elwindui_item_widget, #name, #value, #environment); };
     }
     let props_macro = dsl_props_macro_path(&node.type_path, None);
@@ -14395,8 +15098,12 @@ fn emit_external_construction(
     out: &mut TokenStream,
 ) {
     let binding = &node.binding;
-    let type_path = dsl_concrete_type_path(&node.type_path, None);
-    let ext_path = dsl_ext_path(&node.type_path, None);
+    // Issue #166 (A2): a same-crate Component with a deferred constructor keeps its local type,
+    // trait and shape-macro paths; only its constructor ABI is used like an external one.
+    let deferred_local = resolve_context_info(ctx, from, table, &node.type_path)
+        .filter(|info| info.deferred_constructor);
+    let type_path = dsl_concrete_type_path(&node.type_path, deferred_local);
+    let ext_path = dsl_ext_path(&node.type_path, deferred_local);
     let binding_ts = quote! { #binding };
     // `Grid::row`/`Grid::column`/... — every real builtin now goes through this construction
     // path (no `TypeInfo` left to route a virtual builtin through `emit_virtual_construction`'s
@@ -14407,26 +15114,24 @@ fn emit_external_construction(
     // own content instead of occupying its own row).
     let attached = emit_common_ui_element_setters(node, ctx, from, table, &binding_ts);
     let attribute_values = external_attribute_values(node, ctx, from, table);
-    let props_macro = dsl_props_macro_path(&node.type_path, None);
+    let props_macro = dsl_props_macro_path(&node.type_path, deferred_local);
     let non_dynamic_children: Vec<_> = node
         .child_bindings
         .iter()
         .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
         .map(|(child, _)| quote! { #child.clone() })
         .collect();
-    if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
+    if let Some(ctor_macro) = node_ctor_macro_path(node, ctx, from, table) {
         let props: Vec<TokenStream> = attribute_values
             .iter()
             .filter(|attribute| !attribute.synthesized)
             .map(|attribute| {
                 let name = &attribute.name;
-                let name_literal =
-                    syn::LitStr::new(&name.to_string(), proc_macro2::Span::call_site());
                 let value = &attribute.value;
                 if attribute.typed {
-                    quote! { (#name_literal => @typed #value), }
+                    quote! { (#name => @typed #value), }
                 } else {
-                    quote! { (#name_literal => #value), }
+                    quote! { (#name => #value), }
                 }
             })
             .collect();
@@ -14442,19 +15147,17 @@ fn emit_external_construction(
             .filter(|attribute| !attribute.synthesized)
             .map(|attribute| {
                 let name = &attribute.name;
-                let name_literal =
-                    syn::LitStr::new(&name.to_string(), proc_macro2::Span::call_site());
                 let value = &attribute.value;
                 if attribute.typed {
                     quote! {
-                        #ctor_macro!(@initial_named_typed #binding, #name_literal, #value, #environment);
+                        #ctor_macro!(@initial_named_typed #binding, #name, #value, #environment);
                     }
                 } else {
                     quote! {
-                        #ctor_macro!(@initial_named #binding, #name_literal, #value, #environment);
+                        #ctor_macro!(@initial_named #binding, #name, #value, #environment);
                     }
                 }
-        });
+            });
         let initial_children = if non_dynamic_children.is_empty() {
             TokenStream::new()
         } else {
@@ -14525,7 +15228,9 @@ fn external_attribute_values(
     from: &Module,
     table: &SymbolTable,
 ) -> Vec<ExternalAttributeValue> {
-    let props_macro = dsl_props_macro_path(&node.type_path, None);
+    let deferred_local = resolve_context_info(ctx, from, table, &node.type_path)
+        .filter(|info| info.deferred_constructor);
+    let props_macro = dsl_props_macro_path(&node.type_path, deferred_local);
     let mut values = Vec::new();
     for attribute in &node.attributes {
         let name = &attribute.name;
@@ -14836,7 +15541,9 @@ fn emit_construction(
         return;
     }
     let resolved_info = resolve_context_info(ctx, from, table, &node.type_path);
-    if resolved_info.is_none() {
+    // Issue #166 (A2): a same-crate Component with a deferred constructor is built through its
+    // constructor ABI macro, exactly like an external generated Component.
+    if resolved_info.is_none_or(|info| info.deferred_constructor) {
         emit_external_construction(node, ctx, from, table, out);
         // `DYNAMIC_CHILD_SLOT_MARKER` bindings are never actually constructed (`build_component_setters`'s
         // own identically-filtered `children` loop doc comment: a list-based dynamic region starts
@@ -14848,7 +15555,8 @@ fn emit_construction(
             .iter()
             .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
             .collect();
-        if dsl_ctor_macro_path(&node.type_path, None).is_none() && !non_dynamic_children.is_empty()
+        if node_ctor_macro_path(node, ctx, from, table).is_none()
+            && !non_dynamic_children.is_empty()
         {
             let binding = &node.binding;
             let props_macro = dsl_props_macro_path(
@@ -15766,6 +16474,132 @@ fn local_content_initial_setter_applies(node: &PlannedNode, info: &TypeInfo) -> 
     true
 }
 
+/// Issue #166 (A2): applies the static values a shape-composition root sets on its base (`flag:
+/// true`, `step: 5`, `spacing: 8.0` in a derived view), right after `build_component_value`
+/// constructed it. A reactive value is pushed by the root's resync at mount; that resync skips
+/// static values (`reactive = false`), so without this they would keep the base's defaults.
+///
+/// Every value goes through the base's exported property-shape macro (`@initial_with_environment`),
+/// the same way for a base in this crate or another one. The macro walks the class chain declared
+/// by `#[class]` attributes, so whichever class declares the name (a generated ancestor's Prop or
+/// defaulted Param, or a builtin's property) applies it; a required constructor input is ignored
+/// there, since `build_component_value` already passed it to the constructor.
+fn shape_root_initial_sets(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    construct_locals: &[syn::Ident],
+) -> (TokenStream, TokenStream) {
+    let props_macro = dsl_props_macro_path(
+        &node.type_path,
+        resolve_context_info(ctx, from, table, &node.type_path),
+    );
+    let is_static = |name: &str| {
+        find_attr(node, name).is_some_and(|expr| {
+            !matches!(
+                expr,
+                ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_)
+            ) && !view_expr_has_reactive_dependency(expr, ctx)
+        })
+    };
+    let environment = format_ident!("__elwindui_root_environment");
+    let sets: Vec<TokenStream> = external_attribute_values(node, ctx, from, table)
+        .into_iter()
+        .filter(|attribute| !attribute.synthesized && is_static(&attribute.name.to_string()))
+        .map(|attribute| {
+            let binding = &node.binding;
+            let name = &attribute.name;
+            let value = &attribute.value;
+            quote! { #props_macro!(@initial_with_environment &#binding, #name, #value, &#environment); }
+        })
+        .collect();
+    // A semantic brush resolves against the environment the derived Component is mounted with,
+    // so the class chain applies those names only in this mount-time pass (from `__build_view`,
+    // where the embedded base is `self.base`); every other name is a no-op here.
+    let mount_environment = format_ident!("__elwindui_root_mount_environment");
+    let self_mode = EmitMode::WithSelf(quote! { self });
+    let brush_sets: Vec<TokenStream> = node
+        .attributes
+        .iter()
+        .filter(|attribute| !attribute.name.starts_with("on_") && is_static(&attribute.name))
+        .map(|attribute| {
+            let name = format_ident!("{}", attribute.name);
+            let value = emit_expr(&attribute.value, ctx, &self_mode);
+            quote! {
+                #props_macro!(@initial_brush_with_environment &self.base, #name, #value, #mount_environment);
+            }
+        })
+        .collect();
+    let construct = if sets.is_empty() {
+        TokenStream::new()
+    } else {
+        clone_referenced_construct_locals(
+            quote! {
+                let #environment = elwindui::core::environment::application_environment();
+                #(#sets)*
+            },
+            construct_locals,
+        )
+    };
+    let mount = if brush_sets.is_empty() {
+        TokenStream::new()
+    } else {
+        quote! {
+            {
+                let #mount_environment = self
+                    .__mount_environment
+                    .get()
+                    .expect("root semantic brush resolution: component is not yet mounted");
+                #(#brush_sets)*
+            }
+        }
+    };
+    (construct, mount)
+}
+
+/// Issue #166 (A2): the root initial values run inside `construct()` before `Self { .. }` takes
+/// ownership of the Component's own constructor locals, so a value that names one (`payload:
+/// source`) would move it out first. Every such local the statements mention is rebound to a clone
+/// inside a block of their own; the original stays for `Self`.
+fn clone_referenced_construct_locals(
+    stmts: TokenStream,
+    construct_locals: &[syn::Ident],
+) -> TokenStream {
+    fn collect(stream: TokenStream, found: &mut HashSet<String>) {
+        for tree in stream {
+            match tree {
+                proc_macro2::TokenTree::Ident(ident) => {
+                    found.insert(ident.to_string());
+                }
+                proc_macro2::TokenTree::Group(group) => collect(group.stream(), found),
+                _ => {}
+            }
+        }
+    }
+    if stmts.is_empty() {
+        return stmts;
+    }
+    let mut found = HashSet::new();
+    collect(stmts.clone(), &mut found);
+    let clones: Vec<&syn::Ident> = construct_locals
+        .iter()
+        .filter(|local| found.contains(&local.to_string()))
+        .collect();
+    if clones.is_empty() {
+        return stmts;
+    }
+    quote! {
+        {
+            #(
+                #[allow(unused_variables)]
+                let #clones = ::core::clone::Clone::clone(&#clones);
+            )*
+            #stmts
+        }
+    }
+}
+
 /// Builds the plain (not yet `Rc`-wrapped) `create_<snake case>(args)` call for a shape-composition
 /// root whose base is a resolved DSL component (rather than a hand-written `elwindui::core::ui`
 /// primitive — see `build_virtual_value` for that case) — e.g. `RoundedPanel inherits ContentControl`,
@@ -15789,6 +16623,46 @@ fn build_component_value(
     plan: &[PlannedNode],
     component: &ComponentDef,
 ) -> TokenStream {
+    // Issue #166 (A2): a generated base whose required inputs arrived through its constructor ABI in
+    // phase two is constructed through its constructor ABI from the named root values (the
+    // auto-forwarded `name: name` and any value the derived view sets itself).
+    if let (Some(required), Some(base_path)) = (
+        external_base_params(&component.name),
+        component.base_path.as_deref(),
+    ) {
+        if component.base.as_deref() == Some(dsl_type_ident(&node.type_path).to_string().as_str()) {
+            let ctor_macro = external_ctor_macro_path(base_path);
+            let type_path: syn::Path =
+                syn::parse_str(base_path).expect("inherits path must be a Rust path");
+            let props: Vec<TokenStream> = external_attribute_values(node, ctx, from, table)
+                .into_iter()
+                .filter(|value| !value.synthesized && required.contains(&value.name.to_string()))
+                .map(|value| {
+                    let name = &value.name;
+                    // The auto-forwarded input already has the base's declared type.
+                    let forwarded =
+                        value.typed || value.value.to_string() == value.name.to_string();
+                    let value = &value.value;
+                    if forwarded {
+                        quote! { (#name => @typed #value), }
+                    } else {
+                        quote! { (#name => #value), }
+                    }
+                })
+                .collect();
+            // `#[class]` rewrites a literal `Base::construct(..)` call into its hidden
+            // constructor, so the call itself stays visible here; only each argument's
+            // conversion goes through the base's constructor ABI.
+            // Built with a loop rather than a closure so rust-analyzer's `quote!` expansion sees
+            // `ctor_macro` as used.
+            let mut args: Vec<TokenStream> = Vec::new();
+            for name in &required {
+                let helper = format_ident!("__ctor_arg_{name}");
+                args.push(quote! { #ctor_macro!(@#helper props = [#(#props)*]) });
+            }
+            return quote! { #type_path::construct(#(#args),*) };
+        }
+    }
     let Some(info) = table.resolve(from, &node.type_path) else {
         // External (no local `TypeInfo`) — same rule every other construction path applies
         // (`concrete_type_ident`'s own doc comment): unresolved here means declared entirely
@@ -18587,14 +19461,14 @@ fn emit_resync_with_receiver(
         if info.is_some_and(|i| i.onetime_fields.contains(name)) {
             continue;
         }
-        if let Some(ctor_macro) = dsl_ctor_macro_path(&node.type_path, None) {
-            let name_literal = syn::LitStr::new(name, proc_macro2::Span::call_site());
+        if let Some(ctor_macro) = element_ctor_macro_path(&node.type_path, info) {
+            let name_ident = format_ident!("{name}");
             let value = emit_expr(expr, ctx, &self_mode);
             let environment = semantic_brush_resync_environment(node, ctx);
             let reactive = view_expr_has_reactive_dependency(expr, ctx);
             let resync_call = quote! {
                 #ctor_macro!(
-                    @resync_named #receiver, #name_literal, #value, #environment,
+                    @resync_named #receiver, #name_ident, #value, #environment,
                     reactive = #reactive
                 );
             };
@@ -18877,6 +19751,11 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                 // as the owner of a `.getter()` call — the field/constructor-parameter itself, not
                 // `emit_path_get`'s `vm.something`-shaped 2-segment machinery.
                 if ctx.own_fields.contains_key(only) {
+                    if ctx.forwarded_inherited_fields.contains(only) {
+                        if let EmitMode::WithSelf(_) = mode {
+                            return inherited_field_read(ctx, mode, only);
+                        }
+                    }
                     // A mutable-required own field (`ViewCtx::mutable_own_fields`,
                     // `generate_view`'s `mutable_required_names`) is Cell/RefCell-backed, not a
                     // bare field — `self.<name>` alone would hand back the cell itself, not its
@@ -19015,6 +19894,11 @@ fn inherited_field_read(ctx: &ViewCtx, mode: &EmitMode, name: &str) -> TokenStre
 /// `self.vm.content()` (with self). A viewmodel action (`vm.save`) resolves through this exact
 /// same 2-segment shape — there is no separate `Command`-wrapper indirection to fold in.
 fn owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> TokenStream {
+    // Issue #166 (A2): a root-forwarded inherited constructor input is stored only by the
+    // declaring ancestor once construction is over.
+    if matches!(mode, EmitMode::WithSelf(_)) && ctx.forwarded_inherited_fields.contains(owner) {
+        return inherited_field_read(ctx, mode, owner);
+    }
     if ctx.default_template_parent && ctx.is_template_parent_alias(owner) {
         return match mode {
             EmitMode::Construction => quote! { self },
@@ -19184,6 +20068,7 @@ pub(crate) fn emit_template_event_closure_body_for_target_with_fields(
         own_fields: HashMap::new(),
         mutable_own_fields: HashSet::new(),
         inherited_fields: HashSet::new(),
+        forwarded_inherited_fields: HashSet::new(),
         inherited_props_macro: None,
         composition_base_prefix_root: None,
         weak_wiring: false,
@@ -19836,7 +20721,7 @@ mod tests {
             crate::component_frontend::ComponentConstructorReturn::RcSelf,
             Vec::new(),
         );
-        let generated = build_constructor_macro("Thing", &shape, None).to_string();
+        let generated = build_constructor_macro("Thing", &shape, None, false, None).to_string();
         assert!(!generated.contains("children"), "{generated}");
     }
 
@@ -23179,6 +24064,63 @@ struct NotepadWindow {
         );
     }
 
+    /// Issue #166 (A2): the required-input alias sits beside the Component at the authored path, and
+    /// the Component path can be recovered from it.
+    #[test]
+    fn required_param_alias_path_is_a_sibling_of_the_component() {
+        assert_eq!(
+            required_param_alias_path("other_crate::widgets::Base", "title"),
+            "other_crate::widgets::__elwindui_required__4_Base_title"
+        );
+        assert_eq!(
+            required_param_alias_path("Base", "max_count"),
+            "__elwindui_required__4_Base_max_count"
+        );
+        let alias: syn::Type =
+            syn::parse_str(&required_param_alias_path("crate::Middle", "max_count")).unwrap();
+        assert_eq!(
+            required_param_alias_base(&alias).as_deref(),
+            Some("crate::Middle")
+        );
+        // `__` inside either name must not be mistaken for the separator.
+        let odd: syn::Type =
+            syn::parse_str(&required_param_alias_path("other::Foo__Bar", "item__id")).unwrap();
+        assert_eq!(
+            required_param_alias_base(&odd).as_deref(),
+            Some("other::Foo__Bar")
+        );
+        let plain: syn::Type = syn::parse_str("String").unwrap();
+        assert!(required_param_alias_base(&plain).is_none());
+    }
+
+    /// Issue #166 (A2): an auto-forwarded input keeps its base's opaque alias type, so its value
+    /// conversion is delegated to the defining base's constructor ABI (`$crate`-relative for a
+    /// same-crate base, crate-prefixed for another crate's).
+    #[test]
+    fn forwarded_required_param_conversion_delegates_to_the_base_abi() {
+        let name = format_ident!("title");
+        let external: syn::Type =
+            syn::parse_str(&required_param_alias_path("other_crate::Base", "title")).unwrap();
+        let tokens = forwarded_required_param_conversion(&external, &name)
+            .expect("alias-typed input")
+            .to_string();
+        assert!(
+            tokens.contains("other_crate :: __elwindui_ctor_Base ! (@ __ctor_arg_title"),
+            "{tokens}"
+        );
+        let local: syn::Type =
+            syn::parse_str(&required_param_alias_path("crate::Middle", "title")).unwrap();
+        let tokens = forwarded_required_param_conversion(&local, &name)
+            .expect("alias-typed input")
+            .to_string();
+        assert!(
+            tokens.contains("$ crate :: __elwindui_ctor_Middle !"),
+            "{tokens}"
+        );
+        let plain: syn::Type = syn::parse_str("String").unwrap();
+        assert!(forwarded_required_param_conversion(&plain, &name).is_none());
+    }
+
     /// PR #311 A/P2: the explicit-base-hook check detects only a real `base::<hook>(..)` call
     /// (directly or inside macro arguments), never a string literal that mentions it or an
     /// unrelated path such as `database::on_mount()`.
@@ -24459,6 +25401,72 @@ struct NotepadWindow {
     /// chain (to which `#[state]` is never declared), so rustc reports it as an unknown value.
     /// Model A is asserted alongside: the inherited Prop `heading` gets no derived-owned accessor
     /// or `{Derived}Property` variant either, and is read/written through the base value.
+    #[test]
+    fn issue_166_root_initial_values_go_through_the_base_property_shape_macro() {
+        // Every static root value (a base Prop two hops up, a builtin's `spacing`/`margin`) goes
+        // through the immediate base's property-shape macro, which walks the `#[class]` chain;
+        // codegen never decides which class declares it, even with the builtins in the table.
+        let module = crate::test_module(&[
+            (
+                Some("VerticalLayout"),
+                r#"
+                struct I166LayoutBase {
+                    #[prop(default = false)]
+                    flag: bool,
+                    body: view! {
+                        TextBlock { text: "base" }
+                    },
+                }
+                "#,
+                None,
+            ),
+            (
+                Some("I166LayoutBase"),
+                r#"
+                struct I166LayoutMiddle {
+                    body: view! {
+                        TextBlock { text: "middle" }
+                    },
+                }
+                "#,
+                None,
+            ),
+            (
+                Some("I166LayoutMiddle"),
+                r#"
+                struct I166LayoutLeaf {
+                    body: view! {
+                        spacing: 8.0
+                        margin: 18.0
+                        flag: true
+                        TextBlock { text: "leaf" }
+                    },
+                }
+                "#,
+                None,
+            ),
+        ])
+        .expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("issue_166_root_initial_property_shape_macro", &generated);
+        let rendered = generated.to_string();
+        assert!(
+            !rendered.contains("__set_initial_prop_spacing")
+                && !rendered.contains("__set_initial_prop_margin")
+                && !rendered.contains(". base . __set_initial"),
+            "no hidden setter is chosen for the root values: {rendered}"
+        );
+        for name in ["spacing", "margin", "flag"] {
+            let call = "crate :: __elwindui_props_I166LayoutMiddle ! (@ initial_with_environment & __i166layoutmiddle_";
+            assert!(rendered.contains(call), "{name}: {rendered}");
+            assert!(
+                rendered.contains(&format!(", {name} ,")),
+                "{name} is passed to the base's property-shape macro"
+            );
+        }
+    }
+
     #[test]
     fn issue_166_inherited_state_is_not_exposed_and_prop_uses_declaring_accessors() {
         let module = crate::test_module(&[

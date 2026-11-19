@@ -7,8 +7,9 @@ Related designs: [`native_control_design.md`](native_control_design.md),
 [`ui_tree_design.md`](ui_tree_design.md),
 [`component_lifecycle_design.md`](component_lifecycle_design.md) §4g/§4i/§4j,
 [`rendering_design.md`](rendering_design.md).
-Tracking: [#313](https://github.com/puchinya/elwindui/issues/313). Status: **approved target architecture,
-migration in progress**. Current-state progress is in `docs/status/`, not here.
+Tracking: [#313](https://github.com/puchinya/elwindui/issues/313) (Core and WinUI3) and
+[#316](https://github.com/puchinya/elwindui/issues/316) (AppKit, see D5). Status: **approved target
+architecture, migration in progress**. Current-state progress is in `docs/status/`, not here.
 
 ## 1. Problem and target
 
@@ -42,6 +43,7 @@ Invariants kept from the existing design:
 | D2 | The peer contract uses **typed per-control Rust traits**: a common `NativePeer` plus `ButtonPeer`, `TextBoxPeer`, etc. A generic property-key mapper is rejected. |
 | D3 | A missing factory, the wrong thread, or an unsupported backend/control causes a **diagnostic panic**. There is no silent fallback. Native backend init failure stays `elwindui::init() -> Result`. |
 | D4 | Delivery is **staged PRs under #313**, with no child Issues. Partial PRs use `Refs #313`; the final removal PR uses `Closes #313`. |
+| D5 | **Scope amendment (user decision 2026-11-20):** AppKit completion, macOS compilation, macOS host E2E and AppKit-specific safety fixes move to [#316](https://github.com/puchinya/elwindui/issues/316). #313 owns the Core contract, WinUI3 and the mode removal, and closes without a macOS run. #313 stages still keep the AppKit sources in line with each Core contract change, so the Core contract stays backend-independent, but those sources are unverified. AppKit results are recorded as **DEFERRED → #316**, never PASS. This overrides the earlier "both backends" wording in §9 and §10. |
 
 ## 3. Module layout and dependency DAG
 
@@ -149,15 +151,21 @@ into a host.
 - `NativeControl::construct(peer: Option<Rc<dyn NativePeer>>)` is internal (no constructor inputs).
   `None` is the lazy path. `Some(peer)` is the transitional eager path for controls not yet migrated
   (their backend `struct_only` implementors wrap their handle in a `HandlePeer`).
-- Realization reaches the most-derived control's `#[doc(hidden)] #[overridable] fn __create_native_peer`
-  through `self_weak`, because a method running on the base storage cannot dispatch to an override by
-  itself.
+- Realization reaches the most-derived control's `#[doc(hidden)] #[overridable]` hooks
+  `__create_native_peer` and `__initialize_native_peer` (§6) through `self_weak`, because a method running
+  on the base storage cannot dispatch to an override by itself.
 - Each concrete control stores its own typed slot, for example `peer: RefCell<Option<Rc<dyn ButtonPeer>>>`.
   At realization it gives the same `Rc` (upcast) to the `NativeControl` slot. There is exactly one logical
   peer per Component.
 - **Setter flow (one path per property):** Core setter → store the logical value → if a peer exists, push
   the value to the peer → invalidate measure where the property affects size. Clearing a property pushes
   the cleared or PlatformDefault value. Props without a native effect never reach the peer.
+- **Push failure:** a peer method that can fail natively reports it with a `bool` (`apply_background`,
+  `apply_text_style`). Core never records a rejected value as applied. It keeps the logical value pending
+  and pushes the current logical value again at the start of every later measure pass until the peer
+  returns `true`. A newer set/clear replaces the pending value. Measure does not invalidate itself to force
+  a retry, so a permanently failing native call costs one call per layout pass and never loops. Peer
+  methods returning `()` are fire-and-forget: a native failure there is logged or ignored by the backend.
 - **Two-way properties (OS→Core):** the peer reports through a callback that Core installed at
   realization. Core compares with the stored value. If the value changed, Core stores it and raises the
   `on_change`/binding notification once. Core does not push it back to the peer, so there is no echo.
@@ -185,8 +193,22 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   realization without a separate mount hook. A mount hook was rejected because Visual-parent attach also
   happens in host-less trees (Core unit tests, detached subtrees), which would then need a factory.
   The backend `__IntoAnyView::into_any_view` (below) also realizes, because it hands the handle out.
-- Realization order: factory `create_*` → push every stored logical property (base first, then
-  control-specific) → install OS→Core callbacks → accessibility semantics → `invalidate_measure`.
+- **Realization is a fixed two-phase protocol**, run once by `__native_peer()`:
+  1. `owner.__create_native_peer()` (most-derived override) calls the factory `create_*` and records the
+     typed peer in the control's own `OnceCell`. It pushes no state and installs no callback.
+  2. `NativeControl` stores the upcast peer in its `OnceCell` and pushes the base logical state
+     (`background`, then `tooltip`). The text style is pull-based and is pushed by the same measure pass.
+  3. `owner.__initialize_native_peer()` (most-derived override, default no-op) pushes the control's own
+     logical state, then installs OS→Core callbacks **last**.
+
+  Accessibility semantics are Core-owned and need no push. The caller (measure or render collection)
+  continues with the realized peer.
+- **Reentrancy during realization:** both `OnceCell`s are set before any state is pushed. A setter that
+  runs reentrantly during steps 2–3 stores its value and pushes straight to the peer, so the last write
+  wins natively and logically. A reentrant `__native_peer()` returns the installed peer and never creates
+  another or re-runs initialization. No OS event reaches Core before step 3 finishes, because the
+  callbacks are installed last. A panic inside realization is a fatal UI-thread error and is not
+  recoverable. `__native_peer()` holds the owner strongly (upgraded `self_weak`) for the whole protocol.
 - **Unmount** detaches the native widget from its host (host reconciliation) but **keeps the peer**.
   Remount, show/hide, Collapsed/inactive and TabView page deactivation never re-create a peer.
 - **Drop** of the Core Component calls `dispose()` once, which unregisters native targets and
@@ -196,6 +218,17 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   native event that arrives after `dispose()` is dropped by the backend (the registry entry is gone) and
   by Core (failed upgrade). This replaces the current Button `on_constructed`, which captures `owner_rc()`
   strongly and, on WinUI3, never unregisters its global UI-callback entry.
+- **In-flight callbacks:** a Core callback upgrades its `Weak` **before** anything else, including a
+  user `set_on_click`-style override, and keeps that strong reference until it returns. A stale callback
+  therefore runs nothing, and a handler that removes the control from its tree cannot drop it mid-dispatch.
+  The drop (and `dispose()`) happens once the callback returns. Backends must keep the dispatched closure
+  and the native object that dispatches it alive for the duration of the call, even when `dispose()` runs
+  reentrantly. WinUI3 already does this: `invoke_ui_event_callback` and the click dispatcher clone the
+  `Rc` before calling it. The AppKit requirement (temporarily retain the target in `perform` while its
+  ivar callback runs) is tracked by #316 (D5). A permanent strong cycle to the Core owner stays forbidden.
+- **Replaced native registrations** are released when they are replaced, not only at `dispose()`. For
+  example, the WinUI3 Enter accelerator's callback entry is unregistered when `is_default` toggles, so
+  repeated toggling keeps the callback registry at a constant size.
 - **Reentrancy:** Core never holds a `RefCell` borrow across a peer call or a user callback. Peer
   callbacks borrow, clone what they need, release the borrow, then dispatch. The existing TabView
   close/select discipline applies to all peers.
@@ -253,8 +286,8 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   rust-analyzer shadow keep using the PR #312 class-backed registry (`register_class_backed_constructor`).
   Only the declaring crate changes from backend to Core.
 - Removal order (one stage per PR, every stage keeps the full gate green):
-  1. Peer infrastructure + `NativeControl` + `Button` (both backends, testsupport mock factory, facade ctor
-     from Core).
+  1. Peer infrastructure + `NativeControl` + `Button` (WinUI3, GTK4 unsupported factory, testsupport mock
+     factory, facade ctor from Core; AppKit sources updated but unverified, D5).
   2. `Window`.
   3. `CheckBox`, `RadioButton`, `Slider`, `ToggleSwitch`, `TextBox`, `TextArea`, `PasswordBox`.
   4. `Dropdown`(+`Item`), `Menu`/`MenuBar`/`MenuItem`/`MenuBarItem`, `ScrollView`, `TabView`(+`Item`).
@@ -271,19 +304,26 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
 
 - **Core unit tests with a mock factory** (counters per peer method):
   - one `create_*` per Component across mount/unmount/remount/show/hide/layout;
-  - property push order and values;
+  - full push order (base `background`/`tooltip` → control props → callbacks) and values;
+  - a rejected push (`false` then `true`) is retried on a later measure and then stops;
   - two-way echo suppression;
   - a single routed event per native activation;
-  - Drop → `dispose()` once, `Weak` cannot upgrade, stale callback is a no-op;
-  - `#[should_panic(expected = ..)]` for no factory, a different thread and an unsupported control.
+  - Drop → `dispose()` once, `Weak` cannot upgrade, stale callback is a no-op with and without a
+    user override;
+  - a native callback whose handler releases the last owner finishes, then disposes once;
+  - `#[should_panic(expected = ..)]` for no factory, a different thread and an unsupported control;
+  - a failed backend `init()` leaves no factory registered (backend test through an injectable bootstrap
+    result).
+- **Backend bookkeeping:** WinUI3 hosted test that toggling `is_default` 100+ times keeps the UI callback
+  registry and the owner's registrations at baseline plus a constant.
 - **Window:** a mock `WindowPeer` covers first-show retention, hide/re-show state, cancelled native close,
   reentrant close, accepted close release and popup teardown order.
 - **Construction/inheritance regressions:** existing `class_backed_component.rs`, cross-crate fixtures,
   `new!`/`view!`/template, Cargo alias, multi-hop, generated→handwritten→generated, `#[overridable]`.
 - **Removal:** trybuild compile-fail cases for each removed mode in `crates/elwindui/tests/ui/`.
-- **Native hosts:** WinUI3 E2E on a Windows host and AppKit E2E on a macOS host, following
-  `docs/agents/testing.md` host rules. A host that cannot be run is reported `BLOCKED` and is not
-  counted as passed.
+- **Native hosts:** WinUI3 E2E on a Windows host, following `docs/agents/testing.md` host rules, is
+  required for #313. AppKit compilation and macOS host E2E (including a click handler that releases its
+  own Button) are #316 acceptance (D5). #313 records them as `DEFERRED → #316`, never as passed.
 
 ## 11. Alternatives rejected
 

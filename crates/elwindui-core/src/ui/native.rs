@@ -37,7 +37,9 @@ pub trait NativePeer {
 
     /// Applies an explicit background, or restores the toolkit default for `None`.
     ///
-    /// Returns `false` when the native call failed, so Core can retry on a later push.
+    /// Returns `false` when the native call failed. Core then keeps the value pending and pushes
+    /// the current logical background again at the start of every later measure pass until the
+    /// peer returns `true`; a newer `set_background`/`clear_background` replaces the pending value.
     fn apply_background(&self, background: Option<&Brush>) -> bool;
 
     /// Sets the hover tooltip, or removes it for `None`.

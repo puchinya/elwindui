@@ -88,12 +88,25 @@ impl Button {
         }
     }
 
+    /// Realization phase 1: create only (see [`NativeControl`]).
     #[overrides]
     fn __create_native_peer(&self) -> Option<Rc<dyn NativePeer>> {
         let peer = create_native_peer("Button", |factory| factory.create_button());
         if self.peer.set(peer.clone()).is_err() {
             panic!("elwindui: a Button's native peer was realized more than once");
         }
+        Some(peer)
+    }
+
+    /// Realization phase 3: runs after `NativeControl` pushed `background`/`tooltip`. Pushes the
+    /// button's own state, then installs the click callback last.
+    #[overrides]
+    fn __initialize_native_peer(&self) {
+        let peer = self
+            .peer
+            .get()
+            .expect("Button::__initialize_native_peer runs after __create_native_peer")
+            .clone();
         // Clone the logical values out before calling the peer: it may re-enter this button.
         let text = self.text.borrow().clone();
         peer.set_text(&text);
@@ -101,7 +114,9 @@ impl Button {
         peer.set_role(self.role.get());
         peer.set_is_default(self.is_default.get());
         // The callback holds only a `Weak` to this button, so the peer never keeps the button
-        // alive and a click after the button is gone is a no-op.
+        // alive. It upgrades first and keeps the strong reference until it returns: a click
+        // after the button is gone is a no-op (override or not), and a handler that removes the
+        // button from its tree cannot drop it mid-dispatch.
         let node = self
             .as_ui_element()
             .visual_collection
@@ -109,18 +124,18 @@ impl Button {
             .map(|node| Rc::downgrade(&node));
         let click_override = self.click_override.clone();
         peer.set_on_click(Some(Box::new(move || {
-            let replacement = click_override.borrow().clone();
-            if let Some(callback) = replacement {
-                callback();
-                return;
-            }
             let Some(node) = node.as_ref().and_then(Weak::upgrade) else {
                 return;
             };
-            let args = crate::input::RoutedEventArgs::default();
-            crate::ui::dispatch_routed(&node, "on_click", &(), &args);
+            let replacement = click_override.borrow().clone();
+            if let Some(callback) = replacement {
+                callback();
+            } else {
+                let args = crate::input::RoutedEventArgs::default();
+                crate::ui::dispatch_routed(&node, "on_click", &(), &args);
+            }
+            drop(node);
         })));
-        Some(peer)
     }
 
     /// Registers a `#[routed] on_click` handler on this button's own node. Native activation
@@ -234,6 +249,7 @@ mod tests {
     /// Records every call a Core `Button` makes on its peer.
     struct MockButtonPeer {
         log: Rc<RefCell<Vec<String>>>,
+        background_fails: Rc<Cell<bool>>,
         click: RefCell<Option<Box<dyn Fn()>>>,
         handle: &'static str,
     }
@@ -256,8 +272,9 @@ mod tests {
             }
         }
         fn apply_background(&self, background: Option<&Brush>) -> bool {
-            self.record(format!("background:{}", background.is_some()));
-            true
+            let accepted = !self.background_fails.get();
+            self.record(format!("background:{}:{accepted}", background.is_some()));
+            accepted
         }
         fn set_tooltip(&self, tooltip: Option<&str>) {
             self.record(format!("tooltip:{tooltip:?}"));
@@ -297,6 +314,7 @@ mod tests {
     struct MockFactory {
         created: Cell<usize>,
         log: Rc<RefCell<Vec<String>>>,
+        background_fails: Rc<Cell<bool>>,
         last: RefCell<Option<Rc<MockButtonPeer>>>,
     }
 
@@ -308,6 +326,7 @@ mod tests {
             self.created.set(self.created.get() + 1);
             let peer = Rc::new(MockButtonPeer {
                 log: self.log.clone(),
+                background_fails: self.background_fails.clone(),
                 click: RefCell::new(None),
                 handle: "mock-button",
             });
@@ -368,19 +387,24 @@ mod tests {
         button.set_role(ButtonRole::Primary);
         button.set_is_default(true);
         button.set_tooltip("hint");
+        button.set_background(Some(Brush::Solid(crate::graphics::Color::rgba(
+            1, 2, 3, 255,
+        ))));
         assert_eq!(factory.created.get(), 0);
 
+        // Base state first, then the button's own state, then the callback (design §6).
         button.measure(available());
         assert_eq!(button.measured_size().unwrap().width, 80.0);
         assert_eq!(
             factory.log.borrow().as_slice(),
             [
+                "background:true:true",
+                "tooltip:Some(\"hint\")",
                 "text:Save",
                 "enabled:true",
                 "role:Primary",
                 "is_default:true",
                 "on_click:true",
-                "tooltip:Some(\"hint\")",
                 "measure",
             ]
         );
@@ -431,6 +455,98 @@ mod tests {
         }));
         click(&factory);
         assert_eq!((clicks.get(), replaced.get()), (1, 1));
+        clear_native_peer_factory();
+    }
+
+    #[test]
+    fn a_rejected_background_is_retried_on_later_measure_passes() {
+        let factory = install_mock();
+        let button = Button::new();
+        factory.background_fails.set(true);
+        button.set_background(Some(Brush::Solid(crate::graphics::Color::rgba(
+            1, 2, 3, 255,
+        ))));
+        button.measure(available());
+        button.invalidate_measure();
+        button.measure(available());
+        factory.background_fails.set(false);
+        button.invalidate_measure();
+        button.measure(available());
+        // Accepted now: later passes stop pushing it.
+        button.invalidate_measure();
+        button.measure(available());
+        let backgrounds: Vec<String> = factory
+            .log
+            .borrow()
+            .iter()
+            .filter(|entry| entry.starts_with("background:"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            backgrounds,
+            [
+                "background:true:false",
+                "background:true:false",
+                "background:true:true"
+            ]
+        );
+        clear_native_peer_factory();
+    }
+
+    #[test]
+    fn a_click_after_drop_runs_neither_the_override_nor_the_routed_handler() {
+        let factory = install_mock();
+        let button = Button::new();
+        let clicks = Rc::new(Cell::new(0));
+        button.register_routed_handler::<()>(
+            "on_click",
+            Box::new({
+                let clicks = clicks.clone();
+                move |_, _| clicks.set(clicks.get() + 1)
+            }),
+        );
+        let replaced = Rc::new(Cell::new(0));
+        button.set_on_click(Box::new({
+            let replaced = replaced.clone();
+            move || replaced.set(replaced.get() + 1)
+        }));
+        button.measure(available());
+        let peer = factory.last.borrow().clone().unwrap();
+        let callback = peer.click.borrow_mut().take().expect("click callback");
+        let weak = Rc::downgrade(&button);
+        drop(button);
+        assert!(weak.upgrade().is_none());
+        callback();
+        assert_eq!((clicks.get(), replaced.get()), (0, 0));
+        clear_native_peer_factory();
+    }
+
+    #[test]
+    fn a_click_handler_that_releases_the_last_owner_finishes_safely() {
+        let factory = install_mock();
+        let holder: Rc<RefCell<Option<Rc<Button>>>> = Rc::new(RefCell::new(None));
+        let button = Button::new();
+        button.set_on_click(Box::new({
+            let holder = holder.clone();
+            move || {
+                holder.borrow_mut().take();
+            }
+        }));
+        button.measure(available());
+        let weak = Rc::downgrade(&button);
+        *holder.borrow_mut() = Some(button);
+        let peer = factory.last.borrow().clone().unwrap();
+        let callback = peer.click.borrow_mut().take().expect("click callback");
+        // The dispatch keeps the button alive until it returns, then the drop disposes once.
+        callback();
+        assert!(weak.upgrade().is_none());
+        let disposals = factory
+            .log
+            .borrow()
+            .iter()
+            .filter(|entry| *entry == "dispose")
+            .count();
+        assert_eq!(disposals, 1);
         clear_native_peer_factory();
     }
 

@@ -8,7 +8,7 @@ use crate::bindings::Microsoft::UI::Xaml::Media::Brush;
 use crate::bindings::Microsoft::UI::Xaml::{Application, RoutedEventHandler, Style};
 use crate::ffi::{AnyView, UiCallbackRegistryOwner, invoke_ui_event_callback};
 use elwindui_core::ui::ButtonRole;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use windows::Foundation::PropertyValue;
 use windows::Foundation::TypedEventHandler;
@@ -25,6 +25,9 @@ pub(crate) struct InnerButton {
     xaml: XamlButton,
     on_click: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
     callbacks: UiCallbackRegistryOwner,
+    /// Registry id of the current Enter accelerator's callback, released whenever the
+    /// accelerator is replaced or removed so toggling `is_default` never accumulates entries.
+    default_accelerator_callback: Cell<Option<usize>>,
 }
 
 impl InnerButton {
@@ -36,6 +39,7 @@ impl InnerButton {
             xaml,
             on_click: Rc::new(RefCell::new(None)),
             callbacks: UiCallbackRegistryOwner::default(),
+            default_accelerator_callback: Cell::new(None),
         };
         {
             let callback_id = this.callbacks.register_event(this.click_dispatcher());
@@ -63,6 +67,7 @@ impl InnerButton {
     /// Idempotent.
     pub(crate) fn dispose(&self) {
         self.on_click.borrow_mut().take();
+        self.default_accelerator_callback.take();
         self.callbacks.clear();
     }
 
@@ -119,18 +124,23 @@ impl InnerButton {
     ///
     /// WinUI 3's `Button` has no `IsDefault` (that lives on `ContentDialog`'s buttons only), so
     /// this uses the general mechanism: an `Enter` `KeyboardAccelerator`. The accelerator is added
-    /// once and removed when unset, rather than accumulating one per call.
+    /// once and removed when unset, rather than accumulating one per call. The replaced
+    /// accelerator's registry callback is released at the same time.
     pub(crate) fn set_is_default(&self, is_default: bool) {
         let Ok(accelerators) = self.xaml.KeyboardAccelerators() else {
             return;
         };
         let _ = accelerators.Clear();
+        if let Some(previous) = self.default_accelerator_callback.take() {
+            self.callbacks.unregister_event(previous);
+        }
         if !is_default {
             return;
         }
         if let Ok(accelerator) = KeyboardAccelerator::new() {
             let _ = accelerator.SetKey(VirtualKey::Enter);
             let callback_id = self.callbacks.register_event(self.click_dispatcher());
+            self.default_accelerator_callback.set(Some(callback_id));
             let _ = accelerator.Invoked(&TypedEventHandler::<
                 KeyboardAccelerator,
                 KeyboardAcceleratorInvokedEventArgs,
@@ -559,6 +569,21 @@ mod hosted_xaml_regression_tests {
                     .expect("default accelerator key"),
                 VirtualKey::Enter
             );
+            // Toggling `is_default` must release each replaced accelerator's registry callback
+            // (PR #315 review): only the click callback and at most one accelerator remain.
+            let toggle_baseline = crate::ffi::ui_event_callback_count();
+            let owned_baseline = button.callbacks.registration_count();
+            for _ in 0..128 {
+                button.set_is_default(false);
+                button.set_is_default(true);
+            }
+            assert_eq!(crate::ffi::ui_event_callback_count(), toggle_baseline);
+            assert_eq!(button.callbacks.registration_count(), owned_baseline);
+            assert_eq!(accelerators.Size().expect("accelerator count"), 1);
+            button.set_is_default(false);
+            assert_eq!(crate::ffi::ui_event_callback_count(), toggle_baseline - 1);
+            assert_eq!(accelerators.Size().expect("accelerator count"), 0);
+            button.set_is_default(true);
             let element = view.as_element();
             assert!(
                 !element.IsLoaded().expect("unparented Button IsLoaded"),

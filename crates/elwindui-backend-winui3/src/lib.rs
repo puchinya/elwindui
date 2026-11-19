@@ -73,11 +73,6 @@ pub fn init() -> windows::core::Result<()> {
     // `docs/design/runtime/text_design.md` for why this needs to happen before any `TextBlock`
     // measurement or `NativeControl::sync_text_style` call.
     elwindui_core::graphics::set_text_backend(std::rc::Rc::new(render::WinUi3TextBackend));
-    // Native controls are Core-owned Components whose peers this backend creates
-    // (`docs/design/runtime/native_peer_design.md`); register the factory for this UI thread.
-    elwindui_core::ui::native::register_native_peer_factory(std::rc::Rc::new(
-        native_ui::WinUi3PeerFactory,
-    ));
     // Self-drawn accent chrome falls back to the user's Windows accent when the app Theme leaves
     // `Primary` unset (`docs/specs/docking_spec.md`). Queried on demand so theme refreshes see
     // accent changes.
@@ -104,7 +99,41 @@ pub fn init() -> windows::core::Result<()> {
         let result = initialize((1 << 16) | 8, PCWSTR::null(), 0);
         result.ok().map_err(|error| error.code())
     });
-    result.map_err(Error::from_hresult)
+    finish_init(result.map_err(Error::from_hresult))
+}
+
+/// Registers this UI thread's native peer factory once every fallible bootstrap step has
+/// succeeded (`docs/design/runtime/native_peer_design.md`): a failed `init()` leaves no factory
+/// registered, so realizing a native control afterwards panics with the "no backend" diagnostic
+/// instead of creating XAML objects without the App SDK.
+fn finish_init(bootstrap: windows::core::Result<()>) -> windows::core::Result<()> {
+    bootstrap?;
+    elwindui_core::ui::native::register_native_peer_factory(std::rc::Rc::new(
+        native_ui::WinUi3PeerFactory,
+    ));
+    Ok(())
+}
+
+#[cfg(test)]
+mod init_tests {
+    use super::finish_init;
+    use elwindui_core::ui::native::{clear_native_peer_factory, has_native_peer_factory};
+
+    #[test]
+    fn failed_bootstrap_registers_no_native_peer_factory() {
+        clear_native_peer_factory();
+        let failure = windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL);
+        assert!(finish_init(Err(failure)).is_err());
+        assert!(!has_native_peer_factory());
+    }
+
+    #[test]
+    fn successful_bootstrap_registers_the_native_peer_factory() {
+        clear_native_peer_factory();
+        assert!(finish_init(Ok(())).is_ok());
+        assert!(has_native_peer_factory());
+        clear_native_peer_factory();
+    }
 }
 
 /// Re-exported so `elwindui`'s own facade can expose `application::run` uniformly across

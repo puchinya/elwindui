@@ -19,9 +19,18 @@ use std::cell::OnceCell;
 /// lazily, exactly once, the first time the control takes part in hosted layout or render
 /// collection (`measure_override` / `try_as_native_control`). Both only happen once the control
 /// is mounted under a backend host, so constructing controls never requires a backend.
-/// Realization asks the most-derived class for its peer through
-/// [`NativeControlExt::__create_native_peer`]. Unmounting, remounting, hiding, and relayout never
-/// create a second peer. Dropping the control calls [`NativePeer::dispose`] once.
+/// Realization is a two-phase protocol (`native_peer_design.md` §6):
+///
+/// 1. The most-derived [`NativeControlExt::__create_native_peer`] only creates the peer through
+///    the factory and records its typed handle. It pushes no state and installs no callback.
+/// 2. This base installs the peer, so every later lookup (including a reentrant one) sees it,
+///    then pushes its own logical state (`background`, `tooltip`).
+/// 3. The most-derived [`NativeControlExt::__initialize_native_peer`] pushes the control's own
+///    logical state and installs native callbacks last, so no OS event reaches Core before the
+///    peer carries the complete initial state.
+///
+/// Unmounting, remounting, hiding, and relayout never create a second peer. Dropping the control
+/// calls [`NativePeer::dispose`] once.
 ///
 /// Native controls that still create their widget eagerly in their own constructor pass it to
 /// `NativeControl::construct(Some(peer))` instead.
@@ -37,6 +46,9 @@ pub struct NativeControl {
     self_weak: Weak<dyn NativeControlExt>,
     peer: OnceCell<Rc<dyn NativePeer>>,
     background: RefCell<Option<Brush>>,
+    /// Set when the peer rejected the current background (`apply_background` returned `false`).
+    /// Retried on every later measure pass until the peer accepts it or a newer value replaces it.
+    background_pending: Cell<bool>,
     tooltip: RefCell<String>,
     text_style: TextStyleStorage,
     /// The style last accepted by the peer. Lets `sync_text_style` skip a redundant native call
@@ -48,7 +60,12 @@ pub struct NativeControl {
 impl NativeControl {
     #[overrides]
     fn measure_override(&self, available: Size) -> Size {
+        // Read before realizing: realization itself pushes the background once.
+        let retry_background = self.background_pending.get();
         let peer = self.__native_peer();
+        if retry_background {
+            self.push_background(peer);
+        }
         if peer.refresh_text_style_on_measure() {
             self.reapply_text_style();
         } else {
@@ -65,18 +82,28 @@ impl NativeControl {
         Some(self)
     }
 
-    /// Creates this control's native peer. Called at most once, by the realization path.
+    /// Realization phase 1: creates this control's native peer. Called at most once.
     ///
     /// Each concrete native control overrides this to create its typed peer through
-    /// [`crate::ui::native::create_native_peer`], push its own logical state, and install its
-    /// native callbacks. The default returns `None`, which is only valid for a control that
-    /// passed its peer to `NativeControl::construct(Some(peer))` or that overrides both
-    /// `measure_override` and `try_as_native_control` itself.
+    /// [`crate::ui::native::create_native_peer`] and record the typed handle it needs for its own
+    /// setters. It must not push state or install callbacks: that is
+    /// [`NativeControlExt::__initialize_native_peer`]'s job, after the base state is pushed. The
+    /// default returns `None`, which is only valid for a control that passed its peer to
+    /// `NativeControl::construct(Some(peer))` or that overrides both `measure_override` and
+    /// `try_as_native_control` itself.
     #[doc(hidden)]
     #[overridable]
     fn __create_native_peer(&self) -> Option<Rc<dyn NativePeer>> {
         None
     }
+
+    /// Realization phase 3: pushes the control's own logical state to the just-installed peer,
+    /// then installs its native callbacks. Called exactly once, right after this base pushed its
+    /// own state. The peer is already installed, so a reentrant setter pushes straight to it and a
+    /// reentrant `__native_peer()` returns it without creating another.
+    #[doc(hidden)]
+    #[overridable]
+    fn __initialize_native_peer(&self) {}
 
     /// Returns this control's native peer, realizing it first if needed.
     ///
@@ -101,7 +128,9 @@ impl NativeControl {
                 owner.type_name()
             )
         });
-        self.install_native_peer(peer)
+        let peer = self.install_native_peer(peer);
+        owner.__initialize_native_peer();
+        peer
     }
 
     /// Whether this control's native peer has been realized.
@@ -118,9 +147,9 @@ impl NativeControl {
             self.clear_background();
             return;
         };
-        *self.background.borrow_mut() = Some(background.clone());
+        *self.background.borrow_mut() = Some(background);
         if let Some(peer) = self.peer.get() {
-            peer.apply_background(Some(&background));
+            self.push_background(peer);
         }
         self.invalidate();
     }
@@ -132,7 +161,7 @@ impl NativeControl {
     fn clear_background(&self) {
         self.background.borrow_mut().take();
         if let Some(peer) = self.peer.get() {
-            peer.apply_background(None);
+            self.push_background(peer);
         }
         self.invalidate();
     }
@@ -164,6 +193,7 @@ impl NativeControl {
             self_weak: __self_weak.clone(),
             peer: cell,
             background: RefCell::new(None),
+            background_pending: Cell::new(false),
             tooltip: RefCell::new(String::new()),
             text_style: TextStyleStorage::new(),
             applied: RefCell::new(None),
@@ -172,23 +202,33 @@ impl NativeControl {
 }
 
 impl NativeControl {
-    /// Installs a freshly created peer and pushes this base's logical state to it.
+    /// Realization phase 2: installs a freshly created peer and pushes this base's logical
+    /// state to it.
     fn install_native_peer(&self, peer: Rc<dyn NativePeer>) -> &Rc<dyn NativePeer> {
         if self.peer.set(peer).is_err() {
             panic!("elwindui: a NativeControl's native peer was realized more than once");
         }
         let peer = self.peer.get().expect("peer was just installed");
-        // Clone the logical values out first: the peer may re-enter this control.
-        let background = self.background.borrow().clone();
-        if background.is_some() {
-            peer.apply_background(background.as_ref());
+        if self.background.borrow().is_some() {
+            self.push_background(peer);
         }
+        // Clone the logical value out first: the peer may re-enter this control.
         let tooltip = self.tooltip.borrow().clone();
         if !tooltip.is_empty() {
             peer.set_tooltip(Some(&tooltip));
         }
         self.applied.borrow_mut().take();
         peer
+    }
+
+    /// Pushes the current logical background (or its absence) to `peer` and records whether the
+    /// peer rejected it, so the next measure pass retries it. A rejected value is never treated
+    /// as applied; a newer `set_background`/`clear_background` simply replaces the pending one.
+    fn push_background(&self, peer: &Rc<dyn NativePeer>) {
+        // Clone the logical value out first: the peer may re-enter this control.
+        let background = self.background.borrow().clone();
+        self.background_pending
+            .set(!peer.apply_background(background.as_ref()));
     }
 
     /// Pulls this element's resolved text style and pushes it to the peer, but only when it

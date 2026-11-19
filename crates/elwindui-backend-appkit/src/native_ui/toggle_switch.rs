@@ -10,7 +10,7 @@ use elwindui_core::ui::{ToggleSwitchExt, UIElementExt};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::ToggleSwitchExt, inherits = crate::NativeControl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::ToggleSwitchExt, inherits = elwindui_core::ui::NativeControl)]
 pub struct ToggleSwitch {
     inner: InnerToggleSwitch,
     on_change: RefCell<Option<Box<dyn Fn(bool)>>>,
@@ -75,7 +75,7 @@ impl ToggleSwitch {
         let inner = InnerToggleSwitch::new();
         let handle = inner.handle();
         Self {
-            base: NativeControl::construct(handle),
+            base: NativeControl::construct(super::control::handle_peer(handle)),
             inner,
             on_change: RefCell::new(None),
         }

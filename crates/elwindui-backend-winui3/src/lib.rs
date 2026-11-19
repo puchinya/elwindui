@@ -73,6 +73,11 @@ pub fn init() -> windows::core::Result<()> {
     // `docs/design/runtime/text_design.md` for why this needs to happen before any `TextBlock`
     // measurement or `NativeControl::sync_text_style` call.
     elwindui_core::graphics::set_text_backend(std::rc::Rc::new(render::WinUi3TextBackend));
+    // Native controls are Core-owned Components whose peers this backend creates
+    // (`docs/design/runtime/native_peer_design.md`); register the factory for this UI thread.
+    elwindui_core::ui::native::register_native_peer_factory(std::rc::Rc::new(
+        native_ui::WinUi3PeerFactory,
+    ));
     // Self-drawn accent chrome falls back to the user's Windows accent when the app Theme leaves
     // `Primary` unset (`docs/specs/docking_spec.md`). Queried on demand so theme refreshes see
     // accent changes.

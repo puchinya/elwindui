@@ -25,7 +25,7 @@ use std::rc::{Rc, Weak};
 /// restore. `struct_only = elwindui_core::ui::TabViewExt` (a deliberately empty shared trait — see
 /// its own doc comment in `elwindui-core`) — mirrors `elwindui_backend_appkit::native_ui::TabView`'s
 /// own shape; every method below stays `#[inherent]`, unchanged.
-#[elwindui_macros::class(struct_only = elwindui_core::ui::TabViewExt, inherits = crate::NativeControl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::TabViewExt, inherits = elwindui_core::ui::NativeControl)]
 pub struct TabView {
     inner: InnerTabView,
     children: RefCell<Vec<Rc<dyn elwindui_core::ui::TabViewItemExt>>>,
@@ -117,7 +117,7 @@ impl TabView {
         let inner = InnerTabView::new();
         let handle = inner.handle();
         Self {
-            base: NativeControl::construct(handle),
+            base: NativeControl::construct(super::control::handle_peer(handle)),
             inner,
             children: RefCell::new(Vec::new()),
             displayed: RefCell::new(Vec::new()),

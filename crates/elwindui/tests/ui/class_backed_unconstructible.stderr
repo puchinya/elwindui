@@ -1,15 +1,26 @@
-error: `NativeControl` cannot be constructed by new! or a view: its `construct` takes internal arguments that are not published with `#[constructor_inputs(..)]`
- --> tests/ui/class_backed_unconstructible.rs:8:13
-  |
-8 |     let _ = elwindui::__elwindui_ctor_NativeControl!(@new elwindui::ui::NativeControl, props = []);
-  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |
-  = note: this error originates in the macro `elwindui::__elwindui_ctor_NativeControl` (in Nightly builds, run with -Z macro-backtrace for more info)
+error: `InternalOnly` cannot be constructed by new! or a view: its `construct` takes internal arguments that are not published with `#[constructor_inputs(..)]`
+  --> tests/ui/class_backed_unconstructible.rs:14:1
+   |
+14 | #[elwindui::component]
+   | ^^^^^^^^^^^^^^^^^^^^^^
+...
+28 |     let _ = crate::__elwindui_ctor_InternalOnly!(@new InternalOnly, props = []);
+   |             ------------------------------------------------------------------- in this macro invocation
+   |
+   = note: this error originates in the macro `crate::__elwindui_ctor_InternalOnly` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: `NativeControl` cannot be constructed by new! or a view: it is an abstract class
+  --> tests/ui/class_backed_unconstructible.rs:29:13
+   |
+29 |     let _ = elwindui::__elwindui_ctor_NativeControl!(@new elwindui::ui::NativeControl, props = []);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `elwindui::__elwindui_ctor_NativeControl` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: `Layout` cannot be constructed by new! or a view: it is an abstract class
- --> tests/ui/class_backed_unconstructible.rs:9:13
-  |
-9 |     let _ = elwindui::__elwindui_ctor_Layout!(@new elwindui::ui::Layout, props = []);
-  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |
-  = note: this error originates in the macro `elwindui::__elwindui_ctor_Layout` (in Nightly builds, run with -Z macro-backtrace for more info)
+  --> tests/ui/class_backed_unconstructible.rs:30:13
+   |
+30 |     let _ = elwindui::__elwindui_ctor_Layout!(@new elwindui::ui::Layout, props = []);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `elwindui::__elwindui_ctor_Layout` (in Nightly builds, run with -Z macro-backtrace for more info)

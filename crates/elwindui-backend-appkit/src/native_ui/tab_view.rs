@@ -20,7 +20,7 @@ use std::rc::{Rc, Weak};
 /// since a real tab content host type differs per backend (AppKit's `Retained<TreeHost>`/
 /// `TabChipImpl` have no common shape with WinUI3's own equivalents worth sharing without
 /// associated types this crate doesn't need yet).
-#[elwindui_macros::class(struct_only = elwindui_core::ui::TabViewExt, inherits = crate::NativeControl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::TabViewExt, inherits = elwindui_core::ui::NativeControl)]
 pub struct TabView {
     inner: InnerTabView,
     children: elwindui_core::ui::ChildList<dyn elwindui_core::ui::TabViewItemExt>,
@@ -111,7 +111,7 @@ impl TabView {
         let inner = InnerTabView::new();
         let handle = inner.handle();
         Self {
-            base: NativeControl::construct(handle),
+            base: NativeControl::construct(super::control::handle_peer(handle)),
             inner,
             children: elwindui_core::ui::ChildList::new(),
             selected_index: Cell::new(0),

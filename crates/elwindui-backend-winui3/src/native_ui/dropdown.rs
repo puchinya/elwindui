@@ -11,7 +11,7 @@ use elwindui_core::ui::UIElementExt;
 use std::cell::Cell;
 use std::rc::Rc;
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::DropdownExt, inherits = crate::NativeControl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::DropdownExt, inherits = elwindui_core::ui::NativeControl)]
 pub struct Dropdown {
     inner: InnerDropdown,
     children: elwindui_core::ui::ChildList<dyn elwindui_core::ui::DropdownItemExt>,
@@ -45,7 +45,7 @@ impl Dropdown {
         let inner = InnerDropdown::new();
         let handle = inner.handle();
         Self {
-            base: NativeControl::construct(handle),
+            base: NativeControl::construct(super::control::handle_peer(handle)),
             inner,
             children: elwindui_core::ui::ChildList::new(),
             selected_index: Cell::new(0),

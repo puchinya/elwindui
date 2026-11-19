@@ -76,6 +76,7 @@ mod controls;
 
 mod collections;
 mod engine;
+pub mod native;
 pub mod popup;
 mod text_style;
 

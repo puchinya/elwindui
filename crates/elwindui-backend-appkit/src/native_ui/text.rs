@@ -10,7 +10,7 @@ use elwindui_core::ui::{TextAreaExt, UIElementExt};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::TextAreaExt, inherits = crate::NativeControl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::TextAreaExt, inherits = elwindui_core::ui::NativeControl)]
 pub struct TextArea {
     inner: InnerTextArea,
     on_change: RefCell<Option<Box<dyn Fn(String)>>>,
@@ -83,7 +83,7 @@ impl TextArea {
         let inner = InnerTextArea::new();
         let handle = inner.handle();
         Self {
-            base: NativeControl::construct(handle),
+            base: NativeControl::construct(super::control::handle_peer(handle)),
             inner,
             on_change: RefCell::new(None),
         }
@@ -137,7 +137,7 @@ impl TextArea {
     }
 }
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::TextBoxExt, inherits = crate::NativeControl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::TextBoxExt, inherits = elwindui_core::ui::NativeControl)]
 pub struct TextBox {
     inner: InnerTextBox,
 }
@@ -180,7 +180,7 @@ impl TextBox {
         let inner = InnerTextBox::new();
         let handle = inner.handle();
         Self {
-            base: NativeControl::construct(handle),
+            base: NativeControl::construct(super::control::handle_peer(handle)),
             inner,
         }
     }
@@ -213,7 +213,7 @@ impl TextBox {
     }
 }
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::PasswordBoxExt, inherits = crate::NativeControl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::PasswordBoxExt, inherits = elwindui_core::ui::NativeControl)]
 pub struct PasswordBox {
     inner: InnerPasswordBox,
 }
@@ -257,7 +257,7 @@ impl PasswordBox {
         let inner = InnerPasswordBox::new();
         let handle = inner.handle();
         Self {
-            base: NativeControl::construct(handle),
+            base: NativeControl::construct(super::control::handle_peer(handle)),
             inner,
         }
     }

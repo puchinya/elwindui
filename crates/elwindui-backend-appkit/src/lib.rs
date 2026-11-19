@@ -35,6 +35,11 @@
 /// layout pass) relies on to call `NSFont`/`NSFontDescriptor` APIs without its own `mtm()` check.
 pub fn init() -> Result<(), std::convert::Infallible> {
     elwindui_core::graphics::set_text_backend(std::rc::Rc::new(render::AppKitTextBackend));
+    // Native controls are Core-owned Components whose peers this backend creates
+    // (`docs/design/runtime/native_peer_design.md`); register the factory for this UI thread.
+    elwindui_core::ui::native::register_native_peer_factory(std::rc::Rc::new(
+        native_ui::AppKitPeerFactory,
+    ));
     // Self-drawn accent chrome falls back to the system control accent when the app Theme leaves
     // `Primary` unset (`docs/specs/docking_spec.md`). Queried on demand so theme refreshes see
     // accent changes.
@@ -104,7 +109,7 @@ pub fn run_accessibility_active_host_regression() {
     use std::rc::Rc;
 
     application::run(|| {
-        let actual_button = Button::new();
+        let actual_button = elwindui_core::ui::Button::new();
         actual_button.set_text("disabled-setter-test");
         actual_button.set_enabled(false);
         let actual_button_id = actual_button.as_ui_element().accessibility_id();

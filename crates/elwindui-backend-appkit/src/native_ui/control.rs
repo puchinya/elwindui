@@ -1,133 +1,56 @@
-//! `NativeControl` — the base class every native leaf in this backend inherits from.
+//! The native-peer side of `elwindui_core::ui::NativeControl` (Issue #313).
+//!
+//! `NativeControl` itself is a Core-owned Component now. This module provides the
+//! [`NativePeer`] that wraps one `NSView`, shared by every native leaf in this backend: the
+//! background/tooltip/text-style/measure plumbing is identical for all of them.
 
 use crate::AnyView;
-use elwindui_core::graphics::{Brush, CascadedTextStyle, TextStyleStorage};
-use elwindui_core::ui::{TextStyleOwner, UIElementExt};
+use elwindui_core::base::Size;
+use elwindui_core::graphics::{Brush, CascadedTextStyle};
+use elwindui_core::ui::native::NativePeer;
 use std::any::Any;
-use std::cell::RefCell;
+use std::rc::Rc;
 
-/// The backend-owned counterpart to `elwindui_core::ui::NativeControl` (a pure marker trait with no
-/// backing struct of its own — measuring/placing a native handle is entirely backend-specific, so
-/// `elwindui-core` doesn't define this generically). Holding `handle: AnyView` here once, instead
-/// of on each of `TextArea`/`Button`/`TabView` individually, is what lets `inherits = NativeControl`
-/// resolve `base`'s field type to this same struct.
-///
-/// `text_style`/`applied` add font support (指示書 §17): every leaf sharing this one base struct
-/// gets `TextStyleOwner` (storage + inherited resolution) and font application for free, without
-/// each of `Button`/`TextArea`/`TextBox`/`PasswordBox`/`ScrollView`/`TabView` repeating it.
-#[elwindui_macros::component(struct_only = elwindui_core::ui::NativeControlExt, inherits elwindui_core::ui::UIElement)]
-pub struct NativeControl {
+/// A [`NativePeer`] over one `NSView`. Controls not yet migrated to Core-owned Components create
+/// one eagerly and pass it to `NativeControl::construct(Some(..))`.
+pub(crate) struct HandlePeer {
     handle: AnyView,
-    background: RefCell<Option<Brush>>,
-    text_style: TextStyleStorage,
-    /// The style last actually pushed to `handle` — lets `sync_text_style` skip a redundant
-    /// AppKit call when nothing changed since the previous measure pass.
-    applied: RefCell<Option<CascadedTextStyle>>,
 }
 
-#[elwindui_macros::component]
-impl NativeControl {
-    #[overrides]
-    fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
-        self.sync_text_style();
+impl HandlePeer {
+    pub(crate) fn new(handle: AnyView) -> Self {
+        Self { handle }
+    }
+
+    pub(crate) fn any_view(&self) -> &AnyView {
+        &self.handle
+    }
+}
+
+/// Wraps `handle` as the eagerly created peer of a native control's `NativeControl` base.
+pub(crate) fn handle_peer(handle: AnyView) -> Option<Rc<dyn NativePeer>> {
+    Some(Rc::new(HandlePeer::new(handle)))
+}
+
+impl NativePeer for HandlePeer {
+    fn handle(&self) -> &dyn Any {
+        &self.handle
+    }
+    fn measure(&self, available: Size) -> Size {
         self.handle.measure(available)
     }
-    #[overrides]
-    fn try_as_native_control(&self) -> Option<&dyn Any> {
-        Some(&self.handle)
+    fn apply_background(&self, background: Option<&Brush>) -> bool {
+        self.handle.apply_background(background);
+        true
     }
-    #[overrides]
-    fn as_text_style_owner(&self) -> Option<&dyn TextStyleOwner> {
-        Some(self)
+    fn set_tooltip(&self, tooltip: Option<&str>) {
+        self.handle.set_tooltip(tooltip);
     }
-    fn set_background(&self, background: Option<Brush>) {
-        let Some(background) = background else {
-            self.clear_background();
-            return;
-        };
-        self.handle.apply_background(Some(&background));
-        *self.background.borrow_mut() = Some(background);
-        self.invalidate();
+    fn supports_text_style(&self) -> bool {
+        self.handle.supports_text_style()
     }
-    fn clear_background(&self) {
-        self.background.borrow_mut().take();
-        self.handle.apply_background(None);
-        self.invalidate();
-    }
-    /// Pushed straight to the view rather than pull-synced from `measure_override` the way
-    /// `text_style` is: `text_style` must be re-pulled on every layout pass because it can inherit
-    /// from an ancestor that changed, while a tooltip is local, non-inherited, plain text with
-    /// nothing to re-resolve. It also has no effect on layout, so there is nothing to invalidate.
-    fn set_tooltip(&self, tooltip: &str) {
-        self.handle.set_tooltip(if tooltip.is_empty() {
-            None
-        } else {
-            Some(tooltip)
-        });
-    }
-    fn construct(handle: AnyView) -> Self {
-        Self {
-            base: elwindui_core::ui::UIElement::construct(),
-            handle,
-            background: RefCell::new(None),
-            text_style: TextStyleStorage::new(),
-            applied: RefCell::new(None),
-        }
-    }
-}
-
-impl NativeControl {
-    /// Measures a native leaf after refreshing its text presentation. A native view can lose its
-    /// attributed title while a sibling subtree is replaced even though the resolved style is
-    /// unchanged, so controls that need repaint-on-reconcile can use this narrow path without
-    /// disabling the style cache for every native control.
-    pub(crate) fn measure_with_text_style_refresh(
-        &self,
-        available: elwindui_core::base::Size,
-    ) -> elwindui_core::base::Size {
-        self.reapply_text_style();
-        self.handle.as_nsview().setNeedsDisplay(true);
-        self.handle.measure(available)
-    }
-
-    /// Pulls this element's resolved text style and pushes it to `handle`, but only when it
-    /// actually differs from what was last applied — pull-based (called from `measure_override`,
-    /// which `UIElementExt::measure` runs unconditionally every layout pass) rather than pushed
-    /// from `TextStyleOwner::on_text_style_property_changed`, because a base-class method has no
-    /// way to reach the most-derived leaf object (`UIElement` keeps no self-`Weak`, and
-    /// `#[overridable]` isn't available on a `struct_only` class — see
-    /// `docs/specs/macro_class_spec.md`). Every text-style setter already calls
-    /// `invalidate_measure()`, so this is guaranteed to run again before anything is drawn.
-    ///
-    /// `pub(crate)` (not `#[inherent]`/private): `native_ui::text::TextArea` overrides
-    /// `measure_override` itself (`NSScrollView.fittingSize()` reports `{0,0}`) and must call this
-    /// first — see that override's own doc comment.
-    pub(crate) fn sync_text_style(&self) {
-        // 指示書 §17: a font-incapable leaf (e.g. a bare `NSStackView`) must not be treated as
-        // "handled" — but it's also not an error, it simply has nowhere to put a text style, so
-        // this skips the (harmless but pointless) resolve-and-apply work rather than warning.
-        if !self.handle.supports_text_style() {
-            return;
-        }
-        let cascaded = self.cascaded_text_style();
-        if self.applied.borrow().as_ref() != Some(&cascaded) {
-            self.handle.apply_text_style(&cascaded);
-            *self.applied.borrow_mut() = Some(cascaded);
-        }
-    }
-
-    /// Reapplies the current resolved style after a native widget mutation that discards its
-    /// attributed text. `NSButton.setTitle` is the relevant AppKit case: component resync may set
-    /// the same title again after the cached style was applied, so cache equality alone cannot
-    /// prove that the native handle still carries that style.
-    pub(crate) fn reapply_text_style(&self) {
-        self.applied.borrow_mut().take();
-        self.sync_text_style();
-    }
-}
-
-impl TextStyleOwner for NativeControl {
-    fn text_style_storage(&self) -> &TextStyleStorage {
-        &self.text_style
+    fn apply_text_style(&self, style: &CascadedTextStyle) -> bool {
+        self.handle.apply_text_style(style);
+        true
     }
 }

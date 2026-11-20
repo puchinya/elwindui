@@ -225,8 +225,8 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   The drop (and `dispose()`) happens once the callback returns. Backends must keep the dispatched closure
   and the native object that dispatches it alive for the duration of the call, even when `dispose()` runs
   reentrantly. WinUI3 already does this: `invoke_ui_event_callback` and the click dispatcher clone the
-  `Rc` before calling it. The AppKit requirement (temporarily retain the target in `perform` while its
-  ivar callback runs) is tracked by #316 (D5). A permanent strong cycle to the Core owner stays forbidden.
+  `Rc` before calling it. On AppKit, `ButtonTarget::perform` retains the target for the duration of
+  its ivar callback (#316, D5; cross-compiled only, macOS run pending). A permanent strong cycle to the Core owner stays forbidden.
 - **Replaced native registrations** are released when they are replaced, not only at `dispose()`. For
   example, the WinUI3 Enter accelerator's callback entry is unregistered when `is_default` toggles, so
   repeated toggling keeps the callback registry at a constant size.

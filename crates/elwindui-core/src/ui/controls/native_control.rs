@@ -49,11 +49,19 @@ pub struct NativeControl {
     /// Set when the peer rejected the current background (`apply_background` returned `false`).
     /// Retried on every later measure pass until the peer accepts it or a newer value replaces it.
     background_pending: Cell<bool>,
+    /// Bumped by every background push. A push records its value before calling the peer and
+    /// writes `background_pending` only if no other push (a reentrant one) ran meanwhile, so a
+    /// stale result never overwrites a newer one (`native_peer_design.md` §6).
+    background_generation: Cell<u64>,
     tooltip: RefCell<String>,
     text_style: TextStyleStorage,
     /// The style last accepted by the peer. Lets `sync_text_style` skip a redundant native call
     /// when nothing changed since the previous measure pass.
     applied: RefCell<Option<CascadedTextStyle>>,
+    /// Bumped by every text-style push and every cache invalidation. A push caches its style
+    /// only if the generation is unchanged when the peer returns, so a reentrant push or
+    /// invalidation is never overwritten by an older style.
+    text_style_generation: Cell<u64>,
 }
 
 #[elwindui_macros::component]
@@ -194,9 +202,11 @@ impl NativeControl {
             peer: cell,
             background: RefCell::new(None),
             background_pending: Cell::new(false),
+            background_generation: Cell::new(0),
             tooltip: RefCell::new(String::new()),
             text_style: TextStyleStorage::new(),
             applied: RefCell::new(None),
+            text_style_generation: Cell::new(0),
         }
     }
 }
@@ -217,6 +227,7 @@ impl NativeControl {
         if !tooltip.is_empty() {
             peer.set_tooltip(Some(&tooltip));
         }
+        self.bump_text_style_generation();
         self.applied.borrow_mut().take();
         peer
     }
@@ -224,11 +235,29 @@ impl NativeControl {
     /// Pushes the current logical background (or its absence) to `peer` and records whether the
     /// peer rejected it, so the next measure pass retries it. A rejected value is never treated
     /// as applied; a newer `set_background`/`clear_background` simply replaces the pending one.
+    ///
+    /// Reentrancy (`native_peer_design.md` §6): when the peer re-enters a background setter while
+    /// this push is in flight, the inner push is newer, so this outer result is stale. It is
+    /// discarded, and the current value is marked pending instead, because the outer native call
+    /// may have completed after the inner one. The next measure pass re-pushes the newest value
+    /// once, so the native widget converges on the last logical write.
     fn push_background(&self, peer: &Rc<dyn NativePeer>) {
+        let generation = self.background_generation.get().wrapping_add(1);
+        self.background_generation.set(generation);
         // Clone the logical value out first: the peer may re-enter this control.
         let background = self.background.borrow().clone();
-        self.background_pending
-            .set(!peer.apply_background(background.as_ref()));
+        let accepted = peer.apply_background(background.as_ref());
+        if self.background_generation.get() == generation {
+            self.background_pending.set(!accepted);
+        } else {
+            self.background_pending.set(true);
+        }
+    }
+
+    fn bump_text_style_generation(&self) -> u64 {
+        let generation = self.text_style_generation.get().wrapping_add(1);
+        self.text_style_generation.set(generation);
+        generation
     }
 
     /// Pulls this element's resolved text style and pushes it to the peer, but only when it
@@ -247,7 +276,19 @@ impl NativeControl {
             return;
         }
         let cascaded = self.cascaded_text_style();
-        if self.applied.borrow().as_ref() != Some(&cascaded) && peer.apply_text_style(&cascaded) {
+        // Compare in its own statement so no `RefCell` borrow is held across the peer call.
+        let unchanged = self.applied.borrow().as_ref() == Some(&cascaded);
+        if unchanged {
+            return;
+        }
+        let generation = self.bump_text_style_generation();
+        let accepted = peer.apply_text_style(&cascaded);
+        if self.text_style_generation.get() != generation {
+            // A reentrant push or invalidation ran during this call, so this result is stale and
+            // this outer native call may have completed after the newer one. Drop the cache so
+            // the next measure pass re-pushes the newest resolved style once (§6).
+            self.applied.borrow_mut().take();
+        } else if accepted {
             // Only cache a style after the peer accepted it, so a transient native failure is
             // retried on a later layout pass.
             *self.applied.borrow_mut() = Some(cascaded);
@@ -259,6 +300,7 @@ impl NativeControl {
     /// widget still carries the style.
     #[doc(hidden)]
     pub fn reapply_text_style(&self) {
+        self.bump_text_style_generation();
         self.applied.borrow_mut().take();
         self.sync_text_style();
     }

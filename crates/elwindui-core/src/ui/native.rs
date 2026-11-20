@@ -24,6 +24,11 @@ use std::rc::Rc;
 /// Every method is called on the UI thread that created the peer. Core never holds a `RefCell`
 /// borrow across a peer call, so an implementation may synchronously re-enter Core (for example
 /// through a native event raised by a setter).
+///
+/// When it does, the last logical write wins (`native_peer_design.md` §6): Core derives its own
+/// state from the latest stored value, and discards the result of a fallible push that a
+/// reentrant push superseded, re-pushing the newest value on the next measure pass instead. A
+/// peer whose native call raises a synchronous event must finish its own native write first.
 pub trait NativePeer {
     /// The backend's type-erased native handle (for example the WinUI3/AppKit `AnyView`).
     ///

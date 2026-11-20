@@ -157,7 +157,9 @@ impl Button {
         if let Some(peer) = self.peer.get() {
             peer.set_enabled(enabled);
         }
-        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
+        // Derive owner state from the latest logical value, not the argument: the peer may have
+        // re-entered this setter with a newer value (`native_peer_design.md` §6).
+        sync_intrinsic_enabled(self.base.as_ui_element(), self.enabled.get());
     }
 
     /// Replaces native activation's routed `on_click` dispatch with `callback`.
@@ -171,11 +173,14 @@ impl Button {
         if let Some(peer) = self.peer.get() {
             peer.set_text(text);
         }
+        // Derive the label from the latest logical text, not the argument: the peer may have
+        // re-entered this setter with a newer value (`native_peer_design.md` §6).
+        let latest = self.text.borrow().clone();
         let mut semantics = self
             .base
             .intrinsic_accessibility_semantics()
             .unwrap_or_else(button_accessibility_semantics);
-        semantics.label = Some(text.to_string());
+        semantics.label = Some(latest);
         self.base.set_intrinsic_accessibility_semantics(semantics);
         // Some toolkits drop the attributed title when it changes (AppKit `NSButton.setTitle`),
         // and the caption changes the fitting size.
@@ -247,9 +252,15 @@ mod tests {
     };
 
     /// Records every call a Core `Button` makes on its peer.
+    /// Called with the peer operation name before the peer acts on it, so a test can re-enter
+    /// Core synchronously from inside a peer call, like a backend reacting to a native event.
+    type ReenterHook = Rc<RefCell<Option<Rc<dyn Fn(&str)>>>>;
+
     struct MockButtonPeer {
         log: Rc<RefCell<Vec<String>>>,
         background_fails: Rc<Cell<bool>>,
+        text_style: Rc<Cell<bool>>,
+        reenter: ReenterHook,
         click: RefCell<Option<Box<dyn Fn()>>>,
         handle: &'static str,
     }
@@ -257,6 +268,12 @@ mod tests {
     impl MockButtonPeer {
         fn record(&self, entry: impl Into<String>) {
             self.log.borrow_mut().push(entry.into());
+        }
+        fn reenter(&self, op: &str) {
+            let hook = self.reenter.borrow().clone();
+            if let Some(hook) = hook {
+                hook(op);
+            }
         }
     }
 
@@ -272,6 +289,7 @@ mod tests {
             }
         }
         fn apply_background(&self, background: Option<&Brush>) -> bool {
+            self.reenter("background");
             let accepted = !self.background_fails.get();
             self.record(format!("background:{}:{accepted}", background.is_some()));
             accepted
@@ -280,9 +298,13 @@ mod tests {
             self.record(format!("tooltip:{tooltip:?}"));
         }
         fn supports_text_style(&self) -> bool {
-            false
+            self.text_style.get()
         }
-        fn apply_text_style(&self, _style: &crate::graphics::CascadedTextStyle) -> bool {
+        fn apply_text_style(&self, style: &crate::graphics::CascadedTextStyle) -> bool {
+            // Re-enter first and record after, so a reentrant push completes before this outer
+            // one: the worst case for last-write-wins.
+            self.reenter("text_style");
+            self.record(format!("text_style:{:?}", style.font_size));
             true
         }
         fn dispose(&self) {
@@ -293,9 +315,11 @@ mod tests {
 
     impl ButtonPeer for MockButtonPeer {
         fn set_text(&self, text: &str) {
+            self.reenter(&format!("text:{text}"));
             self.record(format!("text:{text}"));
         }
         fn set_enabled(&self, enabled: bool) {
+            self.reenter(&format!("enabled:{enabled}"));
             self.record(format!("enabled:{enabled}"));
         }
         fn set_role(&self, role: ButtonRole) {
@@ -315,7 +339,31 @@ mod tests {
         created: Cell<usize>,
         log: Rc<RefCell<Vec<String>>>,
         background_fails: Rc<Cell<bool>>,
+        text_style: Rc<Cell<bool>>,
+        reenter: ReenterHook,
         last: RefCell<Option<Rc<MockButtonPeer>>>,
+    }
+
+    impl MockFactory {
+        /// Installs `hook` to run once, on the first peer operation named `op`, with the
+        /// button. Holds only a `Weak` so the hook never keeps the button alive.
+        fn reenter_once(
+            &self,
+            op: &'static str,
+            button: &Rc<Button>,
+            hook: impl Fn(&Button) + 'static,
+        ) {
+            let button = Rc::downgrade(button);
+            let fired = Cell::new(false);
+            *self.reenter.borrow_mut() = Some(Rc::new(move |current: &str| {
+                if current != op || fired.replace(true) {
+                    return;
+                }
+                if let Some(button) = button.upgrade() {
+                    hook(&button);
+                }
+            }));
+        }
     }
 
     impl NativePeerFactory for MockFactory {
@@ -327,6 +375,8 @@ mod tests {
             let peer = Rc::new(MockButtonPeer {
                 log: self.log.clone(),
                 background_fails: self.background_fails.clone(),
+                text_style: self.text_style.clone(),
+                reenter: self.reenter.clone(),
                 click: RefCell::new(None),
                 handle: "mock-button",
             });
@@ -586,6 +636,114 @@ mod tests {
         // A native click that races with teardown is a no-op.
         callback();
         assert_eq!(clicks.get(), 0);
+        clear_native_peer_factory();
+    }
+
+    fn backgrounds(factory: &MockFactory) -> Vec<String> {
+        factory
+            .log
+            .borrow()
+            .iter()
+            .filter(|entry| entry.starts_with("background:"))
+            .cloned()
+            .collect()
+    }
+
+    fn solid(red: u8) -> Brush {
+        Brush::Solid(crate::graphics::Color::rgba(red, 0, 0, 255))
+    }
+
+    #[test]
+    fn a_stale_background_result_does_not_hide_a_reentrant_rejection() {
+        let factory = install_mock();
+        let button = Button::new();
+        button.measure(available());
+        // apply(A) -> set_background(B) -> apply(B) = false -> apply(A) = true.
+        let fails = factory.background_fails.clone();
+        factory.reenter_once("background", &button, move |button| {
+            fails.set(true);
+            button.set_background(Some(solid(2)));
+            fails.set(false);
+        });
+        button.set_background(Some(solid(1)));
+        assert_eq!(
+            backgrounds(&factory),
+            ["background:true:false", "background:true:true"]
+        );
+        // B, the newest logical value, stays pending and is retried on the next pass.
+        button.invalidate_measure();
+        button.measure(available());
+        assert_eq!(
+            backgrounds(&factory),
+            [
+                "background:true:false",
+                "background:true:true",
+                "background:true:true"
+            ]
+        );
+        // Accepted now: later passes stop pushing it.
+        button.invalidate_measure();
+        button.measure(available());
+        assert_eq!(backgrounds(&factory).len(), 3);
+        clear_native_peer_factory();
+    }
+
+    #[test]
+    fn a_reentrant_text_style_change_converges_on_the_newest_style() {
+        let factory = install_mock();
+        factory.text_style.set(true);
+        let button = Button::new();
+        // While the outer `apply_text_style` runs, the peer changes the style and re-enters
+        // `set_text`, which pushes the newer style. No `RefCell` borrow may be held across the
+        // peer call, or this reentrant cache invalidation would panic.
+        factory.reenter_once("text_style", &button, |button| {
+            let owner = button
+                .as_text_style_owner()
+                .expect("native controls own a text style");
+            crate::ui::TextStyleOwner::set_font_size(owner, 20.0);
+            button.set_text("B");
+        });
+        button.measure(available());
+        let styles = |factory: &MockFactory| -> Vec<String> {
+            factory
+                .log
+                .borrow()
+                .iter()
+                .filter(|entry| entry.starts_with("text_style:"))
+                .cloned()
+                .collect()
+        };
+        // The stale outer call finished last, with the old style.
+        let realized = styles(&factory);
+        assert_eq!(realized.len(), 2);
+        assert_eq!(realized[0], "text_style:Some(20.0)");
+        // Its result was discarded, so the next pass re-pushes the newest style once ...
+        button.invalidate_measure();
+        button.measure(available());
+        let converged = styles(&factory);
+        assert_eq!(converged.len(), 3);
+        assert_eq!(converged[2], "text_style:Some(20.0)");
+        // ... and then the cache settles.
+        button.invalidate_measure();
+        button.measure(available());
+        assert_eq!(styles(&factory).len(), 3);
+        clear_native_peer_factory();
+    }
+
+    #[test]
+    fn reentrant_setters_leave_owner_semantics_on_the_latest_value() {
+        let factory = install_mock();
+        let button = Button::new();
+        button.measure(available());
+        factory.reenter_once("text:A", &button, |button| button.set_text("B"));
+        button.set_text("A");
+        let semantics = button.intrinsic_accessibility_semantics().unwrap();
+        assert_eq!(semantics.label.as_deref(), Some("B"));
+
+        factory.reenter_once("enabled:true", &button, |button| button.set_enabled(false));
+        button.set_enabled(true);
+        let semantics = button.intrinsic_accessibility_semantics().unwrap();
+        assert!(semantics.state.disabled);
         clear_native_peer_factory();
     }
 

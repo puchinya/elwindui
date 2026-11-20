@@ -166,6 +166,7 @@ into a host.
   returns `true`. A newer set/clear replaces the pending value. Measure does not invalidate itself to force
   a retry, so a permanently failing native call costs one call per layout pass and never loops. Peer
   methods returning `()` are fire-and-forget: a native failure there is logged or ignored by the backend.
+  The result of a push that a reentrant push superseded is never recorded (§6, last write wins).
 - **Two-way properties (OS→Core):** the peer reports through a callback that Core installed at
   realization. Core compares with the stored value. If the value changed, Core stores it and raises the
   `on_change`/binding notification once. Core does not push it back to the peer, so there is no echo.
@@ -204,8 +205,8 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   Accessibility semantics are Core-owned and need no push. The caller (measure or render collection)
   continues with the realized peer.
 - **Reentrancy during realization:** both `OnceCell`s are set before any state is pushed. A setter that
-  runs reentrantly during steps 2–3 stores its value and pushes straight to the peer, so the last write
-  wins natively and logically. A reentrant `__native_peer()` returns the installed peer and never creates
+  runs reentrantly during steps 2–3 stores its value and pushes straight to the peer; the last-write-wins
+  rules below apply. A reentrant `__native_peer()` returns the installed peer and never creates
   another or re-runs initialization. No OS event reaches Core before step 3 finishes, because the
   callbacks are installed last. A panic inside realization is a fatal UI-thread error and is not
   recoverable. `__native_peer()` holds the owner strongly (upgraded `self_weak`) for the whole protocol.
@@ -229,9 +230,41 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
 - **Replaced native registrations** are released when they are replaced, not only at `dispose()`. For
   example, the WinUI3 Enter accelerator's callback entry is unregistered when `is_default` toggles, so
   repeated toggling keeps the callback registry at a constant size.
-- **Reentrancy:** Core never holds a `RefCell` borrow across a peer call or a user callback. Peer
-  callbacks borrow, clone what they need, release the borrow, then dispatch. The existing TabView
-  close/select discipline applies to all peers.
+- **Reentrancy:** Core never holds a `RefCell` borrow across a peer call or a user callback, including a
+  temporary borrow inside the condition that guards the call: a comparison against cached state is
+  computed in its own statement first. Peer callbacks borrow, clone what they need, release the borrow,
+  then dispatch. The existing TabView close/select discipline applies to all peers.
+- **Last write wins (reentrant setters).** A peer may synchronously re-enter a Core setter while a push
+  is in flight (outer push of A, inner push of B). Core guarantees the following without assuming in
+  which order the two native calls complete:
+  1. **Logical state** is the value stored last (B): every setter stores before it pushes.
+  2. **Owner-side derived state** (accessibility label and `disabled`, layout invalidation) is computed
+     from the stored logical value after the peer call returns, never from the setter's argument. After
+     the outer `set_text(A)` returns, the label is B. After the outer `set_enabled(true)` returns with a
+     reentrant `set_enabled(false)`, `disabled` is `true`.
+  3. **Results of fallible pushes are versioned.** Each control keeps a generation counter per fallible
+     property (`background`, text style). A push increments it before calling the peer and remembers its
+     own value. When the call returns, the result is recorded (`background_pending`, the applied
+     text-style cache) only if the counter is unchanged. Otherwise the result is stale: it is discarded
+     and the property is marked dirty instead (`background_pending = true`, applied text-style cache
+     cleared), because the stale outer native call may have completed after the newer one. A text-style
+     cache invalidation (for example `reapply_text_style`) also increments the counter.
+  4. **Convergence:** the next measure pass re-pushes the newest logical value once. The setter that ran
+     reentrantly has already invalidated layout, so that pass is scheduled. With no further reentrancy
+     the counter is stable on that pass and the state settles, so this never loops.
+
+  Fire-and-forget pushes (`set_text`, `set_enabled`, `set_tooltip`, ...) return no result and need no
+  generation. Their native final value after a reentrant overlap is the backend's responsibility: a
+  backend whose native call can raise a synchronous event must finish its own native write before it
+  dispatches that event.
+
+  Required Core mock tests (a mock peer that re-enters synchronously):
+  - `apply_background(A)` → `set_background(B)` → `apply(B) = false` → `apply(A) = true`: B stays pending
+    and is re-pushed on the next measure pass, after which the state settles.
+  - `apply_text_style` re-enters a style change and `set_text`: no panic, the newest style is the last one
+    pushed after the next measure pass, and the cache then settles.
+  - A peer `set_text(A)` that re-enters `set_text(B)` leaves label = B. A peer `set_enabled(true)` that
+    re-enters `set_enabled(false)` leaves `disabled = true`.
 
 ## 7. Window
 
@@ -311,6 +344,9 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   - Drop → `dispose()` once, `Weak` cannot upgrade, stale callback is a no-op with and without a
     user override;
   - a native callback whose handler releases the last owner finishes, then disposes once;
+  - synchronous reentrancy from inside a peer call (§6 "Last write wins"): a stale background result does
+    not hide a newer rejection, a reentrant text-style change converges without a `RefCell` panic, and
+    the accessibility label/`disabled` follow the latest logical value;
   - `#[should_panic(expected = ..)]` for no factory, a different thread and an unsupported control;
   - a failed backend `init()` leaves no factory registered (backend test through an injectable bootstrap
     result).

@@ -6,6 +6,8 @@ Related specification: [`../../specs/ui_spec.md`](../../specs/ui_spec.md).
 
 `NativeControl` represents an ElwindUI element whose leaf presentation is owned by an OS widget. Common code owns public properties, logical relationships, and events; backend code owns widget creation, property translation, native event targets, and disposal.
 
+The target split (Issue #313) is a single Core concrete Component per native builtin plus a backend-implemented peer created through a registered factory; it replaces the `trait_only`/`struct_only`/`abi_props` pairing. See [`native_peer_design.md`](native_peer_design.md) for the peer contract, realization lifecycle, failure boundary, and migration order.
+
 The backend layering remains `native_ui -> inner -> host -> render -> ffi`. Public UI modules do not expose AppKit, WinUI, WinRT, or Objective-C types.
 
 ## Hosting and owner mapping

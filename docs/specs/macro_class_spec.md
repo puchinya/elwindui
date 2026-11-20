@@ -18,6 +18,8 @@
 
 同じclass名に必要な宣言が複数ある形態では、macroがそれらを一つのclass contractとして検証する。
 
+**廃止予定(Issue #313)**: `trait_only`と`struct_only`(および`#[component]`の`abi_props`)は、native builtinをCoreの単一concrete Componentとbackend Peerへ移行した後に削除する。削除後にこれらを指定するとcompile-time errorになり、そのerrorは指定されたmode名を示す。native builtinの公開型(`elwindui::ui::Button`など)、`view!`/`new!`、`inherits`による継承、`#[overrides]`は互換のまま維持する。backendの具象型(`elwindui::backend::Button`など)を直接名指しするコードと、利用者自身が書いた`trait_only`/`struct_only` classは移行対象外で、互換を保証しない。移行の順序と内部設計は[`native_peer_design.md`](../design/runtime/native_peer_design.md)を参照する。
+
 ## 3. Class arguments
 
 - `inherits = Path` は一つの直接ancestorを指定する。

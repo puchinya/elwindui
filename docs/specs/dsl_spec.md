@@ -399,6 +399,7 @@ impl ContentControl {
   - (iii) `view!`/`template_view!`フィールドもフィールドのDSL属性もなく、companion `impl`に`fn construct(..) -> Self`がある。これは`impl`を読んだ時点で決まる。
 - それ以外は従来どおり宣言的componentである(viewを持たず無属性フィールドだけのstructと空の`impl`も、従来どおり宣言的)。
 - 引数は`inherits Path`(`=`なし)、`trait_only`、`struct_only = Trait`、`abi_props = <props macro path>`、`abstract_class`、`sealed`、`no_ancestor_forward`。`trait_only`と`struct_only`は同時に指定できない。`abi_props`は`struct_only`でのみ指定できる。
+- **廃止予定(Issue #313)**: 次の`trait_only`/`struct_only`/`abi_props`の形は、native builtinをCoreの単一concrete Component(手書きストレージ+backend Peer)へ移行した後に削除され、指定するとcompile-time errorになる。native builtinの公開型・`view!`/`new!`・継承経路は変わらない。詳細は[`macro_class_spec.md`](macro_class_spec.md) §2と[`native_peer_design.md`](../design/runtime/native_peer_design.md)を参照する。
 - Core interfaceは`#[component(trait_only, inherits Path)] trait Name { .. }`と書く。backendの実装は`#[component(struct_only = TraitPath, inherits Path, abi_props = elwindui_core::__elwindui_props_Name)] struct Name { .. }`と書く。公開property(`#[prop]`/`#[content]`)はCore interfaceが宣言し、`abi_props`がその宣言元を明示する(trait名から推測しない)。
 - 手書きストレージの形と宣言的componentの形(`view!`フィールド、フィールドのDSL属性)を混ぜるとエラーになる。`trait_only`をstructに、`struct_only`をtraitに付けてもエラーになる。
 - `construct`はcompanion `impl`の無属性の関連関数で、仮想メソッドではない。`self`レシーバ・`async`・`unsafe`・ジェネリクス・`Self`以外の戻り値・重複・`#[overridable]`/`#[overrides]`はエラーになる。手書きストレージのcomponentでは、`impl`に`#[class]`と同じメソッド(無属性のメソッド、`#[inherent]`、`#[overridable]`/`#[overrides]`、`on_constructed`)を書ける。

@@ -9,7 +9,7 @@ use std::rc::Rc;
 /// `content: std::rc::Rc<dyn UIElement>` (`ScrollView`'s `#[class]` declaration, `#[content(content)]`)
 /// resolves to `Rc<dyn UIElementExt>` here — the same type every other `visual_children()`/
 /// `#[content(..)]` slot in this crate already uses.
-#[elwindui_macros::class(struct_only = elwindui_core::ui::ScrollViewExt, inherits = crate::NativeControl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::ScrollViewExt, inherits = elwindui_core::ui::NativeControl)]
 pub struct ScrollView {
     inner: InnerScrollView,
 }
@@ -35,7 +35,7 @@ impl ScrollView {
         let inner = InnerScrollView::new();
         let handle = inner.handle();
         Self {
-            base: NativeControl::construct(handle),
+            base: NativeControl::construct(super::control::handle_peer(handle)),
             inner,
         }
     }

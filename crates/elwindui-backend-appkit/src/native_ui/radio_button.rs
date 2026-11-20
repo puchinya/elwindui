@@ -20,7 +20,7 @@ use std::rc::{Rc, Weak};
 // not a compile error). Relying on `AsAny` reaching here only as `UIElementExt`'s own supertrait
 // is what makes `owner.as_any()` below resolve correctly.
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::RadioButtonExt, inherits = crate::NativeControl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::RadioButtonExt, inherits = elwindui_core::ui::NativeControl)]
 pub struct RadioButton {
     inner: InnerRadioButton,
     group: RefCell<String>,
@@ -141,7 +141,7 @@ impl RadioButton {
         let inner = InnerRadioButton::new();
         let handle = inner.handle();
         Self {
-            base: NativeControl::construct(handle),
+            base: NativeControl::construct(super::control::handle_peer(handle)),
             inner,
             group: RefCell::new(String::new()),
             on_change: RefCell::new(None),

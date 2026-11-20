@@ -6,20 +6,28 @@ use crate::bindings::Microsoft::UI::Xaml::Input::{
 };
 use crate::bindings::Microsoft::UI::Xaml::Media::Brush;
 use crate::bindings::Microsoft::UI::Xaml::{Application, RoutedEventHandler, Style};
-use crate::ffi::{AnyView, invoke_ui_event_callback, register_ui_event_callback};
+use crate::ffi::{AnyView, UiCallbackRegistryOwner, invoke_ui_event_callback};
 use elwindui_core::ui::ButtonRole;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use windows::Foundation::PropertyValue;
 use windows::Foundation::TypedEventHandler;
 use windows::System::VirtualKey;
 use windows::core::{HSTRING, Interface};
 
-/// Raw `XamlButton` + click wiring — composed by `native_ui::Button`.
+/// Raw `XamlButton` + click wiring — composed by `native_ui::WinUi3ButtonPeer`.
+///
+/// Every native callback is registered through `callbacks`, so [`InnerButton::dispose`] (or the
+/// final drop) removes them from the UI-thread callback registry. The click slot itself is
+/// replaced with `None` on dispose, so a delegate that races with teardown is a no-op.
 pub(crate) struct InnerButton {
     handle: AnyView,
     xaml: XamlButton,
-    on_click: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    on_click: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    callbacks: UiCallbackRegistryOwner,
+    /// Registry id of the current Enter accelerator's callback, released whenever the
+    /// accelerator is replaced or removed so toggling `is_default` never accumulates entries.
+    default_accelerator_callback: Cell<Option<usize>>,
 }
 
 impl InnerButton {
@@ -30,14 +38,11 @@ impl InnerButton {
             handle,
             xaml,
             on_click: Rc::new(RefCell::new(None)),
+            callbacks: UiCallbackRegistryOwner::default(),
+            default_accelerator_callback: Cell::new(None),
         };
         {
-            let callback = this.on_click.clone();
-            let callback_id = register_ui_event_callback(Rc::new(move || {
-                if let Some(callback) = callback.borrow().as_ref() {
-                    callback();
-                }
-            }));
+            let callback_id = this.callbacks.register_event(this.click_dispatcher());
             let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
                 invoke_ui_event_callback(callback_id);
                 Ok(())
@@ -54,8 +59,28 @@ impl InnerButton {
         let _ = self.xaml.SetIsEnabled(enabled);
     }
 
-    pub(crate) fn set_on_click(&self, callback: Box<dyn Fn()>) {
-        *self.on_click.borrow_mut() = Some(callback);
+    pub(crate) fn set_on_click(&self, callback: Option<Box<dyn Fn()>>) {
+        *self.on_click.borrow_mut() = callback.map(Rc::from);
+    }
+
+    /// Removes the click callback and every callback-registry entry this button owns.
+    /// Idempotent.
+    pub(crate) fn dispose(&self) {
+        self.on_click.borrow_mut().take();
+        self.default_accelerator_callback.take();
+        self.callbacks.clear();
+    }
+
+    /// A registry callback that runs the current click callback. The callback is cloned out of
+    /// its slot before it runs, so it may replace itself or dispose this button reentrantly.
+    fn click_dispatcher(&self) -> Rc<dyn Fn()> {
+        let slot = self.on_click.clone();
+        Rc::new(move || {
+            let callback = slot.borrow().clone();
+            if let Some(callback) = callback {
+                callback();
+            }
+        })
     }
 
     pub(crate) fn set_text(&self, text: &str) {
@@ -99,23 +124,23 @@ impl InnerButton {
     ///
     /// WinUI 3's `Button` has no `IsDefault` (that lives on `ContentDialog`'s buttons only), so
     /// this uses the general mechanism: an `Enter` `KeyboardAccelerator`. The accelerator is added
-    /// once and removed when unset, rather than accumulating one per call.
+    /// once and removed when unset, rather than accumulating one per call. The replaced
+    /// accelerator's registry callback is released at the same time.
     pub(crate) fn set_is_default(&self, is_default: bool) {
         let Ok(accelerators) = self.xaml.KeyboardAccelerators() else {
             return;
         };
         let _ = accelerators.Clear();
+        if let Some(previous) = self.default_accelerator_callback.take() {
+            self.callbacks.unregister_event(previous);
+        }
         if !is_default {
             return;
         }
         if let Ok(accelerator) = KeyboardAccelerator::new() {
             let _ = accelerator.SetKey(VirtualKey::Enter);
-            let callback = self.on_click.clone();
-            let callback_id = register_ui_event_callback(Rc::new(move || {
-                if let Some(callback) = callback.borrow().as_ref() {
-                    callback();
-                }
-            }));
+            let callback_id = self.callbacks.register_event(self.click_dispatcher());
+            self.default_accelerator_callback.set(Some(callback_id));
             let _ = accelerator.Invoked(&TypedEventHandler::<
                 KeyboardAccelerator,
                 KeyboardAcceleratorInvokedEventArgs,
@@ -262,9 +287,9 @@ mod hosted_xaml_regression_tests {
         root.set_spacing(4.0);
         let mut views = Vec::with_capacity(count);
         for index in 0..count {
-            let button = crate::native_ui::Button::new();
+            let button = elwindui_core::ui::Button::new();
             button.set_text(&format!("Loaded batch button {index}"));
-            views.push(button.into_any_view());
+            views.push(crate::native_ui::__IntoAnyView::into_any_view(&button));
             root.children().add(button);
         }
         (root, views)
@@ -544,6 +569,21 @@ mod hosted_xaml_regression_tests {
                     .expect("default accelerator key"),
                 VirtualKey::Enter
             );
+            // Toggling `is_default` must release each replaced accelerator's registry callback
+            // (PR #315 review): only the click callback and at most one accelerator remain.
+            let toggle_baseline = crate::ffi::ui_event_callback_count();
+            let owned_baseline = button.callbacks.registration_count();
+            for _ in 0..128 {
+                button.set_is_default(false);
+                button.set_is_default(true);
+            }
+            assert_eq!(crate::ffi::ui_event_callback_count(), toggle_baseline);
+            assert_eq!(button.callbacks.registration_count(), owned_baseline);
+            assert_eq!(accelerators.Size().expect("accelerator count"), 1);
+            button.set_is_default(false);
+            assert_eq!(crate::ffi::ui_event_callback_count(), toggle_baseline - 1);
+            assert_eq!(accelerators.Size().expect("accelerator count"), 0);
+            button.set_is_default(true);
             let element = view.as_element();
             assert!(
                 !element.IsLoaded().expect("unparented Button IsLoaded"),

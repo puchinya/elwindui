@@ -12,8 +12,8 @@ use objc2_foundation::{NSAttributedString, NSObjectProtocol, NSString};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// Raw `NSButton` + click target — composed by `native_ui::Button` (and used directly, not through
-/// `native_ui::Button`, by `TabChipImpl`/`TabStripImpl` below for their own internal chip/strip
+/// Raw `NSButton` + click target — composed by `native_ui::AppKitButtonPeer` (and used directly, not through
+/// `native_ui::AppKitButtonPeer`, by `TabChipImpl`/`TabStripImpl` below for their own internal chip/strip
 /// buttons — see those types' own doc comments).
 pub(crate) struct InnerButton {
     pub(crate) handle: AnyView,
@@ -46,6 +46,18 @@ impl InnerButton {
     pub(crate) fn set_on_click(&self, callback: Box<dyn Fn()>) {
         let target = ButtonTarget::attach(&self.ns, callback);
         *self.target_storage.borrow_mut() = Some(target);
+    }
+
+    /// Detaches the click target, so a later native click does nothing. Idempotent. Used by
+    /// `native_ui::AppKitButtonPeer` for `set_on_click(None)` and `dispose`.
+    pub(crate) fn clear_on_click(&self) {
+        unsafe {
+            self.ns.setTarget(None);
+            self.ns.setAction(None);
+        }
+        // Drop the target only after `NSButton` no longer points at it.
+        let target = self.target_storage.borrow_mut().take();
+        drop(target);
     }
 
     /// Used by `TabChipImpl` to rename a tab's title button when its document's file name changes.

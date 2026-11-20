@@ -8066,8 +8066,13 @@ fn generate_view(
             quote! { self.#root_binding.get().expect("into_any_view: component is not yet mounted") },
             "AnyView",
         );
+        // Core-owned native Components (Issue #313) cannot name `AnyView`, so the backend
+        // supplies `into_any_view` for them through `__IntoAnyView`. Controls and components with
+        // their own inherent `into_any_view` still resolve to it first.
         quote! {
             pub fn into_any_view(self: std::rc::Rc<Self>) -> elwindui::backend::AnyView {
+                #[allow(unused_imports)]
+                use elwindui::backend::__IntoAnyView as _;
                 #root_expr
             }
         }

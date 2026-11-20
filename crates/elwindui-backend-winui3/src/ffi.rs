@@ -153,6 +153,12 @@ impl UiCallbackRegistryOwner {
         id
     }
 
+    /// The number of registry entries this lifetime group currently owns.
+    #[cfg(test)]
+    pub(crate) fn registration_count(&self) -> usize {
+        self.0.registrations.borrow().len()
+    }
+
     /// Registers a native WinUI `GettingFocus` callback owned by this lifetime group.
     pub(crate) fn register_getting_focus(
         &self,

@@ -10,7 +10,7 @@ use elwindui_core::ui::{CheckBoxExt, CheckState, UIElementExt};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::CheckBoxExt, inherits = crate::NativeControl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::CheckBoxExt, inherits = elwindui_core::ui::NativeControl)]
 pub struct CheckBox {
     inner: InnerCheckBox,
     on_change: RefCell<Option<Box<dyn Fn(CheckState)>>>,
@@ -96,7 +96,7 @@ impl CheckBox {
         let inner = InnerCheckBox::new();
         let handle = inner.handle();
         Self {
-            base: NativeControl::construct(handle),
+            base: NativeControl::construct(super::control::handle_peer(handle)),
             inner,
             on_change: RefCell::new(None),
         }

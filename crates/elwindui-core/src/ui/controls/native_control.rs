@@ -325,3 +325,64 @@ impl Drop for NativeControl {
         }
     }
 }
+
+/// Intrinsic accessibility semantics for a native leaf: `role` plus the actions it supports.
+pub(crate) fn native_semantics(
+    role: AccessibilityRole,
+    actions: &[AccessibilityActionKind],
+) -> AccessibilitySemantics {
+    let mut semantics = AccessibilitySemantics::new(role);
+    semantics.actions = actions.to_vec();
+    semantics
+}
+
+/// Updates `node`'s intrinsic accessibility semantics in place. Does nothing before they were
+/// first set (every native leaf sets them in `on_constructed`).
+pub(crate) fn update_intrinsic_semantics(
+    node: &dyn UIElementExt,
+    update: impl FnOnce(&mut AccessibilitySemantics),
+) {
+    let Some(mut semantics) = node.intrinsic_accessibility_semantics() else {
+        return;
+    };
+    update(&mut semantics);
+    node.set_intrinsic_accessibility_semantics(semantics);
+}
+
+/// Mirrors a native leaf's `enabled` state into its accessibility `disabled` state.
+pub(crate) fn sync_native_enabled(node: &dyn UIElementExt, enabled: bool) {
+    update_intrinsic_semantics(node, |semantics| semantics.state.disabled = !enabled);
+}
+
+/// Calls a stored user change callback without holding the `RefCell` borrow during the call, so
+/// the callback may replace itself or re-enter the control (§6).
+pub(crate) fn notify_change<T>(slot: &RefCell<Option<Rc<dyn Fn(T)>>>, value: T) {
+    let callback = slot.borrow().clone();
+    if let Some(callback) = callback {
+        callback(value);
+    }
+}
+
+/// A native-to-Core callback that holds only a `Weak` to the owning node. It upgrades first and
+/// keeps the strong reference for the whole call (§6 in-flight callbacks), downcasts to the
+/// sealed concrete control `C`, and does nothing once the control is gone.
+pub(crate) fn weak_native_callback<C: 'static, A: 'static>(
+    node: &dyn UIElementExt,
+    on_event: impl Fn(&C, A) + 'static,
+) -> Box<dyn Fn(A)> {
+    let node = node
+        .as_ui_element()
+        .visual_collection
+        .owner_rc()
+        .map(|node| Rc::downgrade(&node));
+    Box::new(move |arg: A| {
+        let Some(node) = node.as_ref().and_then(Weak::upgrade) else {
+            return;
+        };
+        let Some(control) = node.as_any().downcast_ref::<C>() else {
+            return;
+        };
+        on_event(control, arg);
+        drop(node);
+    })
+}

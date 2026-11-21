@@ -17,8 +17,10 @@ pub use elwindui_macros::__component_with_base_params;
 // defines the concrete type).
 #[doc(hidden)]
 pub use elwindui_core::{
-    __elwindui_ctor_Button, __elwindui_ctor_Layout, __elwindui_ctor_NativeControl,
-    __elwindui_ctor_VerticalLayout, __elwindui_ctor_Window,
+    __elwindui_ctor_Button, __elwindui_ctor_CheckBox, __elwindui_ctor_Layout,
+    __elwindui_ctor_NativeControl, __elwindui_ctor_PasswordBox, __elwindui_ctor_RadioButton,
+    __elwindui_ctor_Slider, __elwindui_ctor_TextArea, __elwindui_ctor_TextBox,
+    __elwindui_ctor_ToggleSwitch, __elwindui_ctor_VerticalLayout, __elwindui_ctor_Window,
 };
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` — writes
 /// a `component`+`view` pair (docs/specs/dsl_spec.md §3/§13) as a single ordinary Rust `struct`,

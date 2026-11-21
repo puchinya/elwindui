@@ -1,10 +1,10 @@
 //! The XAML `CheckBox` and its `Checked`/`Unchecked`/`Indeterminate` events.
 
+use super::{CallbackSlot, invoke_slot, new_callback_slot};
 use crate::bindings::Microsoft::UI::Xaml::Controls::CheckBox as XamlCheckBox;
 use crate::bindings::Microsoft::UI::Xaml::RoutedEventHandler;
-use crate::ffi::{AnyView, UiEventGate, invoke_ui_event_callback, register_ui_event_callback};
+use crate::ffi::{AnyView, UiCallbackRegistryOwner, UiEventGate, invoke_ui_event_callback};
 use elwindui_core::ui::CheckState;
-use std::cell::RefCell;
 use std::rc::Rc;
 use windows::Foundation::{IReference, PropertyValue};
 use windows::core::{HSTRING, Interface};
@@ -13,8 +13,10 @@ use windows::core::{HSTRING, Interface};
 pub(crate) struct InnerCheckBox {
     handle: AnyView,
     xaml: XamlCheckBox,
-    on_change: Rc<RefCell<Option<Box<dyn Fn(CheckState)>>>>,
+    on_change: CallbackSlot<CheckState>,
     events: UiEventGate,
+    /// Owns every registry entry this widget registered; dropping the widget removes them.
+    callbacks: UiCallbackRegistryOwner,
 }
 
 impl InnerCheckBox {
@@ -30,8 +32,9 @@ impl InnerCheckBox {
         let this = Self {
             handle,
             xaml,
-            on_change: Rc::new(RefCell::new(None)),
+            on_change: new_callback_slot(),
             events,
+            callbacks: UiCallbackRegistryOwner::default(),
         };
         for (event, state) in [
             ("Checked", CheckState::Checked),
@@ -39,13 +42,11 @@ impl InnerCheckBox {
         ] {
             let callback = this.on_change.clone();
             let events = this.events.clone();
-            let callback_id = register_ui_event_callback(Rc::new(move || {
+            let callback_id = this.callbacks.register_event(Rc::new(move || {
                 if events.is_suppressed() {
                     return;
                 }
-                if let Some(callback) = callback.borrow().as_ref() {
-                    callback(state);
-                }
+                invoke_slot(&callback, state);
             }));
             let handler = RoutedEventHandler::new(move |_, _| {
                 invoke_ui_event_callback(callback_id);
@@ -65,7 +66,7 @@ impl InnerCheckBox {
             let xaml_for_coerce = this.xaml.clone();
             let callback = this.on_change.clone();
             let events = this.events.clone();
-            let callback_id = register_ui_event_callback(Rc::new(move || {
+            let callback_id = this.callbacks.register_event(Rc::new(move || {
                 if events.is_suppressed() {
                     return;
                 }
@@ -75,9 +76,7 @@ impl InnerCheckBox {
                         .and_then(|v| v.cast::<IReference<bool>>().ok());
                     let _ = xaml_for_coerce.SetIsChecked(value.as_ref());
                 });
-                if let Some(callback) = callback.borrow().as_ref() {
-                    callback(CheckState::Checked);
-                }
+                invoke_slot(&callback, CheckState::Checked);
             }));
             let handler = RoutedEventHandler::new(move |_, _| {
                 invoke_ui_event_callback(callback_id);
@@ -126,6 +125,6 @@ impl InnerCheckBox {
     }
 
     pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(CheckState)>) {
-        *self.on_change.borrow_mut() = Some(callback);
+        *self.on_change.borrow_mut() = Some(Rc::from(callback));
     }
 }

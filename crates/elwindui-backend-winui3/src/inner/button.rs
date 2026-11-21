@@ -626,9 +626,10 @@ mod hosted_xaml_regression_tests {
                     // Application instance in this test process.
                     let focus_host = Rc::new(crate::host::TreeHost::new());
                     let focus_window = XamlWindow::new().expect("focus regression Window::new");
-                    let focus_text_box = crate::native_ui::TextBox::new();
+                    use crate::native_ui::__IntoAnyView as _;
+                    let focus_text_box = elwindui_core::ui::TextBox::new();
                     let focus_view = focus_text_box.into_any_view();
-                    let pointer_text_box = crate::native_ui::TextBox::new();
+                    let pointer_text_box = elwindui_core::ui::TextBox::new();
                     let pointer_view = pointer_text_box.into_any_view();
                     let window_for_focus = focus_window.clone();
                     let focus_event_count = Rc::new(Cell::new(0usize));
@@ -882,6 +883,9 @@ mod hosted_xaml_regression_tests {
                 });
 
                 assert_text_style_round_trip(&canvas);
+                crate::native_ui::input_lifecycle_tests::input_peers_release_every_registration();
+                crate::native_ui::input_lifecycle_tests::
+                    input_peer_released_by_its_own_event_is_safe();
                 crate::inner::menu::live_menu_item_icon_tests::
                     live_inner_menu_item_icon_set_replace_clear();
                 crate::inner::menu::live_menu_item_icon_tests::

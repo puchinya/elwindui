@@ -1,210 +1,68 @@
-//! `elwindui::ui::Slider` — the Windows-tested `SliderExt` implementation. Mirrors
-//! `elwindui_backend_appkit::native_ui::slider`'s own structure exactly.
+//! The WinUI 3 peers behind `elwindui::ui::Slider` (Core-owned Components, Issue #313).
 
-use super::{NativeControl, base_accessibility_semantics, sync_intrinsic_enabled};
-use crate::AnyView;
+use super::control::HandlePeer;
 use crate::inner::InnerSlider;
-use elwindui_core::accessibility::{
-    AccessibilityAction, AccessibilityActionKind, AccessibilityRole, ValueRange,
-};
-use elwindui_core::ui::{SliderExt, UIElementExt};
-use std::cell::RefCell;
-use std::rc::{Rc, Weak};
+use elwindui_core::base::Size;
+use elwindui_core::graphics::{Brush, CascadedTextStyle};
+use elwindui_core::ui::native::{NativePeer, SliderPeer};
+use std::any::Any;
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::SliderExt, inherits = elwindui_core::ui::NativeControl)]
-pub struct Slider {
+/// [`SliderPeer`] over the native slider. Created by [`super::WinUi3PeerFactory`].
+pub(crate) struct WinUi3SliderPeer {
+    base: HandlePeer,
     inner: InnerSlider,
-    on_change: RefCell<Option<Box<dyn Fn(f32)>>>,
 }
 
-#[elwindui_macros::class]
-impl Slider {
-    #[overrides]
-    fn perform_accessibility_action(&self, action: AccessibilityAction) -> bool {
-        match action {
-            AccessibilityAction::SetValue(value) => {
-                self.set_value(value as f32);
-                self.notify_change(value as f32);
-                true
-            }
-            AccessibilityAction::Increment | AccessibilityAction::Decrement => {
-                let Some(range) = self
-                    .base
-                    .intrinsic_accessibility_semantics()
-                    .and_then(|semantics| semantics.state.value_range)
-                else {
-                    return false;
-                };
-                let step = range.step.unwrap_or(1.0);
-                let value = if matches!(action, AccessibilityAction::Increment) {
-                    range.value + step
-                } else {
-                    range.value - step
-                };
-                self.set_value(value as f32);
-                self.notify_change(value as f32);
-                true
-            }
-            AccessibilityAction::Focus => self.focus(),
-            _ => false,
+impl WinUi3SliderPeer {
+    pub(crate) fn new() -> Self {
+        let inner = InnerSlider::new();
+        Self {
+            base: HandlePeer::new(inner.handle()),
+            inner,
         }
     }
+}
 
-    #[inherent]
-    pub fn into_any_view(&self) -> AnyView {
-        self.inner.handle()
+impl NativePeer for WinUi3SliderPeer {
+    fn handle(&self) -> &dyn Any {
+        self.base.handle()
     }
+    fn measure(&self, available: Size) -> Size {
+        self.base.measure(available)
+    }
+    fn apply_background(&self, background: Option<&Brush>) -> bool {
+        self.base.apply_background(background)
+    }
+    fn set_tooltip(&self, tooltip: Option<&str>) {
+        self.base.set_tooltip(tooltip);
+    }
+    fn supports_text_style(&self) -> bool {
+        self.base.supports_text_style()
+    }
+    fn apply_text_style(&self, style: &CascadedTextStyle) -> bool {
+        self.base.apply_text_style(style)
+    }
+    /// Replaces every Core callback with a no-op, so no native event reaches Core afterwards.
+    fn dispose(&self) {
+        self.inner.set_on_change(Box::new(|_| {}));
+    }
+}
 
+impl SliderPeer for WinUi3SliderPeer {
     fn set_value(&self, value: f32) {
         self.inner.set_value(value);
-        let mut semantics = self
-            .base
-            .intrinsic_accessibility_semantics()
-            .unwrap_or_else(|| {
-                base_accessibility_semantics(
-                    AccessibilityRole::Slider,
-                    &[
-                        AccessibilityActionKind::SetValue,
-                        AccessibilityActionKind::Increment,
-                        AccessibilityActionKind::Decrement,
-                        AccessibilityActionKind::Focus,
-                    ],
-                )
-            });
-        let range = semantics.state.value_range.get_or_insert(ValueRange {
-            value: value as f64,
-            min: 0.0,
-            max: 1.0,
-            step: None,
-        });
-        range.value = value as f64;
-        self.base.set_intrinsic_accessibility_semantics(semantics);
-    }
-    fn set_on_change(&self, callback: Box<dyn Fn(f32)>) {
-        *self.on_change.borrow_mut() = Some(callback);
-        self.install_change_trampoline();
     }
     fn set_min(&self, min: f32) {
         self.inner.set_min(min);
-        let mut semantics = self
-            .base
-            .intrinsic_accessibility_semantics()
-            .unwrap_or_else(|| {
-                base_accessibility_semantics(
-                    AccessibilityRole::Slider,
-                    &[
-                        AccessibilityActionKind::SetValue,
-                        AccessibilityActionKind::Increment,
-                        AccessibilityActionKind::Decrement,
-                        AccessibilityActionKind::Focus,
-                    ],
-                )
-            });
-        let range = semantics.state.value_range.get_or_insert(ValueRange {
-            value: 0.0,
-            min: 0.0,
-            max: 1.0,
-            step: None,
-        });
-        range.min = min as f64;
-        self.base.set_intrinsic_accessibility_semantics(semantics);
     }
     fn set_max(&self, max: f32) {
         self.inner.set_max(max);
-        let mut semantics = self
-            .base
-            .intrinsic_accessibility_semantics()
-            .unwrap_or_else(|| {
-                base_accessibility_semantics(
-                    AccessibilityRole::Slider,
-                    &[
-                        AccessibilityActionKind::SetValue,
-                        AccessibilityActionKind::Increment,
-                        AccessibilityActionKind::Decrement,
-                        AccessibilityActionKind::Focus,
-                    ],
-                )
-            });
-        let range = semantics.state.value_range.get_or_insert(ValueRange {
-            value: 0.0,
-            min: 0.0,
-            max: 1.0,
-            step: None,
-        });
-        range.max = max as f64;
-        self.base.set_intrinsic_accessibility_semantics(semantics);
     }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
-        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
     }
-
-    fn construct() -> Self {
-        let inner = InnerSlider::new();
-        let handle = inner.handle();
-        Self {
-            base: NativeControl::construct(super::control::handle_peer(handle)),
-            inner,
-            on_change: RefCell::new(None),
-        }
-    }
-
-    fn on_constructed(&self) {
-        let mut semantics = base_accessibility_semantics(
-            AccessibilityRole::Slider,
-            &[
-                AccessibilityActionKind::SetValue,
-                AccessibilityActionKind::Increment,
-                AccessibilityActionKind::Decrement,
-                AccessibilityActionKind::Focus,
-            ],
-        );
-        semantics.state.value_range = Some(ValueRange {
-            value: 0.0,
-            min: 0.0,
-            max: 1.0,
-            step: None,
-        });
-        self.base.set_intrinsic_accessibility_semantics(semantics);
-        self.set_tab_stop(true);
-        self.install_change_trampoline();
-    }
-
-    /// `codegen` calls exactly `set_on_{field}_change` for a `#[two_way]` prop.
-    #[inherent]
-    pub fn set_on_value_change(&self, callback: Box<dyn Fn(f32)>) {
-        self.set_on_change(callback);
-    }
-
-    #[inherent]
-    fn install_change_trampoline(&self) {
-        let owner: Rc<dyn UIElementExt> = self
-            .as_ui_element()
-            .visual_collection
-            .owner_rc()
-            .expect("Slider must be Rc-constructed before installing its value callback");
-        let weak: Weak<dyn UIElementExt> = Rc::downgrade(&owner);
-        self.inner.set_on_change(Box::new(move |value: f32| {
-            let owner: Option<Rc<dyn UIElementExt>> = weak.upgrade();
-            let Some(owner) = owner else { return };
-            let this = owner
-                .as_any()
-                .downcast_ref::<Slider>()
-                .expect("Slider owner must downcast to Slider");
-            this.set_value(value);
-            this.notify_change(value);
-        }));
-    }
-
-    #[inherent]
-    fn notify_change(&self, value: f32) {
-        let callback = self.on_change.borrow_mut().take();
-        if let Some(callback) = callback {
-            callback(value);
-            let mut slot = self.on_change.borrow_mut();
-            if slot.is_none() {
-                *slot = Some(callback);
-            }
-        }
+    fn set_on_change(&self, callback: Option<Box<dyn Fn(f32)>>) {
+        self.inner
+            .set_on_change(callback.unwrap_or_else(|| Box::new(|_| {})));
     }
 }

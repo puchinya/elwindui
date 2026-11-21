@@ -1,36 +1,36 @@
 //! The XAML `Slider` and its `ValueChanged` event.
 
+use super::{CallbackSlot, invoke_slot, new_callback_slot};
 use crate::bindings::Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventHandler;
 use crate::bindings::Microsoft::UI::Xaml::Controls::Slider as XamlSlider;
-use crate::ffi::{
-    AnyView, UiEventGate, invoke_ui_f32_event_callback, register_ui_f32_event_callback,
-};
-use std::cell::RefCell;
+use crate::ffi::{AnyView, UiCallbackRegistryOwner, UiEventGate, invoke_ui_f32_event_callback};
 use std::rc::Rc;
 
 /// Raw `XamlSlider` + change wiring — composed by `native_ui::Slider`.
 pub(crate) struct InnerSlider {
     handle: AnyView,
     xaml: XamlSlider,
-    on_change: Rc<RefCell<Option<Box<dyn Fn(f32)>>>>,
+    on_change: CallbackSlot<f32>,
     events: UiEventGate,
+    /// Owns every registry entry this widget registered; dropping the widget removes them. Held
+    /// only for that `Drop`.
+    _callbacks: UiCallbackRegistryOwner,
 }
 
 impl InnerSlider {
     pub(crate) fn new() -> Self {
         let xaml = XamlSlider::new().expect("Slider::new");
         let handle = AnyView::from(xaml.clone());
-        let on_change: Rc<RefCell<Option<Box<dyn Fn(f32)>>>> = Rc::new(RefCell::new(None));
+        let on_change: CallbackSlot<f32> = new_callback_slot();
+        let callbacks = UiCallbackRegistryOwner::default();
         let events = UiEventGate::default();
         let callback = on_change.clone();
         let callback_events = events.clone();
-        let callback_id = register_ui_f32_event_callback(Rc::new(move |value| {
+        let callback_id = callbacks.register_f32_event(Rc::new(move |value| {
             if callback_events.is_suppressed() {
                 return;
             }
-            if let Some(callback) = callback.borrow().as_ref() {
-                callback(value);
-            }
+            invoke_slot(&callback, value);
         }));
         let _ = xaml.ValueChanged(&RangeBaseValueChangedEventHandler::new(
             move |_sender, args| {
@@ -47,6 +47,7 @@ impl InnerSlider {
             xaml,
             on_change,
             events,
+            _callbacks: callbacks,
         }
     }
 
@@ -80,6 +81,6 @@ impl InnerSlider {
     /// (`isContinuous`); `Slider.ValueChanged` already behaves the same way, so no extra setup is
     /// needed here to match.
     pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(f32)>) {
-        *self.on_change.borrow_mut() = Some(callback);
+        *self.on_change.borrow_mut() = Some(Rc::from(callback));
     }
 }

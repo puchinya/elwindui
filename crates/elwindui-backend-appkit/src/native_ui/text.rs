@@ -1,167 +1,58 @@
-//! `elwindui::ui::TextArea`/`TextBox`/`PasswordBox` — the text-entry `*Ext` implementations.
+//! The AppKit peers behind `elwindui::ui::{TextBox, TextArea, PasswordBox}` (Core-owned Components, Issue #313).
 
-use super::{NativeControl, base_accessibility_semantics};
-use crate::AnyView;
+use super::control::HandlePeer;
 use crate::inner::{InnerPasswordBox, InnerTextArea, InnerTextBox};
-use elwindui_core::accessibility::{
-    AccessibilityAction, AccessibilityActionKind, AccessibilityRole,
-};
-use elwindui_core::ui::{TextAreaExt, UIElementExt};
-use std::cell::RefCell;
-use std::rc::Rc;
+use elwindui_core::base::Size;
+use elwindui_core::graphics::{Brush, CascadedTextStyle};
+use elwindui_core::ui::TextAlignment;
+use elwindui_core::ui::native::{NativePeer, PasswordBoxPeer, TextAreaPeer, TextBoxPeer};
+use std::any::Any;
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::TextAreaExt, inherits = elwindui_core::ui::NativeControl)]
-pub struct TextArea {
-    inner: InnerTextArea,
-    on_change: RefCell<Option<Box<dyn Fn(String)>>>,
-}
-
-#[elwindui_macros::class]
-impl TextArea {
-    #[overrides]
-    fn perform_accessibility_action(&self, action: AccessibilityAction) -> bool {
-        match action {
-            AccessibilityAction::SetText(text) => {
-                self.set_text(&text);
-                self.notify_change(text);
-                true
-            }
-            AccessibilityAction::Focus => self.focus(),
-            _ => false,
-        }
-    }
-
-    /// Overrides `NativeControl::measure_override`'s generic `fittingSize()`-based measurement —
-    /// see `InnerTextArea::measure`'s own doc comment for why `TextArea` specifically can't share
-    /// that path (its handle is an `NSScrollView`, whose `fittingSize()` doesn't reflect the
-    /// wrapped `NSTextView`'s natural size). Since this override bypasses `NativeControl`'s own
-    /// `measure_override` entirely, it must call `sync_text_style()` itself first — every other
-    /// `NativeControl` leaf (`Button`/`TextBox`/`PasswordBox`/`ScrollView`/`TabView`) gets it for
-    /// free from the base.
-    #[overrides]
-    fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
-        self.base.sync_text_style();
-        self.inner.refresh_default_size();
-        self.inner.measure(available)
-    }
-
-    /// `#[two_way] text` (`TextArea`'s `#[class]` declaration) — the change-back half of the binding;
-    /// `elwindui_core::ui::TextArea::set_text` is the model→widget half.
-    #[inherent]
-    pub fn set_on_text_change(&self, callback: Box<dyn Fn(String)>) {
-        self.set_on_change(callback);
-    }
-
-    #[inherent]
-    pub fn into_any_view(&self) -> AnyView {
-        self.inner.handle()
-    }
-
-    fn set_text(&self, text: &str) {
-        self.inner.set_text(text);
-        let mut semantics = self
-            .base
-            .intrinsic_accessibility_semantics()
-            .unwrap_or_else(|| {
-                base_accessibility_semantics(
-                    AccessibilityRole::TextInput,
-                    &[
-                        AccessibilityActionKind::SetText,
-                        AccessibilityActionKind::Focus,
-                    ],
-                )
-            });
-        semantics.value = Some(text.to_string());
-        self.base.set_intrinsic_accessibility_semantics(semantics);
-    }
-    fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
-        *self.on_change.borrow_mut() = Some(callback);
-        self.install_change_trampoline();
-    }
-
-    fn construct() -> Self {
-        let inner = InnerTextArea::new();
-        let handle = inner.handle();
-        Self {
-            base: NativeControl::construct(super::control::handle_peer(handle)),
-            inner,
-            on_change: RefCell::new(None),
-        }
-    }
-
-    fn on_constructed(&self) {
-        let mut semantics = base_accessibility_semantics(
-            AccessibilityRole::TextInput,
-            &[
-                AccessibilityActionKind::SetText,
-                AccessibilityActionKind::Focus,
-            ],
-        );
-        semantics.value = Some(String::new());
-        self.base.set_intrinsic_accessibility_semantics(semantics);
-        // WinUI3's `TextBox`/AppKit's `NSTextField` are tab stops by default — see
-        // docs/design/runtime/input_focus_design.md.
-        self.set_tab_stop(true);
-        self.install_change_trampoline();
-    }
-
-    #[inherent]
-    fn install_change_trampoline(&self) {
-        let owner: Rc<dyn UIElementExt> = self
-            .as_ui_element()
-            .visual_collection
-            .owner_rc()
-            .expect("TextArea must be Rc-constructed before installing its text callback");
-        let weak = Rc::downgrade(&owner);
-        self.inner.set_on_change(Box::new(move |text| {
-            let Some(owner) = weak.upgrade() else { return };
-            let this = owner
-                .as_any()
-                .downcast_ref::<TextArea>()
-                .expect("TextArea owner must downcast to TextArea");
-            this.set_text(&text);
-            this.notify_change(text);
-        }));
-    }
-
-    #[inherent]
-    fn notify_change(&self, text: String) {
-        let callback = self.on_change.borrow_mut().take();
-        if let Some(callback) = callback {
-            callback(text);
-            let mut slot = self.on_change.borrow_mut();
-            if slot.is_none() {
-                *slot = Some(callback);
-            }
-        }
-    }
-}
-
-#[elwindui_macros::class(struct_only = elwindui_core::ui::TextBoxExt, inherits = elwindui_core::ui::NativeControl)]
-pub struct TextBox {
+/// [`TextBoxPeer`] over the native single-line text field. Created by [`super::AppKitPeerFactory`].
+pub(crate) struct AppKitTextBoxPeer {
+    base: HandlePeer,
     inner: InnerTextBox,
 }
 
-#[elwindui_macros::class]
-impl TextBox {
-    /// `#[two_way] text` (`TextBox`'s `#[class]` declaration) — the change-back half of the binding;
-    /// `elwindui_core::ui::TextBox::set_text` is the model→widget half. Mirrors
-    /// `TextArea::set_on_text_change` above.
-    #[inherent]
-    pub fn set_on_text_change(&self, callback: Box<dyn Fn(String)>) {
-        self.inner.set_on_change(callback);
+impl AppKitTextBoxPeer {
+    pub(crate) fn new() -> Self {
+        let inner = InnerTextBox::new();
+        Self {
+            base: HandlePeer::new(inner.handle()),
+            inner,
+        }
     }
+}
 
-    #[inherent]
-    pub fn into_any_view(&self) -> AnyView {
-        self.inner.handle()
+impl NativePeer for AppKitTextBoxPeer {
+    fn handle(&self) -> &dyn Any {
+        self.base.handle()
     }
+    fn measure(&self, available: Size) -> Size {
+        self.base.measure(available)
+    }
+    fn apply_background(&self, background: Option<&Brush>) -> bool {
+        self.base.apply_background(background)
+    }
+    fn set_tooltip(&self, tooltip: Option<&str>) {
+        self.base.set_tooltip(tooltip);
+    }
+    fn supports_text_style(&self) -> bool {
+        self.base.supports_text_style()
+    }
+    fn apply_text_style(&self, style: &CascadedTextStyle) -> bool {
+        self.base.apply_text_style(style)
+    }
+    /// Replaces every Core callback with a no-op, so no native event reaches Core afterwards.
+    fn dispose(&self) {
+        self.inner.set_on_change(Box::new(|_| {}));
+        self.inner.set_on_submit(Box::new(|| {}));
+    }
+}
 
+impl TextBoxPeer for AppKitTextBoxPeer {
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
-    }
-    fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
-        self.inner.set_on_change(callback);
     }
     fn set_placeholder(&self, text: &str) {
         self.inner.set_placeholder(text);
@@ -172,76 +63,115 @@ impl TextBox {
     fn set_max_length(&self, max_length: Option<u32>) {
         self.inner.set_max_length(max_length);
     }
-    fn set_text_alignment(&self, alignment: elwindui_core::ui::TextAlignment) {
+    fn set_text_alignment(&self, alignment: TextAlignment) {
         self.inner.set_text_alignment(alignment);
     }
+    fn set_on_change(&self, callback: Option<Box<dyn Fn(String)>>) {
+        self.inner
+            .set_on_change(callback.unwrap_or_else(|| Box::new(|_| {})));
+    }
+    fn set_on_submit(&self, callback: Option<Box<dyn Fn()>>) {
+        self.inner
+            .set_on_submit(callback.unwrap_or_else(|| Box::new(|| {})));
+    }
+}
 
-    fn construct() -> Self {
-        let inner = InnerTextBox::new();
-        let handle = inner.handle();
+/// [`TextAreaPeer`] over the native multi-line text view. Created by [`super::AppKitPeerFactory`].
+pub(crate) struct AppKitTextAreaPeer {
+    base: HandlePeer,
+    inner: InnerTextArea,
+}
+
+impl AppKitTextAreaPeer {
+    pub(crate) fn new() -> Self {
+        let inner = InnerTextArea::new();
         Self {
-            base: NativeControl::construct(super::control::handle_peer(handle)),
+            base: HandlePeer::new(inner.handle()),
             inner,
         }
     }
+}
 
-    fn on_constructed(&self) {
-        // AppKit's `NSTextField`/WinUI3's `TextBox` are tab stops by default — see
-        // docs/design/runtime/input_focus_design.md.
-        self.set_tab_stop(true);
-        // Enter-key submit rides the ordinary inherited `on_key_down` (see
-        // `elwindui_core::ui::TextBox`'s own doc comment on why this isn't a dedicated field) —
-        // wired here, once, the same way `Button::on_constructed` wires `on_click`.
-        // `InnerTextBox::set_on_submit` is the one narrowly-scoped AppKit addition that makes a
-        // native `NSTextField`'s own Enter key actually reach this dispatch at all (AppKit doesn't
-        // otherwise forward its own key handling into `on_key_down` — see
-        // `docs/status/backend_status.md`).
-        let node: Rc<dyn UIElementExt> = self
-            .as_ui_element()
-            .visual_collection
-            .owner_rc()
-            .expect("TextBox::on_constructed: object must already be Rc-constructed");
-        self.inner.set_on_submit(Box::new(move || {
-            let args = elwindui_core::input::RoutedEventArgs::default();
-            let key_args = elwindui_core::input::KeyEventArgs {
-                key: elwindui_core::input::Key::Enter,
-                modifiers: elwindui_core::input::KeyModifiers::default(),
-                is_repeat: false,
-            };
-            elwindui_core::ui::dispatch_routed(&node, "on_key_down", &key_args, &args);
-        }));
+impl NativePeer for AppKitTextAreaPeer {
+    fn handle(&self) -> &dyn Any {
+        self.base.handle()
+    }
+    fn measure(&self, available: Size) -> Size {
+        self.inner.refresh_default_size();
+        self.inner.measure(available)
+    }
+    fn apply_background(&self, background: Option<&Brush>) -> bool {
+        self.base.apply_background(background)
+    }
+    fn set_tooltip(&self, tooltip: Option<&str>) {
+        self.base.set_tooltip(tooltip);
+    }
+    fn supports_text_style(&self) -> bool {
+        self.base.supports_text_style()
+    }
+    fn apply_text_style(&self, style: &CascadedTextStyle) -> bool {
+        self.base.apply_text_style(style)
+    }
+    /// Replaces every Core callback with a no-op, so no native event reaches Core afterwards.
+    fn dispose(&self) {
+        self.inner.set_on_change(Box::new(|_| {}));
     }
 }
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::PasswordBoxExt, inherits = elwindui_core::ui::NativeControl)]
-pub struct PasswordBox {
+impl TextAreaPeer for AppKitTextAreaPeer {
+    fn set_text(&self, text: &str) {
+        self.inner.set_text(text);
+    }
+    fn set_on_change(&self, callback: Option<Box<dyn Fn(String)>>) {
+        self.inner
+            .set_on_change(callback.unwrap_or_else(|| Box::new(|_| {})));
+    }
+}
+
+/// [`PasswordBoxPeer`] over the native secure field. Never logs the value. Created by [`super::AppKitPeerFactory`].
+pub(crate) struct AppKitPasswordBoxPeer {
+    base: HandlePeer,
     inner: InnerPasswordBox,
 }
 
-#[elwindui_macros::class]
-impl PasswordBox {
-    #[overrides]
-    fn perform_accessibility_action(&self, action: AccessibilityAction) -> bool {
-        matches!(action, AccessibilityAction::Focus) && self.focus()
+impl AppKitPasswordBoxPeer {
+    pub(crate) fn new() -> Self {
+        let inner = InnerPasswordBox::new();
+        Self {
+            base: HandlePeer::new(inner.handle()),
+            inner,
+        }
     }
+}
 
-    /// `#[two_way] password` (`PasswordBox`'s `#[class]` declaration) — the change-back half of the
-    /// binding; `elwindui_core::ui::PasswordBox::set_password` is the model→widget half.
-    #[inherent]
-    pub fn set_on_password_change(&self, callback: Box<dyn Fn(String)>) {
-        self.inner.set_on_change(callback);
+impl NativePeer for AppKitPasswordBoxPeer {
+    fn handle(&self) -> &dyn Any {
+        self.base.handle()
     }
-
-    #[inherent]
-    pub fn into_any_view(&self) -> AnyView {
-        self.inner.handle()
+    fn measure(&self, available: Size) -> Size {
+        self.base.measure(available)
     }
+    fn apply_background(&self, background: Option<&Brush>) -> bool {
+        self.base.apply_background(background)
+    }
+    fn set_tooltip(&self, tooltip: Option<&str>) {
+        self.base.set_tooltip(tooltip);
+    }
+    fn supports_text_style(&self) -> bool {
+        self.base.supports_text_style()
+    }
+    fn apply_text_style(&self, style: &CascadedTextStyle) -> bool {
+        self.base.apply_text_style(style)
+    }
+    /// Replaces every Core callback with a no-op, so no native event reaches Core afterwards.
+    fn dispose(&self) {
+        self.inner.set_on_change(Box::new(|_| {}));
+    }
+}
 
+impl PasswordBoxPeer for AppKitPasswordBoxPeer {
     fn set_password(&self, password: &str) {
         self.inner.set_password(password);
-    }
-    fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
-        self.inner.set_on_change(callback);
     }
     fn set_placeholder(&self, text: &str) {
         self.inner.set_placeholder(text);
@@ -252,24 +182,8 @@ impl PasswordBox {
     fn set_reveal_enabled(&self, enabled: bool) {
         self.inner.set_reveal_enabled(enabled);
     }
-
-    fn construct() -> Self {
-        let inner = InnerPasswordBox::new();
-        let handle = inner.handle();
-        Self {
-            base: NativeControl::construct(super::control::handle_peer(handle)),
-            inner,
-        }
-    }
-
-    fn on_constructed(&self) {
-        self.base
-            .set_intrinsic_accessibility_semantics(base_accessibility_semantics(
-                AccessibilityRole::SecureTextInput,
-                &[AccessibilityActionKind::Focus],
-            ));
-        // AppKit's `NSSecureTextField`/WinUI3's `PasswordBox` are tab stops by default — see
-        // docs/design/runtime/input_focus_design.md.
-        self.set_tab_stop(true);
+    fn set_on_change(&self, callback: Option<Box<dyn Fn(String)>>) {
+        self.inner
+            .set_on_change(callback.unwrap_or_else(|| Box::new(|_| {})));
     }
 }

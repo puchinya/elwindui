@@ -30,3 +30,25 @@ pub(crate) use tab_view::InnerTabView;
 pub(crate) use text::{InnerPasswordBox, InnerTextArea, InnerTextBox};
 pub(crate) use toggle_switch::InnerToggleSwitch;
 pub(crate) use window::InnerWindow;
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// A replaceable callback slot shared between an `Inner*` widget and its registered native-event
+/// closure (Issue #313). The slot holds an `Rc`, so [`invoke_slot`] can clone the callback out and
+/// release the borrow before calling it: the callback may replace or clear this same slot (for
+/// example when it drops the last owner and the peer's `dispose` runs) without a `RefCell`
+/// double-borrow panic.
+pub(crate) type CallbackSlot<T> = Rc<RefCell<Option<Rc<dyn Fn(T)>>>>;
+
+pub(crate) fn new_callback_slot<T>() -> CallbackSlot<T> {
+    Rc::new(RefCell::new(None))
+}
+
+/// Calls the slot's current callback, if any, without holding the slot borrowed during the call.
+pub(crate) fn invoke_slot<T>(slot: &RefCell<Option<Rc<dyn Fn(T)>>>, value: T) {
+    let callback = slot.borrow().clone();
+    if let Some(callback) = callback {
+        callback(value);
+    }
+}

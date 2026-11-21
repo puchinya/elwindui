@@ -51,7 +51,7 @@ mod controls_demo_view_model {
 
         #[observable(default = String::new())]
         password_box_value: String,
-        #[computed(expr = format!("{}", self.password_box_value.borrow().chars().count()))]
+        #[computed(expr = password_box_value.chars().count().to_string())]
         password_box_length: String,
         #[observable(default = String::new())]
         password_box_log: String,

@@ -50,6 +50,8 @@ mod menu;
 mod menu_bar;
 mod menu_bar_item;
 mod menu_item;
+#[cfg(test)]
+mod native_input_tests;
 mod password_box;
 mod radio_button;
 mod rectangle;

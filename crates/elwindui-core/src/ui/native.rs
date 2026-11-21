@@ -14,7 +14,7 @@
 
 use crate::base::{Rect, Size};
 use crate::graphics::{Brush, CascadedTextStyle};
-use crate::ui::{ButtonRole, MenuBarExt, UIElementExt, WindowExt};
+use crate::ui::{ButtonRole, CheckState, MenuBarExt, TextAlignment, UIElementExt, WindowExt};
 use std::any::Any;
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
@@ -94,6 +94,102 @@ pub trait ButtonPeer: NativePeer {
     /// Core installs exactly one callback when the peer is realized. It captures only a `Weak`
     /// reference to the Component, so it is a no-op after the Component is gone.
     fn set_on_click(&self, callback: Option<Box<dyn Fn()>>);
+}
+
+/// The native check box behind `elwindui::ui::CheckBox`.
+///
+/// `set_checked` is programmatic and must not raise the change callback. The callback reports a
+/// user change only; Core compares it with its stored value before notifying (§5 two-way rule).
+pub trait CheckBoxPeer: NativePeer {
+    /// Sets the label.
+    fn set_text(&self, text: &str);
+    /// Displays `checked`, including the indeterminate state.
+    fn set_checked(&self, checked: CheckState);
+    /// Enables or disables native interaction.
+    fn set_enabled(&self, enabled: bool);
+    /// Installs, or with `None` removes, the user-change callback. A user click can only land on
+    /// `Unchecked`/`Checked`.
+    fn set_on_change(&self, callback: Option<Box<dyn Fn(CheckState)>>);
+}
+
+/// The native radio button behind `elwindui::ui::RadioButton`. Grouping is Core's job: the peer
+/// only reports activation.
+pub trait RadioButtonPeer: NativePeer {
+    /// Sets the label.
+    fn set_text(&self, text: &str);
+    /// Displays the checked state. Programmatic: raises no callback.
+    fn set_checked(&self, checked: bool);
+    /// Enables or disables native interaction.
+    fn set_enabled(&self, enabled: bool);
+    /// Installs, or with `None` removes, the user-activation callback.
+    fn set_on_click(&self, callback: Option<Box<dyn Fn()>>);
+}
+
+/// The native slider behind `elwindui::ui::Slider`.
+pub trait SliderPeer: NativePeer {
+    /// Displays `value`. Programmatic: raises no callback.
+    fn set_value(&self, value: f32);
+    /// Sets the minimum.
+    fn set_min(&self, min: f32);
+    /// Sets the maximum.
+    fn set_max(&self, max: f32);
+    /// Enables or disables native interaction.
+    fn set_enabled(&self, enabled: bool);
+    /// Installs, or with `None` removes, the user-change callback.
+    fn set_on_change(&self, callback: Option<Box<dyn Fn(f32)>>);
+}
+
+/// The native toggle switch behind `elwindui::ui::ToggleSwitch`.
+pub trait ToggleSwitchPeer: NativePeer {
+    /// Displays the on/off state. Programmatic: raises no callback.
+    fn set_is_on(&self, is_on: bool);
+    /// Enables or disables native interaction.
+    fn set_enabled(&self, enabled: bool);
+    /// Installs, or with `None` removes, the user-change callback.
+    fn set_on_change(&self, callback: Option<Box<dyn Fn(bool)>>);
+}
+
+/// The native single-line text box behind `elwindui::ui::TextBox`.
+pub trait TextBoxPeer: NativePeer {
+    /// Displays `text`. Programmatic: must not reach Core as a user change (Core also drops an
+    /// echo whose value equals its stored text).
+    fn set_text(&self, text: &str);
+    /// Sets the placeholder shown while empty.
+    fn set_placeholder(&self, text: &str);
+    /// Makes the field read-only.
+    fn set_read_only(&self, read_only: bool);
+    /// Limits the text length; `None` removes the limit.
+    fn set_max_length(&self, max_length: Option<u32>);
+    /// Aligns the text.
+    fn set_text_alignment(&self, alignment: TextAlignment);
+    /// Installs, or with `None` removes, the user-edit callback.
+    fn set_on_change(&self, callback: Option<Box<dyn Fn(String)>>);
+    /// Installs, or with `None` removes, the Enter/submit callback.
+    fn set_on_submit(&self, callback: Option<Box<dyn Fn()>>);
+}
+
+/// The native multi-line text area behind `elwindui::ui::TextArea`.
+pub trait TextAreaPeer: NativePeer {
+    /// Displays `text`. Programmatic.
+    fn set_text(&self, text: &str);
+    /// Installs, or with `None` removes, the user-edit callback.
+    fn set_on_change(&self, callback: Option<Box<dyn Fn(String)>>);
+}
+
+/// The native secure text field behind `elwindui::ui::PasswordBox`.
+///
+/// Implementations must never log, `Debug` or otherwise expose the password value.
+pub trait PasswordBoxPeer: NativePeer {
+    /// Displays `password`. Programmatic.
+    fn set_password(&self, password: &str);
+    /// Sets the placeholder shown while empty.
+    fn set_placeholder(&self, text: &str);
+    /// Limits the length; `None` removes the limit.
+    fn set_max_length(&self, max_length: Option<u32>);
+    /// Shows or hides the reveal affordance.
+    fn set_reveal_enabled(&self, enabled: bool);
+    /// Installs, or with `None` removes, the user-edit callback.
+    fn set_on_change(&self, callback: Option<Box<dyn Fn(String)>>);
 }
 
 /// The native top-level window behind `elwindui::ui::Window`.
@@ -182,6 +278,41 @@ pub trait NativePeerFactory {
     /// Creates the peer for a new `Button`.
     fn create_button(&self) -> Rc<dyn ButtonPeer> {
         unsupported_native_control(self.backend_name(), "Button")
+    }
+
+    /// Creates the peer for a new `CheckBox`.
+    fn create_check_box(&self) -> Rc<dyn CheckBoxPeer> {
+        unsupported_native_control(self.backend_name(), "CheckBox")
+    }
+
+    /// Creates the peer for a new `RadioButton`.
+    fn create_radio_button(&self) -> Rc<dyn RadioButtonPeer> {
+        unsupported_native_control(self.backend_name(), "RadioButton")
+    }
+
+    /// Creates the peer for a new `Slider`.
+    fn create_slider(&self) -> Rc<dyn SliderPeer> {
+        unsupported_native_control(self.backend_name(), "Slider")
+    }
+
+    /// Creates the peer for a new `ToggleSwitch`.
+    fn create_toggle_switch(&self) -> Rc<dyn ToggleSwitchPeer> {
+        unsupported_native_control(self.backend_name(), "ToggleSwitch")
+    }
+
+    /// Creates the peer for a new `TextBox`.
+    fn create_text_box(&self) -> Rc<dyn TextBoxPeer> {
+        unsupported_native_control(self.backend_name(), "TextBox")
+    }
+
+    /// Creates the peer for a new `TextArea`.
+    fn create_text_area(&self) -> Rc<dyn TextAreaPeer> {
+        unsupported_native_control(self.backend_name(), "TextArea")
+    }
+
+    /// Creates the peer for a new `PasswordBox`.
+    fn create_password_box(&self) -> Rc<dyn PasswordBoxPeer> {
+        unsupported_native_control(self.backend_name(), "PasswordBox")
     }
 
     /// Creates the peer for a `Window`. `owner` is the most-derived Window (a generated

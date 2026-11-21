@@ -18,7 +18,10 @@ pub use elwindui_core::ui::NativeControlExt;
 // The submodules' native leaves inherit Core's `NativeControl` (Issue #313).
 use elwindui_core::ui::NativeControl;
 
-use elwindui_core::ui::native::{ButtonPeer, NativePeerFactory, WindowPeer};
+use elwindui_core::ui::native::{
+    ButtonPeer, CheckBoxPeer, NativePeerFactory, PasswordBoxPeer, RadioButtonPeer, SliderPeer,
+    TextAreaPeer, TextBoxPeer, ToggleSwitchPeer, WindowPeer,
+};
 use std::rc::{Rc, Weak};
 
 /// This backend's [`NativePeerFactory`], registered for the main thread by [`crate::init`].
@@ -30,6 +33,27 @@ impl NativePeerFactory for AppKitPeerFactory {
     }
     fn create_button(&self) -> Rc<dyn ButtonPeer> {
         Rc::new(button::AppKitButtonPeer::new())
+    }
+    fn create_check_box(&self) -> Rc<dyn CheckBoxPeer> {
+        Rc::new(check_box::AppKitCheckBoxPeer::new())
+    }
+    fn create_radio_button(&self) -> Rc<dyn RadioButtonPeer> {
+        Rc::new(radio_button::AppKitRadioButtonPeer::new())
+    }
+    fn create_slider(&self) -> Rc<dyn SliderPeer> {
+        Rc::new(slider::AppKitSliderPeer::new())
+    }
+    fn create_toggle_switch(&self) -> Rc<dyn ToggleSwitchPeer> {
+        Rc::new(toggle_switch::AppKitToggleSwitchPeer::new())
+    }
+    fn create_text_box(&self) -> Rc<dyn TextBoxPeer> {
+        Rc::new(text::AppKitTextBoxPeer::new())
+    }
+    fn create_text_area(&self) -> Rc<dyn TextAreaPeer> {
+        Rc::new(text::AppKitTextAreaPeer::new())
+    }
+    fn create_password_box(&self) -> Rc<dyn PasswordBoxPeer> {
+        Rc::new(text::AppKitPasswordBoxPeer::new())
     }
     fn create_window(&self, owner: Weak<dyn elwindui_core::ui::WindowExt>) -> Rc<dyn WindowPeer> {
         Rc::new(window::AppKitWindowPeer::new(owner))
@@ -142,13 +166,8 @@ mod window;
 // path alias next to each class, which downstream `#[component(inherits ..)]` resolves as
 // `elwindui::ui::__elwindui_macros_of_Window`. Naming only the types here would leave those
 // aliases behind in the submodule and break every inheriting user component.
-pub use check_box::*;
 pub use dropdown::*;
 pub use dropdown_item::*;
 pub use menu::*;
-pub use radio_button::*;
 pub use scroll_view::*;
-pub use slider::*;
 pub use tab_view::*;
-pub use text::*;
-pub use toggle_switch::*;

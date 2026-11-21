@@ -8,7 +8,10 @@ use crate::bindings::Microsoft::UI::Xaml::Controls::{
 };
 use crate::bindings::Microsoft::UI::Xaml::Input::KeyEventHandler;
 use crate::bindings::Microsoft::UI::Xaml::RoutedEventHandler;
-use crate::ffi::{AnyView, invoke_ui_event_callback, register_ui_event_callback};
+use crate::ffi::{
+    AnyView, invoke_ui_bool_event_callback, invoke_ui_event_callback,
+    register_ui_bool_event_callback, register_ui_event_callback,
+};
 use crate::render::xaml_text_alignment;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -111,16 +114,19 @@ impl InnerTextBox {
         };
         {
             let on_submit = this.on_submit.clone();
-            let callback_id = register_ui_event_callback(Rc::new(move || {
+            // Returns whether a submit callback handled the Enter key.
+            let callback_id = register_ui_bool_event_callback(Rc::new(move || {
                 // Not borrowed across the call: the callback may replace itself.
                 let callback = on_submit.borrow_mut().take();
-                if let Some(callback) = callback {
-                    callback();
-                    let mut slot = on_submit.borrow_mut();
-                    if slot.is_none() {
-                        *slot = Some(callback);
-                    }
+                let Some(callback) = callback else {
+                    return false;
+                };
+                callback();
+                let mut slot = on_submit.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some(callback);
                 }
+                true
             }));
             let _ = this
                 .text_box
@@ -131,8 +137,13 @@ impl InnerTextBox {
                     let Ok(virtual_key) = args.Key() else {
                         return Ok(());
                     };
-                    if virtual_key == VirtualKey::Enter {
-                        invoke_ui_event_callback(callback_id);
+                    // The submit callback already dispatches the routed `on_key_down` (Enter)
+                    // from this TextBox. Mark the key handled so it does not also bubble to the
+                    // host canvas, whose keyboard path would dispatch the same key a second time.
+                    if virtual_key == VirtualKey::Enter
+                        && invoke_ui_bool_event_callback(callback_id)
+                    {
+                        let _ = args.SetHandled(true);
                     }
                     Ok(())
                 }));

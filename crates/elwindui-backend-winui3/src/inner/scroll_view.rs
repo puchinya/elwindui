@@ -2,13 +2,13 @@
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::{ScrollMode, ScrollViewer};
 use crate::bindings::Microsoft::UI::Xaml::SizeChangedEventHandler;
-use crate::ffi::{AnyView, invoke_ui_event_callback, register_ui_event_callback};
+use crate::ffi::{AnyView, UiCallbackRegistryOwner, invoke_ui_event_callback};
 use crate::host::{TreeHost, TreeHostViewport};
 use std::cell::Cell;
 use std::rc::Rc;
 
 /// Raw `ScrollViewer` + nested `TreeHost` (`ElwinduiContentRoot`) — composed by
-/// `native_ui::ScrollView`. See `elwindui_core::ui::ScrollView`'s own doc comment for the
+/// the ScrollView peer (`native_ui::scroll_view`). See `elwindui_core::ui::ScrollView`'s own doc comment for the
 /// `ScrollView -> NativeScrollHost -> ElwinduiContentRoot -> content` structure this implements.
 /// Structurally mirrors `elwindui-backend-appkit::inner::InnerScrollView`; unverified on this
 /// machine (no Windows environment — see `docs/status/control_status.md`).
@@ -29,6 +29,8 @@ pub(crate) struct InnerScrollView {
     /// rationale. `Rc<Cell<..>>`, not a plain `Cell<..>`, so the `SizeChanged` closure below can
     /// read the current value at fire time rather than a snapshot from construction.
     axes: Rc<Cell<(bool, bool)>>,
+    /// Owns the `SizeChanged` registry entry; dropping the widget removes it.
+    callbacks: UiCallbackRegistryOwner,
 }
 
 impl InnerScrollView {
@@ -45,13 +47,14 @@ impl InnerScrollView {
             scroll_viewer,
             content_host,
             axes,
+            callbacks: UiCallbackRegistryOwner::default(),
         };
         this.apply_axes();
         {
             let content_host_for_handler = this.content_host.clone();
             let scroll_viewer_for_handler = this.scroll_viewer.clone();
             let axes_for_handler = this.axes.clone();
-            let callback_id = register_ui_event_callback(Rc::new(move || {
+            let callback_id = this.callbacks.register_event(Rc::new(move || {
                 sync_scroll_view_cross_axis(
                     &content_host_for_handler,
                     &scroll_viewer_for_handler,
@@ -105,7 +108,13 @@ impl InnerScrollView {
         self.content_host.set_hosted_tree(content, owner);
     }
 
+    /// Retires the hosted content for good (the owning ScrollView unmounted).
+    pub(crate) fn unmount_content(&self) {
+        self.content_host.unmount_hosted_tree();
+    }
+
     /// The nested content host (a cheap handle clone).
+    #[cfg(test)]
     pub(crate) fn content_host(&self) -> crate::host::TreeHost {
         self.content_host.clone()
     }

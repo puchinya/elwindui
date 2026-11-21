@@ -5,7 +5,7 @@ use crate::ffi::mtm;
 use elwindui_core::graphics::{IconSource, ImageSource, SystemIcon};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{AnyThread, DefinedClass, define_class, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, Message, define_class, msg_send, sel};
 use objc2_app_kit::{NSImage, NSMenu, NSMenuItem};
 use objc2_foundation::{
     NSObjectProtocol, NSOperatingSystemVersion, NSProcessInfo, NSSize, NSString,
@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 /// See docs/specs/ui_spec.md#menu. A single application-wide `NSMenu` (top menu bar
-/// item / `File`, `Edit`, ...) entry — composed by `native_ui::MenuItem`.
+/// item / `File`, `Edit`, ...) entry — composed by the menu item peer (`native_ui::menu`).
 #[derive(Clone)]
 pub(crate) struct InnerMenuItem {
     ns: Retained<NSMenuItem>,
@@ -61,37 +61,22 @@ impl InnerMenuItem {
             .setKeyEquivalent(&NSString::from_str(key_equivalent));
     }
 
-    pub(crate) fn text(&self) -> String {
-        self.ns.title().to_string()
-    }
-
-    pub(crate) fn enabled(&self) -> bool {
-        self.ns.isEnabled()
-    }
-
-    pub(crate) fn shortcut(&self) -> Option<String> {
-        let eq = self.ns.keyEquivalent().to_string();
-        if eq.is_empty() { None } else { Some(eq) }
-    }
-
-    pub(crate) fn select(&self) {
-        let target = self.target_storage.borrow().clone();
-        if let Some(target) = target {
-            (target.ivars().callback)();
-        }
-    }
-
-    pub(crate) fn set_on_select(&self, callback: Box<dyn Fn()>) {
+    /// Installs the activation callback, or with `None` detaches the target entirely.
+    pub(crate) fn set_on_select(&self, callback: Option<Box<dyn Fn()>>) {
+        let Some(callback) = callback else {
+            unsafe {
+                self.ns.setTarget(None);
+                self.ns.setAction(None);
+            }
+            *self.target_storage.borrow_mut() = None;
+            return;
+        };
         let target = MenuItemTarget::new(MenuItemTargetIvars { callback });
         unsafe {
             self.ns.setTarget(Some(&target));
             self.ns.setAction(Some(sel!(perform:)));
         }
         *self.target_storage.borrow_mut() = Some(target);
-    }
-
-    pub(crate) fn icon(&self) -> Option<IconSource> {
-        self.icon.borrow().clone()
     }
 
     /// Ordering per `icon_source_design.md` §7: semantic state first, then the live native
@@ -235,6 +220,9 @@ define_class!(
     impl MenuItemTarget {
         #[unsafe(method(perform:))]
         fn perform(&self, _sender: &AnyObject) {
+            // The callback may replace or clear this very target (#316): keep it alive for the
+            // whole call.
+            let _in_flight: Retained<Self> = self.retain();
             (self.ivars().callback)();
         }
     }
@@ -248,7 +236,7 @@ impl MenuItemTarget {
 }
 
 /// A dropdown attached to a `MenuBarItem` (or, per 付録M, a right-click context menu — not used
-/// that way here, but the same type covers both) — composed by `native_ui::Menu`.
+/// that way here, but the same type covers both) — composed by the menu peer (`native_ui::menu`).
 #[derive(Clone)]
 pub(crate) struct InnerMenu {
     ns: Retained<NSMenu>,
@@ -278,7 +266,7 @@ impl InnerMenu {
 }
 
 /// One top-level entry in the menu bar (e.g. "File"), holding its dropdown `InnerMenu` — composed
-/// by `native_ui::MenuBarItem`.
+/// by the menu bar item peer (`native_ui::menu`).
 #[derive(Clone)]
 pub(crate) struct InnerMenuBarItem {
     ns: Retained<NSMenuItem>,
@@ -307,7 +295,7 @@ impl InnerMenuBarItem {
 }
 
 /// The whole top menu bar, installed via `WindowPeer::set_menu_bar` (`native_ui::window`) — composed by
-/// `native_ui::MenuBar`.
+/// the menu bar peer (`native_ui::menu`).
 #[derive(Clone)]
 pub(crate) struct InnerMenuBar {
     pub(crate) ns: Retained<NSMenu>,

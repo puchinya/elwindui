@@ -1,27 +1,11 @@
 //! One file per builtin class, mirroring how each backend crate already lays out its own
 //! `native_ui/`/`inner/` twins.
 //!
-//! The property-setter traits here (`TextArea`/`Button`/`MenuItem`/`Menu`/`MenuBar`/`MenuBarItem`/
-//! `Window`) are declared once in this crate rather than duplicated per backend crate.
-//! Each backend crate provides `impl Xxx for BackendXImpl { .. }` — the property
-//! *shape* (what setters exist, what they take) is common to every backend, only the method
-//! *bodies* (the actual platform API calls) differ, exactly the same split
-//! `NativeControl`/`Layout`/`Shape`/`Control`/etc. model for the virtual builtins.
-//!
-//! `Menu`/`MenuBar`/`MenuBarItem`/`Window` are *not* generic over the backend's own concrete
-//! menu-entry/menu-bar-entry/menu/menu-bar type the way a backend's own `NativeControlImpl`'s
-//! `handle` is — instead each such argument is `&dyn` (or `Rc<dyn>`) the matching leaf trait itself
-//! (`MenuItem`/`Menu`/
-//! `MenuBarItem`/`MenuBar`), and each backend's own `impl Xxx for BackendXImpl` downcasts it back to
-//! its own concrete type via `AsAny::as_any` (see that trait's own doc comment; already the
-//! established pattern for `UIElement::try_as_native_control`/`visual_tree::find_all`) before
-//! delegating to its real native handle.
-//!
-//! `TabView`/`TabViewItem` are deliberately **not** included in that shared set: their own methods
-//! (`insert_tab`/`remove_tab`/`set_tab_content_visible`, an owned content host handle per platform)
-//! are genuinely different in shape per backend (AppKit's `Retained<TreeHost>`/`TabChipImpl` vs
-//! WinUI3's own equivalents have no common signature to share without associated types this crate
-//! doesn't need yet) — each backend keeps declaring its own local `TabView` trait.
+//! Every builtin is declared once here. The native builtins (`Button`, `Window`, the input
+//! controls, `Dropdown`, `ScrollView`, `TabView`, the menus, ...) are Core-owned Components whose
+//! OS widgets are backend peers (`crate::ui::native`, Issue #313,
+//! `docs/design/runtime/native_peer_design.md`): Core owns their properties, logical state,
+//! item lists and events, and each backend only implements the peer traits.
 
 use super::*;
 
@@ -50,6 +34,8 @@ mod menu;
 mod menu_bar;
 mod menu_bar_item;
 mod menu_item;
+#[cfg(test)]
+mod native_container_tests;
 #[cfg(test)]
 mod native_input_tests;
 mod password_box;

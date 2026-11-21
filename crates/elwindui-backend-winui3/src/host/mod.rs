@@ -3547,9 +3547,11 @@ impl TreeHost {
             elwindui_core::ui::popup::ResolvedContextDefinition::Menu { menu, presentation } => {
                 match presentation {
                     elwindui_core::ui::ContextMenuPresentation::Native => {
-                        if let Some(winui_menu) =
-                            menu.as_any().downcast_ref::<crate::native_ui::Menu>()
-                        {
+                        let menu_peer = elwindui_core::ui::__menu_peer_of(&*menu);
+                        if let Some(winui_menu) = menu_peer
+                            .as_any()
+                            .downcast_ref::<crate::native_ui::menu::WinUi3MenuPeer>(
+                        ) {
                             if let Ok(flyout) = winui_menu.create_flyout() {
                                 let fe: FrameworkElement =
                                     canvas.cast().expect("Canvas as FrameworkElement");

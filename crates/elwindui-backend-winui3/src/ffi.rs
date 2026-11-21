@@ -393,11 +393,12 @@ pub(crate) fn ui_event_callback_count() -> usize {
 /// Every registry entry count the input-control peers (Issue #313) register into: plain events,
 /// boolean events and `f32` events. Hosted lifecycle tests compare it against a baseline.
 #[cfg(test)]
-pub(crate) fn input_control_callback_counts() -> (usize, usize, usize) {
+pub(crate) fn input_control_callback_counts() -> (usize, usize, usize, usize) {
     (
         ui_event_callback_count(),
         UI_BOOL_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().len()),
         UI_F32_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().len()),
+        UI_INDEX_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().len()),
     )
 }
 

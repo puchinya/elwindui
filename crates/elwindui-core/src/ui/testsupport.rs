@@ -60,44 +60,6 @@ impl FakeNativeControl {
     }
 }
 
-/// Backend-independent stand-in for a real backend's `ScrollView` leaf (a `struct_only` implementor
-/// of `ScrollViewExt` over `FakeNativeControl`). Unlike every other `Fake*Widget` here, `ScrollView`'s own content is a full
-/// child subtree, not a plain value — this fake models that by overriding the already-
-/// `#[overridable]` `visual_children()` (see that trait method's own doc comment) to expose
-/// `content`, the same way `elwindui-test::tree`'s tree-dump helper would discover it on a real
-/// backend's `InnerScrollView`.
-pub(crate) struct FakeScrollViewState {
-    content: RefCell<Option<Rc<dyn UIElementExt>>>,
-}
-
-#[elwindui_macros::class(struct_only = crate::ui::ScrollViewExt, inherits = crate::ui::testsupport::FakeNativeControl)]
-pub(crate) struct FakeScrollViewWidget {
-    state: FakeScrollViewState,
-}
-
-#[elwindui_macros::class]
-impl FakeScrollViewWidget {
-    #[overrides]
-    fn visual_children(&self) -> Vec<Rc<dyn UIElementExt>> {
-        self.state.content.borrow().iter().cloned().collect()
-    }
-
-    fn construct(handle: FakeHandle) -> Self {
-        Self {
-            base: FakeNativeControl::construct(handle),
-            state: FakeScrollViewState {
-                content: RefCell::new(None),
-            },
-        }
-    }
-
-    fn set_content(&self, content: Rc<dyn UIElementExt>) {
-        *self.state.content.borrow_mut() = Some(content);
-    }
-    fn set_horizontal_scroll_enabled(&self, _enabled: bool) {}
-    fn set_vertical_scroll_enabled(&self, _enabled: bool) {}
-}
-
 /// `#[overridable]`/`#[overrides]` usage example, exercised across a genuine 3-hop chain
 /// (`OverridableBase` -> `OverridableMid` -> `OverridableLeaf`) with two overridable methods —
 /// `OverridableMid` overrides only `label`, leaving `compute` untouched, and `OverridableLeaf`
@@ -786,114 +748,6 @@ impl WrapProbe {
     }
 }
 
-#[elwindui_macros::class(struct_only = crate::ui::MenuItemExt)]
-pub(crate) struct FakeMenuItem {
-    text: RefCell<String>,
-    icon: RefCell<Option<crate::graphics::IconSource>>,
-    enabled: Cell<bool>,
-    shortcut: RefCell<Option<String>>,
-    on_select: RefCell<Option<Box<dyn Fn()>>>,
-}
-
-#[elwindui_macros::class]
-impl FakeMenuItem {
-    fn construct() -> Self {
-        Self {
-            text: RefCell::new(String::new()),
-            icon: RefCell::new(None),
-            enabled: Cell::new(true),
-            shortcut: RefCell::new(None),
-            on_select: RefCell::new(None),
-        }
-    }
-    fn text(&self) -> String {
-        self.text.borrow().clone()
-    }
-    fn set_text(&self, text: &str) {
-        *self.text.borrow_mut() = text.to_string();
-    }
-    fn icon(&self) -> Option<crate::graphics::IconSource> {
-        self.icon.borrow().clone()
-    }
-    fn set_icon(&self, icon: Option<crate::graphics::IconSource>) {
-        *self.icon.borrow_mut() = icon;
-    }
-    fn enabled(&self) -> bool {
-        self.enabled.get()
-    }
-    fn set_enabled(&self, enabled: bool) {
-        self.enabled.set(enabled);
-    }
-    fn shortcut(&self) -> Option<String> {
-        self.shortcut.borrow().clone()
-    }
-    fn set_shortcut(&self, key_equivalent: &str) {
-        *self.shortcut.borrow_mut() = if key_equivalent.is_empty() {
-            None
-        } else {
-            Some(key_equivalent.to_string())
-        };
-    }
-    fn set_on_select(&self, callback: Box<dyn Fn()>) {
-        *self.on_select.borrow_mut() = Some(callback);
-    }
-    fn select(&self) {
-        if let Some(cb) = self.on_select.borrow().as_ref() {
-            cb();
-        }
-    }
-}
-
-#[elwindui_macros::class(struct_only = crate::ui::MenuExt)]
-pub(crate) struct FakeMenu {
-    items: crate::ui::ChildList<dyn crate::ui::MenuItemExt>,
-}
-
-#[elwindui_macros::class]
-impl FakeMenu {
-    fn construct() -> Self {
-        Self {
-            items: crate::ui::ChildList::new(),
-        }
-    }
-    fn add_item(&self, item: &dyn crate::ui::MenuItemExt) {
-        let _ = item;
-    }
-    fn remove_item(&self, item: &dyn crate::ui::MenuItemExt) {
-        let _ = item;
-    }
-    fn items(&self) -> &dyn crate::ui::ListExt<dyn crate::ui::MenuItemExt> {
-        self
-    }
-}
-
-impl crate::ui::ListExt<dyn crate::ui::MenuItemExt> for FakeMenu {
-    fn add(&self, item: Rc<dyn crate::ui::MenuItemExt>) {
-        self.items.add(item);
-    }
-    fn insert(&self, index: usize, item: Rc<dyn crate::ui::MenuItemExt>) {
-        self.items.insert(index, item);
-    }
-    fn remove(&self, item: &Rc<dyn crate::ui::MenuItemExt>) -> bool {
-        self.items.remove(item)
-    }
-    fn remove_at(&self, index: usize) -> Rc<dyn crate::ui::MenuItemExt> {
-        self.items.remove_at(index)
-    }
-    fn clear(&self) {
-        self.items.clear();
-    }
-    fn len(&self) -> usize {
-        self.items.len()
-    }
-    fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-    fn to_vec(&self) -> Vec<Rc<dyn crate::ui::MenuItemExt>> {
-        self.items.to_vec()
-    }
-}
-
 /// A minimal test-only fixture that both paints itself *and* has children — no real builtin
 /// combines the two today (`Shape` is a childless leaf; `Layout`/`Control`/`Grid`
 /// never paint), so `render_item_ordering_preserves_traversal_order_across_native_and_paint`
@@ -1080,28 +934,6 @@ pub(crate) fn cancel_event(x: f32, y: f32) -> crate::input::RawPointerEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fake_scroll_view_measures_through_inherited_native_control_base() {
-        let widget = FakeScrollViewWidget::new(FakeHandle("scrollview", size(300.0, 200.0)));
-        let widget: Rc<dyn UIElementExt> = widget;
-        assert_eq!(natural_size(&*widget), size(300.0, 200.0));
-        assert!(widget.try_as_native_control().is_some());
-    }
-
-    /// Verifies `content` stays reachable via `visual_children()` once set — the property a real
-    /// backend's nested `TreeHost` content host relies on for hit-testing/
-    /// tree-dump purposes (`docs/status/control_status.md`).
-    #[test]
-    fn fake_scroll_view_content_reachable_via_visual_children() {
-        let widget = FakeScrollViewWidget::new(FakeHandle("scrollview", size(300.0, 200.0)));
-        let content = native("inner", size(50.0, 50.0));
-        widget.set_content(Rc::clone(&content));
-        let widget: Rc<dyn UIElementExt> = widget;
-        let children = widget.visual_children();
-        assert_eq!(children.len(), 1);
-        assert!(Rc::ptr_eq(&children[0], &content));
-    }
 
     #[test]
     fn overridable_override_dispatches_through_inherit_macro() {

@@ -1,10 +1,10 @@
 //! The AppKit peer behind `elwindui::ui::Window` (a Core-owned Component, Issue #313).
 
-use super::MenuBar;
+use super::menu::AppKitMenuBarPeer;
 use crate::inner::InnerWindow;
 use elwindui_core::base::Rect;
-use elwindui_core::ui::native::WindowPeer;
-use elwindui_core::ui::{MenuBarExt, UIElementExt, WindowExt};
+use elwindui_core::ui::native::{MenuBarPeer, WindowPeer};
+use elwindui_core::ui::{UIElementExt, WindowExt};
 use std::rc::{Rc, Weak};
 
 /// [`WindowPeer`] over an `NSWindow`. Created by [`super::AppKitPeerFactory`].
@@ -43,11 +43,11 @@ impl WindowPeer for AppKitWindowPeer {
     fn set_title(&self, title: &str) {
         self.inner.set_title(title);
     }
-    fn set_menu_bar(&self, menu_bar: Rc<dyn MenuBarExt>) {
+    fn set_menu_bar(&self, menu_bar: Rc<dyn MenuBarPeer>) {
         let menu_bar = menu_bar
             .as_any()
-            .downcast_ref::<MenuBar>()
-            .expect("Window::set_menu_bar: menu_bar must be this backend's MenuBar");
+            .downcast_ref::<AppKitMenuBarPeer>()
+            .expect("Window::set_menu_bar: menu_bar must be this backend's MenuBar peer");
         self.inner.set_menu_bar(&menu_bar.inner);
     }
     fn set_content(&self, content: Rc<dyn UIElementExt>) {

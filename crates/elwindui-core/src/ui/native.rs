@@ -13,8 +13,9 @@
 //! backend's own render/host reconciliation downcasts to its handle type.
 
 use crate::base::{Rect, Size};
+use crate::graphics::IconSource;
 use crate::graphics::{Brush, CascadedTextStyle};
-use crate::ui::{ButtonRole, CheckState, MenuBarExt, TextAlignment, UIElementExt, WindowExt};
+use crate::ui::{ButtonRole, CheckState, TabViewItemExt, TextAlignment, UIElementExt, WindowExt};
 use std::any::Any;
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
@@ -192,6 +193,127 @@ pub trait PasswordBoxPeer: NativePeer {
     fn set_on_change(&self, callback: Option<Box<dyn Fn(String)>>);
 }
 
+/// The native drop-down selection control behind `elwindui::ui::Dropdown`.
+///
+/// Core owns the item list and the selected index; the peer only displays them. `set_items` and
+/// `set_selected_index` are programmatic and must not raise the change callback.
+pub trait DropdownPeer: NativePeer {
+    /// Replaces the displayed item texts, in order.
+    fn set_items(&self, texts: &[String]);
+    /// Displays `index` as the selection. Programmatic: raises no callback.
+    fn set_selected_index(&self, index: usize);
+    /// Enables or disables native interaction.
+    fn set_enabled(&self, enabled: bool);
+    /// Installs, or with `None` removes, the user-selection callback.
+    fn set_on_change(&self, callback: Option<Box<dyn Fn(usize)>>);
+}
+
+/// The native scrolling container behind `elwindui::ui::ScrollView`.
+///
+/// The peer hosts Core's `content` subtree in a nested backend host (`native_peer_design.md` §7c)
+/// and owns that host's content lifecycle: replacing content retires the previous tree first,
+/// and [`ScrollViewPeer::unmount_content`] retires it for good.
+pub trait ScrollViewPeer: NativePeer {
+    /// Hosts `content`. `owner` is the ScrollView itself; the backend links the content's logical
+    /// parent to it while the content is hosted.
+    fn set_content(&self, content: Rc<dyn UIElementExt>, owner: Option<Rc<dyn UIElementExt>>);
+    /// Enables or disables horizontal scrolling.
+    fn set_horizontal_scroll_enabled(&self, enabled: bool);
+    /// Enables or disables vertical scrolling.
+    fn set_vertical_scroll_enabled(&self, enabled: bool);
+    /// Retires the hosted content (popup first, then one unmount). Called when the ScrollView
+    /// unmounts; the host accepts no content afterwards.
+    fn unmount_content(&self);
+    /// The concrete peer, for backend-internal downcasts (tests, hosts).
+    fn as_any(&self) -> &dyn Any;
+}
+
+/// The native tab container behind `elwindui::ui::TabView`.
+///
+/// Core owns the ordered item list, the selected index and the selection policy after a removal
+/// (`docs/specs/ui_spec.md` TabView). The peer owns each tab's nested content host, keyed by item
+/// identity (`Rc::as_ptr`), and shows/hides them.
+///
+/// A user selection is shown by the peer itself (it activates the selected tab's content) before
+/// it reports the index through the select callback. `set_items` and `set_selected_index` are
+/// programmatic; a native selection event they raise reaches Core only as an echo of the stored
+/// index, which Core drops.
+pub trait TabViewPeer: NativePeer {
+    /// Reconciles the displayed tabs with `items` by identity: removed tabs retire their content
+    /// first, new tabs get a content host for the item's content, and every tab's header and
+    /// closable state are refreshed. `owner` is the TabView itself (the hosted content's logical
+    /// parent). May re-enter Core synchronously (content unmount hooks); a reentrant call only
+    /// replaces the pending list.
+    ///
+    /// Each item is Core's `TabViewItem` (`item.as_ui_element()` gives its header, closable state
+    /// and content).
+    fn set_items(&self, items: &[Rc<dyn TabViewItemExt>], owner: Option<Rc<dyn UIElementExt>>);
+    /// Selects `index` and activates its content host. Programmatic.
+    fn set_selected_index(&self, index: usize);
+    /// Updates the header of the tab at `index`.
+    fn set_tab_header(&self, index: usize, header: &str);
+    /// Updates whether the tab at `index` shows a close affordance.
+    fn set_tab_closable(&self, index: usize, closable: bool);
+    /// Installs, or with `None` removes, the user-selection callback.
+    fn set_on_select(&self, callback: Option<Box<dyn Fn(usize)>>);
+    /// Installs, or with `None` removes, the tab close-request callback.
+    fn set_on_close(&self, callback: Option<Box<dyn Fn(usize)>>);
+    /// Installs, or with `None` removes, the new-tab request callback.
+    fn set_on_new_tab(&self, callback: Option<Box<dyn Fn()>>);
+    /// Retires every tab's hosted content. Called when the TabView unmounts.
+    fn unmount_content(&self);
+    /// The concrete peer, for backend-internal downcasts (tests, hosts).
+    fn as_any(&self) -> &dyn Any;
+}
+
+/// The native menu entry behind `elwindui::ui::MenuItem`.
+///
+/// Not a [`NativePeer`]: menu objects are not `UIElement`s. The peer of a `MenuItem` is created
+/// once, by the first native menu or menu bar that shows it, and shared by every native menu the
+/// item appears in. `select()` from Core is not routed through the peer.
+pub trait MenuItemPeer {
+    /// Sets the caption.
+    fn set_text(&self, text: &str);
+    /// Sets or clears the icon.
+    fn set_icon(&self, icon: Option<IconSource>);
+    /// Sets the keyboard shortcut (`""` clears it).
+    fn set_shortcut(&self, shortcut: &str);
+    /// Enables or disables the entry.
+    fn set_enabled(&self, enabled: bool);
+    /// Installs, or with `None` removes, the user-activation callback.
+    fn set_on_select(&self, callback: Option<Box<dyn Fn()>>);
+    /// Releases every callback registration. Called once when the `MenuItem` drops.
+    fn dispose(&self) {}
+    /// The concrete peer, for backend-internal downcasts.
+    fn as_any(&self) -> &dyn Any;
+}
+
+/// The native menu behind `elwindui::ui::Menu` (a submenu or a context menu).
+pub trait MenuPeer {
+    /// Reconciles the native entries with `items`, in order, by peer identity.
+    fn set_items(&self, items: &[Rc<dyn MenuItemPeer>]);
+    /// The concrete peer, for backend-internal downcasts (context-menu presentation).
+    fn as_any(&self) -> &dyn Any;
+}
+
+/// The native top-level menu entry behind `elwindui::ui::MenuBarItem`.
+pub trait MenuBarItemPeer {
+    /// Sets the caption.
+    fn set_text(&self, text: &str);
+    /// Installs the submenu.
+    fn set_submenu(&self, submenu: Rc<dyn MenuPeer>);
+    /// The concrete peer, for backend-internal downcasts.
+    fn as_any(&self) -> &dyn Any;
+}
+
+/// The native application menu bar behind `elwindui::ui::MenuBar`.
+pub trait MenuBarPeer {
+    /// Reconciles the native top-level entries with `items`, in order, by peer identity.
+    fn set_items(&self, items: &[Rc<dyn MenuBarItemPeer>]);
+    /// The concrete peer, for backend-internal downcasts (the Window installs it).
+    fn as_any(&self) -> &dyn Any;
+}
+
 /// The native top-level window behind `elwindui::ui::Window`.
 ///
 /// Not a [`NativePeer`]: a Window is a non-`UIElement` root with no measure, background or text
@@ -217,10 +339,7 @@ pub trait WindowPeer {
     /// Sets the title-bar text.
     fn set_title(&self, title: &str);
     /// Installs the menu bar.
-    ///
-    /// `MenuBar` is not a Core-owned Component yet (#313 stage ④), so the backend downcasts this
-    /// to its own concrete type.
-    fn set_menu_bar(&self, menu_bar: Rc<dyn MenuBarExt>);
+    fn set_menu_bar(&self, menu_bar: Rc<dyn MenuBarPeer>);
     /// Hosts `content` as the window's root element.
     fn set_content(&self, content: Rc<dyn UIElementExt>);
     /// Enables or disables an alpha-capable client surface.
@@ -313,6 +432,41 @@ pub trait NativePeerFactory {
     /// Creates the peer for a new `PasswordBox`.
     fn create_password_box(&self) -> Rc<dyn PasswordBoxPeer> {
         unsupported_native_control(self.backend_name(), "PasswordBox")
+    }
+
+    /// Creates the peer for a new `Dropdown`.
+    fn create_dropdown(&self) -> Rc<dyn DropdownPeer> {
+        unsupported_native_control(self.backend_name(), "Dropdown")
+    }
+
+    /// Creates the peer for a new `ScrollView`.
+    fn create_scroll_view(&self) -> Rc<dyn ScrollViewPeer> {
+        unsupported_native_control(self.backend_name(), "ScrollView")
+    }
+
+    /// Creates the peer for a new `TabView`.
+    fn create_tab_view(&self) -> Rc<dyn TabViewPeer> {
+        unsupported_native_control(self.backend_name(), "TabView")
+    }
+
+    /// Creates the peer for a `MenuItem`.
+    fn create_menu_item(&self) -> Rc<dyn MenuItemPeer> {
+        unsupported_native_control(self.backend_name(), "MenuItem")
+    }
+
+    /// Creates the peer for a `Menu`.
+    fn create_menu(&self) -> Rc<dyn MenuPeer> {
+        unsupported_native_control(self.backend_name(), "Menu")
+    }
+
+    /// Creates the peer for a `MenuBarItem`.
+    fn create_menu_bar_item(&self) -> Rc<dyn MenuBarItemPeer> {
+        unsupported_native_control(self.backend_name(), "MenuBarItem")
+    }
+
+    /// Creates the peer for a `MenuBar`.
+    fn create_menu_bar(&self) -> Rc<dyn MenuBarPeer> {
+        unsupported_native_control(self.backend_name(), "MenuBar")
     }
 
     /// Creates the peer for a `Window`. `owner` is the most-derived Window (a generated

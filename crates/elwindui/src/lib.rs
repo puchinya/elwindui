@@ -17,9 +17,12 @@ pub use elwindui_macros::__component_with_base_params;
 // defines the concrete type).
 #[doc(hidden)]
 pub use elwindui_core::{
-    __elwindui_ctor_Button, __elwindui_ctor_CheckBox, __elwindui_ctor_Layout,
+    __elwindui_ctor_Button, __elwindui_ctor_CheckBox, __elwindui_ctor_Dropdown,
+    __elwindui_ctor_DropdownItem, __elwindui_ctor_Layout, __elwindui_ctor_Menu,
+    __elwindui_ctor_MenuBar, __elwindui_ctor_MenuBarItem, __elwindui_ctor_MenuItem,
     __elwindui_ctor_NativeControl, __elwindui_ctor_PasswordBox, __elwindui_ctor_RadioButton,
-    __elwindui_ctor_Slider, __elwindui_ctor_TextArea, __elwindui_ctor_TextBox,
+    __elwindui_ctor_ScrollView, __elwindui_ctor_Slider, __elwindui_ctor_TabView,
+    __elwindui_ctor_TabViewItem, __elwindui_ctor_TextArea, __elwindui_ctor_TextBox,
     __elwindui_ctor_ToggleSwitch, __elwindui_ctor_VerticalLayout, __elwindui_ctor_Window,
 };
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` — writes

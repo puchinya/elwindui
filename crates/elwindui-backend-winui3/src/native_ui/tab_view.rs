@@ -1,332 +1,138 @@
-//! `elwindui::ui::TabView`/`TabViewItem`, their identity helpers, and the `ListExt` collection.
+//! The WinUI 3 peer behind `elwindui::ui::TabView` (a Core-owned Component, Issue #313).
+//!
+//! `Microsoft.UI.Xaml.Controls.TabView` is a real native tabbed-document control. Each displayed
+//! tab's `Content` is a persistent `crate::host::TreeHost` holding that tab's whole widget tree —
+//! recreating it on every resync would reset a document's `TextArea` (lost cursor/focus) on every
+//! keystroke — so tabs are reconciled by item identity and only the selected tab's host takes
+//! part in layout/render. Core owns the item list, the selected index and the selection policy;
+//! this peer owns the hosts, their order and which one is active.
 
-use super::NativeControl;
-use crate::AnyView;
+use super::control::HandlePeer;
 use crate::host::TreeHost;
-use crate::inner::InnerTabView;
-use elwindui_core::ui::UIElementExt;
+use crate::inner::{CallbackSlot, InnerTabView, invoke_slot, new_callback_slot as new_slot};
+use elwindui_core::base::Size;
+use elwindui_core::graphics::{Brush, CascadedTextStyle};
+use elwindui_core::ui::native::{NativePeer, TabViewPeer};
+use elwindui_core::ui::{TabViewItemExt, UIElementExt};
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
-/// See docs/specs/ui_spec.md#tabs and `elwindui_backend_appkit::native_ui::TabView`'s
-/// doc comment for the shared `children` convention (static and transparent dynamic ranges) and
-/// why `TabViewItem` — not a bespoke per-mode representation — is the thing every child range
-/// normalizes into. `Microsoft.UI.Xaml.Controls.
-/// TabView` is a real native tabbed-document control (unlike AppKit, which has none, hence that
-/// backend's hand-rolled `TabChip`/`TabStrip`), and each `TabViewItem`'s `Content` here is a live
-/// `crate::host::TreeHost` holding that tab's whole widget tree — recreating it on every
-/// resync (as AppKit's *chips*, which are cheap, safely do) would reset a document's `TextArea`
-/// (lost cursor/focus) on every keystroke. Unlike AppKit, this backend has **no** "content already
-/// shown once" limitation for static mode: a `TabViewItem`'s `content` is moved into its own
-/// persistent `TreeHost` exactly once, when that `TabViewItem` is first inserted as a real
-/// native tab — it is never subsequently discarded by selecting a different tab
-/// (`Controls::TabView` shows/hides each item's own `Content` natively), so there's nothing to
-/// restore. `struct_only = elwindui_core::ui::TabViewExt` (a deliberately empty shared trait — see
-/// its own doc comment in `elwindui-core`) — mirrors `elwindui_backend_appkit::native_ui::TabView`'s
-/// own shape; every method below stays `#[inherent]`, unchanged.
-#[elwindui_macros::class(struct_only = elwindui_core::ui::TabViewExt, inherits = elwindui_core::ui::NativeControl)]
-pub struct TabView {
-    inner: InnerTabView,
-    children: RefCell<Vec<Rc<dyn elwindui_core::ui::TabViewItemExt>>>,
-    /// Pointer identities (`Rc::as_ptr`, as `usize`) of the `TabViewItem`s currently reflected as
-    /// real `TabViewItem`s, in display order — the "before" side of `rebuild`'s diff against the
-    /// current `children` pointers (the "after" side).
+/// [`TabViewPeer`] over a XAML `TabView`. Created by [`super::WinUi3PeerFactory`].
+pub(crate) struct WinUi3TabViewPeer {
+    base: HandlePeer,
+    pub(crate) state: Rc<TabViewState>,
+}
+
+/// The peer's state, shared (weakly) with the native event handlers.
+pub(crate) struct TabViewState {
+    pub(crate) inner: InnerTabView,
+    /// The latest item list Core pushed.
+    items: RefCell<Vec<Rc<dyn TabViewItemExt>>>,
+    /// Bumped by every `set_items`, so a list pushed reentrantly during a rebuild is noticed.
+    generation: Cell<u64>,
+    /// The hosted content's logical parent (the TabView). Weak: the TabView owns this peer.
+    owner: RefCell<Option<Weak<dyn UIElementExt>>>,
+    /// Pointer identities of the items currently reflected as real XAML tabs, in display order —
+    /// the "before" side of `rebuild`'s diff against `items` (the "after" side).
     displayed: RefCell<Vec<usize>>,
     /// Parallel to `displayed`: each real XAML tab's persistent content host, in display order.
-    /// Ownership lives here rather than in `InnerTabView` so keyed removal can suppress and drop
-    /// exactly the host belonging to a closed declarative item.
-    content_hosts: RefCell<Vec<TreeHost>>,
+    pub(crate) content_hosts: RefCell<Vec<TreeHost>>,
     /// Pointer identity of the entry whose host currently participates in layout/render. `None`
     /// means either no selected child exists or the selected index is out of range.
-    active: Cell<Option<usize>>,
+    pub(crate) active: Cell<Option<usize>>,
     /// Guards XAML collection edits that can synchronously raise selection/size events. Transient
     /// selection callbacks are suppressed, and host synchronization waits until `rebuild` has
-    /// released its `children`/`displayed` borrows.
+    /// released its borrows.
     rebuilding: Cell<bool>,
-    /// Not read by this type itself (`set_on_select` passes callbacks straight through to
-    /// `crate::inner::InnerTabView`, which has no getter of its own) — tracked here purely so
-    /// `selected_item`/`selected_container` can read it back.
     selected_index: Cell<usize>,
-    on_close: RefCell<Option<Box<dyn Fn(usize)>>>,
-    /// User / binding selection callback, invoked after this TabView has followed a native
-    /// selection change itself (see `on_constructed`).
-    user_on_select: RefCell<Option<Rc<dyn Fn(usize)>>>,
-    weak_self: RefCell<Weak<TabView>>,
+    on_select: CallbackSlot<usize>,
+    on_close: CallbackSlot<usize>,
+    on_new_tab: CallbackSlot<()>,
 }
 
-/// The backend-native representation of one declarative `TabViewItem`, whether it was written
-/// literally or generated by a transparent dynamic child range.
-/// `struct_only = elwindui_core::ui::TabViewItemExt` (a deliberately empty shared trait — see its
-/// own doc comment in `elwindui-core`) — mirrors `elwindui_backend_appkit::native_ui::TabViewItem`'s
-/// own shape; every method below stays `#[inherent]`, unchanged.
-#[elwindui_macros::class(struct_only = elwindui_core::ui::TabViewItemExt)]
-pub struct TabViewItem {
-    header: RefCell<String>,
-    on_header_changed: RefCell<Option<Box<dyn Fn()>>>,
-    // Taken (moved into a real `TreeHost`) the first time this `TabViewItem` is inserted as a
-    // displayed tab; `None` afterward — see `TabView`'s own doc comment for why that's never a
-    // problem here (unlike AppKit's single shared content pane).
-    content: RefCell<Option<Rc<dyn UIElementExt>>>,
-    closable: Cell<bool>,
-    on_close: RefCell<Option<Box<dyn Fn()>>>,
+fn item_key(item: &Rc<dyn TabViewItemExt>) -> usize {
+    Rc::as_ptr(item) as *const () as usize
 }
 
-#[elwindui_macros::class]
-impl TabViewItem {
-    fn construct() -> Self {
-        Self {
-            header: RefCell::new(String::new()),
-            on_header_changed: RefCell::new(None),
-            content: RefCell::new(None),
-            closable: Cell::new(true),
-            on_close: RefCell::new(None),
-        }
-    }
-
-    #[inherent]
-    pub fn set_header(&self, header: &str) {
-        if *self.header.borrow() == header {
-            return;
-        }
-        *self.header.borrow_mut() = header.to_string();
-        if let Some(callback) = self.on_header_changed.borrow().as_ref() {
-            callback();
-        }
-    }
-
-    #[inherent]
-    pub fn set_content(&self, content: Rc<dyn UIElementExt>) {
-        *self.content.borrow_mut() = Some(content);
-    }
-
-    #[inherent]
-    pub fn set_closable(&self, closable: bool) {
-        self.closable.set(closable);
-    }
-
-    #[inherent]
-    pub fn set_on_close(&self, callback: Box<dyn Fn()>) {
-        *self.on_close.borrow_mut() = Some(callback);
-    }
-}
-
-#[elwindui_macros::class]
-impl TabView {
-    fn construct() -> Self {
+impl WinUi3TabViewPeer {
+    pub(crate) fn new() -> Self {
         let inner = InnerTabView::new();
-        let handle = inner.handle();
-        Self {
-            base: NativeControl::construct(super::control::handle_peer(handle)),
+        let base = HandlePeer::new(inner.handle());
+        let state = Rc::new(TabViewState {
             inner,
-            children: RefCell::new(Vec::new()),
+            items: RefCell::new(Vec::new()),
+            generation: Cell::new(0),
+            owner: RefCell::new(None),
             displayed: RefCell::new(Vec::new()),
             content_hosts: RefCell::new(Vec::new()),
             active: Cell::new(None),
             rebuilding: Cell::new(false),
             selected_index: Cell::new(0),
-            on_close: RefCell::new(None),
-            user_on_select: RefCell::new(None),
-            weak_self: RefCell::new(Weak::<TabView>::new()),
-        }
-    }
-
-    fn on_constructed(&self) {
-        // `owner_rc()` is guaranteed `Some` here (see `Button::on_constructed`'s own doc comment);
-        // downcasting the type-erased owner back to this concrete `TabView` is what lets `rebuild`/
-        // `attach_header_listener`/`set_on_close` upgrade `weak_self` into a real `Rc<TabView>`
-        // later.
-        let node = self
-            .as_ui_element()
-            .visual_collection
-            .owner_rc()
-            .expect("TabView::on_constructed: object must already be Rc-constructed");
-        let any_rc: Rc<dyn Any> = node;
-        let this: Rc<TabView> = any_rc
-            .downcast::<TabView>()
-            .expect("TabView::on_constructed: owner must be this TabView");
-        *self.weak_self.borrow_mut() = Rc::downgrade(&this);
-        let weak: Weak<TabView> = Rc::downgrade(&this);
-        self.inner
-            .set_on_content_size_changed(Box::new(move |width, height| {
-                let this: Option<Rc<TabView>> = weak.upgrade();
-                if let Some(this) = this {
-                    this.resize_active_content_host(width, height);
+            on_select: new_slot(),
+            on_close: new_slot(),
+            on_new_tab: new_slot(),
+        });
+        let weak = Rc::downgrade(&state);
+        state
+            .inner
+            .set_on_content_size_changed(Some(Rc::new(move |(width, height)| {
+                let state: Option<Rc<TabViewState>> = weak.upgrade();
+                if let Some(state) = state {
+                    state.resize_active_content_host(width, height);
                 }
-            }));
-        // Always wire the native close event. Static tabs may provide only per-item `on_close`
-        // handlers, so waiting for a TabView-level fallback to be assigned would leave their
-        // close buttons disconnected entirely.
-        let weak: Weak<TabView> = Rc::downgrade(&this);
-        self.inner.set_on_close(Box::new(move |index| {
-            let this: Option<Rc<TabView>> = weak.upgrade();
-            let Some(this) = this else { return };
-            // Drop the collection borrow before invoking user code: a close callback can
-            // synchronously mutate the backing list and re-enter `ListExt::remove_at`.
-            let entry: Option<Rc<dyn elwindui_core::ui::TabViewItemExt>> = {
-                let children = this.children.borrow();
-                children.get(index).cloned()
-            };
-            let handled: bool =
-                entry.is_some_and(|entry: Rc<dyn elwindui_core::ui::TabViewItemExt>| {
-                    let item: &TabViewItem = downcast_tab_view_item(&*entry);
-                    let callback: std::cell::Ref<'_, Option<Box<dyn Fn()>>> =
-                        item.on_close.borrow();
-                    if let Some(callback) = callback.as_ref() {
-                        callback();
-                        true
-                    } else {
-                        false
-                    }
-                });
-            if !handled {
-                let on_close: &std::cell::RefCell<Option<Box<dyn Fn(usize)>>> = &this.on_close;
-                let callback: std::cell::Ref<'_, Option<Box<dyn Fn(usize)>>> = on_close.borrow();
-                if let Some(callback) = callback.as_ref() {
-                    callback(index);
-                }
-            }
-        }));
-        // A native (user) selection activates the selected tab's content host here, whether or not
-        // a `selected_index` binding exists; without this, an unbound TabView left the newly
-        // selected tab's host inactive and its content blank. The binding write-back that follows
-        // reaches `set_selected_index` with the same index, which is then a no-op.
-        let weak: Weak<TabView> = Rc::downgrade(&this);
-        self.inner.set_on_select(Box::new(move |index| {
-            let this: Option<Rc<TabView>> = weak.upgrade();
-            let Some(this) = this else { return };
-            // XAML raises transient selection changes synchronously while `rebuild` edits
-            // `TabItems`. Publishing those intermediate indices can re-enter the declarative list
-            // diff while it still holds collection borrows; the final model-selected index is
-            // applied after rebuilding instead.
-            if this.rebuilding.get() {
+            })));
+        // A native (user) selection activates the selected tab's content host here, then reports
+        // the index to Core. XAML raises transient selection changes synchronously while
+        // `rebuild` edits `TabItems`; those are suppressed, and Core pushes the final selection
+        // after the list change.
+        let weak = Rc::downgrade(&state);
+        state.inner.set_on_select(Some(Rc::new(move |index| {
+            let state: Option<Rc<TabViewState>> = weak.upgrade();
+            let Some(state) = state else { return };
+            if state.rebuilding.get() {
                 return;
             }
-            this.set_selected_index(index);
-            let callback: Option<Rc<dyn Fn(usize)>> = this.user_on_select.borrow().clone();
-            if let Some(callback) = callback {
-                callback(index);
+            state.selected_index.set(index);
+            state.sync_active_content_host();
+            invoke_slot(&state.on_select, index);
+        })));
+        let weak = Rc::downgrade(&state);
+        state.inner.set_on_close(Some(Rc::new(move |index| {
+            let state: Option<Rc<TabViewState>> = weak.upgrade();
+            if let Some(state) = state {
+                invoke_slot(&state.on_close, index);
             }
-        }));
-        // Tab content lives in nested hosts outside the Visual tree, so it is unmounted (popups
-        // first) when this TabView unmounts — see `TreeHost::unmount_hosted_tree`.
-        let weak: Weak<TabView> = Rc::downgrade(&this);
-        self.add_unmount_hook(Box::new(move || {
-            let this: Option<Rc<TabView>> = weak.upgrade();
-            let Some(this) = this else { return };
-            let hosts: Vec<TreeHost> = this.content_hosts.borrow().clone();
-            for host in hosts {
-                host.unmount_hosted_tree();
+        })));
+        let weak = Rc::downgrade(&state);
+        state.inner.set_on_new_tab(Some(Rc::new(move |()| {
+            let state: Option<Rc<TabViewState>> = weak.upgrade();
+            if let Some(state) = state {
+                invoke_slot(&state.on_new_tab, ());
             }
-        }));
-        // WinUI3's `TabView` is a tab stop by default — see
-        // docs/design/runtime/input_focus_design.md.
-        self.set_tab_stop(true);
+        })));
+        Self { base, state }
     }
 
-    #[inherent]
-    pub fn set_children(&self, children: Vec<Rc<TabViewItem>>) {
-        for item in &children {
-            self.attach_header_listener(
-                &(Rc::clone(item) as Rc<dyn elwindui_core::ui::TabViewItemExt>),
-            );
-        }
-        *self.children.borrow_mut() = children
-            .into_iter()
-            .map(|item| item as Rc<dyn elwindui_core::ui::TabViewItemExt>)
-            .collect();
-        self.rebuild();
+    #[cfg(test)]
+    pub(crate) fn emit_select_for_test(&self, index: usize) {
+        self.state.inner.emit_select_for_test(index);
     }
 
-    #[inherent]
-    pub fn set_on_select(&self, callback: Box<dyn Fn(usize)>) {
-        *self.user_on_select.borrow_mut() = Some(Rc::from(callback));
+    #[cfg(test)]
+    pub(crate) fn native_selected_index_for_test(&self) -> i32 {
+        self.state.inner.native_selected_index_for_test()
+    }
+}
+
+impl TabViewState {
+    /// The displayed position of the item at Core `index`.
+    fn displayed_position(&self, index: usize) -> Option<usize> {
+        let key = self.items.borrow().get(index).map(item_key)?;
+        self.displayed.borrow().iter().position(|k| *k == key)
     }
 
-    /// Registers the write-back callback used by a two-way `selected_index` binding.
-    #[inherent]
-    pub fn set_on_selected_index_change(&self, callback: Box<dyn Fn(usize)>) {
-        self.set_on_select(callback);
-    }
-
-    /// A static `TabViewItem`'s own `on_close` (if set) takes precedence — it's the per-item
-    /// declaration in that mode; dynamic mode has none, so its `TabView`-level `on_close(index)`
-    /// is used instead (same precedence as `elwindui_backend_appkit::native_ui::TabView`).
-    #[inherent]
-    pub fn set_on_close(&self, callback: Box<dyn Fn(usize)>) {
-        *self.on_close.borrow_mut() = Some(callback);
-    }
-
-    #[inherent]
-    pub fn set_on_new_tab(&self, callback: Box<dyn Fn()>) {
-        self.inner.set_on_new_tab(callback);
-    }
-
-    fn children(&self) -> &dyn elwindui_core::ui::ListExt<dyn elwindui_core::ui::TabViewItemExt> {
-        self
-    }
-
-    /// Selects the matching XAML item and transfers layout/render participation to its persistent
-    /// host. XAML still owns visual visibility, while this layer independently suppresses the old
-    /// host's expensive RenderTree/backend resources and rebuilds the new host at the latest
-    /// content viewport size.
-    #[inherent]
-    pub fn set_selected_index(&self, selected_index: usize) {
-        if self.selected_index.get() == selected_index {
-            return;
-        }
-        self.selected_index.set(selected_index);
-        self.inner.set_selected_index(selected_index);
-        if !self.rebuilding.get() {
-            self.sync_active_content_host();
-        }
-    }
-
-    #[inherent]
-    pub fn into_any_view(&self) -> AnyView {
-        self.inner.handle()
-    }
-
-    #[inherent]
-    fn attach_header_listener(&self, item: &Rc<dyn elwindui_core::ui::TabViewItemExt>) {
-        let key = tab_view_item_key(item);
-        let weak: Weak<TabView> = self.weak_self.borrow().clone();
-        *downcast_tab_view_item(&**item)
-            .on_header_changed
-            .borrow_mut() = Some(Box::new(move || {
-            let tab_view: Option<Rc<TabView>> = weak.upgrade();
-            if let Some(tab_view) = tab_view {
-                tab_view.refresh_dynamic_header(key);
-            }
-        }));
-    }
-
-    #[inherent]
-    fn refresh_dynamic_header(&self, key: usize) {
-        let Some(index) = self
-            .displayed
-            .borrow()
-            .iter()
-            .position(|displayed| *displayed == key)
-        else {
-            return;
-        };
-        let Some(item) = self
-            .children
-            .borrow()
-            .iter()
-            .find(|item| tab_view_item_key(item) == key)
-            .cloned()
-        else {
-            return;
-        };
-        self.inner
-            .set_tab_title(index, &downcast_tab_view_item(&*item).header.borrow());
-    }
-
-    /// Resizes only the host currently participating in layout/render. The native `SizeChanged`
-    /// callback delegates here instead of retaining and walking every tab host.
-    #[inherent]
+    /// Resizes only the host currently participating in layout/render.
     fn resize_active_content_host(&self, width: f64, height: f64) {
         if self.rebuilding.get() {
             return;
@@ -349,17 +155,15 @@ impl TabView {
     /// Deactivates the previously selected host, then sizes and activates the current one. Host
     /// clones are resolved before each state transition and no collection borrow is held across a
     /// relayout, avoiding `RefCell` re-entry if native focus events synchronously run user code.
-    #[inherent]
     fn sync_active_content_host(&self) {
         let selected_key = self
-            .children
+            .items
             .borrow()
             .get(self.selected_index.get())
-            .map(tab_view_item_key);
+            .map(item_key);
         if self.active.get() == selected_key {
             return;
         }
-
         let old_host = self.active.get().and_then(|active_key| {
             let displayed = self.displayed.borrow();
             let index = displayed.iter().position(|key| *key == active_key)?;
@@ -368,7 +172,6 @@ impl TabView {
         if let Some(host) = old_host {
             host.set_active(false);
         }
-
         let new_host = selected_key.and_then(|selected_key| {
             let displayed = self.displayed.borrow();
             let index = displayed.iter().position(|key| *key == selected_key)?;
@@ -385,30 +188,35 @@ impl TabView {
         self.active.set(active_key);
     }
 
-    /// Keyed diff (pointer identity — see `displayed`'s doc comment): removes displayed tabs whose
-    /// `TabViewItem` no longer appears in `children`, inserts a real `TabViewItem` (+ that entry's
-    /// one-time `content`) for each not-yet-displayed one, and refreshes every displayed tab's
-    /// title (labels can change independently of tab identity, e.g. a document's file name). Does
-    /// not handle reordering existing tabs (no reorder op is exposed, and nothing in notepad's
-    /// command set reorders tabs today — only appends/removes) — an already-displayed tab is left
-    /// in its current slot rather than physically moved to match `children`' exact order.
-    #[inherent]
+    /// Keyed diff (pointer identity): retires and removes displayed tabs whose item is gone,
+    /// inserts a real XAML tab (+ a content host for the item's content) for each new item, and
+    /// refreshes every tab's header and closable state. Does not reorder existing tabs. Repeats
+    /// until no list was pushed reentrantly meanwhile.
     fn rebuild(&self) {
         if self.rebuilding.replace(true) {
             return;
         }
-        let active_before = self.active.get();
+        loop {
+            let generation = self.generation.get();
+            self.rebuild_once();
+            if self.generation.get() == generation {
+                break;
+            }
+        }
+        self.rebuilding.set(false);
+        self.sync_active_content_host();
+    }
 
+    fn rebuild_once(&self) {
         // Phase 1 — retire the content of every removed tab while its XAML TabViewItem and native
         // children are still attached: its popup closes, the content unmounts exactly once, and
-        // only then are its native children detached (`TreeHost::unmount_hosted_tree`). No
-        // collection borrow is held, because `on_unmount` may re-enter this TabView; a removal made
-        // from there is picked up by the next loop pass, and a reentrant `rebuild` returns early.
+        // only then are its native children detached (`TreeHost::unmount_hosted_tree`). No borrow
+        // is held, because `on_unmount` may re-enter Core and push a new list; that list is
+        // picked up by the next loop pass.
         let mut retired: Vec<usize> = Vec::new();
         loop {
             let pending: Vec<(usize, TreeHost)> = {
-                let children = self.children.borrow();
-                let keys: Vec<usize> = children.iter().map(tab_view_item_key).collect();
+                let keys: Vec<usize> = self.items.borrow().iter().map(item_key).collect();
                 let displayed = self.displayed.borrow();
                 let hosts = self.content_hosts.borrow();
                 displayed
@@ -427,142 +235,127 @@ impl TabView {
             }
         }
 
-        // Phase 2 — structural diff: remove the (already retired) XAML tabs, insert new ones.
-        let children = self.children.borrow();
-        let new_keys: Vec<usize> = children.iter().map(tab_view_item_key).collect();
-        let mut displayed = self.displayed.borrow_mut();
-        let mut removed_any = false;
-        for i in (0..displayed.len()).rev() {
-            if !new_keys.contains(&displayed[i]) {
+        // Phase 2 — structural diff on a snapshot: remove the (already retired) XAML tabs, insert
+        // new ones.
+        let items = self.items.borrow().clone();
+        let new_keys: Vec<usize> = items.iter().map(item_key).collect();
+        // Bind the length first: a borrow in the range expression would live for the whole loop.
+        let displayed_len = self.displayed.borrow().len();
+        for i in (0..displayed_len).rev() {
+            let key = self.displayed.borrow()[i];
+            if !new_keys.contains(&key) {
                 let host = self.content_hosts.borrow_mut().remove(i);
                 host.set_active(false);
                 self.inner.remove_tab_at(i);
-                displayed.remove(i);
-                removed_any = true;
-            }
-        }
-
-        for (target_index, (key, entry)) in new_keys.iter().zip(children.iter()).enumerate() {
-            if !displayed.contains(key) {
-                let entry = downcast_tab_view_item(&**entry);
-                let label = entry.header.borrow().clone();
-                let closable = entry.closable.get();
-                let content_host =
-                    self.inner
-                        .insert_tab(target_index.min(displayed.len()), &label, closable);
-                if let Some(content) = entry.content.borrow_mut().take() {
-                    content_host.set_hosted_tree(
-                        content,
-                        self.as_ui_element().visual_collection.owner_rc(),
-                    );
-                }
-                let insertion_index = target_index.min(displayed.len());
-                self.content_hosts
-                    .borrow_mut()
-                    .insert(insertion_index, content_host);
-                displayed.insert(insertion_index, *key);
-            }
-        }
-        drop(displayed);
-
-        for (index, entry) in children.iter().enumerate() {
-            self.inner
-                .set_tab_title(index, &downcast_tab_view_item(&**entry).header.borrow());
-        }
-
-        // Selection after removal (`docs/specs/ui_spec.md` TabView): a surviving selected tab stays
-        // selected by identity; if the selected tab itself was removed, the tab now at its index is
-        // selected, or the new last tab when it was last. Native `SelectedIndex`, `selected_index`
-        // and the active host are all set from that one decision (native selection events are
-        // suppressed while `rebuilding`), and a changed index is reported to the user / binding
-        // callback once the edit is complete.
-        let mut changed_selection = None;
-        if removed_any {
-            if let Some(active_key) = active_before {
-                let survivor = children
-                    .iter()
-                    .position(|entry| tab_view_item_key(entry) == active_key);
-                let replacement = survivor.or_else(|| {
-                    (!children.is_empty())
-                        .then(|| self.selected_index.get().min(children.len() - 1))
-                });
-                if let Some(index) = replacement {
-                    if index != self.selected_index.get() {
-                        self.selected_index.set(index);
-                        changed_selection = Some(index);
-                    }
-                    self.inner.set_selected_index(index);
+                self.displayed.borrow_mut().remove(i);
+                if self.active.get() == Some(key) {
+                    self.active.set(None);
                 }
             }
         }
-        drop(children);
-        self.rebuilding.set(false);
-        self.sync_active_content_host();
-        if let Some(index) = changed_selection {
-            let callback: Option<Rc<dyn Fn(usize)>> = self.user_on_select.borrow().clone();
-            if let Some(callback) = callback {
-                callback(index);
+        let owner = self.owner.borrow().as_ref().and_then(Weak::upgrade);
+        for (target_index, (key, entry)) in new_keys.iter().zip(items.iter()).enumerate() {
+            if self.displayed.borrow().contains(key) {
+                continue;
+            }
+            let item = entry.as_ui_element();
+            let insertion_index = target_index.min(self.displayed.borrow().len());
+            let content_host =
+                self.inner
+                    .insert_tab(insertion_index, &item.header(), item.closable());
+            self.content_hosts
+                .borrow_mut()
+                .insert(insertion_index, content_host.clone());
+            self.displayed.borrow_mut().insert(insertion_index, *key);
+            if let Some(content) = item.content() {
+                content_host.set_hosted_tree(content, owner.clone());
+            }
+        }
+        for (key, entry) in new_keys.iter().zip(items.iter()) {
+            let position = self.displayed.borrow().iter().position(|k| k == key);
+            if let Some(position) = position {
+                let item = entry.as_ui_element();
+                self.inner.set_tab_title(position, &item.header());
+                self.inner.set_tab_closable(position, item.closable());
             }
         }
     }
 }
 
-pub(crate) fn downcast_tab_view_item(item: &dyn elwindui_core::ui::TabViewItemExt) -> &TabViewItem {
-    item.as_any()
-        .downcast_ref::<TabViewItem>()
-        .expect("TabViewExt: child must be this backend's TabViewItem")
+impl NativePeer for WinUi3TabViewPeer {
+    fn handle(&self) -> &dyn Any {
+        self.base.handle()
+    }
+    fn measure(&self, available: Size) -> Size {
+        self.base.measure(available)
+    }
+    fn apply_background(&self, background: Option<&Brush>) -> bool {
+        self.base.apply_background(background)
+    }
+    fn set_tooltip(&self, tooltip: Option<&str>) {
+        self.base.set_tooltip(tooltip);
+    }
+    fn supports_text_style(&self) -> bool {
+        self.base.supports_text_style()
+    }
+    fn apply_text_style(&self, style: &CascadedTextStyle) -> bool {
+        self.base.apply_text_style(style)
+    }
+    fn dispose(&self) {
+        *self.state.on_select.borrow_mut() = None;
+        *self.state.on_close.borrow_mut() = None;
+        *self.state.on_new_tab.borrow_mut() = None;
+    }
 }
 
-pub(crate) fn tab_view_item_key(item: &Rc<dyn elwindui_core::ui::TabViewItemExt>) -> usize {
-    Rc::as_ptr(item) as *const () as usize
-}
-
-impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::TabViewItemExt> for TabView {
-    fn add(&self, item: Rc<dyn elwindui_core::ui::TabViewItemExt>) {
-        self.attach_header_listener(&item);
-        self.children.borrow_mut().push(item);
-        self.rebuild();
+impl TabViewPeer for WinUi3TabViewPeer {
+    fn set_items(&self, items: &[Rc<dyn TabViewItemExt>], owner: Option<Rc<dyn UIElementExt>>) {
+        *self.state.items.borrow_mut() = items.to_vec();
+        *self.state.owner.borrow_mut() = owner.as_ref().map(Rc::downgrade);
+        self.state.generation.set(self.state.generation.get() + 1);
+        self.state.rebuild();
     }
-
-    fn insert(&self, index: usize, item: Rc<dyn elwindui_core::ui::TabViewItemExt>) {
-        self.attach_header_listener(&item);
-        let mut children = self.children.borrow_mut();
-        let index = index.min(children.len());
-        children.insert(index, item);
-        drop(children);
-        self.rebuild();
+    /// Selects the matching XAML item and transfers layout/render participation to its
+    /// persistent host. The native `SelectionChanged` this raises reaches Core as an echo.
+    fn set_selected_index(&self, index: usize) {
+        self.state.selected_index.set(index);
+        self.state.inner.set_selected_index(index);
+        if !self.state.rebuilding.get() {
+            self.state.sync_active_content_host();
+        }
     }
-
-    fn remove(&self, item: &Rc<dyn elwindui_core::ui::TabViewItemExt>) -> bool {
-        let mut children = self.children.borrow_mut();
-        let Some(index) = children.iter().position(|child| Rc::ptr_eq(child, item)) else {
-            return false;
-        };
-        children.remove(index);
-        drop(children);
-        self.rebuild();
-        true
+    fn set_tab_header(&self, index: usize, header: &str) {
+        if let Some(position) = self.state.displayed_position(index) {
+            self.state.inner.set_tab_title(position, header);
+        }
     }
-
-    fn remove_at(&self, index: usize) -> Rc<dyn elwindui_core::ui::TabViewItemExt> {
-        let item = self.children.borrow_mut().remove(index);
-        self.rebuild();
-        item
+    fn set_tab_closable(&self, index: usize, closable: bool) {
+        if let Some(position) = self.state.displayed_position(index) {
+            self.state.inner.set_tab_closable(position, closable);
+        }
     }
-
-    fn clear(&self) {
-        self.children.borrow_mut().clear();
-        self.rebuild();
+    fn set_on_select(&self, callback: Option<Box<dyn Fn(usize)>>) {
+        *self.state.on_select.borrow_mut() = callback.map(Rc::from);
     }
-
-    fn len(&self) -> usize {
-        self.children.borrow().len()
+    fn set_on_close(&self, callback: Option<Box<dyn Fn(usize)>>) {
+        *self.state.on_close.borrow_mut() = callback.map(Rc::from);
     }
-    fn is_empty(&self) -> bool {
-        self.children.borrow().is_empty()
+    fn set_on_new_tab(&self, callback: Option<Box<dyn Fn()>>) {
+        *self.state.on_new_tab.borrow_mut() = callback.map(|callback| {
+            let callback: Rc<dyn Fn(())> = Rc::new(move |()| callback());
+            callback
+        });
     }
-    fn to_vec(&self) -> Vec<Rc<dyn elwindui_core::ui::TabViewItemExt>> {
-        self.children.borrow().clone()
+    /// Tab content lives in nested hosts outside the Visual tree, so it is retired (popups
+    /// first) when the TabView unmounts — see `TreeHost::unmount_hosted_tree`.
+    fn unmount_content(&self) {
+        let hosts: Vec<TreeHost> = self.state.content_hosts.borrow().clone();
+        for host in hosts {
+            host.unmount_hosted_tree();
+        }
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -577,10 +370,38 @@ pub(crate) mod hosted_lifecycle_tests {
     use crate::host::hosted_context_lifecycle_tests::{
         Log, capture_events, count, open_recording_popup, probe_content,
     };
-    use elwindui_core::ui::{ListExt, TabViewItemExt};
+    use elwindui_core::ui::{ListExt, TabView, TabViewItem, TabViewItemExt};
+
+    fn peer_of(tab_view: &TabView) -> Rc<dyn TabViewPeer> {
+        tab_view.__tab_view_peer()
+    }
+
+    fn winui(peer: &Rc<dyn TabViewPeer>) -> &WinUi3TabViewPeer {
+        peer.as_any()
+            .downcast_ref::<WinUi3TabViewPeer>()
+            .expect("WinUI 3 TabView peer")
+    }
+
+    fn hosts_of(tab_view: &TabView) -> Vec<TreeHost> {
+        winui(&peer_of(tab_view))
+            .state
+            .content_hosts
+            .borrow()
+            .clone()
+    }
+
+    fn emit_select(tab_view: &TabView, index: usize) {
+        winui(&peer_of(tab_view)).emit_select_for_test(index);
+    }
+
+    fn native_selected(tab_view: &TabView) -> i32 {
+        winui(&peer_of(tab_view)).native_selected_index_for_test()
+    }
 
     fn tab_view_with(log: &Log, names: &[&str]) -> (Rc<TabView>, Vec<Rc<dyn UIElementExt>>) {
         let tab_view = TabView::new();
+        // Realize first, so every later list change reaches the native tabs immediately.
+        peer_of(&tab_view);
         let contents: Vec<Rc<dyn UIElementExt>> =
             names.iter().map(|name| probe_content(log, name)).collect();
         for (name, content) in names.iter().zip(&contents) {
@@ -614,7 +435,7 @@ pub(crate) mod hosted_lifecycle_tests {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let _events = capture_events(&log);
         let (tab_view, contents) = tab_view_with(&log, &["c0", "c1", "c2", "c3"]);
-        let hosts: Vec<TreeHost> = tab_view.content_hosts.borrow().clone();
+        let hosts: Vec<TreeHost> = hosts_of(&tab_view);
         assert_eq!(hosts.len(), 4);
         assert!(contents.iter().all(|content| content.parent().is_some()));
         take(&log);
@@ -625,7 +446,7 @@ pub(crate) mod hosted_lifecycle_tests {
         tab_view.set_on_select(Box::new(move |index| {
             selected_for_callback.set(Some(index))
         }));
-        tab_view.inner.emit_select_for_test(2);
+        emit_select(&tab_view, 2);
         assert!(hosts[2].is_active_for_test(), "selected tab host is active");
         assert!(
             !hosts[0].is_active_for_test(),
@@ -636,7 +457,7 @@ pub(crate) mod hosted_lifecycle_tests {
         // (a)/(c) inactive tab with an open popup, before the selected tab (c3 at index 3): the
         // retirement happens while the XAML TabViewItem is still attached, and the selected tab
         // keeps its selection by identity although its index shifts to 2.
-        tab_view.inner.emit_select_for_test(3);
+        emit_select(&tab_view, 3);
         selected.set(None);
         open_recording_popup(&hosts[1], &log, "c1");
         tab_view.remove_at(1);
@@ -656,8 +477,8 @@ pub(crate) mod hosted_lifecycle_tests {
             hosts[3].is_active_for_test(),
             "selected tab stays active after an earlier removal"
         );
-        assert_eq!(tab_view.selected_index.get(), 2);
-        assert_eq!(tab_view.inner.native_selected_index_for_test(), 2);
+        assert_eq!(tab_view.selected_index(), 2);
+        assert_eq!(native_selected(&tab_view), 2);
         assert_eq!(selected.get(), Some(2), "binding is told the shifted index");
 
         // (b) clear removes several tabs; each is retired before any TabViewItem is removed.
@@ -705,7 +526,7 @@ pub(crate) mod hosted_lifecycle_tests {
     pub(crate) fn removing_the_selected_tab_selects_a_consistent_replacement() {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let (tab_view, _contents) = tab_view_with(&log, &["s0", "s1", "s2"]);
-        let hosts: Vec<TreeHost> = tab_view.content_hosts.borrow().clone();
+        let hosts: Vec<TreeHost> = hosts_of(&tab_view);
         // A two-way binding: the callback writes the index back like generated code does.
         let reported = Rc::new(RefCell::new(Vec::<usize>::new()));
         let weak = Rc::downgrade(&tab_view);
@@ -717,16 +538,8 @@ pub(crate) mod hosted_lifecycle_tests {
             }
         }));
         let assert_selected = |index: usize, host: &TreeHost, label: &str| {
-            assert_eq!(
-                tab_view.selected_index.get(),
-                index,
-                "{label}: selected_index"
-            );
-            assert_eq!(
-                tab_view.inner.native_selected_index_for_test(),
-                index as i32,
-                "{label}: native"
-            );
+            assert_eq!(tab_view.selected_index(), index, "{label}: selected_index");
+            assert_eq!(native_selected(&tab_view), index as i32, "{label}: native");
             assert!(
                 host.is_active_for_test(),
                 "{label}: replacement host active"
@@ -734,7 +547,7 @@ pub(crate) mod hosted_lifecycle_tests {
         };
 
         // Selected last tab removed → new last tab.
-        tab_view.inner.emit_select_for_test(2);
+        emit_select(&tab_view, 2);
         reported.borrow_mut().clear();
         tab_view.remove_at(2);
         assert_selected(1, &hosts[1], "selected last");
@@ -745,8 +558,8 @@ pub(crate) mod hosted_lifecycle_tests {
         let item = TabViewItem::new();
         item.set_content(probe_content(&log, "s3"));
         tab_view.add(item as Rc<dyn TabViewItemExt>);
-        let hosts: Vec<TreeHost> = tab_view.content_hosts.borrow().clone();
-        tab_view.inner.emit_select_for_test(1);
+        let hosts: Vec<TreeHost> = hosts_of(&tab_view);
+        emit_select(&tab_view, 1);
         reported.borrow_mut().clear();
         tab_view.remove_at(1);
         assert_selected(1, &hosts[2], "selected middle");
@@ -757,16 +570,12 @@ pub(crate) mod hosted_lifecycle_tests {
 
         // Only tab: remove until one is left, then remove it.
         tab_view.remove_at(0);
-        assert_selected(
-            0,
-            &tab_view.content_hosts.borrow()[0],
-            "after removing first",
-        );
-        let last_host = tab_view.content_hosts.borrow()[0].clone();
+        assert_selected(0, &hosts_of(&tab_view)[0], "after removing first");
+        let last_host = hosts_of(&tab_view)[0].clone();
         tab_view.remove_at(0);
         assert_eq!(tab_view.len(), 0);
         assert!(
-            tab_view.active.get().is_none(),
+            winui(&peer_of(&tab_view)).state.active.get().is_none(),
             "no active host in an empty TabView"
         );
         assert!(!last_host.is_active_for_test());
@@ -778,7 +587,7 @@ pub(crate) mod hosted_lifecycle_tests {
     pub(crate) fn tab_removal_never_reattaches_reentrant_requests() {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let (tab_view, contents) = tab_view_with(&log, &["A", "keep"]);
-        let host = tab_view.content_hosts.borrow()[0].clone();
+        let host = hosts_of(&tab_view)[0].clone();
         let b = probe_content(&log, "B");
         let c = probe_content(&log, "C");
         let request = |content: &Rc<dyn UIElementExt>, next: &Rc<dyn UIElementExt>| {
@@ -822,6 +631,7 @@ pub(crate) mod hosted_lifecycle_tests {
             };
             let log: Log = Rc::new(RefCell::new(Vec::new()));
             let tab_view = TabView::new();
+            peer_of(&tab_view);
             let b = probe_content(&log, "B");
             for name in ["T1", "T2"] {
                 let item = TabViewItem::new();
@@ -829,7 +639,7 @@ pub(crate) mod hosted_lifecycle_tests {
                 item.set_content(Rc::clone(&b));
                 tab_view.add(item as Rc<dyn TabViewItemExt>);
             }
-            let hosts: Vec<TreeHost> = tab_view.content_hosts.borrow().clone();
+            let hosts: Vec<TreeHost> = hosts_of(&tab_view);
             let publishes_b = |host: &TreeHost| {
                 host.hosted_tree_for_test()
                     .is_some_and(|tree| Rc::ptr_eq(&tree, &b))
@@ -851,12 +661,12 @@ pub(crate) mod hosted_lifecycle_tests {
                 b.as_ui_element().invalidate_host.borrow().is_some(),
                 "{label}: B wired"
             );
-            tab_view.inner.emit_select_for_test(1);
+            emit_select(&tab_view, 1);
             assert!(
                 hosts[1].is_active_for_test(),
                 "{label}: selecting the second tab works"
             );
-            tab_view.inner.emit_select_for_test(0);
+            emit_select(&tab_view, 0);
             assert!(
                 hosts[0].is_active_for_test(),
                 "{label}: back to the owning tab"

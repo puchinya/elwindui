@@ -347,6 +347,10 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   accessibility action that changes the value (CheckBox/ToggleSwitch `Activate`, Slider
   `SetValue`/`Increment`/`Decrement`, RadioButton `Activate`/`Select`, TextBox/TextArea `SetText`) is a
   user change: it pushes to the widget and notifies once if the value changed.
+- **CheckBox from `Indeterminate`:** a user click on a box showing `Indeterminate` lands on `Checked`
+  (`ui_spec.md`). Core enforces it in the change callback: whatever state the toolkit's own cycle
+  reports (WinUI3's three-state cycle reports `Unchecked`), Core stores `Checked`, pushes it back to
+  the widget once and notifies once.
 - **RadioButton groups** are owned by Core in one per-UI-thread registry of `Weak` members. A selection
   checks the button, unchecks the other live members of its group, and notifies only the members whose
   state changed. The peer only displays state and reports activation.

@@ -28,8 +28,9 @@ pub enum CheckState {
 /// land on `Indeterminate` — that third state exists purely so a `component` can *display* "some
 /// but not all" (e.g. a header checkbox reflecting a partially-selected list) without a user
 /// being able to get stuck in it by clicking. Setting `checked: CheckState::Indeterminate` from
-/// Rust still works; the next click always moves to `Checked` from any prior state, matching how
-/// this two-state cycle already behaves without ever reading the mixed value.
+/// Rust still works. A user click on a box showing `Indeterminate` always moves it to `Checked`
+/// (the common "select all" convention); Core enforces this for every backend. From `Checked` or
+/// `Unchecked`, a click toggles as usual.
 ///
 /// Declared once here as a Core-owned Component (Issue #313). The OS widget is a
 /// [`CheckBoxPeer`](crate::ui::native::CheckBoxPeer) created lazily by the active backend (see
@@ -161,11 +162,28 @@ impl CheckBox {
 impl CheckBox {
     /// A user change reported by the peer (§5 two-way rule): an echo of the stored state is
     /// dropped; otherwise Core stores it and notifies once, without pushing it back.
-    fn on_native_change(&self, state: CheckState) {
-        if self.checked.get() == state {
+    ///
+    /// A user click on a box showing `Indeterminate` always lands on `Checked` (the common
+    /// "select all" convention, and the AppKit behavior). Toolkits whose own cycle goes elsewhere
+    /// (WinUI3 three-state: `null` -> `false`) are corrected here, once, for every backend: only a
+    /// corrected state is pushed back to the widget.
+    fn on_native_change(&self, reported: CheckState) {
+        let previous = self.checked.get();
+        let state = if previous == CheckState::Indeterminate {
+            CheckState::Checked
+        } else {
+            reported
+        };
+        if previous == state {
             return;
         }
         self.checked.set(state);
+        // Only a corrected state needs to reach the widget; a reported one is already shown.
+        if state != reported {
+            if let Some(peer) = self.peer.get() {
+                peer.set_checked(state);
+            }
+        }
         self.sync_checked_semantics();
         notify_change(&self.on_change, state);
     }

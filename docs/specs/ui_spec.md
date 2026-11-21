@@ -723,7 +723,7 @@ ON / OFF / （選択的）Indeterminate 状態を持つネイティブのチェ�
 
 #### Semantics
 
-ユーザーのクリック操作は `Unchecked` と `Checked` の2状態間のみを切り替える。`Indeterminate`（中間状態）はプログラムからの状態表示専用である。
+ユーザーのクリック操作は `Unchecked` と `Checked` の2状態間のみを切り替える。`Indeterminate`（中間状態）はプログラムからの状態表示専用である。`Indeterminate` を表示中のチェックボックスをユーザーがクリックすると、常に `Checked` になる（「すべて選択」の一般的な慣習。全 backend で同じ）。
 Core semantic tree では `AccessibilityRole::CheckBox` として `Off` / `On` / `Mixed` を公開し、
 `Activate` はこの通常の状態/event path を一度だけ実行する。
 

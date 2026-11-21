@@ -354,6 +354,44 @@ fn check_box_realizes_once_and_separates_programmatic_and_user_changes() {
 }
 
 #[test]
+fn a_user_click_on_an_indeterminate_check_box_lands_on_checked() {
+    let factory = install_mock();
+    let check_box = CheckBox::new();
+    let (seen, sink) = recorder();
+    check_box.set_on_checked_change(sink);
+    realize(check_box.as_ref());
+    check_box.set_checked(CheckState::Indeterminate);
+    factory.take_log();
+    // A toolkit whose three-state cycle reports Unchecked (WinUI3) is corrected to Checked and
+    // the widget is told; a toolkit that already reports Checked (AppKit) needs no correction.
+    fire(&factory.peer(0).on_check, CheckState::Unchecked);
+    assert_eq!(*seen.borrow(), [CheckState::Checked]);
+    assert_eq!(factory.take_log(), ["checked:Checked"]);
+    assert_eq!(
+        semantics(check_box.as_ref()).state.checked,
+        Some(AccessibilityCheckState::On)
+    );
+
+    check_box.set_checked(CheckState::Indeterminate);
+    factory.take_log();
+    fire(&factory.peer(0).on_check, CheckState::Checked);
+    assert_eq!(*seen.borrow(), [CheckState::Checked, CheckState::Checked]);
+    assert!(factory.take_log().is_empty());
+
+    // From Checked, a click goes back to Unchecked as usual.
+    fire(&factory.peer(0).on_check, CheckState::Unchecked);
+    assert_eq!(
+        *seen.borrow(),
+        [
+            CheckState::Checked,
+            CheckState::Checked,
+            CheckState::Unchecked
+        ]
+    );
+    clear_native_peer_factory();
+}
+
+#[test]
 fn input_callbacks_hold_only_weak_owners_and_dispose_once() {
     let factory = install_mock();
     let check_box = CheckBox::new();

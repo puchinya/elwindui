@@ -4,7 +4,7 @@ use crate::ffi::{AnyView, mtm};
 use elwindui_core::ui::ButtonRole;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send, sel};
+use objc2::{AnyThread, ClassType, DefinedClass, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAccessibility, NSButton, NSCellImagePosition, NSColor, NSControlSize, NSImage,
 };
@@ -195,6 +195,13 @@ define_class!(
     impl ButtonTarget {
         #[unsafe(method(perform:))]
         fn perform(&self, _sender: &AnyObject) {
+            // `NSControl` does not retain its target, and the only owning `Retained` lives in
+            // the peer's `target_storage`. A user handler can release the last Button owner
+            // mid-callback (`dispose` -> `clear_on_click`), which would otherwise free this
+            // target, and the closure that is still running, before it returns. Hold a strong
+            // reference for exactly the duration of the call (`native_peer_design.md` §6,
+            // "In-flight callbacks"). It is released on return, so no permanent cycle forms.
+            let _in_flight: Retained<Self> = self.retain();
             (self.ivars().callback)();
         }
     }
@@ -219,5 +226,65 @@ impl ButtonTarget {
             button.setAction(Some(sel!(perform:)));
         }
         target
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ButtonTarget;
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSObject;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    /// Sets its flag when dropped, i.e. when the target's ivars (and the callback) are freed.
+    struct DropFlag(Rc<Cell<usize>>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    /// A click handler that drops the last stored `Retained<ButtonTarget>` (what `dispose` does
+    /// when the handler releases the last Button owner) must not free the target or its own
+    /// closure before it returns. The target is freed exactly once afterwards.
+    #[test]
+    fn a_callback_that_releases_its_own_target_outlives_the_call() {
+        let storage: Rc<RefCell<Option<Retained<ButtonTarget>>>> = Rc::new(RefCell::new(None));
+        let drops = Rc::new(Cell::new(0));
+        let drops_seen_during_call = Rc::new(Cell::new(usize::MAX));
+        let callback = {
+            let storage = storage.clone();
+            let flag = DropFlag(drops.clone());
+            let drops = drops.clone();
+            let seen = drops_seen_during_call.clone();
+            move || {
+                storage.borrow_mut().take();
+                // Still inside the callback: the closure (and `flag`) must be alive.
+                let _ = &flag;
+                seen.set(drops.get());
+            }
+        };
+        let target = ButtonTarget::new(Box::new(callback));
+        let raw: *const ButtonTarget = Retained::as_ptr(&target);
+        *storage.borrow_mut() = Some(target);
+        let sender = NSObject::new();
+        let sender: &AnyObject = &sender;
+        // The only strong reference is in `storage`, like a peer's `target_storage`.
+        let _: () = unsafe { msg_send![&*raw, perform: sender] };
+        assert_eq!(
+            drops_seen_during_call.get(),
+            0,
+            "freed during its own callback"
+        );
+        assert_eq!(
+            drops.get(),
+            1,
+            "freed exactly once after the callback returned"
+        );
+        assert!(storage.borrow().is_none());
     }
 }

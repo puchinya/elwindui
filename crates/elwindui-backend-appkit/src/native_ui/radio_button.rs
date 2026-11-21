@@ -1,224 +1,68 @@
-//! `elwindui::ui::RadioButton` — the `RadioButtonExt` implementation, including elwindui's own
-//! group-exclusivity bookkeeping (`elwindui_core::ui::RadioButton`'s own doc comment explains why
-//! this is deliberately not delegated to AppKit's native radio-grouping).
+//! The AppKit peers behind `elwindui::ui::RadioButton` (Core-owned Components, Issue #313).
 
-use super::{NativeControl, base_accessibility_semantics, sync_intrinsic_enabled};
-use crate::AnyView;
+use super::control::HandlePeer;
 use crate::inner::InnerRadioButton;
-use elwindui_core::accessibility::{
-    AccessibilityAction, AccessibilityActionKind, AccessibilityCheckState, AccessibilityRole,
-};
-use elwindui_core::ui::{RadioButtonExt, UIElementExt};
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::{Rc, Weak};
+use elwindui_core::base::Size;
+use elwindui_core::graphics::{Brush, CascadedTextStyle};
+use elwindui_core::ui::native::{NativePeer, RadioButtonPeer};
+use std::any::Any;
 
-// Deliberately *not* `use elwindui_core::base::AsAny;` — see `native_ui/mod.rs`'s own top-level
-// comment (and `menu.rs`'s `MenuBarItem::set_submenu`) for why a direct import makes
-// `.as_any()` resolve to the blanket impl on `Rc<dyn UIElementExt>` itself instead of on the
-// trait object it points to, breaking every `downcast_ref` in this file silently (wrong `TypeId`,
-// not a compile error). Relying on `AsAny` reaching here only as `UIElementExt`'s own supertrait
-// is what makes `owner.as_any()` below resolve correctly.
-
-#[elwindui_macros::class(struct_only = elwindui_core::ui::RadioButtonExt, inherits = elwindui_core::ui::NativeControl)]
-pub struct RadioButton {
+/// [`RadioButtonPeer`] over the native radio button. Grouping is Core's. Created by [`super::AppKitPeerFactory`].
+pub(crate) struct AppKitRadioButtonPeer {
+    base: HandlePeer,
     inner: InnerRadioButton,
-    group: RefCell<String>,
-    on_change: RefCell<Option<Box<dyn Fn(bool)>>>,
 }
 
-thread_local! {
-    /// Every live `RadioButton` currently registered to a non-empty group, keyed by that group's
-    /// name. `Weak` (not `Rc`): this is a passive lookup structure, not an owner, and must not
-    /// keep a `RadioButton` alive after the view tree drops its own strong reference. Pruned of
-    /// dead entries lazily on the next `set_group`/`uncheck_siblings` pass rather than eagerly on
-    /// drop — a `RadioButton` never runs code on its own destruction, so there is no hook to
-    /// prune from.
-    static GROUPS: RefCell<HashMap<String, Vec<Weak<dyn UIElementExt>>>> =
-        RefCell::new(HashMap::new());
-}
-
-#[elwindui_macros::class]
-impl RadioButton {
-    #[overrides]
-    fn perform_accessibility_action(
-        &self,
-        action: elwindui_core::accessibility::AccessibilityAction,
-    ) -> bool {
-        match action {
-            AccessibilityAction::Activate | AccessibilityAction::Select => {
-                self.activate();
-                true
-            }
-            AccessibilityAction::Focus => self.focus(),
-            _ => false,
+impl AppKitRadioButtonPeer {
+    pub(crate) fn new() -> Self {
+        let inner = InnerRadioButton::new();
+        Self {
+            base: HandlePeer::new(inner.handle()),
+            inner,
         }
     }
+}
 
-    #[inherent]
-    pub fn into_any_view(&self) -> AnyView {
-        self.inner.handle()
+impl NativePeer for AppKitRadioButtonPeer {
+    fn handle(&self) -> &dyn Any {
+        self.base.handle()
     }
+    fn measure(&self, available: Size) -> Size {
+        self.base.measure(available)
+    }
+    fn apply_background(&self, background: Option<&Brush>) -> bool {
+        self.base.apply_background(background)
+    }
+    fn set_tooltip(&self, tooltip: Option<&str>) {
+        self.base.set_tooltip(tooltip);
+    }
+    fn supports_text_style(&self) -> bool {
+        self.base.supports_text_style()
+    }
+    fn apply_text_style(&self, style: &CascadedTextStyle) -> bool {
+        self.base.apply_text_style(style)
+    }
+    fn refresh_text_style_on_measure(&self) -> bool {
+        true
+    }
+    /// Replaces every Core callback with a no-op, so no native event reaches Core afterwards.
+    fn dispose(&self) {
+        self.inner.set_on_click(Box::new(|| {}));
+    }
+}
 
+impl RadioButtonPeer for AppKitRadioButtonPeer {
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
-        let mut semantics = self
-            .base
-            .intrinsic_accessibility_semantics()
-            .unwrap_or_else(|| {
-                base_accessibility_semantics(
-                    AccessibilityRole::RadioButton,
-                    &[
-                        AccessibilityActionKind::Activate,
-                        AccessibilityActionKind::Select,
-                        AccessibilityActionKind::Focus,
-                    ],
-                )
-            });
-        semantics.label = Some(text.to_string());
-        self.base.set_intrinsic_accessibility_semantics(semantics);
-        self.base.reapply_text_style();
     }
-
-    /// Setting `checked: true` also unchecks every other member of this button's group — the
-    /// model→widget half of two-way binding must enforce exclusivity exactly like a real click
-    /// does, or a bound view model that flips one radio button on without also flipping its
-    /// siblings off would leave the UI showing two selections at once.
     fn set_checked(&self, checked: bool) {
         self.inner.set_checked(checked);
-        let mut semantics = self
-            .base
-            .intrinsic_accessibility_semantics()
-            .unwrap_or_else(|| {
-                base_accessibility_semantics(
-                    AccessibilityRole::RadioButton,
-                    &[
-                        AccessibilityActionKind::Activate,
-                        AccessibilityActionKind::Select,
-                        AccessibilityActionKind::Focus,
-                    ],
-                )
-            });
-        semantics.state.checked = Some(if checked {
-            AccessibilityCheckState::On
-        } else {
-            AccessibilityCheckState::Off
-        });
-        semantics.state.selected = Some(checked);
-        self.base.set_intrinsic_accessibility_semantics(semantics);
-        if checked {
-            self.uncheck_siblings();
-        }
-    }
-    /// Registers the write-back callback used by a two-way `checked` binding.
-    #[inherent]
-    pub fn set_on_checked_change(&self, callback: Box<dyn Fn(bool)>) {
-        *self.on_change.borrow_mut() = Some(callback);
-    }
-    fn set_group(&self, group: &str) {
-        *self.group.borrow_mut() = group.to_string();
-        if group.is_empty() {
-            return;
-        }
-        let owner: Rc<dyn UIElementExt> = self
-            .as_ui_element()
-            .visual_collection
-            .owner_rc()
-            .expect("RadioButton::set_group: object must already be Rc-constructed");
-        GROUPS.with(|groups| {
-            let mut groups = groups.borrow_mut();
-            let members = groups.entry(group.to_string()).or_default();
-            members.retain(|member| member.strong_count() > 0);
-            members.push(Rc::downgrade(&owner));
-        });
     }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
-        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
     }
-
-    fn construct() -> Self {
-        let inner = InnerRadioButton::new();
-        let handle = inner.handle();
-        Self {
-            base: NativeControl::construct(super::control::handle_peer(handle)),
-            inner,
-            group: RefCell::new(String::new()),
-            on_change: RefCell::new(None),
-        }
-    }
-
-    fn on_constructed(&self) {
-        let mut semantics = base_accessibility_semantics(
-            AccessibilityRole::RadioButton,
-            &[
-                AccessibilityActionKind::Activate,
-                AccessibilityActionKind::Select,
-                AccessibilityActionKind::Focus,
-            ],
-        );
-        semantics.state.checked = Some(AccessibilityCheckState::Off);
-        semantics.state.selected = Some(false);
-        self.base.set_intrinsic_accessibility_semantics(semantics);
-        self.set_tab_stop(true);
-        let node: Rc<dyn UIElementExt> = self
-            .as_ui_element()
-            .visual_collection
-            .owner_rc()
-            .expect("RadioButton::on_constructed: object must already be Rc-constructed");
-        self.inner.set_on_click(Box::new(move || {
-            let this = node
-                .as_any()
-                .downcast_ref::<RadioButton>()
-                .expect("owner_rc of a RadioButton must downcast to RadioButton");
-            this.activate();
-        }));
-    }
-
-    #[inherent]
-    fn uncheck_siblings(&self) {
-        let group = self.group.borrow();
-        if group.is_empty() {
-            return;
-        }
-        GROUPS.with(|groups| {
-            let groups = groups.borrow();
-            let Some(members) = groups.get(group.as_str()) else {
-                return;
-            };
-            for member in members {
-                let Some(member) = member.upgrade() else {
-                    continue;
-                };
-                let Some(member) = member.as_any().downcast_ref::<RadioButton>() else {
-                    continue;
-                };
-                if std::ptr::eq(member, self) {
-                    continue;
-                }
-                member.set_checked(false);
-                member.notify_change(false);
-            }
-        });
-    }
-
-    #[inherent]
-    fn activate(&self) {
-        // A native radio click always lands the widget on "checked" — there is no native click
-        // path to uncheck one. Keep the same Core metadata and callback path for OS and AX action.
-        self.set_checked(true);
-        self.notify_change(true);
-    }
-
-    #[inherent]
-    fn notify_change(&self, checked: bool) {
-        let callback = self.on_change.borrow_mut().take();
-        if let Some(callback) = callback {
-            callback(checked);
-            let mut slot = self.on_change.borrow_mut();
-            if slot.is_none() {
-                *slot = Some(callback);
-            }
-        }
+    fn set_on_click(&self, callback: Option<Box<dyn Fn()>>) {
+        self.inner
+            .set_on_click(callback.unwrap_or_else(|| Box::new(|| {})));
     }
 }

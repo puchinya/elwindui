@@ -2,10 +2,10 @@
 //! in `native_ui::RadioButton` — deliberately not delegated to `RadioButton.GroupName` (see that
 //! type's own doc comment for why).
 
+use super::{CallbackSlot, invoke_slot, new_callback_slot};
 use crate::bindings::Microsoft::UI::Xaml::Controls::RadioButton as XamlRadioButton;
 use crate::bindings::Microsoft::UI::Xaml::RoutedEventHandler;
-use crate::ffi::{AnyView, UiEventGate, invoke_ui_event_callback, register_ui_event_callback};
-use std::cell::RefCell;
+use crate::ffi::{AnyView, UiCallbackRegistryOwner, UiEventGate, invoke_ui_event_callback};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use windows::Foundation::{IReference, PropertyValue};
@@ -17,8 +17,10 @@ static NEXT_NATIVE_GROUP: AtomicUsize = AtomicUsize::new(1);
 pub(crate) struct InnerRadioButton {
     handle: AnyView,
     xaml: XamlRadioButton,
-    on_click: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    on_click: CallbackSlot<()>,
     events: UiEventGate,
+    /// Owns every registry entry this widget registered; dropping the widget removes them.
+    callbacks: UiCallbackRegistryOwner,
 }
 
 impl InnerRadioButton {
@@ -37,18 +39,17 @@ impl InnerRadioButton {
         let this = Self {
             handle,
             xaml,
-            on_click: Rc::new(RefCell::new(None)),
+            on_click: new_callback_slot(),
             events,
+            callbacks: UiCallbackRegistryOwner::default(),
         };
         let callback = this.on_click.clone();
         let events = this.events.clone();
-        let callback_id = register_ui_event_callback(Rc::new(move || {
+        let callback_id = this.callbacks.register_event(Rc::new(move || {
             if events.is_suppressed() {
                 return;
             }
-            if let Some(callback) = callback.borrow().as_ref() {
-                callback();
-            }
+            invoke_slot(&callback, ());
         }));
         let _ = this.xaml.Checked(&RoutedEventHandler::new(move |_, _| {
             invoke_ui_event_callback(callback_id);
@@ -83,6 +84,6 @@ impl InnerRadioButton {
     /// The raw click signal — see `InnerRadioButton`'s AppKit counterpart's own doc comment for
     /// why this reports no value of its own and leaves exclusivity to `native_ui::RadioButton`.
     pub(crate) fn set_on_click(&self, callback: Box<dyn Fn()>) {
-        *self.on_click.borrow_mut() = Some(callback);
+        *self.on_click.borrow_mut() = Some(Rc::new(move |()| callback()));
     }
 }

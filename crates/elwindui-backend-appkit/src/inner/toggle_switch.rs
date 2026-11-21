@@ -6,7 +6,7 @@
 use crate::ffi::{AnyView, mtm};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{AnyThread, DefinedClass, define_class, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, Message, define_class, msg_send, sel};
 use objc2_app_kit::{NSControlStateValueOff, NSControlStateValueOn, NSSwitch};
 use objc2_foundation::NSObjectProtocol;
 use std::cell::RefCell;
@@ -72,6 +72,10 @@ define_class!(
     impl ToggleSwitchTarget {
         #[unsafe(method(perform:))]
         fn perform(&self, _sender: &AnyObject) {
+            // The only owning `Retained` lives in the widget's `target_storage`; a handler that
+            // releases the last owner (`dispose` -> `set_on_change`) would otherwise free this
+            // target mid-call. Hold it for exactly the duration of the call (Issue #313).
+            let _in_flight: Retained<Self> = self.retain();
             (self.ivars().callback)();
         }
     }

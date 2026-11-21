@@ -1,155 +1,69 @@
-//! `elwindui::ui::CheckBox` — the `CheckBoxExt` implementation.
+//! The AppKit peers behind `elwindui::ui::CheckBox` (Core-owned Components, Issue #313).
 
-use super::{NativeControl, base_accessibility_semantics, sync_intrinsic_enabled};
-use crate::AnyView;
+use super::control::HandlePeer;
 use crate::inner::InnerCheckBox;
-use elwindui_core::accessibility::{
-    AccessibilityAction, AccessibilityActionKind, AccessibilityCheckState, AccessibilityRole,
-};
-use elwindui_core::ui::{CheckBoxExt, CheckState, UIElementExt};
-use std::cell::RefCell;
-use std::rc::Rc;
+use elwindui_core::base::Size;
+use elwindui_core::graphics::{Brush, CascadedTextStyle};
+use elwindui_core::ui::CheckState;
+use elwindui_core::ui::native::{CheckBoxPeer, NativePeer};
+use std::any::Any;
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::CheckBoxExt, inherits = elwindui_core::ui::NativeControl)]
-pub struct CheckBox {
+/// [`CheckBoxPeer`] over the native check box. Created by [`super::AppKitPeerFactory`].
+pub(crate) struct AppKitCheckBoxPeer {
+    base: HandlePeer,
     inner: InnerCheckBox,
-    on_change: RefCell<Option<Box<dyn Fn(CheckState)>>>,
 }
 
-#[elwindui_macros::class]
-impl CheckBox {
-    #[overrides]
-    fn perform_accessibility_action(&self, action: AccessibilityAction) -> bool {
-        match action {
-            AccessibilityAction::Activate => {
-                let next = match self
-                    .base
-                    .intrinsic_accessibility_semantics()
-                    .and_then(|semantics| semantics.state.checked)
-                {
-                    Some(AccessibilityCheckState::On) => CheckState::Unchecked,
-                    _ => CheckState::Checked,
-                };
-                self.set_checked(next);
-                self.notify_change(next);
-                true
-            }
-            AccessibilityAction::Focus => self.focus(),
-            _ => false,
+impl AppKitCheckBoxPeer {
+    pub(crate) fn new() -> Self {
+        let inner = InnerCheckBox::new();
+        Self {
+            base: HandlePeer::new(inner.handle()),
+            inner,
         }
     }
+}
 
-    #[inherent]
-    pub fn into_any_view(&self) -> AnyView {
-        self.inner.handle()
+impl NativePeer for AppKitCheckBoxPeer {
+    fn handle(&self) -> &dyn Any {
+        self.base.handle()
     }
+    fn measure(&self, available: Size) -> Size {
+        self.base.measure(available)
+    }
+    fn apply_background(&self, background: Option<&Brush>) -> bool {
+        self.base.apply_background(background)
+    }
+    fn set_tooltip(&self, tooltip: Option<&str>) {
+        self.base.set_tooltip(tooltip);
+    }
+    fn supports_text_style(&self) -> bool {
+        self.base.supports_text_style()
+    }
+    fn apply_text_style(&self, style: &CascadedTextStyle) -> bool {
+        self.base.apply_text_style(style)
+    }
+    fn refresh_text_style_on_measure(&self) -> bool {
+        true
+    }
+    /// Replaces every Core callback with a no-op, so no native event reaches Core afterwards.
+    fn dispose(&self) {
+        self.inner.set_on_change(Box::new(|_| {}));
+    }
+}
 
+impl CheckBoxPeer for AppKitCheckBoxPeer {
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
-        let mut semantics = self
-            .base
-            .intrinsic_accessibility_semantics()
-            .unwrap_or_else(|| {
-                base_accessibility_semantics(
-                    AccessibilityRole::CheckBox,
-                    &[
-                        AccessibilityActionKind::Activate,
-                        AccessibilityActionKind::Focus,
-                    ],
-                )
-            });
-        semantics.label = Some(text.to_string());
-        self.base.set_intrinsic_accessibility_semantics(semantics);
-        self.base.reapply_text_style();
     }
     fn set_checked(&self, checked: CheckState) {
         self.inner.set_checked(checked);
-        let mut semantics = self
-            .base
-            .intrinsic_accessibility_semantics()
-            .unwrap_or_else(|| {
-                base_accessibility_semantics(
-                    AccessibilityRole::CheckBox,
-                    &[
-                        AccessibilityActionKind::Activate,
-                        AccessibilityActionKind::Focus,
-                    ],
-                )
-            });
-        semantics.state.checked = Some(match checked {
-            CheckState::Unchecked => AccessibilityCheckState::Off,
-            CheckState::Checked => AccessibilityCheckState::On,
-            CheckState::Indeterminate => AccessibilityCheckState::Mixed,
-        });
-        self.base.set_intrinsic_accessibility_semantics(semantics);
-    }
-    fn set_on_change(&self, callback: Box<dyn Fn(CheckState)>) {
-        *self.on_change.borrow_mut() = Some(callback);
-        self.install_change_trampoline();
     }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
-        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
     }
-
-    fn construct() -> Self {
-        let inner = InnerCheckBox::new();
-        let handle = inner.handle();
-        Self {
-            base: NativeControl::construct(super::control::handle_peer(handle)),
-            inner,
-            on_change: RefCell::new(None),
-        }
-    }
-
-    fn on_constructed(&self) {
-        let mut semantics = base_accessibility_semantics(
-            AccessibilityRole::CheckBox,
-            &[
-                AccessibilityActionKind::Activate,
-                AccessibilityActionKind::Focus,
-            ],
-        );
-        semantics.state.checked = Some(AccessibilityCheckState::Off);
-        self.base.set_intrinsic_accessibility_semantics(semantics);
-        self.set_tab_stop(true);
-        self.install_change_trampoline();
-    }
-
-    /// `codegen` calls exactly `set_on_{field}_change` for a `#[two_way]` prop.
-    #[inherent]
-    pub fn set_on_checked_change(&self, callback: Box<dyn Fn(CheckState)>) {
-        self.set_on_change(callback);
-    }
-
-    #[inherent]
-    fn install_change_trampoline(&self) {
-        let owner: Rc<dyn UIElementExt> = self
-            .as_ui_element()
-            .visual_collection
-            .owner_rc()
-            .expect("CheckBox must be Rc-constructed before installing its change callback");
-        let weak = Rc::downgrade(&owner);
-        self.inner.set_on_change(Box::new(move |state| {
-            let Some(owner) = weak.upgrade() else { return };
-            let this = owner
-                .as_any()
-                .downcast_ref::<CheckBox>()
-                .expect("CheckBox owner must downcast to CheckBox");
-            this.set_checked(state);
-            this.notify_change(state);
-        }));
-    }
-
-    #[inherent]
-    fn notify_change(&self, state: CheckState) {
-        let callback = self.on_change.borrow_mut().take();
-        if let Some(callback) = callback {
-            callback(state);
-            let mut slot = self.on_change.borrow_mut();
-            if slot.is_none() {
-                *slot = Some(callback);
-            }
-        }
+    fn set_on_change(&self, callback: Option<Box<dyn Fn(CheckState)>>) {
+        self.inner
+            .set_on_change(callback.unwrap_or_else(|| Box::new(|_| {})));
     }
 }

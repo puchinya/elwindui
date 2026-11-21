@@ -1,17 +1,19 @@
 //! The XAML `ToggleSwitch` and its `Toggled` event.
 
+use super::{CallbackSlot, invoke_slot, new_callback_slot};
 use crate::bindings::Microsoft::UI::Xaml::Controls::ToggleSwitch as XamlToggleSwitch;
 use crate::bindings::Microsoft::UI::Xaml::RoutedEventHandler;
-use crate::ffi::{AnyView, UiEventGate, invoke_ui_event_callback, register_ui_event_callback};
-use std::cell::RefCell;
+use crate::ffi::{AnyView, UiCallbackRegistryOwner, UiEventGate, invoke_ui_event_callback};
 use std::rc::Rc;
 
 /// Raw `XamlToggleSwitch` + change wiring — composed by `native_ui::ToggleSwitch`.
 pub(crate) struct InnerToggleSwitch {
     handle: AnyView,
     xaml: XamlToggleSwitch,
-    on_change: Rc<RefCell<Option<Box<dyn Fn(bool)>>>>,
+    on_change: CallbackSlot<bool>,
     events: UiEventGate,
+    /// Owns every registry entry this widget registered; dropping the widget removes them.
+    callbacks: UiCallbackRegistryOwner,
 }
 
 impl InnerToggleSwitch {
@@ -22,19 +24,18 @@ impl InnerToggleSwitch {
         let this = Self {
             handle,
             xaml,
-            on_change: Rc::new(RefCell::new(None)),
+            on_change: new_callback_slot(),
             events,
+            callbacks: UiCallbackRegistryOwner::default(),
         };
         let callback = this.on_change.clone();
         let xaml_for_read = this.xaml.clone();
         let events = this.events.clone();
-        let callback_id = register_ui_event_callback(Rc::new(move || {
+        let callback_id = this.callbacks.register_event(Rc::new(move || {
             if events.is_suppressed() {
                 return;
             }
-            if let Some(callback) = callback.borrow().as_ref() {
-                callback(xaml_for_read.IsOn().unwrap_or(false));
-            }
+            invoke_slot(&callback, xaml_for_read.IsOn().unwrap_or(false));
         }));
         let _ = this.xaml.Toggled(&RoutedEventHandler::new(move |_, _| {
             invoke_ui_event_callback(callback_id);
@@ -58,6 +59,6 @@ impl InnerToggleSwitch {
     }
 
     pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(bool)>) {
-        *self.on_change.borrow_mut() = Some(callback);
+        *self.on_change.borrow_mut() = Some(Rc::from(callback));
     }
 }

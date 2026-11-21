@@ -1,6 +1,7 @@
 //! The three text controls: `TextBox` (multiline = `TextArea`), single-line `TextBox`, and
 //! `PasswordBox`.
 
+use super::{CallbackSlot, invoke_slot, new_callback_slot};
 use crate::bindings;
 use crate::bindings::Microsoft::UI::Xaml::Controls::TextChangedEventHandler;
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
@@ -8,9 +9,10 @@ use crate::bindings::Microsoft::UI::Xaml::Controls::{
 };
 use crate::bindings::Microsoft::UI::Xaml::Input::KeyEventHandler;
 use crate::bindings::Microsoft::UI::Xaml::RoutedEventHandler;
-use crate::ffi::{AnyView, invoke_ui_event_callback, register_ui_event_callback};
+use crate::ffi::{
+    AnyView, UiCallbackRegistryOwner, invoke_ui_bool_event_callback, invoke_ui_event_callback,
+};
 use crate::render::xaml_text_alignment;
-use std::cell::RefCell;
 use std::rc::Rc;
 use windows::System::VirtualKey;
 use windows::core::HSTRING;
@@ -21,10 +23,22 @@ use windows::core::HSTRING;
 pub(crate) struct InnerTextArea {
     handle: AnyView,
     text_box: XamlTextBox,
-    on_change: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
+    on_change: CallbackSlot<String>,
+    /// Owns every registry entry this widget registered; dropping the widget removes them.
+    callbacks: UiCallbackRegistryOwner,
+    /// The registry id of the change handler, so hosted tests can deliver the exact callback a
+    /// native change event resolves (`TextChanged`/`PasswordChanged` are raised asynchronously).
+    #[cfg(test)]
+    change_callback_id: std::cell::Cell<usize>,
 }
 
 impl InnerTextArea {
+    /// The registry id the native change handler resolves (test-only).
+    #[cfg(test)]
+    pub(crate) fn change_callback_id_for_test(&self) -> usize {
+        self.change_callback_id.get()
+    }
+
     pub(crate) fn new() -> Self {
         let text_box = XamlTextBox::new().expect("TextBox::new");
         let _ = text_box.SetAcceptsReturn(true);
@@ -33,20 +47,23 @@ impl InnerTextArea {
         let this = Self {
             handle,
             text_box,
-            on_change: Rc::new(RefCell::new(None)),
+            on_change: new_callback_slot(),
+            callbacks: UiCallbackRegistryOwner::default(),
+            #[cfg(test)]
+            change_callback_id: std::cell::Cell::new(0),
         };
         {
             let callback = this.on_change.clone();
             let text_box_for_handler = this.text_box.clone();
-            let callback_id = register_ui_event_callback(Rc::new(move || {
-                if let Some(callback) = callback.borrow().as_ref() {
-                    let text = text_box_for_handler
-                        .Text()
-                        .map(|value| value.to_string_lossy())
-                        .unwrap_or_default();
-                    callback(text);
-                }
+            let callback_id = this.callbacks.register_event(Rc::new(move || {
+                let text = text_box_for_handler
+                    .Text()
+                    .map(|value| value.to_string_lossy())
+                    .unwrap_or_default();
+                invoke_slot(&callback, text);
             }));
+            #[cfg(test)]
+            this.change_callback_id.set(callback_id);
             let _ = this
                 .text_box
                 .TextChanged(&TextChangedEventHandler::new(move |_, _| {
@@ -81,7 +98,7 @@ impl InnerTextArea {
     }
 
     pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
-        *self.on_change.borrow_mut() = Some(callback);
+        *self.on_change.borrow_mut() = Some(Rc::from(callback));
     }
 }
 
@@ -93,30 +110,81 @@ impl InnerTextArea {
 pub(crate) struct InnerTextBox {
     handle: AnyView,
     text_box: XamlTextBox,
-    on_change: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
+    on_change: CallbackSlot<String>,
+    /// The Enter/submit callback. The `KeyDown` handler is registered once, in `new`, and reads
+    /// this slot, so replacing or clearing the callback never adds another native handler.
+    on_submit: CallbackSlot<()>,
+    /// Owns every registry entry this widget registered; dropping the widget removes them.
+    callbacks: UiCallbackRegistryOwner,
+    /// The registry id of the change handler, so hosted tests can deliver the exact callback a
+    /// native change event resolves (`TextChanged`/`PasswordChanged` are raised asynchronously).
+    #[cfg(test)]
+    change_callback_id: std::cell::Cell<usize>,
 }
 
 impl InnerTextBox {
+    /// The registry id the native change handler resolves (test-only).
+    #[cfg(test)]
+    pub(crate) fn change_callback_id_for_test(&self) -> usize {
+        self.change_callback_id.get()
+    }
+
     pub(crate) fn new() -> Self {
         let text_box = XamlTextBox::new().expect("TextBox::new");
         let handle = AnyView::from(text_box.clone());
         let this = Self {
             handle,
             text_box,
-            on_change: Rc::new(RefCell::new(None)),
+            on_change: new_callback_slot(),
+            on_submit: new_callback_slot(),
+            callbacks: UiCallbackRegistryOwner::default(),
+            #[cfg(test)]
+            change_callback_id: std::cell::Cell::new(0),
         };
+        {
+            let on_submit = this.on_submit.clone();
+            // Returns whether a submit callback handled the Enter key. The callback is cloned out
+            // so the slot is not borrowed during the call: it may replace or clear itself.
+            let callback_id = this.callbacks.register_bool_event(Rc::new(move || {
+                let callback = on_submit.borrow().clone();
+                let Some(callback) = callback else {
+                    return false;
+                };
+                callback(());
+                true
+            }));
+            let _ = this
+                .text_box
+                .KeyDown(&KeyEventHandler::new(move |_sender, args| {
+                    let Some(args) = args.cloned() else {
+                        return Ok(());
+                    };
+                    let Ok(virtual_key) = args.Key() else {
+                        return Ok(());
+                    };
+                    // The submit callback already dispatches the routed `on_key_down` (Enter)
+                    // from this TextBox. Mark the key handled so it does not also bubble to the
+                    // host canvas, whose keyboard path would dispatch the same key a second time.
+                    if virtual_key == VirtualKey::Enter
+                        && invoke_ui_bool_event_callback(callback_id)
+                    {
+                        let _ = args.SetHandled(true);
+                    }
+                    Ok(())
+                }));
+        }
         {
             let callback = this.on_change.clone();
             let text_box_for_handler = this.text_box.clone();
-            let callback_id = register_ui_event_callback(Rc::new(move || {
-                if let Some(callback) = callback.borrow().as_ref() {
-                    let text = text_box_for_handler
-                        .Text()
-                        .map(|value| value.to_string_lossy())
-                        .unwrap_or_default();
-                    callback(text);
-                }
+            let callback_id = this.callbacks.register_event(Rc::new(move || {
+                let text = text_box_for_handler
+                    .Text()
+                    .map(|value| value.to_string_lossy())
+                    .unwrap_or_default();
+                invoke_slot(&callback, text);
             }));
+            #[cfg(test)]
+            this.change_callback_id.set(callback_id);
             let _ = this
                 .text_box
                 .TextChanged(&TextChangedEventHandler::new(move |_, _| {
@@ -145,7 +213,7 @@ impl InnerTextBox {
     }
 
     pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
-        *self.on_change.borrow_mut() = Some(callback);
+        *self.on_change.borrow_mut() = Some(Rc::from(callback));
     }
 
     pub(crate) fn set_placeholder(&self, text: &str) {
@@ -175,22 +243,9 @@ impl InnerTextBox {
     /// `control:textView:doCommandBySelector:` workaround, see that method's own doc comment for
     /// why), WinUI3's own `TextBox.KeyDown` fires natively regardless of focus and needs no
     /// special-casing.
-    pub(crate) fn set_on_submit(&self, callback: Box<dyn Fn()>) {
-        let callback_id = register_ui_event_callback(Rc::new(move || callback()));
-        let _ = self
-            .text_box
-            .KeyDown(&KeyEventHandler::new(move |_sender, args| {
-                let Some(args) = args.cloned() else {
-                    return Ok(());
-                };
-                let Ok(virtual_key) = args.Key() else {
-                    return Ok(());
-                };
-                if virtual_key == VirtualKey::Enter {
-                    invoke_ui_event_callback(callback_id);
-                }
-                Ok(())
-            }));
+    pub(crate) fn set_on_submit(&self, callback: Option<Box<dyn Fn()>>) {
+        *self.on_submit.borrow_mut() =
+            callback.map(|callback| Rc::new(move |()| callback()) as Rc<dyn Fn(())>);
     }
 }
 
@@ -203,30 +258,45 @@ impl InnerTextBox {
 pub(crate) struct InnerPasswordBox {
     handle: AnyView,
     password_box: XamlPasswordBox,
-    on_change: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
+    on_change: CallbackSlot<String>,
+    /// Owns every registry entry this widget registered; dropping the widget removes them.
+    callbacks: UiCallbackRegistryOwner,
+    /// The registry id of the change handler, so hosted tests can deliver the exact callback a
+    /// native change event resolves (`TextChanged`/`PasswordChanged` are raised asynchronously).
+    #[cfg(test)]
+    change_callback_id: std::cell::Cell<usize>,
 }
 
 impl InnerPasswordBox {
+    /// The registry id the native change handler resolves (test-only).
+    #[cfg(test)]
+    pub(crate) fn change_callback_id_for_test(&self) -> usize {
+        self.change_callback_id.get()
+    }
+
     pub(crate) fn new() -> Self {
         let password_box = XamlPasswordBox::new().expect("PasswordBox::new");
         let handle = AnyView::from(password_box.clone());
         let this = Self {
             handle,
             password_box,
-            on_change: Rc::new(RefCell::new(None)),
+            on_change: new_callback_slot(),
+            callbacks: UiCallbackRegistryOwner::default(),
+            #[cfg(test)]
+            change_callback_id: std::cell::Cell::new(0),
         };
         {
             let callback = this.on_change.clone();
             let password_box_for_handler = this.password_box.clone();
-            let callback_id = register_ui_event_callback(Rc::new(move || {
-                if let Some(callback) = callback.borrow().as_ref() {
-                    let password = password_box_for_handler
-                        .Password()
-                        .map(|value| value.to_string_lossy())
-                        .unwrap_or_default();
-                    callback(password);
-                }
+            let callback_id = this.callbacks.register_event(Rc::new(move || {
+                let password = password_box_for_handler
+                    .Password()
+                    .map(|value| value.to_string_lossy())
+                    .unwrap_or_default();
+                invoke_slot(&callback, password);
             }));
+            #[cfg(test)]
+            this.change_callback_id.set(callback_id);
             // `PasswordChanged`'s event type is the plain `RoutedEventHandler` `Button.Click`
             // already uses (see `build.rs`'s own comment on this allow-list entry) — not
             // `TextChangedEventHandler`.
@@ -259,7 +329,7 @@ impl InnerPasswordBox {
     }
 
     pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
-        *self.on_change.borrow_mut() = Some(callback);
+        *self.on_change.borrow_mut() = Some(Rc::from(callback));
     }
 
     pub(crate) fn set_placeholder(&self, text: &str) {

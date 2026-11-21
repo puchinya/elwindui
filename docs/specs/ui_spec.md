@@ -723,7 +723,7 @@ ON / OFF / （選択的）Indeterminate 状態を持つネイティブのチェ�
 
 #### Semantics
 
-ユーザーのクリック操作は `Unchecked` と `Checked` の2状態間のみを切り替える。`Indeterminate`（中間状態）はプログラムからの状態表示専用である。
+ユーザーのクリック操作は `Unchecked` と `Checked` の2状態間のみを切り替える。`Indeterminate`（中間状態）はプログラムからの状態表示専用である。`Indeterminate` を表示中のチェックボックスをユーザーがクリックすると、常に `Checked` になる（「すべて選択」の一般的な慣習。全 backend で同じ）。
 Core semantic tree では `AccessibilityRole::CheckBox` として `Off` / `On` / `Mixed` を公開し、
 `Activate` はこの通常の状態/event path を一度だけ実行する。
 
@@ -745,6 +745,8 @@ Core semantic tree では `AccessibilityRole::CheckBox` として `Off` / `On` /
 | Name | Type | Description |
 |---|---|---|
 | `on_change` | `fn(bool)` | 状態変更時に発火 |
+
+`group` を変更すると、ボタンは元のグループから外れて新しいグループにだけ属する（空文字はどのグループにも属さない）。選択済みのボタンが別のグループに加わった場合は、そのボタンの選択を保ち、加わった先のグループで選択されていたボタンの選択を外す。
 
 ### `elwindui::ui::ToggleSwitch`
 
@@ -781,6 +783,8 @@ ON / OFF を切り替えるスイッチコントロール。
 | Name | Type | Description |
 |---|---|---|
 | `on_change` | `fn(f32)` | 値変更時に発火 |
+
+アクセシビリティ操作（`SetValue` / `Increment` / `Decrement`）で要求された値は `min..=max` に丸めてから適用する。丸めた結果が現在値と同じ場合は、値を変えず `on_change` も発火しない。
 
 ### `elwindui::ui::Dropdown`
 

@@ -154,6 +154,8 @@ mod check_box;
 mod control;
 mod dropdown;
 mod dropdown_item;
+#[cfg(test)]
+pub(crate) mod input_lifecycle_tests;
 mod menu;
 mod radio_button;
 pub(crate) mod scroll_view;

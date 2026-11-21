@@ -15,6 +15,12 @@ pub(crate) struct WinUi3TextBoxPeer {
 }
 
 impl WinUi3TextBoxPeer {
+    /// The registry id the native change handler resolves (test-only).
+    #[cfg(test)]
+    pub(crate) fn change_callback_id_for_test(&self) -> usize {
+        self.inner.change_callback_id_for_test()
+    }
+
     pub(crate) fn new() -> Self {
         let inner = InnerTextBox::new();
         Self {
@@ -82,6 +88,12 @@ pub(crate) struct WinUi3TextAreaPeer {
 }
 
 impl WinUi3TextAreaPeer {
+    /// The registry id the native change handler resolves (test-only).
+    #[cfg(test)]
+    pub(crate) fn change_callback_id_for_test(&self) -> usize {
+        self.inner.change_callback_id_for_test()
+    }
+
     pub(crate) fn new() -> Self {
         let inner = InnerTextArea::new();
         Self {
@@ -133,6 +145,12 @@ pub(crate) struct WinUi3PasswordBoxPeer {
 }
 
 impl WinUi3PasswordBoxPeer {
+    /// The registry id the native change handler resolves (test-only).
+    #[cfg(test)]
+    pub(crate) fn change_callback_id_for_test(&self) -> usize {
+        self.inner.change_callback_id_for_test()
+    }
+
     pub(crate) fn new() -> Self {
         let inner = InnerPasswordBox::new();
         Self {

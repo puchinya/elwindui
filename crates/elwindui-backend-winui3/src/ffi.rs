@@ -62,6 +62,7 @@ enum UiCallbackKind {
     PointerEvent,
     RightTapped,
     Index,
+    F32,
     Size,
     Bounds,
     Key,
@@ -94,6 +95,9 @@ fn remove_ui_callback(kind: UiCallbackKind, id: usize) {
             callbacks.borrow_mut().remove(&id);
         }),
         UiCallbackKind::Index => UI_INDEX_EVENT_CALLBACKS.try_with(|callbacks| {
+            callbacks.borrow_mut().remove(&id);
+        }),
+        UiCallbackKind::F32 => UI_F32_EVENT_CALLBACKS.try_with(|callbacks| {
             callbacks.borrow_mut().remove(&id);
         }),
         UiCallbackKind::Size => UI_SIZE_EVENT_CALLBACKS.try_with(|callbacks| {
@@ -215,6 +219,16 @@ impl UiCallbackRegistryOwner {
             .registrations
             .borrow_mut()
             .push((UiCallbackKind::Event, id));
+        id
+    }
+
+    /// Registers an `f32`-argument callback owned by this lifetime group.
+    pub(crate) fn register_f32_event(&self, callback: Rc<dyn Fn(f32)>) -> usize {
+        let id = register_ui_f32_event_callback(callback);
+        self.0
+            .registrations
+            .borrow_mut()
+            .push((UiCallbackKind::F32, id));
         id
     }
 
@@ -374,6 +388,17 @@ pub(crate) fn invoke_ui_getting_focus_callback(
 #[cfg(test)]
 pub(crate) fn ui_event_callback_count() -> usize {
     UI_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().len())
+}
+
+/// Every registry entry count the input-control peers (Issue #313) register into: plain events,
+/// boolean events and `f32` events. Hosted lifecycle tests compare it against a baseline.
+#[cfg(test)]
+pub(crate) fn input_control_callback_counts() -> (usize, usize, usize) {
+    (
+        ui_event_callback_count(),
+        UI_BOOL_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().len()),
+        UI_F32_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().len()),
+    )
 }
 
 pub(crate) fn register_ui_bool_event_callback(callback: Rc<dyn Fn() -> bool>) -> usize {

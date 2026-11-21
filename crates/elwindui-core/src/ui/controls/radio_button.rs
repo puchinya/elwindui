@@ -106,23 +106,37 @@ impl RadioButton {
         *self.on_change.borrow_mut() = Some(Rc::from(callback));
     }
 
+    /// Moves this button to `group` (or out of every group for `""`). The registration in the
+    /// previous group is removed, so the old group no longer reaches this button, and a button
+    /// is never registered twice. A checked button that joins a group keeps its check and
+    /// unchecks the group's other checked member, exactly like `set_checked(true)`, so a group
+    /// never shows two checked buttons.
     fn set_group(&self, group: &str) {
-        *self.group.borrow_mut() = group.to_string();
-        if group.is_empty() {
+        let previous = self.group.replace(group.to_string());
+        if previous == group {
             return;
         }
         let Some(owner) = self.as_ui_element().visual_collection.owner_rc() else {
             return;
         };
+        let this = Rc::downgrade(&owner);
         GROUPS.with(|groups| {
             let mut groups = groups.borrow_mut();
-            let members: &mut Vec<Weak<dyn UIElementExt>> =
-                groups.entry(group.to_string()).or_default();
-            members.retain(|member: &Weak<dyn UIElementExt>| {
-                Weak::<dyn UIElementExt>::strong_count(member) > 0
-            });
-            members.push(Rc::downgrade(&owner));
+            if let Some(members) = groups.get_mut(&previous) {
+                retain_other_live_members(members, &this);
+                if members.is_empty() {
+                    groups.remove(&previous);
+                }
+            }
+            if !group.is_empty() {
+                let members = groups.entry(group.to_string()).or_default();
+                retain_other_live_members(members, &this);
+                members.push(this.clone());
+            }
         });
+        if self.checked.get() {
+            self.uncheck_siblings();
+        }
     }
 
     fn set_enabled(&self, enabled: bool) {
@@ -165,6 +179,17 @@ impl RadioButton {
         self.base.set_intrinsic_accessibility_semantics(semantics);
         self.set_tab_stop(true);
     }
+}
+
+/// Drops dead registrations and any registration of `this` from one group's member list.
+fn retain_other_live_members(
+    members: &mut Vec<Weak<dyn UIElementExt>>,
+    this: &Weak<dyn UIElementExt>,
+) {
+    members.retain(|member: &Weak<dyn UIElementExt>| {
+        Weak::<dyn UIElementExt>::strong_count(member) > 0
+            && !Weak::<dyn UIElementExt>::ptr_eq(member, this)
+    });
 }
 
 impl RadioButton {

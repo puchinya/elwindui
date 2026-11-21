@@ -341,19 +341,33 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   field's attributes before its text), then installs the native callbacks last, each built by
   `weak_native_callback` (a `Weak` node, upgraded for the whole call, downcast to the sealed control).
   `dispose()` replaces every callback with a no-op.
+- **Backend callback ownership:** every native-event registration an `Inner*` input widget makes is
+  owned by that widget (WinUI3: `UiCallbackRegistryOwner`), so dropping the peer returns the callback
+  registries to their baseline. The widget invokes its callback slot by cloning the `Rc` out and
+  releasing the borrow first, because the callback may release the last owner, whose `dispose()`
+  replaces that same slot. AppKit targets and delegates retain themselves for the duration of the call
+  (`_in_flight`), like `ButtonTarget::perform`. The WinUI3 hosted test releases each peer from inside
+  its own native event and checks the registry baseline and stale-event no-op (AppKit: #316).
 - **Two-way (§5):** a programmatic setter stores, pushes and updates semantics without notifying. A
   native change callback compares with the stored value; an equal value is an echo and is dropped,
   otherwise Core stores it, updates semantics and notifies once without pushing it back. An
   accessibility action that changes the value (CheckBox/ToggleSwitch `Activate`, Slider
   `SetValue`/`Increment`/`Decrement`, RadioButton `Activate`/`Select`, TextBox/TextArea `SetText`) is a
   user change: it pushes to the widget and notifies once if the value changed.
+- **Slider accessibility:** `SetValue`/`Increment`/`Decrement` clamp the requested value to the current
+  `min..=max` (as the widget clamps a drag; NaN lands on a bound) before comparing. An unchanged result
+  (`SetValue(current)`, `Increment` at `max`, `Decrement` at `min`) pushes and notifies nothing, so the
+  logical value, the accessibility range and the notified value never leave the range.
 - **CheckBox from `Indeterminate`:** a user click on a box showing `Indeterminate` lands on `Checked`
   (`ui_spec.md`). Core enforces it in the change callback: whatever state the toolkit's own cycle
   reports (WinUI3's three-state cycle reports `Unchecked`), Core stores `Checked`, pushes it back to
   the widget once and notifies once.
 - **RadioButton groups** are owned by Core in one per-UI-thread registry of `Weak` members. A selection
   checks the button, unchecks the other live members of its group, and notifies only the members whose
-  state changed. The peer only displays state and reports activation.
+  state changed. The peer only displays state and reports activation. Changing `group` moves the
+  registration: the button leaves its previous group's list (and an empty group is removed), is never
+  registered twice, and `""` leaves every group. A checked button that joins a group keeps its check and
+  unchecks the group's checked member, like `set_checked(true)`, so a group never shows two checks.
 - **TextBox submit:** the peer's `on_submit` (Enter) dispatches the routed `on_key_down` with
   `Key::Enter` from the TextBox node. The WinUI3 peer registers its `KeyDown` handler once and stores
   the callback in a slot, so replacing or clearing it never adds a native handler.

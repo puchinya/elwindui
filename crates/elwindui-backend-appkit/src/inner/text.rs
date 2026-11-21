@@ -3,7 +3,7 @@
 
 use crate::ffi::{AnyView, mtm};
 use objc2::rc::Retained;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSControlTextEditingDelegate, NSFont, NSSecureTextField, NSTextDelegate, NSTextField,
     NSTextFieldDelegate, NSTextView, NSTextViewDelegate,
@@ -152,6 +152,10 @@ define_class!(
     unsafe impl NSTextDelegate for TextViewDelegate {
         #[unsafe(method(textDidChange:))]
         fn text_did_change(&self, _notification: &NSNotification) {
+            // The only owning `Retained` lives in `delegate_storage`; a handler that releases the
+            // last owner (`dispose` -> `set_on_change`) would otherwise free this delegate
+            // mid-call. Hold it for exactly the duration of the call (Issue #313).
+            let _in_flight: Retained<Self> = self.retain();
             let s = self.ivars().text_view.string();
             (self.ivars().callback)(s.to_string());
         }
@@ -223,21 +227,23 @@ impl NativeTextFieldCommon {
     }
 
     fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
-        *self.delegate.ivars().on_change.borrow_mut() = Some(callback);
+        *self.delegate.ivars().on_change.borrow_mut() = Some(Rc::from(callback));
     }
 
     /// `TextBox`-only (see `InnerTextBox::set_on_submit`'s own doc comment) — harmless to expose
     /// here too rather than duplicating this setter, since `PasswordBox` simply never calls it.
     fn set_on_submit(&self, callback: Box<dyn Fn()>) {
-        *self.delegate.ivars().on_submit.borrow_mut() = Some(callback);
+        *self.delegate.ivars().on_submit.borrow_mut() = Some(Rc::from(callback));
     }
 }
 
 struct NativeTextFieldDelegateIvars {
     field: Retained<NSTextField>,
     max_length: Cell<Option<u32>>,
-    on_change: RefCell<Option<Box<dyn Fn(String)>>>,
-    on_submit: RefCell<Option<Box<dyn Fn()>>>,
+    /// `Rc` so the callback is cloned out before it runs: it may replace this slot (or release
+    /// the last owner) without a `RefCell` double borrow (Issue #313).
+    on_change: RefCell<Option<Rc<dyn Fn(String)>>>,
+    on_submit: RefCell<Option<Rc<dyn Fn()>>>,
 }
 
 define_class!(
@@ -251,6 +257,9 @@ define_class!(
     unsafe impl NSControlTextEditingDelegate for NativeTextFieldDelegate {
         #[unsafe(method(controlTextDidChange:))]
         fn control_text_did_change(&self, _notification: &NSNotification) {
+            // Owned only by `NativeTextFieldCommon`; keep it alive across a handler that releases
+            // the last owner (Issue #313).
+            let _in_flight: Retained<Self> = self.retain();
             let field = &self.ivars().field;
             // AppKit has no native max-length primitive on `NSTextField`, unlike WinUI3's
             // `TextBox.MaxLength` (`native_ui::TextBox`'s own doc comment on this asymmetry) — so a
@@ -265,7 +274,8 @@ define_class!(
                 }
             }
             let s = field.stringValue();
-            if let Some(callback) = self.ivars().on_change.borrow().as_ref() {
+            let callback = self.ivars().on_change.borrow().clone();
+            if let Some(callback) = callback {
                 callback(s.to_string());
             }
         }
@@ -281,7 +291,9 @@ define_class!(
             command_selector: objc2::runtime::Sel,
         ) -> bool {
             if command_selector == sel!(insertNewline:) {
-                if let Some(callback) = self.ivars().on_submit.borrow().as_ref() {
+                let _in_flight: Retained<Self> = self.retain();
+                let callback = self.ivars().on_submit.borrow().clone();
+                if let Some(callback) = callback {
                     callback();
                 }
             }

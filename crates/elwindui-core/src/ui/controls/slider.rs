@@ -36,18 +36,15 @@ impl Slider {
     fn perform_accessibility_action(&self, action: AccessibilityAction) -> bool {
         match action {
             AccessibilityAction::SetValue(value) => {
-                self.set_value(value as f32);
-                notify_change(&self.on_change, value as f32);
+                self.accessibility_set_value(value as f32);
                 true
             }
-            AccessibilityAction::Increment | AccessibilityAction::Decrement => {
-                let value = if matches!(action, AccessibilityAction::Increment) {
-                    self.value.get() + 1.0
-                } else {
-                    self.value.get() - 1.0
-                };
-                self.set_value(value);
-                notify_change(&self.on_change, value);
+            AccessibilityAction::Increment => {
+                self.accessibility_set_value(self.value.get() + 1.0);
+                true
+            }
+            AccessibilityAction::Decrement => {
+                self.accessibility_set_value(self.value.get() - 1.0);
                 true
             }
             AccessibilityAction::Focus => self.focus(),
@@ -156,6 +153,24 @@ impl Slider {
 }
 
 impl Slider {
+    /// A user change made through accessibility (§7b). The requested value is clamped to the
+    /// current range first, exactly as the native widget would clamp a drag, so Core's logical
+    /// value, the accessibility range and the notified value never leave `min..=max`. A request
+    /// whose clamped value equals the stored value (`SetValue(current)`, `Increment` at `max`,
+    /// `Decrement` at `min`) changes nothing and notifies nothing; otherwise the value is applied
+    /// and `on_change` fires exactly once.
+    fn accessibility_set_value(&self, requested: f32) {
+        let (min, max) = (self.min.get(), self.max.get());
+        let (low, high) = (min.min(max), min.max(max));
+        // `f32::max`/`min` (unlike `clamp`) never panic and map NaN onto the range.
+        let value = requested.max(low).min(high);
+        if value == self.value.get() {
+            return;
+        }
+        self.set_value(value);
+        notify_change(&self.on_change, value);
+    }
+
     /// A user change reported by the peer (§5 two-way rule).
     fn on_native_change(&self, value: f32) {
         if self.value.get() == value {

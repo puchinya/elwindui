@@ -644,3 +644,110 @@ fn an_input_control_on_a_backend_without_it_panics() {
     register_native_peer_factory(Rc::new(EmptyFactory));
     realize(TextBox::new().as_ref());
 }
+
+fn selected(button: &Rc<RadioButton>) -> bool {
+    semantics(button.as_ref()).state.selected == Some(true)
+}
+
+#[test]
+fn radio_group_changes_move_the_registration() {
+    let factory = install_mock();
+    let a1 = RadioButton::new();
+    let a2 = RadioButton::new();
+    let moving = RadioButton::new();
+    let b1 = RadioButton::new();
+    let mut seen = Vec::new();
+    for button in [&a1, &a2, &moving, &b1] {
+        let (log, sink) = recorder();
+        button.set_on_checked_change(sink);
+        seen.push(log);
+        realize(button.as_ref());
+    }
+    a1.set_group("a");
+    a2.set_group("a");
+    moving.set_group("a");
+    b1.set_group("b");
+    // Setting the same group again must not register the button twice.
+    moving.set_group("a");
+    moving.set_checked(true);
+    assert!(!selected(&a1) && !selected(&a2));
+
+    // Moving a checked button into a group that already has a checked member keeps the moved
+    // button checked and unchecks the other one, so the group never shows two checks.
+    b1.set_checked(true);
+    moving.set_group("b");
+    assert!(selected(&moving));
+    assert!(!selected(&b1), "the joined group stays exclusive");
+    assert_eq!(*seen[3].borrow(), [false]);
+
+    // The old group no longer reaches the moved button.
+    fire(&factory.peer(0).on_click, ());
+    assert!(selected(&a1));
+    assert!(
+        selected(&moving),
+        "group `a` must not uncheck a button now in `b`"
+    );
+    assert_eq!(*seen[2].borrow(), Vec::<bool>::new());
+
+    // Leaving every group removes exclusivity entirely.
+    moving.set_group("");
+    fire(&factory.peer(3).on_click, ());
+    assert!(selected(&b1));
+    assert!(
+        selected(&moving),
+        "an ungrouped button is not unchecked by group `b`"
+    );
+
+    // Re-joining `a` while checked unchecks the checked member there exactly once.
+    moving.set_group("a");
+    assert!(!selected(&a1));
+    assert_eq!(*seen[0].borrow(), [true, false]);
+    fire(&factory.peer(1).on_click, ());
+    assert!(
+        !selected(&moving),
+        "re-registered exactly once and exclusive again"
+    );
+    assert_eq!(*seen[2].borrow(), [false]);
+    clear_native_peer_factory();
+}
+
+#[test]
+fn slider_accessibility_clamps_and_notifies_only_real_changes() {
+    let factory = install_mock();
+    let slider = Slider::new();
+    slider.set_min(0.0);
+    slider.set_max(2.0);
+    slider.set_value(1.5);
+    let (seen, sink) = recorder();
+    slider.set_on_value_change(sink);
+    realize(slider.as_ref());
+    factory.take_log();
+
+    // `SetValue(current)` changes nothing.
+    assert!(slider.perform_accessibility_action(AccessibilityAction::SetValue(1.5)));
+    assert!(seen.borrow().is_empty());
+    assert!(factory.take_log().is_empty());
+
+    // `Increment` near `max` stops at `max`, then does nothing more at `max`.
+    assert!(slider.perform_accessibility_action(AccessibilityAction::Increment));
+    assert!(slider.perform_accessibility_action(AccessibilityAction::Increment));
+    assert_eq!(*seen.borrow(), [2.0]);
+    assert_eq!(factory.take_log(), ["value:2"]);
+    let range = semantics(slider.as_ref()).state.value_range.expect("range");
+    assert_eq!((range.value, range.min, range.max), (2.0, 0.0, 2.0));
+
+    // An out-of-range `SetValue` lands on the nearest bound; `Decrement` at `min` is a no-op.
+    assert!(slider.perform_accessibility_action(AccessibilityAction::SetValue(-5.0)));
+    assert!(slider.perform_accessibility_action(AccessibilityAction::Decrement));
+    assert_eq!(*seen.borrow(), [2.0, 0.0]);
+    assert_eq!(factory.take_log(), ["value:0"]);
+    assert_eq!(
+        semantics(slider.as_ref())
+            .state
+            .value_range
+            .expect("range")
+            .value,
+        0.0
+    );
+    clear_native_peer_factory();
+}

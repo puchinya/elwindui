@@ -822,12 +822,18 @@ impl BoundsTarget for AppWindowBounds {
 /// available, or the native call fails, the edge is kept pending, merged with any other pending
 /// edges, and applied in one `MoveAndResize` by [`Self::flush`]. A getter returns the native
 /// value when available and the pending value otherwise, so a value is never silently lost.
+///
+/// Reentrancy (`native_peer_design.md` §6/§7): `MoveAndResize` can synchronously raise
+/// `AppWindow.Changed`, whose handler may request newer bounds. Every request bumps
+/// `generation`; a flush clears the pending edges only if no request arrived while its native
+/// call was in flight, so a stale success never discards a newer, still-unapplied request.
 #[derive(Default)]
 struct PendingBounds {
     left: Cell<Option<f32>>,
     top: Cell<Option<f32>>,
     width: Cell<Option<f32>>,
     height: Cell<Option<f32>>,
+    generation: Cell<u64>,
 }
 
 impl PendingBounds {
@@ -861,12 +867,18 @@ impl PendingBounds {
             .unwrap_or(0.0)
     }
 
+    fn bump(&self) {
+        self.generation.set(self.generation.get().wrapping_add(1));
+    }
+
     fn set(&self, edge: BoundsEdge, value: f32, target: &dyn BoundsTarget) {
         self.cell(edge).set(Some(value));
+        self.bump();
         self.flush(target);
     }
 
     fn set_all(&self, bounds: Rect, target: &dyn BoundsTarget) {
+        self.bump();
         self.left.set(Some(bounds.x));
         self.top.set(Some(bounds.y));
         self.width.set(Some(bounds.width));
@@ -875,11 +887,13 @@ impl PendingBounds {
     }
 
     /// Applies every pending edge in one native operation once the target is available. Keeps
-    /// them pending if it is not, or if the native call fails.
+    /// them pending if it is not, if the native call fails, or if a newer request re-entered
+    /// while the call was in flight (that request is then flushed on the next attempt).
     fn flush(&self, target: &dyn BoundsTarget) {
         if self.is_empty() {
             return;
         }
+        let generation = self.generation.get();
         let Some(current) = target.current() else {
             return;
         };
@@ -889,7 +903,7 @@ impl PendingBounds {
             width: self.width.get().unwrap_or(current.width),
             height: self.height.get().unwrap_or(current.height),
         };
-        if target.move_and_resize(merged) {
+        if target.move_and_resize(merged) && self.generation.get() == generation {
             for cell in [&self.left, &self.top, &self.width, &self.height] {
                 cell.set(None);
             }
@@ -907,6 +921,8 @@ mod pending_bounds_tests {
         fail_writes: Cell<bool>,
         bounds: Cell<Rect>,
         writes: RefCell<Vec<Rect>>,
+        /// Runs once, inside the next native write, like a synchronous `AppWindow.Changed`.
+        reenter: RefCell<Option<Box<dyn FnOnce()>>>,
     }
 
     impl FakeTarget {
@@ -916,6 +932,7 @@ mod pending_bounds_tests {
                 fail_writes: Cell::new(false),
                 bounds: Cell::new(rect(0.0, 0.0, 0.0, 0.0)),
                 writes: RefCell::new(Vec::new()),
+                reenter: RefCell::new(None),
             }
         }
     }
@@ -928,8 +945,13 @@ mod pending_bounds_tests {
             if !self.available.get() || self.fail_writes.get() {
                 return false;
             }
+            // The outer write reaches the native window, then the native change event re-enters.
             self.writes.borrow_mut().push(bounds);
             self.bounds.set(bounds);
+            let reenter = self.reenter.borrow_mut().take();
+            if let Some(reenter) = reenter {
+                reenter();
+            }
             true
         }
     }
@@ -982,6 +1004,42 @@ mod pending_bounds_tests {
         assert_eq!(
             target.writes.borrow().as_slice(),
             [rect(10.0, 5.0, 800.0, 600.0), rect(1.0, 2.0, 3.0, 4.0)]
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn a_stale_flush_success_keeps_a_newer_reentrant_request_pending() {
+        let target = Rc::new(FakeTarget::new());
+        target.available.set(true);
+        target.bounds.set(rect(0.0, 0.0, 800.0, 600.0));
+        let pending = Rc::new(PendingBounds::default());
+        // While A's MoveAndResize is in flight, the change handler requests B, and B's own
+        // native write fails (for example the window is mid-transition).
+        {
+            let pending = pending.clone();
+            let inner_target = target.clone();
+            *target.reenter.borrow_mut() = Some(Box::new(move || {
+                inner_target.fail_writes.set(true);
+                pending.set(BoundsEdge::Width, 500.0, inner_target.as_ref());
+                inner_target.fail_writes.set(false);
+            }));
+        }
+        pending.set_all(rect(10.0, 20.0, 300.0, 200.0), target.as_ref());
+        // A reached the native window and succeeded, but B is newer and was not applied: it must
+        // survive A's stale success.
+        assert_eq!(
+            target.writes.borrow().as_slice(),
+            [rect(10.0, 20.0, 300.0, 200.0)]
+        );
+        assert!(!pending.is_empty(), "B must stay pending");
+        assert_eq!(pending.get(BoundsEdge::Width, target.as_ref()), 500.0);
+
+        // The next flush (for example the show() retry) applies B.
+        pending.flush(target.as_ref());
+        assert_eq!(
+            target.writes.borrow().last().copied(),
+            Some(rect(10.0, 20.0, 500.0, 200.0))
         );
         assert!(pending.is_empty());
     }

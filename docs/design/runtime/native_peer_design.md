@@ -304,7 +304,9 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   unavailable must not drop a pushed edge. The WinUI3 peer keeps edges requested while `AppWindow` is
   unavailable (or whose native call failed) pending. Its getters report the pending value, and it
   applies them in one `MoveAndResize` as soon as `AppWindow` is available, at the latest in `show()`
-  before and again after `Activate()`. AppKit's `NSWindow` always exists, so it needs no pending
+  before and again after `Activate()`. Each request bumps a generation counter; a flush clears the pending edges
+  only if no request re-entered while its `MoveAndResize` was in flight (`AppWindow.Changed` can run
+  the bounds handler synchronously), so a stale success never discards a newer request (§6). AppKit's `NSWindow` always exists, so it needs no pending
   state.
 - `WindowLifecycleHost` stays a Core trait and is implemented by Core `Window`: each handler is stored
   logically and pushed to the peer when realized. The close-request contract (§4i) is unchanged: a

@@ -66,6 +66,8 @@ ordinary/root classは、classの公開操作をdyn dispatch可能にするexten
 
 root class(`inherits`を持たない、`UIElement`など)もこの透過性の生成対象である(自身のclass-interface bridge macroを生成する)。root classの `as_ui_element` はdeclaring struct自身の具象型に固定されたreturn typeを持つ必須trait methodであるため、`struct_only` implementorがこれを単独で満たすことはできない — そのため root interfaceを実装する `struct_only` は、`inherits = <同じroot class>` を**併用**して同じroot storageを合成し(`self.base`)、`as_ui_element` はそこへ forward することが要件となる(`struct_only = ..Ext, inherits = <root>` の組み合わせ)。`inherits` が実装対象のroot classと一致しない場合は、bridge生成時にcompile-time errorとなる。`as_ui_element` の戻り値型自体(具象型を返す契約)は変更されない — root storageを合成することで満たされる。
 
+root class の具象型は、trait method と同じ `as_ui_element(&self) -> &Self` を inherent method としても持つ。これにより、root class を直接 `inherits` する子孫が生成する `as_<root>()` は、宣言箇所で root の `..Ext` trait が scope になくても解決する(`UIElement` 以外の具象 root class、例: Core `Window`、Issue #313)。
+
 ## 6. Construction
 
 - instantiable ordinary/root classは `construct` をconstructor inputの正本として宣言する。

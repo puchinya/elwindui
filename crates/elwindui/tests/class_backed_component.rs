@@ -41,10 +41,9 @@ fn vertical_layout_constructor_abi_sets_own_and_inherited_properties() {
     assert_eq!(spaced - unspaced, 8.0 + 2.0 * 4.0);
 }
 
-/// T4/T5: the backend's `Button`/`Window` (class-backed `struct_only` Components whose public
-/// properties are declared by the Core interfaces, `abi_props`) build through their facade-root
-/// constructor ABI; `text`/`title` reach the backend implementation through the Core property
-/// shape. The bare-name `new!` path keeps working alongside.
+/// T4/T5: the Core-owned `Button`/`Window` (Issue #313) build through their facade-root
+/// constructor ABI; `text`/`title` reach the Component through the Core property shape. The
+/// bare-name `new!` path keeps working alongside.
 #[cfg(all(feature = "backend-winui3", target_os = "windows"))]
 #[test]
 fn native_builtins_build_through_their_constructor_abi() {
@@ -74,6 +73,9 @@ fn native_builtins_build_through_their_constructor_abi() {
         elwindui::__elwindui_ctor_Window!(
             @new_initial_props window, props = [(title => "abi window")], environment = environment
         );
+        // The native window is realized lazily (native_peer_design.md §7). Show it so closing it
+        // releases the only native window and ends `application::run`.
+        window.show();
         window.close();
 
         let via_new = elwindui::new!(Button(text: "builtin"));

@@ -920,7 +920,7 @@ mod hosted_xaml_regression_tests {
                 // Issue #254: `InnerWindow` stores only the final owner's `Weak<dyn WindowExt>`;
                 // the application registry becomes the strong lifetime authority after show().
                 let lifecycle_owner: Rc<dyn elwindui_core::ui::WindowExt> =
-                    crate::native_ui::Window::new();
+                    elwindui_core::ui::Window::new();
                 let weak_owner_a = Rc::downgrade(&lifecycle_owner);
                 let lifecycle_window = Rc::new(InnerWindow::new(weak_owner_a.clone()));
 
@@ -962,7 +962,7 @@ mod hosted_xaml_regression_tests {
                 // final self weak reference from the generated class constructor, so this caller
                 // drop must be survived by the application registry rather than by a separate
                 // test-created InnerWindow.
-                let bare_window = crate::native_ui::Window::new();
+                let bare_window = elwindui_core::ui::Window::new();
                 let bare_weak = Rc::downgrade(&bare_window);
                 bare_window.show();
                 drop(bare_window);
@@ -986,7 +986,7 @@ mod hosted_xaml_regression_tests {
 
                 // A never-shown backend Window must not create or release a registry entry or
                 // affect the unrelated shown windows.
-                let never_shown = crate::native_ui::Window::new();
+                let never_shown = elwindui_core::ui::Window::new();
                 let never_shown_weak = Rc::downgrade(&never_shown);
                 let releases_before_never_shown = crate::app::release_window_call_count_for_test();
                 never_shown.close();
@@ -1183,7 +1183,7 @@ mod hosted_xaml_regression_tests {
                                         let probe = elwindui_core::ui::TextBlock::new();
                                         lifecycle_window_for_burst.set_content(probe.clone());
                                         let sibling_owner: Rc<dyn elwindui_core::ui::WindowExt> =
-                                            crate::native_ui::Window::new();
+                                            elwindui_core::ui::Window::new();
                                         let weak_owner_b = Rc::downgrade(&sibling_owner);
                                         let sibling_window =
                                             Rc::new(InnerWindow::new(weak_owner_b.clone()));

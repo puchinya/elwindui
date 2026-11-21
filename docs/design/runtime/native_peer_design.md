@@ -268,24 +268,55 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
 
 ## 7. Window
 
-- `Window` stays a non-`UIElement` root. Core owns `#[component] struct Window` with title, menu bar,
-  content, transparency, always-on-top and one-time initial bounds as logical state, and
-  `peer: RefCell<Option<Rc<dyn WindowPeer>>>`.
-- `WindowPeer` is a separate trait, not a `NativePeer`: `show`, `hide`, `close`, `set_title`,
-  `set_menu_bar(Option<Rc<dyn MenuBarPeer>>)`, `set_content(Option<Rc<dyn UIElementExt>>)`,
-  bounds getters/setters, `set_close_request_handler`, `set_bounds_changed_handler`, `activate`,
-  `close_active_popup`.
-- Realization happens on first `show()` or on the first getter that needs native state (bounds). Before
-  that, getters return the logical values.
-- `WindowLifecycleHost` moves onto `WindowPeer`. The close-request contract (§4i) is unchanged: a
+- `Window` stays a non-`UIElement` root. Core owns the concrete root class `Window`
+  (`#[component] struct Window` with no `inherits`) holding the title, menu bar, content, transparency,
+  always-on-top, one-time initial bounds and both lifecycle handlers as logical state, plus
+  `peer: OnceCell<Rc<dyn WindowPeer>>`. Its `#[prop]`/`#[content]` schema and `__elwindui_ctor_Window`
+  are declared once in Core. Backends no longer declare a public `Window` type.
+- A root class's reflexive accessor is `as_ui_element` for every root class (not only `UIElement`).
+  The class macro also emits it as an inherent method on the root, so a generated
+  `component X inherits Window` resolves `as_window()` without `WindowExt` in scope.
+- `WindowPeer` (`elwindui_core::ui::native`) is a separate trait, not a `NativePeer`: `show`, `hide`,
+  `close`, `activate`, `close_active_popup`, `set_title`, `set_menu_bar`, `set_content`,
+  `set_transparent`, `set_always_on_top`, the four bounds getters and setters, `set_bounds` (default:
+  the four edges in turn), `set_close_request_handler`, `set_bounds_changed_handler`,
+  `configure_floating_title` (default `Ok(())`, used by Docking) and `dispose`.
+  `NativePeerFactory::create_window(owner: Weak<dyn WindowExt>)` creates it; `owner` is the most-derived
+  Window (`__self_weak`), and the default body reports `Window` unsupported.
+- **Transitional:** `set_menu_bar` takes `Rc<dyn MenuBarExt>` and the backend downcasts it to its own
+  `MenuBar`, because `MenuBar` becomes a Core-owned Component only in stage 4. `set_content` takes the
+  element directly (no `Option`): Core never clears a Window's content today.
+- **Realization** happens once, on the first of: `show()`; `set_content()`; a bounds getter whose value
+  was never set logically; `__configure_floating_title()`. `set_content` realizes because hosting the
+  content installs the native host services (focus, accessibility, invalidation and shortcut
+  collection) that the content's mount relies on; this keeps the pre-#313 timing for generated
+  Windows, which set their content before `mount()`. A bare `Window::new()` without content stays
+  backend-free until shown. Before realization, getters return the logical values and `hide`, `close`,
+  `activate` and `unmount_override` do nothing (an unrealized Window has no native window).
+- **Realization order** follows §6: create through the factory, push the logical state (title, menu
+  bar, transparency, always-on-top, the bounds edges that were set, then content), then install the
+  close-request and bounds-changed handlers **last**. Values are cloned out of their `RefCell`s before
+  each peer call.
+- `WindowLifecycleHost` stays a Core trait and is implemented by Core `Window`: each handler is stored
+  logically and pushed to the peer when realized. The close-request contract (§4i) is unchanged: a
   `Weak` owner, `bool` = accepted or owner gone, mount installs the handler after chaining, and unmount
-  clears it before chaining.
-- The retention registry stays backend-local (§4j). The factory receives a `WindowPeerOwner` that wraps
-  `Weak<dyn WindowExt>` for the most-derived owner. The backend's `app::retain_window` upgrades it on
-  first show and releases it on native close. The WinUI3 `framework_initiated_close` reentrancy guard
-  and the AppKit `windowShouldClose:`/`windowWillClose:` split stay in the backend `WindowPeer`.
-- Generated host-composition Windows keep `#[overrides] show/hide/close/mount_override/unmount_override`.
-  They now chain to Core `Window` (an ordinary class-backed base) instead of a backend `struct_only`.
+  clears it before chaining. **Drop** of Core `Window` calls `WindowPeer::dispose()` once, which clears
+  both handlers so no native close or bounds event reaches Core afterwards.
+- The retention registry stays backend-local (§4j). The backend's `app::retain_window` upgrades the
+  `owner` on first show and releases it on native close. The WinUI3 `framework_initiated_close`
+  reentrancy guard and the AppKit `windowShouldClose:`/`windowWillClose:` split stay in the backend
+  `WindowPeer` (`InnerWindow`).
+- Docking floating hosts use Core `Window` with the `#[doc(hidden)]` hooks `__set_bounds` (one native
+  operation where the backend overrides `WindowPeer::set_bounds`) and `__configure_floating_title`.
+- Generated host-composition Windows keep `#[overrides] show/hide/close/mount_override/unmount_override`
+  and now chain to Core `Window` (an ordinary class-backed base) instead of a backend `struct_only`.
+- Tests: a Core mock `WindowPeer` that models the retention registry covers realization once with state
+  before handlers, `set_content` realization, first-show retention and caller drop, hide and re-show,
+  never-shown close, native close through the `Weak` handler (accepted, released once, reentrant
+  close), a handler whose owner is gone (`false`), popup teardown before handler clearing, `dispose`
+  once, and the unsupported/no-backend panics. The WinUI3 hosted XAML regression covers retention, hide,
+  re-show and close on the real AppWindow. The AppKit peer is cross-checked only; its macOS run is
+  tracked by #316 (D5).
 
 ## 8. Backend-managed hierarchies
 

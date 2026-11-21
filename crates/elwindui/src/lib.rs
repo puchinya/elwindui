@@ -18,16 +18,8 @@ pub use elwindui_macros::__component_with_base_params;
 #[doc(hidden)]
 pub use elwindui_core::{
     __elwindui_ctor_Button, __elwindui_ctor_Layout, __elwindui_ctor_NativeControl,
-    __elwindui_ctor_VerticalLayout,
+    __elwindui_ctor_VerticalLayout, __elwindui_ctor_Window,
 };
-// Native builtins not yet migrated to Core-owned Components (Issue #313) still have their concrete
-// type, and so their constructor ABI, in the backend.
-#[cfg(any(
-    all(target_os = "macos", feature = "backend-appkit"),
-    all(target_os = "windows", feature = "backend-winui3"),
-))]
-#[doc(hidden)]
-pub use backend::__elwindui_ctor_Window;
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` — writes
 /// a `component`+`view` pair (docs/specs/dsl_spec.md §3/§13) as a single ordinary Rust `struct`,
 /// alongside `#[elwindui::viewmodel] mod foo { struct Foo { .. } impl Foo { .. } }` for the

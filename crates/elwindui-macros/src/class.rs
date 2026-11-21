@@ -5441,7 +5441,20 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
     // doesn't need this generated separately: `as_ui_element` already plays this exact role, via
     // its own trait impl above (root mode is the one shape whose "own accessor" is a trait method
     // rather than a plain inherent one).
-    let reflexive_named_accessor = (!is_root_mode).then(|| {
+    // A root class's one reflexive accessor is the `as_ui_element` trait method. It is also
+    // emitted as an inherent method here, so a direct descendant's generated `as_<root>()`
+    // (`build_inherit_macros`' `named_accessor`, which forwards to `self.base.as_ui_element()`)
+    // resolves without the root's `..Ext` trait being in scope at the descendant's declaration
+    // site — needed once a root class other than `UIElement` (Core `Window`, Issue #313) is
+    // concrete, since generated `component X inherits Window` modules import no `WindowExt`.
+    let reflexive_named_accessor = if is_root_mode {
+        quote! {
+            impl #impl_generics #impl_name #ty_generics #where_clause {
+                #[allow(dead_code)]
+                pub fn as_ui_element(&self) -> &Self { self }
+            }
+        }
+    } else {
         let accessor_ident = named_accessor_ident(&bare_name);
         quote! {
             impl #impl_generics #impl_name #ty_generics #where_clause {
@@ -5449,7 +5462,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 pub fn #accessor_ident(&self) -> &Self { self }
             }
         }
-    });
+    };
 
     // This class's own `__elwindui_inherit_*!` trio, for whoever later `inherits = ClassName` (or,
     // for a root class, whoever eventually reaches it via the chain) — see this module's own doc

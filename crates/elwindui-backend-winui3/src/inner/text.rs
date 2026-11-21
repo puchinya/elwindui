@@ -94,6 +94,9 @@ pub(crate) struct InnerTextBox {
     handle: AnyView,
     text_box: XamlTextBox,
     on_change: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
+    /// The Enter/submit callback. The `KeyDown` handler is registered once, in `new`, and reads
+    /// this slot, so replacing or clearing the callback never adds another native handler.
+    on_submit: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
 impl InnerTextBox {
@@ -104,7 +107,36 @@ impl InnerTextBox {
             handle,
             text_box,
             on_change: Rc::new(RefCell::new(None)),
+            on_submit: Rc::new(RefCell::new(None)),
         };
+        {
+            let on_submit = this.on_submit.clone();
+            let callback_id = register_ui_event_callback(Rc::new(move || {
+                // Not borrowed across the call: the callback may replace itself.
+                let callback = on_submit.borrow_mut().take();
+                if let Some(callback) = callback {
+                    callback();
+                    let mut slot = on_submit.borrow_mut();
+                    if slot.is_none() {
+                        *slot = Some(callback);
+                    }
+                }
+            }));
+            let _ = this
+                .text_box
+                .KeyDown(&KeyEventHandler::new(move |_sender, args| {
+                    let Some(args) = args.cloned() else {
+                        return Ok(());
+                    };
+                    let Ok(virtual_key) = args.Key() else {
+                        return Ok(());
+                    };
+                    if virtual_key == VirtualKey::Enter {
+                        invoke_ui_event_callback(callback_id);
+                    }
+                    Ok(())
+                }));
+        }
         {
             let callback = this.on_change.clone();
             let text_box_for_handler = this.text_box.clone();
@@ -175,22 +207,8 @@ impl InnerTextBox {
     /// `control:textView:doCommandBySelector:` workaround, see that method's own doc comment for
     /// why), WinUI3's own `TextBox.KeyDown` fires natively regardless of focus and needs no
     /// special-casing.
-    pub(crate) fn set_on_submit(&self, callback: Box<dyn Fn()>) {
-        let callback_id = register_ui_event_callback(Rc::new(move || callback()));
-        let _ = self
-            .text_box
-            .KeyDown(&KeyEventHandler::new(move |_sender, args| {
-                let Some(args) = args.cloned() else {
-                    return Ok(());
-                };
-                let Ok(virtual_key) = args.Key() else {
-                    return Ok(());
-                };
-                if virtual_key == VirtualKey::Enter {
-                    invoke_ui_event_callback(callback_id);
-                }
-                Ok(())
-            }));
+    pub(crate) fn set_on_submit(&self, callback: Option<Box<dyn Fn()>>) {
+        *self.on_submit.borrow_mut() = callback;
     }
 }
 

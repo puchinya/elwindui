@@ -329,7 +329,39 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   re-show and close on the real AppWindow. The AppKit peer is cross-checked only; its macOS run is
   tracked by #316 (D5).
 
-## 8. Backend-managed hierarchies
+## 7b. Simple input controls (stage ③)
+
+- `CheckBox`, `RadioButton`, `Slider`, `ToggleSwitch`, `TextBox`, `TextArea` and `PasswordBox` are
+  Core concrete Components (`#[component(inherits NativeControl, sealed)]`). Each has its own typed
+  peer (`CheckBoxPeer`, `RadioButtonPeer`, `SliderPeer`, `ToggleSwitchPeer`, `TextBoxPeer`,
+  `TextAreaPeer`, `PasswordBoxPeer`) and a `NativePeerFactory::create_*` method. Their `#[prop]` schemas,
+  constructor ABIs and accessibility semantics live only in Core; the backends keep only `pub(crate)`
+  peers over their existing `Inner*` widgets.
+- Realization follows §6. Phase 3 pushes the control state (a slider's range before its value, a text
+  field's attributes before its text), then installs the native callbacks last, each built by
+  `weak_native_callback` (a `Weak` node, upgraded for the whole call, downcast to the sealed control).
+  `dispose()` replaces every callback with a no-op.
+- **Two-way (§5):** a programmatic setter stores, pushes and updates semantics without notifying. A
+  native change callback compares with the stored value; an equal value is an echo and is dropped,
+  otherwise Core stores it, updates semantics and notifies once without pushing it back. An
+  accessibility action that changes the value (CheckBox/ToggleSwitch `Activate`, Slider
+  `SetValue`/`Increment`/`Decrement`, RadioButton `Activate`/`Select`, TextBox/TextArea `SetText`) is a
+  user change: it pushes to the widget and notifies once if the value changed.
+- **RadioButton groups** are owned by Core in one per-UI-thread registry of `Weak` members. A selection
+  checks the button, unchecks the other live members of its group, and notifies only the members whose
+  state changed. The peer only displays state and reports activation.
+- **TextBox submit:** the peer's `on_submit` (Enter) dispatches the routed `on_key_down` with
+  `Key::Enter` from the TextBox node. The WinUI3 peer registers its `KeyDown` handler once and stores
+  the callback in a slot, so replacing or clearing it never adds a native handler.
+- **Platform defaults:** values the author never set are not pushed: `TextBox::text_alignment` and
+  `PasswordBox::reveal_enabled` are `Option`s, so the platform default stays until set.
+- **PasswordBox** never exposes the value: no accessibility `value`, no logging (the mock records only
+  the length), and content-free assertion messages.
+- AppKit differences stay in the peer: `CheckBox`/`RadioButton` (`NSButton`s) re-push the text style
+  on every measure (`refresh_text_style_on_measure`), and `TextArea` measures through its
+  `NSScrollView`-hosted text view. Both are cross-checked only (#316, D5).
+
+
 
 - `ScrollView`: Core owns `content`. `ScrollViewPeer::set_content(Option<Rc<dyn UIElementExt>>, owner: Weak<..>)`
   hosts it in the backend's nested `TreeHost`. The peer's unmount hook (`unmount_hosted_tree`) is

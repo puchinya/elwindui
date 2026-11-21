@@ -20,30 +20,11 @@ pub(crate) trait FloatingWindowHost {
     fn set_bounds_changed_handler(&self, handler: Option<Rc<dyn Fn(Rect)>>);
 }
 
-#[cfg(target_os = "macos")]
-struct PlatformFloatingHost {
-    window: Rc<elwindui_backend_appkit::Window>,
-}
-
-#[cfg(target_os = "windows")]
-struct PlatformFloatingHost {
-    window: Rc<elwindui_backend_winui3::Window>,
-}
-
+/// A Core `Window` (Issue #313): the backend's `WindowPeer` applies the whole rectangle in one
+/// native operation where it can (`WindowPeer::set_bounds`).
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-impl PlatformFloatingHost {
-    #[cfg(target_os = "macos")]
-    fn set_native_bounds(&self, bounds: Rect) {
-        self.window.set_left(bounds.x);
-        self.window.set_top(bounds.y);
-        self.window.set_width(bounds.width);
-        self.window.set_height(bounds.height);
-    }
-
-    #[cfg(target_os = "windows")]
-    fn set_native_bounds(&self, bounds: Rect) {
-        self.window.set_bounds(bounds);
-    }
+struct PlatformFloatingHost {
+    window: Rc<crate::core::ui::Window>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -53,7 +34,7 @@ impl FloatingWindowHost for PlatformFloatingHost {
     }
 
     fn set_bounds(&self, bounds: Rect) {
-        self.set_native_bounds(bounds);
+        self.window.__set_bounds(bounds);
     }
 
     fn set_title(&self, title: &str) {
@@ -73,7 +54,7 @@ impl FloatingWindowHost for PlatformFloatingHost {
     }
 
     fn set_close_request_handler(&self, handler: Option<Rc<dyn Fn() -> bool>>) {
-        self.window.set_close_request_handler(handler);
+        WindowLifecycleHost::set_close_request_handler(self.window.as_ref(), handler);
     }
 
     fn set_bounds_changed_handler(&self, handler: Option<Rc<dyn Fn(Rect)>>) {
@@ -82,16 +63,11 @@ impl FloatingWindowHost for PlatformFloatingHost {
 }
 
 fn create_platform_host() -> Result<Rc<dyn FloatingWindowHost>, DockLayoutError> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        Ok(Rc::new(PlatformFloatingHost {
-            window: elwindui_backend_appkit::Window::new(),
-        }))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let window = elwindui_backend_winui3::Window::new();
-        if let Err(error) = window.configure_floating_title() {
+        let window = crate::core::ui::Window::new();
+        // Realizes the native window; only WinUI3 configures a custom floating title today.
+        if let Err(error) = window.__configure_floating_title() {
             window.close();
             return Err(DockLayoutError::FloatingHostUnavailable {
                 reason: format!("floating title configuration failed: {error}"),

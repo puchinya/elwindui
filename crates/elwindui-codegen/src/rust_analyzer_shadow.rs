@@ -619,6 +619,12 @@ fn snake_case_ident(name: &str) -> String {
 fn window_extension_forward_impl(target: TokenStream) -> TokenStream {
     quote! {
         impl elwindui::core::ui::WindowExt for #target {
+            // Core `Window` is a concrete root class (Issue #313), so its root accessor is a
+            // required trait item, forwarded to the embedded base like the real expansion does.
+            fn as_ui_element(&self) -> &elwindui::core::ui::Window {
+                elwindui::core::ui::WindowExt::as_ui_element(&self.base)
+            }
+
             fn __dyn_window(&self) -> &dyn elwindui::core::ui::WindowExt {
                 elwindui::core::ui::WindowExt::__dyn_window(&self.base)
             }

@@ -18,8 +18,8 @@ pub use elwindui_core::ui::NativeControlExt;
 // The submodules' native leaves inherit Core's `NativeControl` (Issue #313).
 use elwindui_core::ui::NativeControl;
 
-use elwindui_core::ui::native::{ButtonPeer, NativePeerFactory};
-use std::rc::Rc;
+use elwindui_core::ui::native::{ButtonPeer, NativePeerFactory, WindowPeer};
+use std::rc::{Rc, Weak};
 
 /// This backend's [`NativePeerFactory`], registered for the main thread by [`crate::init`].
 pub(crate) struct AppKitPeerFactory;
@@ -30,6 +30,9 @@ impl NativePeerFactory for AppKitPeerFactory {
     }
     fn create_button(&self) -> Rc<dyn ButtonPeer> {
         Rc::new(button::AppKitButtonPeer::new())
+    }
+    fn create_window(&self, owner: Weak<dyn elwindui_core::ui::WindowExt>) -> Rc<dyn WindowPeer> {
+        Rc::new(window::AppKitWindowPeer::new(owner))
     }
 }
 
@@ -149,4 +152,3 @@ pub use slider::*;
 pub use tab_view::*;
 pub use text::*;
 pub use toggle_switch::*;
-pub use window::*;

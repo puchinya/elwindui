@@ -920,7 +920,7 @@ mod hosted_xaml_regression_tests {
                 // Issue #254: `InnerWindow` stores only the final owner's `Weak<dyn WindowExt>`;
                 // the application registry becomes the strong lifetime authority after show().
                 let lifecycle_owner: Rc<dyn elwindui_core::ui::WindowExt> =
-                    crate::native_ui::Window::new();
+                    elwindui_core::ui::Window::new();
                 let weak_owner_a = Rc::downgrade(&lifecycle_owner);
                 let lifecycle_window = Rc::new(InnerWindow::new(weak_owner_a.clone()));
 
@@ -962,7 +962,7 @@ mod hosted_xaml_regression_tests {
                 // final self weak reference from the generated class constructor, so this caller
                 // drop must be survived by the application registry rather than by a separate
                 // test-created InnerWindow.
-                let bare_window = crate::native_ui::Window::new();
+                let bare_window = elwindui_core::ui::Window::new();
                 let bare_weak = Rc::downgrade(&bare_window);
                 bare_window.show();
                 drop(bare_window);
@@ -986,7 +986,7 @@ mod hosted_xaml_regression_tests {
 
                 // A never-shown backend Window must not create or release a registry entry or
                 // affect the unrelated shown windows.
-                let never_shown = crate::native_ui::Window::new();
+                let never_shown = elwindui_core::ui::Window::new();
                 let never_shown_weak = Rc::downgrade(&never_shown);
                 let releases_before_never_shown = crate::app::release_window_call_count_for_test();
                 never_shown.close();
@@ -1006,6 +1006,56 @@ mod hosted_xaml_regression_tests {
                 }
                 assert!(bare_weak.upgrade().is_none());
                 assert_eq!(crate::app::retained_window_count_for_test(), 1);
+
+                // PR #318 review: a Core Window realized by show() keeps the platform's default
+                // title when none was set, applies an explicit empty title, and applies bounds
+                // requested before realization (kept pending until an AppWindow can take them).
+                {
+                    use crate::native_ui::window::WinUi3WindowPeer;
+                    use elwindui_core::ui::WindowExt as _;
+                    let native_default_title =
+                        InnerWindow::new(std::rc::Weak::<elwindui_core::ui::Window>::new())
+                            .title_for_test();
+                    let releases_before = crate::app::release_window_call_count_for_test();
+                    let untitled = elwindui_core::ui::Window::new();
+                    untitled.show();
+                    let untitled_peer = WinUi3WindowPeer::last_created_for_test()
+                        .expect("untitled Window realized a WinUI3 peer");
+                    assert_eq!(
+                        untitled_peer.inner_for_test().title_for_test(),
+                        native_default_title,
+                        "an unset title must keep the native default title"
+                    );
+                    untitled.close();
+
+                    let titled = elwindui_core::ui::Window::new();
+                    titled.set_title("");
+                    titled.set_left(150.0);
+                    titled.set_top(160.0);
+                    titled.set_width(420.0);
+                    titled.set_height(310.0);
+                    titled.show();
+                    let titled_peer = WinUi3WindowPeer::last_created_for_test()
+                        .expect("titled Window realized a WinUI3 peer");
+                    let inner = titled_peer.inner_for_test();
+                    assert_eq!(
+                        inner.title_for_test(),
+                        "",
+                        "an explicit empty title is applied"
+                    );
+                    assert_eq!(
+                        (inner.left(), inner.top(), inner.width(), inner.height()),
+                        (150.0, 160.0, 420.0, 310.0),
+                        "bounds requested before realization reach the AppWindow"
+                    );
+                    titled.close();
+                    assert_eq!(crate::app::retained_window_count_for_test(), 1);
+                    assert_eq!(
+                        crate::app::release_window_call_count_for_test(),
+                        releases_before + 2,
+                        "each shown title/bounds probe Window is released exactly once"
+                    );
+                }
 
                 // Direct real-TreeHost proof for Issue #265: a one-control and a multi-control
                 // replacement each have one SetTree/bootstrap realization followed by exactly
@@ -1183,7 +1233,7 @@ mod hosted_xaml_regression_tests {
                                         let probe = elwindui_core::ui::TextBlock::new();
                                         lifecycle_window_for_burst.set_content(probe.clone());
                                         let sibling_owner: Rc<dyn elwindui_core::ui::WindowExt> =
-                                            crate::native_ui::Window::new();
+                                            elwindui_core::ui::Window::new();
                                         let weak_owner_b = Rc::downgrade(&sibling_owner);
                                         let sibling_window =
                                             Rc::new(InnerWindow::new(weak_owner_b.clone()));
@@ -1603,8 +1653,8 @@ mod hosted_xaml_regression_tests {
             .with(|slot| *slot.borrow())
             .expect("release_window call count after close should have been recorded");
         assert_eq!(
-            release_call_count_after_close, 3,
-            "programmatic close() on all retained test windows must release exactly once each"
+            release_call_count_after_close, 5,
+            "programmatic close() must release each retained test window exactly once (bare, two PR #318 probes, sibling, lifecycle)"
         );
     }
 }

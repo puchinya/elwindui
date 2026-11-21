@@ -627,7 +627,7 @@ impl InnerMenuBarItem {
     }
 }
 
-/// The whole top menu bar, installed via `native_ui::Window::set_menu_bar` — composed by
+/// The whole top menu bar, installed via `WindowPeer::set_menu_bar` (`native_ui::window`) — composed by
 /// `native_ui::MenuBar`. Unlike AppKit (one global `NSApplication.mainMenu`), WinUI3's `MenuBar`
 /// is a per-window element — installed by `InnerWindow::set_menu_bar` above, not a shared
 /// process-wide singleton, so (unlike the AppKit backend) there's no app-menu-slot/Quit-item

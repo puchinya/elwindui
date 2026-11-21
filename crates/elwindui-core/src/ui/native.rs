@@ -12,12 +12,12 @@
 //! native handle crosses the boundary only as `&dyn Any` ([`NativePeer::handle`]), which the
 //! backend's own render/host reconciliation downcasts to its handle type.
 
-use crate::base::Size;
+use crate::base::{Rect, Size};
 use crate::graphics::{Brush, CascadedTextStyle};
-use crate::ui::ButtonRole;
+use crate::ui::{ButtonRole, MenuBarExt, UIElementExt, WindowExt};
 use std::any::Any;
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 /// The native widget behind a `NativeControl`.
 ///
@@ -96,6 +96,79 @@ pub trait ButtonPeer: NativePeer {
     fn set_on_click(&self, callback: Option<Box<dyn Fn()>>);
 }
 
+/// The native top-level window behind `elwindui::ui::Window`.
+///
+/// Not a [`NativePeer`]: a Window is a non-`UIElement` root with no measure, background or text
+/// style. Created lazily by Core `Window` on its first `show()` (or on the first native-only
+/// operation) through [`NativePeerFactory::create_window`], pushed Core's stored logical state,
+/// then given its close-request and bounds-changed handlers last
+/// (`native_peer_design.md` §7). Core never holds a `RefCell` borrow across a call, so an
+/// implementation may re-enter Core synchronously; the §6 last-write-wins rules apply.
+///
+/// The backend keeps its own retention registry: the `owner` given to `create_window` is
+/// upgraded on first show and released on native close.
+pub trait WindowPeer {
+    /// Makes the window visible. The first call retains the owner in the backend registry.
+    fn show(&self);
+    /// Hides the window without releasing it.
+    fn hide(&self);
+    /// Closes the native window and releases the registry entry, if any.
+    fn close(&self);
+    /// Activates the window without changing its bounds.
+    fn activate(&self);
+    /// Closes the window's active popup, if any (owner-Window unmount, before content teardown).
+    fn close_active_popup(&self);
+    /// Sets the title-bar text.
+    fn set_title(&self, title: &str);
+    /// Installs the menu bar.
+    ///
+    /// `MenuBar` is not a Core-owned Component yet (#313 stage ④), so the backend downcasts this
+    /// to its own concrete type.
+    fn set_menu_bar(&self, menu_bar: Rc<dyn MenuBarExt>);
+    /// Hosts `content` as the window's root element.
+    fn set_content(&self, content: Rc<dyn UIElementExt>);
+    /// Enables or disables an alpha-capable client surface.
+    fn set_transparent(&self, transparent: bool);
+    /// Pins the window above normal windows, or restores normal Z-order.
+    fn set_always_on_top(&self, always_on_top: bool);
+    /// The native left edge.
+    fn left(&self) -> f32;
+    /// Moves the left edge.
+    fn set_left(&self, left: f32);
+    /// The native top edge.
+    fn top(&self) -> f32;
+    /// Moves the top edge.
+    fn set_top(&self, top: f32);
+    /// The native width.
+    fn width(&self) -> f32;
+    /// Resizes the width.
+    fn set_width(&self, width: f32);
+    /// The native height.
+    fn height(&self) -> f32;
+    /// Resizes the height.
+    fn set_height(&self, height: f32);
+    /// Applies a complete rectangle. Backends with a single native operation override this; the
+    /// default sets each edge in turn.
+    fn set_bounds(&self, bounds: Rect) {
+        self.set_left(bounds.x);
+        self.set_top(bounds.y);
+        self.set_width(bounds.width);
+        self.set_height(bounds.height);
+    }
+    /// Installs or clears the close-request bridge (`WindowLifecycleHost`). The handler captures
+    /// only a `Weak` owner and returns `true` when the generated owner accepted the request.
+    fn set_close_request_handler(&self, handler: Option<Rc<dyn Fn() -> bool>>);
+    /// Installs or clears the native move/resize bridge.
+    fn set_bounds_changed_handler(&self, handler: Option<Rc<dyn Fn(Rect)>>);
+    /// Framework-only floating-host title-bar setup (Docking). The default does nothing.
+    fn configure_floating_title(&self) -> Result<(), String> {
+        Ok(())
+    }
+    /// Releases every callback registration this peer owns. Called exactly once by Core when the
+    /// owning `Window` is dropped; no Core handler may run afterwards. Must be idempotent.
+    fn dispose(&self) {}
+}
+
 /// Creates the native peers for one backend.
 ///
 /// A backend registers exactly one factory per UI thread from its `init()` through
@@ -109,6 +182,14 @@ pub trait NativePeerFactory {
     /// Creates the peer for a new `Button`.
     fn create_button(&self) -> Rc<dyn ButtonPeer> {
         unsupported_native_control(self.backend_name(), "Button")
+    }
+
+    /// Creates the peer for a `Window`. `owner` is the most-derived Window (a generated
+    /// host-composition component when there is one); the backend's retention registry upgrades
+    /// it on first show and never stores it strongly anywhere else.
+    fn create_window(&self, owner: Weak<dyn WindowExt>) -> Rc<dyn WindowPeer> {
+        let _ = owner;
+        unsupported_native_control(self.backend_name(), "Window")
     }
 }
 

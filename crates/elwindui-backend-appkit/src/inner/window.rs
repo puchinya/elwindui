@@ -281,7 +281,7 @@ mod native_close_decision_tests {
     }
 }
 
-/// Raw `NSWindow` + content host — composed by `native_ui::Window`.
+/// Raw `NSWindow` + content host — composed by `native_ui::window::AppKitWindowPeer`.
 #[derive(Clone)]
 pub(crate) struct InnerWindow {
     /// Issue #254: `Weak` only — the application-layer registry (`crate::app::WINDOWS`) is the

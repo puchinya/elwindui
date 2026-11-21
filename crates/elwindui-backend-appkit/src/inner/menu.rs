@@ -306,7 +306,7 @@ impl InnerMenuBarItem {
     }
 }
 
-/// The whole top menu bar, installed via `native_ui::Window::set_menu_bar` — composed by
+/// The whole top menu bar, installed via `WindowPeer::set_menu_bar` (`native_ui::window`) — composed by
 /// `native_ui::MenuBar`.
 #[derive(Clone)]
 pub(crate) struct InnerMenuBar {

@@ -368,6 +368,10 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   registration: the button leaves its previous group's list (and an empty group is removed), is never
   registered twice, and `""` leaves every group. A checked button that joins a group keeps its check and
   unchecks the group's checked member, like `set_checked(true)`, so a group never shows two checks.
+  A change callback may re-enter and select another member (§6 last-write-wins). The outer selection
+  then stops: it unchecks no further members once its own button has been unchecked, and it sends no
+  `on_change(true)` for a button that is no longer checked, so each member's last notification matches
+  its final state.
 - **TextBox submit:** the peer's `on_submit` (Enter) dispatches the routed `on_key_down` with
   `Key::Enter` from the TextBox node. The WinUI3 peer registers its `KeyDown` handler once and stores
   the callback in a slot, so replacing or clearing it never adds a native handler.

@@ -196,6 +196,11 @@ impl RadioButton {
     /// A user selection: from the native click (`push == false`, the widget already shows it)
     /// or an accessibility action (`push == true`). Checks this button, unchecks the rest of the
     /// group, and notifies every button whose state actually changed, once each.
+    ///
+    /// A sibling's `on_change(false)` may re-enter and select another button, which unchecks
+    /// this one (and notifies `false`). The newer selection wins (§6 last-write-wins): the outer
+    /// call then sends no stale `on_change(true)`, so the last value a binding sees always
+    /// matches the final state.
     fn select(&self, push: bool) {
         let changed = !self.checked.get();
         if push {
@@ -205,7 +210,7 @@ impl RadioButton {
             self.sync_checked_semantics();
         }
         self.uncheck_siblings();
-        if changed {
+        if changed && self.checked.get() {
             notify_change(&self.on_change, true);
         }
     }
@@ -220,6 +225,8 @@ impl RadioButton {
 
     /// Unchecks every other live member of this button's group, notifying each one that was
     /// checked. Members are collected first so no registry borrow is held during the calls.
+    /// Stops as soon as a re-entrant callback has unchecked this button: a newer selection then
+    /// owns the group, and continuing would uncheck it with stale state.
     fn uncheck_siblings(&self) {
         let group = self.group.borrow().clone();
         if group.is_empty() {
@@ -234,6 +241,9 @@ impl RadioButton {
                 .collect()
         });
         for member in members {
+            if !self.checked.get() {
+                break;
+            }
             let Some(member) = member.as_any().downcast_ref::<RadioButton>() else {
                 continue;
             };

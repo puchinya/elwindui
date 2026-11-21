@@ -712,6 +712,68 @@ fn radio_group_changes_move_the_registration() {
 }
 
 #[test]
+fn radio_reentrant_reselection_keeps_notifications_in_state_order() {
+    let factory = install_mock();
+    let a = RadioButton::new();
+    let b = RadioButton::new();
+    let c = RadioButton::new();
+    let (seen_a, sink_a) = recorder();
+    let (seen_c, sink_c) = recorder();
+    a.set_on_checked_change(sink_a);
+    c.set_on_checked_change(sink_c);
+    // B re-selects itself synchronously whenever it is unchecked.
+    let weak_b = Rc::downgrade(&b);
+    let seen_b = Rc::new(RefCell::new(Vec::new()));
+    let log_b = seen_b.clone();
+    b.set_on_checked_change(Box::new(move |checked| {
+        log_b.borrow_mut().push(checked);
+        if !checked {
+            if let Some(b) = weak_b.upgrade() {
+                b.set_checked(true);
+            }
+        }
+    }));
+    for button in [&a, &b, &c] {
+        button.set_group("g");
+        realize(button.as_ref());
+    }
+    b.set_checked(true);
+    factory.take_log();
+
+    // A native click on A: unchecking B re-enters and re-selects B, which unchecks A.
+    fire(&factory.peer(0).on_click, ());
+    assert!(!selected(&a) && selected(&b) && !selected(&c));
+    assert_eq!(
+        *seen_a.borrow(),
+        [false],
+        "no stale `true` after the re-entrant `false`"
+    );
+    assert_eq!(*seen_b.borrow(), [false]);
+    assert!(
+        seen_c.borrow().is_empty(),
+        "the stale outer pass must not touch the rest of the group"
+    );
+
+    // A's own `true` handler selecting C: A's last notification is `false`, matching state.
+    let seen_a2 = Rc::new(RefCell::new(Vec::new()));
+    let weak_c = Rc::downgrade(&c);
+    let log = seen_a2.clone();
+    a.set_on_checked_change(Box::new(move |checked| {
+        log.borrow_mut().push(checked);
+        if checked {
+            if let Some(c) = weak_c.upgrade() {
+                c.set_checked(true);
+            }
+        }
+    }));
+    b.set_on_checked_change(Box::new(|_| {}));
+    fire(&factory.peer(0).on_click, ());
+    assert!(!selected(&a) && !selected(&b) && selected(&c));
+    assert_eq!(*seen_a2.borrow(), [true, false]);
+    clear_native_peer_factory();
+}
+
+#[test]
 fn slider_accessibility_clamps_and_notifies_only_real_changes() {
     let factory = install_mock();
     let slider = Slider::new();

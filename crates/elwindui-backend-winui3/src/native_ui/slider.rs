@@ -58,6 +58,9 @@ impl SliderPeer for WinUi3SliderPeer {
     fn set_max(&self, max: f32) {
         self.inner.set_max(max);
     }
+    fn set_step(&self, step: Option<f32>) {
+        self.inner.set_step(step);
+    }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
     }

@@ -25,6 +25,7 @@ Snapshot: 2026-09-06. Public behavior is defined by [`../specs/ui_spec.md`](../s
 - `tooltip` is implemented for NativeControl descendants, not backend-neutral self-rendered elements.
 - Native control support has no GTK4 implementation.
 - `Button`, `Window`, `CheckBox`, `RadioButton`, `Slider`, `ToggleSwitch`, `TextBox`, `TextArea` and `PasswordBox` are now Core-owned Components over backend peers ([#313](https://github.com/puchinya/elwindui/issues/313)). Their AppKit peers are cross-checked only; the AppKit column reflects the pre-migration runtime evidence until the macOS run tracked by [#316](https://github.com/puchinya/elwindui/issues/316).
+- `Slider` `step` ([#321](https://github.com/puchinya/elwindui/issues/321)): Core snaps user changes for every backend. WinUI 3 pointer snapping is verified on Windows (an unset step is now continuous instead of WinUI's default 1). Native arrow keys on a WinUI 3 Slider did not reach the control in the E2E run, so the keyboard path is unverified. The AppKit path relies on Core's correction and is cross-checked only ([#316](https://github.com/puchinya/elwindui/issues/316)).
 - `NavigationHost`, `VirtualList`, and `ErrorBoundary` are not part of the 0.1.0 public control surface ([#85](https://github.com/puchinya/elwindui/issues/85)).
 - Additional controls remain backlog items until their public contract and design are approved.
 

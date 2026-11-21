@@ -146,6 +146,11 @@ mod controls_demo_view_model {
         slider_max: f32,
         #[observable(default = false)]
         slider_wide_range: bool,
+        // A second slider with `step: 0.25` (Issue #321): user changes land on 0, 0.25, ... 2.
+        #[observable(default = 1.0f32)]
+        stepped_slider_value: f32,
+        #[computed(expr = stepped_slider_value.to_string())]
+        stepped_slider_value_label: String,
 
         #[observable(default = String::new())]
         regression_text: String,
@@ -721,6 +726,18 @@ struct ControlsDemoWindow {
                     Button {
                         text: "Toggle range (0..1 / -100..100)"
                         on_click: vm.toggle_slider_range
+                    }
+                    TextBlock { text: "Slider with step: 0.25 (range 0..2; drag, arrow keys and accessibility snap):" }
+                    HorizontalLayout {
+                        spacing: 8.0
+                        Slider {
+                            width: 200.0
+                            value <=> vm.stepped_slider_value
+                            min: 0.0
+                            max: 2.0
+                            step: 0.25
+                        }
+                        TextBlock { text: vm.stepped_slider_value_label }
                     }
                 }
             }

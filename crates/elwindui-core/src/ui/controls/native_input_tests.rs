@@ -125,6 +125,9 @@ impl SliderPeer for MockInputPeer {
     fn set_max(&self, max: f32) {
         self.record(format!("max:{max}"));
     }
+    fn set_step(&self, step: Option<f32>) {
+        self.record(format!("step:{step:?}"));
+    }
     fn set_enabled(&self, enabled: bool) {
         self.record(format!("enabled:{enabled}"));
     }
@@ -481,6 +484,7 @@ fn slider_pushes_range_before_value_and_drops_echoes() {
         [
             "min:10",
             "max:20",
+            "step:None",
             "value:15",
             "enabled:true",
             "on_change:true",
@@ -501,6 +505,119 @@ fn slider_pushes_range_before_value_and_drops_echoes() {
     let range = semantics(slider.as_ref()).state.value_range.expect("range");
     assert_eq!((range.value, range.min, range.max), (18.5, 10.0, 20.0));
     clear_native_peer_factory();
+}
+
+#[test]
+fn slider_step_snaps_user_changes_only() {
+    let factory = install_mock();
+    let slider = Slider::new();
+    slider.set_min(0.0);
+    slider.set_max(10.0);
+    slider.set_step(0.25);
+    slider.set_value(1.1);
+    let (seen, sink) = recorder();
+    slider.set_on_value_change(sink);
+    realize(slider.as_ref());
+    assert_eq!(
+        factory.take_log(),
+        [
+            "min:0",
+            "max:10",
+            "step:Some(0.25)",
+            "value:1.1",
+            "enabled:true",
+            "on_change:true",
+            "measure"
+        ],
+        "range, then step, then value; a programmatic value is not snapped"
+    );
+    let range = semantics(slider.as_ref()).state.value_range.expect("range");
+    assert_eq!(range.step, Some(0.25));
+    assert_eq!(range.value, 1.1f32 as f64);
+
+    // A native report off the grid is snapped, pushed back once, and notified once.
+    let peer = factory.peer(0);
+    fire(&peer.on_f32, 2.6);
+    assert_eq!(*seen.borrow(), [2.5]);
+    assert_eq!(factory.take_log(), ["value:2.5"]);
+    // A report that snaps to the stored value only corrects the widget.
+    fire(&peer.on_f32, 2.55);
+    assert_eq!(*seen.borrow(), [2.5]);
+    assert_eq!(factory.take_log(), ["value:2.5"]);
+    // An on-grid report is neither pushed back nor (as an echo) notified.
+    fire(&peer.on_f32, 2.5);
+    assert!(factory.take_log().is_empty());
+    assert_eq!(*seen.borrow(), [2.5]);
+
+    // Accessibility moves by the step and snaps `SetValue`.
+    assert!(slider.perform_accessibility_action(AccessibilityAction::Increment));
+    assert!(slider.perform_accessibility_action(AccessibilityAction::SetValue(4.13)));
+    assert!(slider.perform_accessibility_action(AccessibilityAction::Decrement));
+    assert_eq!(*seen.borrow(), [2.5, 2.75, 4.25, 4.0]);
+    factory.take_log();
+
+    // Changing the step never re-snaps the current value.
+    slider.set_step(3.0);
+    assert_eq!(factory.take_log(), ["step:Some(3.0)"]);
+    assert_eq!(seen.borrow().len(), 4);
+    let range = semantics(slider.as_ref()).state.value_range.expect("range");
+    assert_eq!((range.value, range.step), (4.0, Some(3.0)));
+    clear_native_peer_factory();
+}
+
+#[test]
+fn slider_invalid_step_is_continuous() {
+    let factory = install_mock();
+    let slider = Slider::new();
+    slider.set_min(0.0);
+    slider.set_max(2.0);
+    realize(slider.as_ref());
+    factory.take_log();
+    for invalid in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        slider.set_step(invalid);
+        assert_eq!(factory.take_log(), ["step:None"], "{invalid} is not a step");
+        let range = semantics(slider.as_ref()).state.value_range.expect("range");
+        assert_eq!(range.step, None);
+    }
+    let (seen, sink) = recorder();
+    slider.set_on_value_change(sink);
+    fire(&factory.peer(0).on_f32, 0.37);
+    assert_eq!(
+        *seen.borrow(),
+        [0.37],
+        "continuous: reported values are kept"
+    );
+    assert!(factory.take_log().is_empty());
+    assert!(slider.perform_accessibility_action(AccessibilityAction::Increment));
+    assert_eq!(
+        *seen.borrow(),
+        [0.37, 0.37 + 1.0],
+        "continuous accessibility steps by 1"
+    );
+    clear_native_peer_factory();
+}
+
+#[test]
+fn slider_snap_keeps_max_reachable_and_stays_in_range() {
+    use super::slider::snap_slider_value as snap;
+    // An uneven `max` stays reachable, and the nearer of grid point and `max` wins.
+    assert_eq!(snap(9.9, 0.0, 10.0, Some(3.0)), 10.0);
+    assert_eq!(snap(9.2, 0.0, 10.0, Some(3.0)), 9.0);
+    assert_eq!(snap(10.0, 0.0, 10.0, Some(3.0)), 10.0);
+    // The grid starts at the smaller bound, also for an inverted or negative range.
+    assert_eq!(snap(-3.4, -5.0, 5.0, Some(2.0)), -3.0);
+    assert_eq!(snap(4.0, 5.0, -5.0, Some(2.0)), 5.0);
+    assert_eq!(snap(-2.1, 5.0, -5.0, Some(2.0)), -3.0);
+    // Out-of-range and NaN requests land inside the range.
+    assert_eq!(snap(50.0, 0.0, 10.0, Some(0.5)), 10.0);
+    assert_eq!(snap(-50.0, 0.0, 10.0, Some(0.5)), 0.0);
+    let nan = snap(f32::NAN, 0.0, 10.0, Some(0.5));
+    assert!((0.0..=10.0).contains(&nan));
+    // A step larger than the range offers only the two ends.
+    assert_eq!(snap(0.4, 0.0, 1.0, Some(5.0)), 0.0);
+    assert_eq!(snap(0.6, 0.0, 1.0, Some(5.0)), 1.0);
+    // Without a step only the range applies.
+    assert_eq!(snap(0.37, 0.0, 1.0, None), 0.37);
 }
 
 #[test]

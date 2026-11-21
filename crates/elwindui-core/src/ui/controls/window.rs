@@ -48,7 +48,9 @@ pub struct Window {
     /// The most-derived Window: the backend retention registry upgrades it on first show.
     self_weak: Weak<dyn WindowExt>,
     peer: OnceCell<Rc<dyn WindowPeer>>,
-    title: RefCell<String>,
+    /// `None` until `set_title` is called: realization then leaves the platform's default title.
+    /// `Some("")` is an explicit empty title and is pushed like any other (PR #318 review).
+    title: RefCell<Option<String>>,
     menu_bar: RefCell<Option<Rc<dyn MenuBarExt>>>,
     content: RefCell<Option<Rc<dyn UIElementExt>>>,
     transparent: Cell<bool>,
@@ -64,7 +66,7 @@ pub struct Window {
 #[elwindui_macros::component]
 impl Window {
     fn set_title(&self, title: &str) {
-        *self.as_ui_element().title.borrow_mut() = title.to_string();
+        *self.as_ui_element().title.borrow_mut() = Some(title.to_string());
         if let Some(peer) = self.as_ui_element().peer.get() {
             peer.set_title(title);
         }
@@ -235,7 +237,7 @@ impl Window {
         Self {
             self_weak: __self_weak.clone(),
             peer: OnceCell::new(),
-            title: RefCell::new(String::new()),
+            title: RefCell::new(None),
             menu_bar: RefCell::new(None),
             content: RefCell::new(None),
             transparent: Cell::new(false),
@@ -272,7 +274,7 @@ impl Window {
         let peer = self.peer.get().expect("peer was just installed");
         // Phase 2: push the logical state. Values are cloned out first: the peer may re-enter.
         let title = self.title.borrow().clone();
-        if !title.is_empty() {
+        if let Some(title) = title {
             peer.set_title(&title);
         }
         let menu_bar = self.menu_bar.borrow().clone();
@@ -654,6 +656,33 @@ mod tests {
             ["title:Renamed", "left:5", "top:6", "width:7", "height:8"]
         );
         window.close();
+        clear_native_peer_factory();
+    }
+
+    #[test]
+    fn an_explicit_empty_title_is_pushed_but_an_unset_title_is_not() {
+        let factory = install_mock();
+        let untitled = Window::new();
+        untitled.show();
+        assert!(
+            !factory
+                .log
+                .borrow()
+                .iter()
+                .any(|entry| entry.starts_with("title:")),
+            "an unset title keeps the platform's default title"
+        );
+        untitled.close();
+
+        factory.log.borrow_mut().clear();
+        let empty = Window::new();
+        empty.set_title("");
+        empty.show();
+        assert_eq!(
+            factory.log.borrow().first().map(String::as_str),
+            Some("title:")
+        );
+        empty.close();
         clear_native_peer_factory();
     }
 

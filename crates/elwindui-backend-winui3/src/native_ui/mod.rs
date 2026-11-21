@@ -33,7 +33,7 @@ impl NativePeerFactory for WinUi3PeerFactory {
         Rc::new(button::WinUi3ButtonPeer::new())
     }
     fn create_window(&self, owner: Weak<dyn elwindui_core::ui::WindowExt>) -> Rc<dyn WindowPeer> {
-        Rc::new(window::WinUi3WindowPeer::new(owner))
+        window::WinUi3WindowPeer::create(owner)
     }
 }
 
@@ -137,7 +137,7 @@ mod slider;
 pub(crate) mod tab_view;
 mod text;
 mod toggle_switch;
-mod window;
+pub(crate) mod window;
 
 // Glob re-exports, not a named list: `#[class]` generates a companion `__elwindui_macros_of_*`
 // path alias next to each class, which downstream `#[component(inherits ..)]` resolves as

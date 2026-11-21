@@ -12,7 +12,7 @@ use crate::host::{TreeHost, TreeHostViewport};
 use elwindui_core::base::Rect;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
-use windows::Graphics::{PointInt32, SizeInt32};
+use windows::Graphics::PointInt32;
 use windows::core::HSTRING;
 use windows::core::Interface;
 
@@ -144,6 +144,9 @@ pub(crate) struct InnerWindow {
     framework_initiated_close: Rc<Cell<bool>>,
     bounds_changed_handler: Rc<RefCell<Option<Rc<dyn Fn(Rect)>>>>,
     bounds_changed_registered: Cell<bool>,
+    /// Bounds edges requested while no `AppWindow` was available (PR #318 review). Applied in one
+    /// `MoveAndResize` as soon as one is, at the latest by `show()`.
+    pending_bounds: PendingBounds,
 }
 
 impl InnerWindow {
@@ -213,6 +216,7 @@ impl InnerWindow {
             callback_owner,
             closing_registered: Cell::new(false),
             framework_initiated_close: Rc::new(Cell::new(false)),
+            pending_bounds: PendingBounds::default(),
             bounds_changed_handler: Rc::new(RefCell::new(None)),
             bounds_changed_registered: Cell::new(false),
         };
@@ -613,6 +617,8 @@ impl InnerWindow {
         // in case `new()`'s own best-effort attempt ran too early.
         self.try_register_closing_handler();
         self.try_register_bounds_changed_handler();
+        // Before `Activate()`, so the window first appears at its requested place and size.
+        self.pending_bounds.flush(&self.bounds_target());
         if !self.retained.get() {
             let owner = self.owner.upgrade().expect(
                 "InnerWindow::show: internal invariant violated - final Window owner was already dropped before its first show()",
@@ -621,6 +627,8 @@ impl InnerWindow {
             self.retained.set(true);
         }
         let _ = self.xaml.Activate();
+        // Retry once more in case the `AppWindow` only became available through `Activate()`.
+        self.pending_bounds.flush(&self.bounds_target());
         // Issue #225: `Window.Bounds` is commonly already valid immediately after `Activate()` —
         // apply it now rather than waiting for the first `Window.SizeChanged` to fire, so the
         // first Core layout pass after a fresh `show()` does not have to guess at a `0x0`
@@ -663,6 +671,14 @@ impl InnerWindow {
     }
 
     #[cfg(test)]
+    pub(crate) fn title_for_test(&self) -> String {
+        self.xaml
+            .Title()
+            .map(|title| title.to_string())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_visible_for_test(&self) -> bool {
         self.app_window()
             .and_then(|window| window.IsVisible().ok())
@@ -697,90 +713,295 @@ impl InnerWindow {
     /// top-left-origin, Y increasing downward — unlike `elwindui-backend-appkit`'s `Window`, no
     /// coordinate conversion is needed here. `None` (no `AppWindow` yet, e.g. before the window has
     /// ever been shown) reads back as `0.0`.
+    fn bounds_target(&self) -> AppWindowBounds {
+        AppWindowBounds(self.app_window())
+    }
+
+    /// `AppWindow.Position.X`/`.Y` and `AppWindow.Size.Width`/`.Height` are already
+    /// top-left-origin, Y increasing downward, so no coordinate conversion is needed. Before an
+    /// `AppWindow` exists, a getter returns the pending requested value, or `0.0`.
     pub(crate) fn left(&self) -> f32 {
-        self.app_window()
-            .and_then(|w| w.Position().ok())
-            .map(|p| p.X as f32)
-            .unwrap_or(0.0)
+        self.pending_bounds
+            .get(BoundsEdge::Left, &self.bounds_target())
     }
 
     pub(crate) fn set_left(&self, left: f32) {
-        if let Some(app_window) = self.app_window() {
-            if let Ok(position) = app_window.Position() {
-                let _ = app_window.Move(PointInt32 {
-                    X: left as i32,
-                    Y: position.Y,
-                });
-            }
-        }
+        self.pending_bounds
+            .set(BoundsEdge::Left, left, &self.bounds_target());
     }
 
     /// Applies a complete native window rectangle as one AppWindow operation. Docking uses
     /// this for retained floating-host reconciliation so WinUI3 does not publish a sequence of
     /// intermediate position/size notifications while the model is being synchronized.
     pub(crate) fn set_bounds(&self, bounds: Rect) {
-        if let Some(app_window) = self.app_window() {
-            let _ = app_window.MoveAndResize(windows::Graphics::RectInt32 {
+        self.pending_bounds.set_all(bounds, &self.bounds_target());
+    }
+
+    pub(crate) fn top(&self) -> f32 {
+        self.pending_bounds
+            .get(BoundsEdge::Top, &self.bounds_target())
+    }
+
+    pub(crate) fn set_top(&self, top: f32) {
+        self.pending_bounds
+            .set(BoundsEdge::Top, top, &self.bounds_target());
+    }
+
+    pub(crate) fn width(&self) -> f32 {
+        self.pending_bounds
+            .get(BoundsEdge::Width, &self.bounds_target())
+    }
+
+    pub(crate) fn set_width(&self, width: f32) {
+        self.pending_bounds
+            .set(BoundsEdge::Width, width, &self.bounds_target());
+    }
+
+    pub(crate) fn height(&self) -> f32 {
+        self.pending_bounds
+            .get(BoundsEdge::Height, &self.bounds_target())
+    }
+
+    pub(crate) fn set_height(&self, height: f32) {
+        self.pending_bounds
+            .set(BoundsEdge::Height, height, &self.bounds_target());
+    }
+}
+
+/// One edge of a window rectangle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoundsEdge {
+    Left,
+    Top,
+    Width,
+    Height,
+}
+
+/// Where window bounds are read from and written to. `None`/`false` while the native window has
+/// no `AppWindow` yet. A trait so the pending-bounds logic is testable without XAML.
+trait BoundsTarget {
+    fn current(&self) -> Option<Rect>;
+    fn move_and_resize(&self, bounds: Rect) -> bool;
+}
+
+/// The real target: the XAML window's `AppWindow`, when it has one.
+struct AppWindowBounds(Option<bindings::Microsoft::UI::Windowing::AppWindow>);
+
+impl BoundsTarget for AppWindowBounds {
+    fn current(&self) -> Option<Rect> {
+        let app_window = self.0.as_ref()?;
+        let position = app_window.Position().ok()?;
+        let size = app_window.Size().ok()?;
+        Some(Rect {
+            x: position.X as f32,
+            y: position.Y as f32,
+            width: size.Width as f32,
+            height: size.Height as f32,
+        })
+    }
+
+    fn move_and_resize(&self, bounds: Rect) -> bool {
+        let Some(app_window) = self.0.as_ref() else {
+            return false;
+        };
+        app_window
+            .MoveAndResize(windows::Graphics::RectInt32 {
                 X: bounds.x as i32,
                 Y: bounds.y as i32,
                 Width: bounds.width as i32,
                 Height: bounds.height as i32,
-            });
+            })
+            .is_ok()
+    }
+}
+
+/// Bounds edges requested before the native window could take them (PR #318 review).
+///
+/// A setter applies its edge immediately when the target is available, merged with the current
+/// native values of the other edges (`Move`/`Resize` semantics). When the target is not
+/// available, or the native call fails, the edge is kept pending, merged with any other pending
+/// edges, and applied in one `MoveAndResize` by [`Self::flush`]. A getter returns the native
+/// value when available and the pending value otherwise, so a value is never silently lost.
+#[derive(Default)]
+struct PendingBounds {
+    left: Cell<Option<f32>>,
+    top: Cell<Option<f32>>,
+    width: Cell<Option<f32>>,
+    height: Cell<Option<f32>>,
+}
+
+impl PendingBounds {
+    fn cell(&self, edge: BoundsEdge) -> &Cell<Option<f32>> {
+        match edge {
+            BoundsEdge::Left => &self.left,
+            BoundsEdge::Top => &self.top,
+            BoundsEdge::Width => &self.width,
+            BoundsEdge::Height => &self.height,
         }
     }
 
-    pub(crate) fn top(&self) -> f32 {
-        self.app_window()
-            .and_then(|w| w.Position().ok())
-            .map(|p| p.Y as f32)
+    fn is_empty(&self) -> bool {
+        [&self.left, &self.top, &self.width, &self.height]
+            .iter()
+            .all(|cell| cell.get().is_none())
+    }
+
+    fn get(&self, edge: BoundsEdge, target: &dyn BoundsTarget) -> f32 {
+        if let Some(pending) = self.cell(edge).get() {
+            return pending;
+        }
+        target
+            .current()
+            .map(|bounds| match edge {
+                BoundsEdge::Left => bounds.x,
+                BoundsEdge::Top => bounds.y,
+                BoundsEdge::Width => bounds.width,
+                BoundsEdge::Height => bounds.height,
+            })
             .unwrap_or(0.0)
     }
 
-    pub(crate) fn set_top(&self, top: f32) {
-        if let Some(app_window) = self.app_window() {
-            if let Ok(position) = app_window.Position() {
-                let _ = app_window.Move(PointInt32 {
-                    X: position.X,
-                    Y: top as i32,
-                });
+    fn set(&self, edge: BoundsEdge, value: f32, target: &dyn BoundsTarget) {
+        self.cell(edge).set(Some(value));
+        self.flush(target);
+    }
+
+    fn set_all(&self, bounds: Rect, target: &dyn BoundsTarget) {
+        self.left.set(Some(bounds.x));
+        self.top.set(Some(bounds.y));
+        self.width.set(Some(bounds.width));
+        self.height.set(Some(bounds.height));
+        self.flush(target);
+    }
+
+    /// Applies every pending edge in one native operation once the target is available. Keeps
+    /// them pending if it is not, or if the native call fails.
+    fn flush(&self, target: &dyn BoundsTarget) {
+        if self.is_empty() {
+            return;
+        }
+        let Some(current) = target.current() else {
+            return;
+        };
+        let merged = Rect {
+            x: self.left.get().unwrap_or(current.x),
+            y: self.top.get().unwrap_or(current.y),
+            width: self.width.get().unwrap_or(current.width),
+            height: self.height.get().unwrap_or(current.height),
+        };
+        if target.move_and_resize(merged) {
+            for cell in [&self.left, &self.top, &self.width, &self.height] {
+                cell.set(None);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod pending_bounds_tests {
+    use super::*;
+
+    /// A target that becomes available on demand and records native writes.
+    struct FakeTarget {
+        available: Cell<bool>,
+        fail_writes: Cell<bool>,
+        bounds: Cell<Rect>,
+        writes: RefCell<Vec<Rect>>,
+    }
+
+    impl FakeTarget {
+        fn new() -> Self {
+            Self {
+                available: Cell::new(false),
+                fail_writes: Cell::new(false),
+                bounds: Cell::new(rect(0.0, 0.0, 0.0, 0.0)),
+                writes: RefCell::new(Vec::new()),
             }
         }
     }
 
-    pub(crate) fn width(&self) -> f32 {
-        self.app_window()
-            .and_then(|w| w.Size().ok())
-            .map(|s| s.Width as f32)
-            .unwrap_or(0.0)
-    }
-
-    pub(crate) fn set_width(&self, width: f32) {
-        if let Some(app_window) = self.app_window() {
-            if let Ok(size) = app_window.Size() {
-                let _ = app_window.Resize(SizeInt32 {
-                    Width: width as i32,
-                    Height: size.Height,
-                });
+    impl BoundsTarget for FakeTarget {
+        fn current(&self) -> Option<Rect> {
+            self.available.get().then(|| self.bounds.get())
+        }
+        fn move_and_resize(&self, bounds: Rect) -> bool {
+            if !self.available.get() || self.fail_writes.get() {
+                return false;
             }
+            self.writes.borrow_mut().push(bounds);
+            self.bounds.set(bounds);
+            true
         }
     }
 
-    pub(crate) fn height(&self) -> f32 {
-        self.app_window()
-            .and_then(|w| w.Size().ok())
-            .map(|s| s.Height as f32)
-            .unwrap_or(0.0)
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
-    pub(crate) fn set_height(&self, height: f32) {
-        if let Some(app_window) = self.app_window() {
-            if let Ok(size) = app_window.Size() {
-                let _ = app_window.Resize(SizeInt32 {
-                    Width: size.Width,
-                    Height: height as i32,
-                });
-            }
-        }
+    #[test]
+    fn edges_set_before_the_app_window_exists_are_applied_once_it_does() {
+        let target = FakeTarget::new();
+        target.bounds.set(rect(10.0, 20.0, 800.0, 600.0));
+        let pending = PendingBounds::default();
+        pending.set(BoundsEdge::Left, 150.0, &target);
+        pending.set(BoundsEdge::Top, 160.0, &target);
+        pending.set(BoundsEdge::Width, 400.0, &target);
+        // Nothing reached the native window, and nothing was lost: getters report the request.
+        assert!(target.writes.borrow().is_empty());
+        assert_eq!(pending.get(BoundsEdge::Left, &target), 150.0);
+        assert_eq!(pending.get(BoundsEdge::Height, &target), 0.0);
+
+        // Unavailable -> available: one MoveAndResize, merged with the native height.
+        target.available.set(true);
+        pending.flush(&target);
+        assert_eq!(
+            target.writes.borrow().as_slice(),
+            [rect(150.0, 160.0, 400.0, 600.0)]
+        );
+        assert!(pending.is_empty());
+        assert_eq!(pending.get(BoundsEdge::Width, &target), 400.0);
+
+        // Nothing pending: a later flush (for example the post-Activate retry) writes nothing.
+        pending.flush(&target);
+        assert_eq!(target.writes.borrow().len(), 1);
+    }
+
+    #[test]
+    fn an_available_target_is_written_immediately() {
+        let target = FakeTarget::new();
+        target.available.set(true);
+        target.bounds.set(rect(10.0, 20.0, 800.0, 600.0));
+        let pending = PendingBounds::default();
+        pending.set(BoundsEdge::Top, 5.0, &target);
+        pending.set_all(rect(1.0, 2.0, 3.0, 4.0), &target);
+        assert_eq!(
+            target.writes.borrow().as_slice(),
+            [rect(10.0, 5.0, 800.0, 600.0), rect(1.0, 2.0, 3.0, 4.0)]
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn a_failed_native_write_stays_pending_and_is_retried() {
+        let target = FakeTarget::new();
+        target.available.set(true);
+        target.fail_writes.set(true);
+        target.bounds.set(rect(0.0, 0.0, 800.0, 600.0));
+        let pending = PendingBounds::default();
+        pending.set(BoundsEdge::Width, 320.0, &target);
+        assert!(!pending.is_empty());
+        assert_eq!(pending.get(BoundsEdge::Width, &target), 320.0);
+        target.fail_writes.set(false);
+        pending.flush(&target);
+        assert_eq!(
+            target.writes.borrow().as_slice(),
+            [rect(0.0, 0.0, 320.0, 600.0)]
+        );
     }
 }
 

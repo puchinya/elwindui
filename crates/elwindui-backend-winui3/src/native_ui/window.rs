@@ -22,6 +22,32 @@ impl WinUi3WindowPeer {
             inner: InnerWindow::new(owner),
         }
     }
+
+    /// Creates a peer through the factory path, remembering it for hosted tests.
+    pub(crate) fn create(owner: Weak<dyn WindowExt>) -> Rc<Self> {
+        let peer = Rc::new(Self::new(owner));
+        #[cfg(test)]
+        LAST_CREATED.with(|last| *last.borrow_mut() = Rc::downgrade(&peer));
+        peer
+    }
+
+    /// The most recently created peer on this thread, for hosted tests that need to inspect the
+    /// native window behind a Core `Window`.
+    #[cfg(test)]
+    pub(crate) fn last_created_for_test() -> Option<Rc<Self>> {
+        LAST_CREATED.with(|last| last.borrow().upgrade())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inner_for_test(&self) -> &InnerWindow {
+        &self.inner
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_CREATED: std::cell::RefCell<Weak<WinUi3WindowPeer>> =
+        const { std::cell::RefCell::new(Weak::new()) };
 }
 
 impl WindowPeer for WinUi3WindowPeer {

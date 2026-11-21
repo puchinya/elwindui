@@ -297,6 +297,15 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   bar, transparency, always-on-top, the bounds edges that were set, then content), then install the
   close-request and bounds-changed handlers **last**. Values are cloned out of their `RefCell`s before
   each peer call.
+- **Unset vs explicit values:** the title is `Option<String>`. An unset title is never pushed, so the
+  platform's default title stays. An explicit `set_title("")` is pushed like any other value. Bounds
+  edges are pushed only when set.
+- **Bounds the native window cannot take yet:** a backend whose native bounds API can be temporarily
+  unavailable must not drop a pushed edge. The WinUI3 peer keeps edges requested while `AppWindow` is
+  unavailable (or whose native call failed) pending. Its getters report the pending value, and it
+  applies them in one `MoveAndResize` as soon as `AppWindow` is available, at the latest in `show()`
+  before and again after `Activate()`. AppKit's `NSWindow` always exists, so it needs no pending
+  state.
 - `WindowLifecycleHost` stays a Core trait and is implemented by Core `Window`: each handler is stored
   logically and pushed to the peer when realized. The close-request contract (§4i) is unchanged: a
   `Weak` owner, `bool` = accepted or owner gone, mount installs the handler after chaining, and unmount

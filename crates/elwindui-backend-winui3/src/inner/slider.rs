@@ -4,6 +4,7 @@ use super::{CallbackSlot, invoke_slot, new_callback_slot};
 use crate::bindings::Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventHandler;
 use crate::bindings::Microsoft::UI::Xaml::Controls::Slider as XamlSlider;
 use crate::ffi::{AnyView, UiCallbackRegistryOwner, UiEventGate, invoke_ui_f32_event_callback};
+use std::cell::Cell;
 use std::rc::Rc;
 
 /// Raw `XamlSlider` + change wiring — composed by `native_ui::Slider`.
@@ -12,6 +13,10 @@ pub(crate) struct InnerSlider {
     xaml: XamlSlider,
     on_change: CallbackSlot<f32>,
     events: UiEventGate,
+    /// The last pushed range and normalized step, from which `StepFrequency`/`SmallChange` are
+    /// derived (`apply_step`).
+    range: Cell<(f32, f32)>,
+    step: Cell<Option<f32>>,
     /// Owns every registry entry this widget registered; dropping the widget removes them. Held
     /// only for that `Drop`.
     _callbacks: UiCallbackRegistryOwner,
@@ -47,6 +52,8 @@ impl InnerSlider {
             xaml,
             on_change,
             events,
+            range: Cell::new((0.0, 1.0)),
+            step: Cell::new(None),
             _callbacks: callbacks,
         }
     }
@@ -69,11 +76,44 @@ impl InnerSlider {
         self.events.suppress(|| {
             let _ = self.xaml.SetMinimum(min as f64);
         });
+        self.range.set((min, self.range.get().1));
+        self.apply_step();
     }
 
     pub(crate) fn set_max(&self, max: f32) {
         self.events.suppress(|| {
             let _ = self.xaml.SetMaximum(max as f64);
+        });
+        self.range.set((self.range.get().0, max));
+        self.apply_step();
+    }
+
+    /// Core owns the snapping rule; this only tunes the native feel.
+    pub(crate) fn set_step(&self, step: Option<f32>) {
+        self.step.set(step);
+        self.apply_step();
+    }
+
+    /// With a step, dragging and the arrow keys move by it. Without one the slider is continuous:
+    /// `StepFrequency` defaults to 1, which would snap every `0..1` slider to its ends, so it is set
+    /// to 1/10000 of the range, while `SmallChange` stays 1 like the accessibility `Increment`.
+    fn apply_step(&self) {
+        let (frequency, small_change) = match self.step.get() {
+            Some(step) => (step as f64, step as f64),
+            None => {
+                let (min, max) = self.range.get();
+                let range = (max as f64 - min as f64).abs();
+                let frequency = if range.is_finite() && range > 0.0 {
+                    range / 10_000.0
+                } else {
+                    1e-4
+                };
+                (frequency, 1.0)
+            }
+        };
+        self.events.suppress(|| {
+            let _ = self.xaml.SetStepFrequency(frequency);
+            let _ = self.xaml.SetSmallChange(small_change);
         });
     }
 

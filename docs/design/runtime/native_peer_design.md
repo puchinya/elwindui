@@ -359,6 +359,23 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   `min..=max` (as the widget clamps a drag; NaN lands on a bound) before comparing. An unchanged result
   (`SetValue(current)`, `Increment` at `max`, `Decrement` at `min`) pushes and notifies nothing, so the
   logical value, the accessibility range and the notified value never leave the range.
+- **Slider step (#321):** Core owns the step rule (`ui_spec.md` Slider `step`). A step is valid only
+  when finite and positive; otherwise the slider is continuous. `snap(v)` rounds `v` onto
+  `low + k × step` (`low`/`high` = the smaller/larger of `min`/`max`), keeps it inside `low..=high`, and
+  prefers `high` when that is nearer, so an uneven `max` stays reachable. Only user changes snap:
+  - A native change reported by the peer is snapped. When the snapped value differs from the report,
+    Core pushes it back with `set_value` (programmatic, no echo), like the CheckBox `Indeterminate`
+    correction. The two-way rule then compares the snapped value with the stored one.
+  - Accessibility `SetValue(v)` applies `snap(v)`; `Increment`/`Decrement` apply `snap(value ± d)`
+    with `d` = step (1 when continuous).
+  - Programmatic `set_value` and `set_step` never change the stored value.
+  - `SliderPeer::set_step(Option<f32>)` receives only a normalized step (invalid values as `None`),
+    pushed after the range and before the value. Peers only tune native feel. WinUI3 sets
+    `StepFrequency`/`SmallChange` to the step; when continuous it sets `StepFrequency` to 1/10000 of
+    the range (overriding the toolkit default of 1, which snapped every 0..1 slider to its ends) and
+    keeps `SmallChange` = 1, and it recomputes these when `min`/`max` change. AppKit (`NSSlider`) has
+    no step API and relies on Core's correction (cross-checked only, #316).
+  - The accessibility `ValueRange.step` exposes the valid step.
 - **CheckBox from `Indeterminate`:** a user click on a box showing `Indeterminate` lands on `Checked`
   (`ui_spec.md`). Core enforces it in the change callback: whatever state the toolkit's own cycle
   reports (WinUI3's three-state cycle reports `Unchecked`), Core stores `Checked`, pushes it back to

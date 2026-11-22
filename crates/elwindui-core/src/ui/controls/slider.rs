@@ -20,11 +20,14 @@ use std::cell::OnceCell;
 #[prop(two_way, value: f32)]
 #[prop(min: f32)]
 #[prop(max: f32)]
+#[prop(step: Option<f32>)]
 #[prop(enabled: Option<bool>)]
 pub struct Slider {
     value: Cell<f32>,
     min: Cell<f32>,
     max: Cell<f32>,
+    /// The normalized step: `Some` only for a finite, positive value (`ui_spec.md` Slider `step`).
+    step: Cell<Option<f32>>,
     enabled: Cell<bool>,
     on_change: RefCell<Option<Rc<dyn Fn(f32)>>>,
     peer: OnceCell<Rc<dyn SliderPeer>>,
@@ -40,11 +43,11 @@ impl Slider {
                 true
             }
             AccessibilityAction::Increment => {
-                self.accessibility_set_value(self.value.get() + 1.0);
+                self.accessibility_set_value(self.value.get() + self.increment());
                 true
             }
             AccessibilityAction::Decrement => {
-                self.accessibility_set_value(self.value.get() - 1.0);
+                self.accessibility_set_value(self.value.get() - self.increment());
                 true
             }
             AccessibilityAction::Focus => self.focus(),
@@ -62,12 +65,13 @@ impl Slider {
         Some(peer)
     }
 
-    /// Realization phase 3: range before value, then the change callback last.
+    /// Realization phase 3: range, then step, then value, then the change callback last.
     #[overrides]
     fn __initialize_native_peer(&self) {
         let peer = self.peer.get().expect("created in phase 1").clone();
         peer.set_min(self.min.get());
         peer.set_max(self.max.get());
+        peer.set_step(self.step.get());
         peer.set_value(self.value.get());
         peer.set_enabled(self.enabled.get());
         peer.set_on_change(Some(weak_native_callback(
@@ -105,6 +109,17 @@ impl Slider {
         self.sync_range_semantics();
     }
 
+    /// Sets the step. A value that is not finite and positive makes the slider continuous. The
+    /// current value is not re-snapped; only later user changes snap (`ui_spec.md`).
+    fn set_step(&self, step: f32) {
+        let step = (step.is_finite() && step > 0.0).then_some(step);
+        self.step.set(step);
+        if let Some(peer) = self.peer.get() {
+            peer.set_step(step);
+        }
+        self.sync_range_semantics();
+    }
+
     fn set_enabled(&self, enabled: bool) {
         self.enabled.set(enabled);
         if let Some(peer) = self.peer.get() {
@@ -125,6 +140,7 @@ impl Slider {
             value: Cell::new(0.0),
             min: Cell::new(0.0),
             max: Cell::new(1.0),
+            step: Cell::new(None),
             enabled: Cell::new(true),
             on_change: RefCell::new(None),
             peer: OnceCell::new(),
@@ -160,10 +176,7 @@ impl Slider {
     /// `Decrement` at `min`) changes nothing and notifies nothing; otherwise the value is applied
     /// and `on_change` fires exactly once.
     fn accessibility_set_value(&self, requested: f32) {
-        let (min, max) = (self.min.get(), self.max.get());
-        let (low, high) = (min.min(max), min.max(max));
-        // `f32::max`/`min` (unlike `clamp`) never panic and map NaN onto the range.
-        let value = requested.max(low).min(high);
+        let value = self.snap(requested);
         if value == self.value.get() {
             return;
         }
@@ -171,8 +184,26 @@ impl Slider {
         notify_change(&self.on_change, value);
     }
 
-    /// A user change reported by the peer (§5 two-way rule).
-    fn on_native_change(&self, value: f32) {
+    /// The accessibility `Increment`/`Decrement` amount: the step, or 1 when continuous.
+    fn increment(&self) -> f32 {
+        self.step.get().unwrap_or(1.0)
+    }
+
+    /// Where a user change lands (`ui_spec.md` Slider `step`): inside `low..=high` and, with a
+    /// step, on `low + k × step` or on `high`, whichever is nearer.
+    fn snap(&self, requested: f32) -> f32 {
+        snap_slider_value(requested, self.min.get(), self.max.get(), self.step.get())
+    }
+
+    /// A user change reported by the peer (§5 two-way rule). It is snapped first; a snapped value
+    /// that differs from the report is pushed back to the widget (programmatic, no echo).
+    fn on_native_change(&self, reported: f32) {
+        let value = self.snap(reported);
+        if value != reported {
+            if let Some(peer) = self.peer.get() {
+                peer.set_value(value);
+            }
+        }
         if self.value.get() == value {
             return;
         }
@@ -182,17 +213,48 @@ impl Slider {
     }
 
     fn sync_range_semantics(&self) {
-        let (value, min, max) = (self.value.get(), self.min.get(), self.max.get());
-        update_intrinsic_semantics(self.as_ui_element(), |semantics| {
-            let range = semantics.state.value_range.get_or_insert(ValueRange {
-                value: 0.0,
-                min: 0.0,
-                max: 1.0,
-                step: None,
-            });
-            range.value = value as f64;
-            range.min = min as f64;
-            range.max = max as f64;
+        let Some(mut semantics) = self.intrinsic_accessibility_semantics() else {
+            return;
+        };
+        let range = semantics.state.value_range.get_or_insert(ValueRange {
+            value: 0.0,
+            min: 0.0,
+            max: 1.0,
+            step: None,
         });
+        range.value = f64::from(self.value.get());
+        range.min = f64::from(self.min.get());
+        range.max = f64::from(self.max.get());
+        range.step = self.step.get().map(f64::from);
+        self.set_intrinsic_accessibility_semantics(semantics);
     }
+}
+
+/// Snaps a user-requested slider value (`ui_spec.md` Slider `step`). `f32::max`/`min` (unlike
+/// `clamp`) never panic, so a NaN request or an inverted range still lands inside the range. The
+/// grid arithmetic runs in `f64`: every finite positive `f32` step is valid, and an `f32` quotient
+/// `(value - low) / step` overflows to infinity for a tiny step (or a span wider than `f32::MAX`),
+/// which would otherwise throw the value to `high`. The `f64` quotient of two finite `f32`s cannot.
+pub(crate) fn snap_slider_value(requested: f32, min: f32, max: f32, step: Option<f32>) -> f32 {
+    let (low, high) = (min.min(max), min.max(max));
+    let clamped = requested.max(low).min(high);
+    let Some(step) = step else {
+        return clamped;
+    };
+    let (low64, high64, value64, step64) = (
+        f64::from(low),
+        f64::from(high),
+        f64::from(clamped),
+        f64::from(step),
+    );
+    let on_grid = (low64 + ((value64 - low64) / step64).round() * step64)
+        .max(low64)
+        .min(high64);
+    let snapped = if (high64 - value64).abs() < (on_grid - value64).abs() {
+        high64
+    } else {
+        on_grid
+    };
+    // Narrowing may round just past an end of the range; clamp again in `f32`.
+    (snapped as f32).max(low).min(high)
 }

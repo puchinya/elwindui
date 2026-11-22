@@ -52,6 +52,12 @@ impl InnerSlider {
     /// `NSControl.isContinuous` defaults to `YES` for `NSSlider`, so this fires repeatedly while
     /// dragging — matching a slider's usual UX, and needing no explicit opt-in (`Slider`'s own doc
     /// comment, elwindui-core).
+    /// `NSSlider` has no step API: Core snaps every user change and pushes a corrected value back
+    /// (`native_peer_design.md` §7b, #321), so there is nothing to configure natively.
+    pub(crate) fn set_step(&self, step: Option<f32>) {
+        let _ = step;
+    }
+
     pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(f32)>) {
         let ns = self.ns.clone();
         let target = SliderTarget::new(SliderTargetIvars {

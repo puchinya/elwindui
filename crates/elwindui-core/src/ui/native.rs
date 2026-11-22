@@ -134,6 +134,9 @@ pub trait SliderPeer: NativePeer {
     fn set_min(&self, min: f32);
     /// Sets the maximum.
     fn set_max(&self, max: f32);
+    /// Sets the normalized step (`None` = continuous). Core owns the snapping rule; the peer only
+    /// tunes the native feel (snapping, keyboard increment) and must not re-snap the value itself.
+    fn set_step(&self, step: Option<f32>);
     /// Enables or disables native interaction.
     fn set_enabled(&self, enabled: bool);
     /// Installs, or with `None` removes, the user-change callback.

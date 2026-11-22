@@ -2,13 +2,15 @@
 //! (Core-owned Components, Issue #313).
 //!
 //! Core owns every menu's logical state and item list. These peers wrap the existing
-//! `crate::inner` menu objects and reconcile a pushed item list by peer identity, the same way
-//! the backend types did before: an entry present in both lists stays, one only in the old list
-//! is removed, one only in the new list is appended.
+//! `crate::inner` menu objects and reconcile a pushed item list by peer identity with
+//! `reconcile_ordered_peers`: the native entries always end in the pushed order, and kept entries
+//! are left untouched whenever new ones only need appending.
 
 use crate::inner::{InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuFlyout, InnerMenuItem};
 use elwindui_core::graphics::IconSource;
-use elwindui_core::ui::native::{MenuBarItemPeer, MenuBarPeer, MenuItemPeer, MenuPeer};
+use elwindui_core::ui::native::{
+    MenuBarItemPeer, MenuBarPeer, MenuItemPeer, MenuPeer, reconcile_ordered_peers,
+};
 use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -58,10 +60,6 @@ fn menu_item_inner(peer: &Rc<dyn MenuItemPeer>) -> &InnerMenuItem {
         .inner
 }
 
-fn same_peer<T: ?Sized>(a: &Rc<T>, b: &Rc<T>) -> bool {
-    Rc::as_ptr(a) as *const () == Rc::as_ptr(b) as *const ()
-}
-
 /// [`MenuPeer`]: a submenu's items, also the source of native context-menu flyouts.
 pub(crate) struct WinUi3MenuPeer {
     inner: InnerMenu,
@@ -85,18 +83,12 @@ impl WinUi3MenuPeer {
 impl MenuPeer for WinUi3MenuPeer {
     fn set_items(&self, items: &[Rc<dyn MenuItemPeer>]) {
         let old = self.current.replace(items.to_vec());
-        for removed in old
-            .iter()
-            .filter(|old| !items.iter().any(|new| same_peer(old, new)))
-        {
-            self.inner.remove_item(menu_item_inner(removed));
-        }
-        for added in items
-            .iter()
-            .filter(|new| !old.iter().any(|old| same_peer(old, new)))
-        {
-            self.inner.add_item(menu_item_inner(added));
-        }
+        reconcile_ordered_peers(
+            &old,
+            items,
+            |removed| self.inner.remove_item(menu_item_inner(removed)),
+            |added| self.inner.add_item(menu_item_inner(added)),
+        );
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -158,18 +150,12 @@ fn menu_bar_item_inner(peer: &Rc<dyn MenuBarItemPeer>) -> &InnerMenuBarItem {
 impl MenuBarPeer for WinUi3MenuBarPeer {
     fn set_items(&self, items: &[Rc<dyn MenuBarItemPeer>]) {
         let old = self.current.replace(items.to_vec());
-        for removed in old
-            .iter()
-            .filter(|old| !items.iter().any(|new| same_peer(old, new)))
-        {
-            self.inner.remove_item(menu_bar_item_inner(removed));
-        }
-        for added in items
-            .iter()
-            .filter(|new| !old.iter().any(|old| same_peer(old, new)))
-        {
-            self.inner.add_item(menu_bar_item_inner(added));
-        }
+        reconcile_ordered_peers(
+            &old,
+            items,
+            |removed| self.inner.remove_item(menu_bar_item_inner(removed)),
+            |added| self.inner.add_item(menu_bar_item_inner(added)),
+        );
     }
     fn as_any(&self) -> &dyn Any {
         self

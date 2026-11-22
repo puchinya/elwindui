@@ -179,6 +179,18 @@ impl TabViewState {
                 host.set_tree(content);
             }
         }
+        // Keyed reorder: move each kept chip (with its host) to its pushed position, so the strip
+        // order, `selected_index` and the visible host agree with Core's list.
+        for (target_index, key) in new_keys.iter().enumerate() {
+            let position = self.displayed.borrow().iter().position(|k| k == key);
+            if let Some(position) = position.filter(|position| *position != target_index) {
+                let entry = self.chips.borrow_mut().remove(position);
+                self.inner.move_tab(&entry.0, target_index);
+                self.chips.borrow_mut().insert(target_index, entry);
+                let moved = self.displayed.borrow_mut().remove(position);
+                self.displayed.borrow_mut().insert(target_index, moved);
+            }
+        }
         for (key, entry) in new_keys.iter().zip(items.iter()) {
             let position = self.displayed.borrow().iter().position(|k| k == key);
             if let Some(position) = position {

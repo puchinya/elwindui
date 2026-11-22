@@ -689,3 +689,57 @@ fn menu_bar_realizes_entries_and_their_submenus() {
     assert_eq!(factory.take_log(), ["bar_item_text:Datei", "bar_items:0"]);
     clear_native_peer_factory();
 }
+
+/// Drives `reconcile_ordered_peers` against an append/remove-only "native" list and returns the
+/// resulting native order plus how many removals it needed.
+fn reconcile_into(native: &RefCell<Vec<Rc<str>>>, old: &[Rc<str>], new: &[Rc<str>]) -> usize {
+    let removals = Cell::new(0);
+    crate::ui::native::reconcile_ordered_peers(
+        old,
+        new,
+        |removed| {
+            removals.set(removals.get() + 1);
+            native.borrow_mut().retain(|e| !Rc::ptr_eq(e, removed));
+        },
+        |added| native.borrow_mut().push(added.clone()),
+    );
+    removals.get()
+}
+
+#[test]
+fn ordered_peer_reconcile_matches_the_pushed_order() {
+    let (a, b, c, x): (Rc<str>, Rc<str>, Rc<str>, Rc<str>) =
+        (Rc::from("A"), Rc::from("B"), Rc::from("C"), Rc::from("X"));
+    let names = |native: &RefCell<Vec<Rc<str>>>| {
+        native
+            .borrow()
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+    };
+    let native = RefCell::new(Vec::new());
+    let mut current: Vec<Rc<str>> = Vec::new();
+    let mut push = |next: Vec<Rc<str>>| {
+        let removals = reconcile_into(&native, &current, &next);
+        current = next;
+        removals
+    };
+
+    // Appending keeps the kept entries in place (no removals).
+    assert_eq!(push(vec![a.clone(), b.clone()]), 0);
+    assert_eq!(names(&native), ["A", "B"]);
+    // An insertion before a kept entry (the review case `[A,B] -> insert(0, X)`).
+    push(vec![x.clone(), a.clone(), b.clone()]);
+    assert_eq!(names(&native), ["X", "A", "B"]);
+    // A removal in the middle only removes that entry.
+    assert_eq!(push(vec![x.clone(), b.clone()]), 1);
+    assert_eq!(names(&native), ["X", "B"]);
+    // A reorder of kept entries, plus an append.
+    push(vec![b.clone(), x.clone(), c.clone()]);
+    assert_eq!(names(&native), ["B", "X", "C"]);
+    // Removing the head while appending: the rest stays a prefix.
+    assert_eq!(push(vec![x.clone(), c.clone(), a.clone()]), 1);
+    assert_eq!(names(&native), ["X", "C", "A"]);
+    push(Vec::new());
+    assert!(native.borrow().is_empty());
+}

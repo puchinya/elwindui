@@ -239,6 +239,36 @@ impl InnerTabView {
         }
     }
 
+    /// Moves the existing XAML tab at `from` to `to` (a keyed reorder). The same `TabViewItem`,
+    /// and with it the same content host, is reinserted, so the tab's widget tree is kept.
+    pub(crate) fn move_tab(&self, from: usize, to: usize) {
+        if from == to {
+            return;
+        }
+        if let Ok(items) = self.xaml.TabItems() {
+            if let Ok(item) = items.GetAt(from as u32) {
+                let _ = items.RemoveAt(from as u32);
+                let _ = items.InsertAt(to as u32, &item);
+            }
+        }
+    }
+
+    /// The header text of every native tab, in display order.
+    #[cfg(test)]
+    pub(crate) fn tab_titles_for_test(&self) -> Vec<String> {
+        let Ok(items) = self.xaml.TabItems() else {
+            return Vec::new();
+        };
+        (0..items.Size().unwrap_or(0))
+            .filter_map(|index| items.GetAt(index).ok())
+            .filter_map(|item| item.cast::<TabViewItem>().ok())
+            .filter_map(|item| item.Header().ok())
+            .filter_map(|header| header.cast::<windows::Foundation::IPropertyValue>().ok())
+            .filter_map(|value| value.GetString().ok())
+            .map(|title| title.to_string())
+            .collect()
+    }
+
     pub(crate) fn set_tab_title(&self, index: usize, title: &str) {
         if let Ok(items) = self.xaml.TabItems() {
             if let Ok(item) = items.GetAt(index as u32) {

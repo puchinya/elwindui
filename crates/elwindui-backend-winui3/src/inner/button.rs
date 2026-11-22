@@ -922,6 +922,8 @@ mod hosted_xaml_regression_tests {
                     tab_removal_never_reattaches_reentrant_requests();
                 crate::native_ui::tab_view::hosted_lifecycle_tests::
                     removing_the_selected_tab_selects_a_consistent_replacement();
+                crate::native_ui::tab_view::hosted_lifecycle_tests::
+                    reordering_tabs_keeps_hosts_and_follows_core_order();
                 crate::app::reset_window_lifecycle_test_state();
                 // Issue #254: `InnerWindow` stores only the final owner's `Weak<dyn WindowExt>`;
                 // the application registry becomes the strong lifetime authority after show().

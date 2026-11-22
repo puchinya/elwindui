@@ -189,9 +189,9 @@ impl TabViewState {
     }
 
     /// Keyed diff (pointer identity): retires and removes displayed tabs whose item is gone,
-    /// inserts a real XAML tab (+ a content host for the item's content) for each new item, and
-    /// refreshes every tab's header and closable state. Does not reorder existing tabs. Repeats
-    /// until no list was pushed reentrantly meanwhile.
+    /// inserts a real XAML tab (+ a content host for the item's content) for each new item,
+    /// moves kept tabs into the pushed order (keeping their hosts), and refreshes every tab's
+    /// header and closable state. Repeats until no list was pushed reentrantly meanwhile.
     fn rebuild(&self) {
         if self.rebuilding.replace(true) {
             return;
@@ -269,6 +269,20 @@ impl TabViewState {
             self.displayed.borrow_mut().insert(insertion_index, *key);
             if let Some(content) = item.content() {
                 content_host.set_hosted_tree(content, owner.clone());
+            }
+        }
+        // Phase 3 — keyed reorder: move each kept tab (its `TabViewItem` and content host) to
+        // its pushed position, so the native order, `selected_index` and the active host all
+        // agree with Core's list. Positions before `target_index` are already final, so a tab is
+        // only ever moved forward from a later position.
+        for (target_index, key) in new_keys.iter().enumerate() {
+            let position = self.displayed.borrow().iter().position(|k| k == key);
+            if let Some(position) = position.filter(|position| *position != target_index) {
+                self.inner.move_tab(position, target_index);
+                let host = self.content_hosts.borrow_mut().remove(position);
+                self.content_hosts.borrow_mut().insert(target_index, host);
+                let moved = self.displayed.borrow_mut().remove(position);
+                self.displayed.borrow_mut().insert(target_index, moved);
             }
         }
         for (key, entry) in new_keys.iter().zip(items.iter()) {
@@ -523,6 +537,63 @@ pub(crate) mod hosted_lifecycle_tests {
     /// Removing the selected tab itself selects the tab now at its index, or the new last tab;
     /// native `SelectedIndex`, `selected_index`, the active host and the user/binding callback agree;
     /// removing the only tab leaves an empty TabView with no active host.
+    /// Review fix (PR #320): `set_children` with the existing items in a new order (and an
+    /// insertion before a kept tab) moves the native tabs into Core's order, keeps every tab's
+    /// content host and content (nothing is retired or re-hosted), and leaves the native
+    /// selection and the active host on the tab Core's `selected_index` names.
+    pub(crate) fn reordering_tabs_keeps_hosts_and_follows_core_order() {
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let tab_view = TabView::new();
+        peer_of(&tab_view);
+        let make = |name: &str| {
+            let item = TabViewItem::new();
+            item.set_header(name);
+            item.set_content(probe_content(&log, name));
+            item
+        };
+        let (a, b, c) = (make("a"), make("b"), make("c"));
+        tab_view.set_children(vec![a.clone(), b.clone(), c.clone()]);
+        let titles = || winui(&peer_of(&tab_view)).state.inner.tab_titles_for_test();
+        assert_eq!(titles(), ["a", "b", "c"]);
+        let host_elements = || {
+            hosts_of(&tab_view)
+                .iter()
+                .map(TreeHost::as_element)
+                .collect::<Vec<_>>()
+        };
+        let before = host_elements();
+        emit_select(&tab_view, 2);
+        take(&log);
+
+        let assert_consistent = |label: &str| {
+            let index = tab_view.selected_index();
+            assert_eq!(native_selected(&tab_view), index as i32, "{label}: native");
+            let hosts = hosts_of(&tab_view);
+            assert!(hosts[index].is_active_for_test(), "{label}: active host");
+            let active = hosts.iter().filter(|h| h.is_active_for_test()).count();
+            assert_eq!(active, 1, "{label}: exactly one active host");
+        };
+
+        tab_view.set_children(vec![c.clone(), a.clone(), b.clone()]);
+        assert_eq!(titles(), ["c", "a", "b"], "native order follows Core");
+        assert_eq!(
+            host_elements(),
+            [before[2].clone(), before[0].clone(), before[1].clone()],
+            "each tab keeps its own content host"
+        );
+        assert!(take(&log).is_empty(), "no content was retired or re-hosted");
+        assert_consistent("reorder");
+
+        let x = make("x");
+        tab_view.set_children(vec![x.clone(), b.clone(), c.clone(), a.clone()]);
+        assert_eq!(titles(), ["x", "b", "c", "a"], "insert before kept tabs");
+        let hosts = host_elements();
+        assert_eq!(hosts[1], before[1]);
+        assert_eq!(hosts[2], before[2]);
+        assert_eq!(hosts[3], before[0]);
+        assert_consistent("insert + reorder");
+    }
+
     pub(crate) fn removing_the_selected_tab_selects_a_consistent_replacement() {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let (tab_view, _contents) = tab_view_with(&log, &["s0", "s1", "s2"]);

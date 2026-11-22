@@ -392,7 +392,11 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   base. All of them are `sealed`; the old backend types and their `struct_only` implementors are gone.
 - **Item lists are Core state.** `Dropdown::items`, `TabView::children`, `Menu::items` and
   `MenuBar::items` are `ChildList`s on the Core type, and the Core type implements `ListExt`. Every
-  list change pushes the **full ordered list** to a realized peer; the peer reconciles by identity.
+  list change pushes the **full ordered list** to a realized peer; the peer reconciles by identity and
+  the native list always ends in the pushed order (an insertion before a kept entry and a reorder
+  included). A peer whose native list can only append and remove uses Core's
+  `reconcile_ordered_peers`: kept entries stay untouched while new ones only need appending;
+  otherwise every entry is removed and re-added in order.
 - **Dropdown:** realization pushes the item texts, the selected index, `enabled`, then the change
   callback last. Every list change pushes the texts and then the stored selection, because a rebuilt
   native list loses it. A user selection follows the §5 two-way rule: an echo of the stored index is
@@ -408,8 +412,9 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   (`ui_spec.md` TabView): the selected tab survives by identity; if it was removed, the tab now at its
   index is selected, or the new last tab. `TabViewPeer::set_items(items, owner)` reconciles tabs by
   `Rc::as_ptr` identity: removed tabs retire their content (popup, unmount, native detach) before their
-  native tab is removed, new tabs get a content host for the item's content, and every tab's header and
-  closable state are refreshed. After the list, Core pushes the stored selection.
+  native tab is removed, new tabs get a content host for the item's content, kept tabs are **moved** to
+  their pushed position with their own content host (a reorder never retires or re-hosts content), and
+  every tab's header and closable state are refreshed. After the list, Core pushes the stored selection.
   - A list change made reentrantly from inside `set_items` (a content `on_unmount` hook) only updates
     Core's list and the peer's pending list; the peer repeats its diff until no newer list arrived, and
     only the **outermost** Core push applies the final selection (§6 last-write-wins).

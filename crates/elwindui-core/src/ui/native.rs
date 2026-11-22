@@ -541,3 +541,44 @@ pub fn unsupported_native_control(backend: &str, control: &str) -> ! {
          No fallback is used; use a backend that implements `{control}`."
     )
 }
+
+/// Reconciles an ordered native list with `new` by `Rc` identity, for peers whose native list
+/// can only append and remove (§7c ordered-list contract). When the entries kept from `old`
+/// are, in order, a prefix of `new`, it removes the dropped entries and appends the rest of
+/// `new`, leaving every kept native entry untouched. Otherwise (an insertion before a kept entry,
+/// or a reorder) appending would leave the native order different from `new`, so it removes every
+/// entry of `old` and appends all of `new` in order.
+pub fn reconcile_ordered_peers<T: ?Sized>(
+    old: &[Rc<T>],
+    new: &[Rc<T>],
+    mut remove: impl FnMut(&Rc<T>),
+    mut append: impl FnMut(&Rc<T>),
+) {
+    let same = |a: &Rc<T>, b: &Rc<T>| std::ptr::addr_eq(Rc::as_ptr(a), Rc::as_ptr(b));
+    let kept: Vec<&Rc<T>> = old
+        .iter()
+        .filter(|entry| new.iter().any(|candidate| same(entry, candidate)))
+        .collect();
+    let kept_is_prefix = kept
+        .iter()
+        .zip(new.iter())
+        .all(|(kept, candidate)| same(kept, candidate));
+    if kept_is_prefix {
+        for entry in old
+            .iter()
+            .filter(|entry| !new.iter().any(|candidate| same(entry, candidate)))
+        {
+            remove(entry);
+        }
+        for entry in &new[kept.len()..] {
+            append(entry);
+        }
+    } else {
+        for entry in old {
+            remove(entry);
+        }
+        for entry in new {
+            append(entry);
+        }
+    }
+}

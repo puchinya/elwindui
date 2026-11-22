@@ -449,6 +449,15 @@ impl TabStripImpl {
         chip
     }
 
+    /// Moves an existing chip to `index` in the strip (a keyed reorder).
+    fn move_tab(&self, chip: &TabChipImpl, index: usize) {
+        let view: Retained<NSView> = Retained::into_super(Retained::into_super(chip.ns.clone()));
+        self.chips_stack.removeArrangedSubview(&view);
+        view.removeFromSuperview();
+        self.chips_stack
+            .insertArrangedSubview_atIndex(&view, index as isize);
+    }
+
     fn remove_tab(&self, chip: &TabChipImpl) {
         let view: Retained<NSView> = Retained::into_super(Retained::into_super(chip.ns.clone()));
         self.chips_stack.removeArrangedSubview(&view);
@@ -570,6 +579,12 @@ impl InnerTabView {
     }
 
     /// Removes a tab's chip and its persistent content host together.
+    /// Moves an existing tab's chip to `index` in the strip. Its content host is an overlaid
+    /// subview of the content area, whose order does not matter, so it is kept as it is.
+    pub(crate) fn move_tab(&self, chip: &TabChipImpl, index: usize) {
+        self.strip.move_tab(chip, index);
+    }
+
     pub(crate) fn remove_tab(&self, chip: &TabChipImpl, host: &TreeHost) {
         self.strip.remove_tab(chip);
         // Explicit rather than relying on the last `Retained<TreeHost>` being dropped by the

@@ -618,6 +618,21 @@ fn slider_snap_keeps_max_reachable_and_stays_in_range() {
     assert_eq!(snap(0.6, 0.0, 1.0, Some(5.0)), 1.0);
     // Without a step only the range applies.
     assert_eq!(snap(0.37, 0.0, 1.0, None), 0.37);
+    // A tiny but valid step must not overflow the grid quotient and throw the value to `max`.
+    let tiny = snap(0.1, 0.0, 1.0, Some(1e-40));
+    assert!(
+        (tiny - 0.1).abs() < 1e-6,
+        "tiny step kept the value near 0.1, got {tiny}"
+    );
+    let smallest = snap(0.25, 0.0, 1.0, Some(f32::from_bits(1)));
+    assert!(
+        (smallest - 0.25).abs() < 1e-6,
+        "smallest step, got {smallest}"
+    );
+    // A span wider than `f32::MAX` must not overflow either.
+    // (grid: -MAX, 0, MAX; the `f32` difference `value - low` alone would be infinite).
+    assert_eq!(snap(1.0e38, -f32::MAX, f32::MAX, Some(f32::MAX)), 0.0);
+    assert_eq!(snap(2.5e38, -f32::MAX, f32::MAX, Some(f32::MAX)), f32::MAX);
 }
 
 #[test]

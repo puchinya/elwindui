@@ -231,19 +231,30 @@ impl Slider {
 }
 
 /// Snaps a user-requested slider value (`ui_spec.md` Slider `step`). `f32::max`/`min` (unlike
-/// `clamp`) never panic, so a NaN request or an inverted range still lands inside the range.
+/// `clamp`) never panic, so a NaN request or an inverted range still lands inside the range. The
+/// grid arithmetic runs in `f64`: every finite positive `f32` step is valid, and an `f32` quotient
+/// `(value - low) / step` overflows to infinity for a tiny step (or a span wider than `f32::MAX`),
+/// which would otherwise throw the value to `high`. The `f64` quotient of two finite `f32`s cannot.
 pub(crate) fn snap_slider_value(requested: f32, min: f32, max: f32, step: Option<f32>) -> f32 {
     let (low, high) = (min.min(max), min.max(max));
     let clamped = requested.max(low).min(high);
     let Some(step) = step else {
         return clamped;
     };
-    let on_grid = (low + ((clamped - low) / step).round() * step)
-        .max(low)
-        .min(high);
-    if (high - clamped).abs() < (on_grid - clamped).abs() {
-        high
+    let (low64, high64, value64, step64) = (
+        f64::from(low),
+        f64::from(high),
+        f64::from(clamped),
+        f64::from(step),
+    );
+    let on_grid = (low64 + ((value64 - low64) / step64).round() * step64)
+        .max(low64)
+        .min(high64);
+    let snapped = if (high64 - value64).abs() < (on_grid - value64).abs() {
+        high64
     } else {
         on_grid
-    }
+    };
+    // Narrowing may round just past an end of the range; clamp again in `f32`.
+    (snapped as f32).max(low).min(high)
 }

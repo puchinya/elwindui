@@ -468,7 +468,7 @@ accessorを呼ぶ。
   渡せるようにするためである(文字列リテラルはmacro_rulesでidentに変換できない)。
 - 手書きストレージのcomponentのABIは`codegen::class_constructor_abi`が、生成componentと同じ
   `build_constructor_macro`で作る。列挙するのは`#[constructor_inputs]`の入力だけで、ほかの名前は
-  `delegate_props`(自分のprops macro、または`abi_props`の再エクスポート`$crate::__elwindui_abi_props_<Type>`)の
+  `delegate_props`(自分のprops macro)の
   `@set_chain_with_environment`(値の設定)と`@field_type`(`new!`の名前検査)へ渡す。`new`はclassの`new`で、
   mountは取り付けた側が行う。抽象classと内部専用の`construct`は`unconstructible_class_abi`(どの使い方も
   compile error)になる。facadeはbuiltinのABIをルートで再エクスポートする(具象型を定義するcrateが一つの所有者)。

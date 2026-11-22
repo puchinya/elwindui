@@ -18,20 +18,7 @@ pub struct ClassShapeWithView {
     },
 }
 
-#[elwindui::component(trait_only)]
-pub struct TraitOnlyOnStruct {}
-
-#[elwindui::component(struct_only = elwindui::core::ui::ButtonExt)]
-pub trait StructOnlyOnTrait {}
-
 #[elwindui::component(manual, inherits VerticalLayout)]
 pub struct ManualFlag {}
-
-#[elwindui::component(inherits VerticalLayout, abi_props = elwindui::core::__elwindui_props_Button)]
-pub struct AbiPropsWithoutStructOnly {
-    body: view! {
-        TextBlock { text: "x" }
-    },
-}
 
 fn main() {}

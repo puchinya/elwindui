@@ -631,7 +631,7 @@ fn compiling_crate_key() -> String {
 /// }.to_string()` turns it into a plain, `Send`-safe `String`; `sibling_component_modules` re-parses
 /// it and re-runs `component_and_view_from_item_struct` on demand, the same "recover it via the same
 /// construction path, don't duplicate the logic" approach `class.rs`'s own `StoredClassArgs` uses
-/// for its `inherits`/`struct_only` fields.
+/// for its `inherits` field.
 struct StoredComponent {
     base: Option<String>,
     struct_src: String,
@@ -1590,9 +1590,8 @@ mod tests {
     /// (`inherits Window`, matching `Counter` above) component must NOT auto-mount from
     /// `on_constructed`, and must instead gain a plain inherent `show`/`hide`/`close` that
     /// mount-checks (via `__mount_environment`) and reaches the auto-forwarded `WindowExt`
-    /// implementation through UFCS, not `#[overrides]` (verified not to propagate correctly across
-    /// the `trait_only` -> `struct_only` -> ordinary chain — see this codegen's own comment at the
-    /// `window_lifecycle_overrides` definition in `codegen.rs`).
+    /// implementation (see this codegen's own comment at the `window_lifecycle_overrides`
+    /// definition in `codegen.rs`).
     #[test]
     fn host_composition_gets_override_chain_show_hide_close_and_no_auto_mount_on_constructed() {
         let src = r#"

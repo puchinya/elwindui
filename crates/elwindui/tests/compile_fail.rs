@@ -35,3 +35,9 @@ fn new_of_an_unknown_local_type_is_rejected() {
     let cases = trybuild::TestCases::new();
     cases.compile_fail("tests/ui/new_unknown_local_type.rs");
 }
+
+#[test]
+fn removed_class_modes_are_rejected_by_name() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/removed_class_modes.rs");
+}

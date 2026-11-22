@@ -28,16 +28,13 @@ impl FakeHandle {
     }
 }
 
-/// A minimal stand-in for a real backend's own `NativeControl`-implementing widget base (e.g.
-/// `elwindui-backend-appkit::NativeControlImpl { handle: AnyView, .. }`, shared by that backend's
-/// `TextArea`/`Button`/`TabView`) — exercises the same "concrete implementor writes its own
-/// `measure_override`/`try_as_native_control`" pattern those use, instead of relying on any
-/// generic measuring behavior from `elwindui-core::ui::NativeControl` itself (a pure marker trait
-/// — see that trait's own doc comment). Named `FakeNativeControl`, not the bare `NativeControl`
-/// that trait already uses, because `#[class]`-generated `__elwindui_inherit_*!` macros share a
+/// A minimal native leaf for Core unit tests, which have no backend peer factory: it inherits
+/// `NativeControl` but overrides `measure_override`/`try_as_native_control` itself, so its fixed
+/// handle and size stand in for a realized peer and no peer is ever created. Named
+/// `FakeNativeControl`, not the bare `NativeControl` that the base already uses, because `#[class]`-generated `__elwindui_inherit_*!` macros share a
 /// single flat, crate-wide namespace (unlike ordinary Rust items, which can share a bare name
 /// across different modules) — a same-crate bare-name collision is a real `E0428`.
-#[elwindui_macros::class(struct_only = crate::ui::NativeControlExt, inherits = crate::ui::UIElement)]
+#[elwindui_macros::class(inherits = crate::ui::NativeControl)]
 pub(crate) struct FakeNativeControl {
     handle: FakeHandle,
 }
@@ -54,7 +51,7 @@ impl FakeNativeControl {
     }
     fn construct(handle: FakeHandle) -> Self {
         Self {
-            base: UIElement::construct(),
+            base: NativeControl::construct(None),
             handle,
         }
     }
@@ -123,157 +120,137 @@ impl OverridableLeaf {
     }
 }
 
-/// Issue #128 regression fixtures: `#[overridable]`/`#[overrides]` propagation across a
-/// `trait_only -> struct_only -> ordinary` chain, not just an all-`ordinary` one (contrast with
-/// `OverridableBase`/`Mid`/`Leaf` above, which only exercises the already-working all-`ordinary`
-/// case). `BridgeBase` (`trait_only`) declares the interface, `BridgeConcreteBase` (`struct_only`)
-/// is the concrete backend-style implementor, and `BridgeNoOverride`/`BridgeDerived` are ordinary
-/// descendants reached through that `struct_only` bridge.
-#[elwindui_macros::class(trait_only)]
-pub(crate) trait BridgeBase {
-    #[overridable]
-    fn value(&self) -> i32;
-}
-
-pub(crate) struct BridgeConcreteBaseState {
+/// Issue #128 regression fixtures: `#[overridable]`/`#[overrides]` propagation across a deeper
+/// ordinary chain than `OverridableBase`/`Mid`/`Leaf` above. `ChainBase` declares the
+/// overridable `value`; `ChainNoOverride`/`ChainDerived`/`ChainDepth*` are its descendants.
+#[elwindui_macros::class(inherits = crate::ui::UIElement)]
+pub(crate) struct ChainBase {
     value: Cell<i32>,
 }
 
-#[elwindui_macros::class(struct_only = crate::ui::testsupport::BridgeBaseExt)]
-pub(crate) struct BridgeConcreteBase {
-    state: BridgeConcreteBaseState,
-}
-
 #[elwindui_macros::class]
-impl BridgeConcreteBase {
+impl ChainBase {
+    #[overridable]
     fn value(&self) -> i32 {
-        self.state.value.get()
+        self.value.get()
     }
     fn construct() -> Self {
         Self {
-            state: BridgeConcreteBaseState {
-                value: Cell::new(1),
-            },
+            base: UIElement::construct(),
+            value: Cell::new(1),
         }
     }
 }
 
-/// 7.1: no override anywhere below the `struct_only` bridge — dispatch must reach
-/// `BridgeConcreteBase`'s own concrete implementation.
-#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeConcreteBase)]
-pub(crate) struct BridgeNoOverride {}
+/// 7.1: no override anywhere below `ChainBase` — dispatch must reach its own implementation.
+#[elwindui_macros::class(inherits = crate::ui::testsupport::ChainBase)]
+pub(crate) struct ChainNoOverride {}
 
 #[elwindui_macros::class]
-impl BridgeNoOverride {
+impl ChainNoOverride {
     fn construct() -> Self {
         Self {
-            base: BridgeConcreteBase::construct(),
+            base: ChainBase::construct(),
         }
     }
 }
 
-/// 7.2/9.1: the exact minimal Issue #128 repro — a single ordinary descendant, reached through the
-/// `struct_only` bridge, using ordinary `#[overrides]` + `self.base.value()` forwarding.
-#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeConcreteBase)]
-pub(crate) struct BridgeDerived {}
+/// 7.2/9.1: a single descendant using ordinary `#[overrides]` + `self.base.value()` forwarding.
+#[elwindui_macros::class(inherits = crate::ui::testsupport::ChainBase)]
+pub(crate) struct ChainDerived {}
 
 #[elwindui_macros::class]
-impl BridgeDerived {
+impl ChainDerived {
     #[overrides]
     fn value(&self) -> i32 {
         self.base.value() + 100
     }
     fn construct() -> Self {
         Self {
-            base: BridgeConcreteBase::construct(),
+            base: ChainBase::construct(),
         }
     }
 }
 
-/// 7.3/7.4/9.2: arbitrary ordinary-descendant depth below the `struct_only` bridge —
-/// `BridgeConcreteBase -> BridgeDepthC (overrides) -> BridgeDepthD (no override) -> BridgeDepthE
+/// 7.3/7.4/9.2: arbitrary descendant depth —
+/// `ChainBase -> ChainDepthC (overrides) -> ChainDepthD (no override) -> ChainDepthE
 /// (overrides)`. No depth-specific code exists anywhere in the fix; this fixture is what proves it.
-#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeConcreteBase)]
-pub(crate) struct BridgeDepthC {}
+#[elwindui_macros::class(inherits = crate::ui::testsupport::ChainBase)]
+pub(crate) struct ChainDepthC {}
 
 #[elwindui_macros::class]
-impl BridgeDepthC {
+impl ChainDepthC {
     #[overrides]
     fn value(&self) -> i32 {
         self.base.value() + 10
     }
     fn construct() -> Self {
         Self {
-            base: BridgeConcreteBase::construct(),
+            base: ChainBase::construct(),
         }
     }
 }
 
-#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeDepthC)]
-pub(crate) struct BridgeDepthD {}
+#[elwindui_macros::class(inherits = crate::ui::testsupport::ChainDepthC)]
+pub(crate) struct ChainDepthD {}
 
 #[elwindui_macros::class]
-impl BridgeDepthD {
+impl ChainDepthD {
     fn construct() -> Self {
         Self {
-            base: BridgeDepthC::construct(),
+            base: ChainDepthC::construct(),
         }
     }
 }
 
-#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeDepthD)]
-pub(crate) struct BridgeDepthE {}
+#[elwindui_macros::class(inherits = crate::ui::testsupport::ChainDepthD)]
+pub(crate) struct ChainDepthE {}
 
 #[elwindui_macros::class]
-impl BridgeDepthE {
+impl ChainDepthE {
     #[overrides]
     fn value(&self) -> i32 {
         self.base.value() + 1000
     }
     fn construct() -> Self {
         Self {
-            base: BridgeDepthD::construct(),
+            base: ChainDepthD::construct(),
         }
     }
 }
 
-/// 7.5/9.3/9.4: two independent `#[overridable]` methods on the same `trait_only` interface,
-/// overridden at different descendant depths below the `struct_only` bridge —
-/// `BridgeMultiBase(struct_only) -> BridgeMultiC (overrides first) -> BridgeMultiD (overrides
-/// second) -> BridgeMultiE (overrides first)`. Each override logs its own name before forwarding via
-/// `self.base.*(log)`, letting a test assert both the exact per-method dispatch target and the
-/// forwarding order.
-#[elwindui_macros::class(trait_only)]
-pub(crate) trait BridgeMulti {
-    #[overridable]
-    fn first(&self, log: &RefCell<Vec<&'static str>>) -> i32;
-    #[overridable]
-    fn second(&self, log: &RefCell<Vec<&'static str>>) -> i32;
-}
-
-#[elwindui_macros::class(struct_only = crate::ui::testsupport::BridgeMultiExt)]
-pub(crate) struct BridgeMultiBase {}
+/// 7.5/9.3/9.4: two independent `#[overridable]` methods on the same class, overridden at
+/// different descendant depths — `ChainMultiBase -> ChainMultiC (overrides first) ->
+/// ChainMultiD (overrides second) -> ChainMultiE (overrides first)`. Each override logs its own
+/// name before forwarding via `self.base.*(log)`, letting a test assert both the exact per-method
+/// dispatch target and the forwarding order.
+#[elwindui_macros::class(inherits = crate::ui::UIElement)]
+pub(crate) struct ChainMultiBase {}
 
 #[elwindui_macros::class]
-impl BridgeMultiBase {
+impl ChainMultiBase {
+    #[overridable]
     fn first(&self, log: &RefCell<Vec<&'static str>>) -> i32 {
         log.borrow_mut().push("B");
         1
     }
+    #[overridable]
     fn second(&self, log: &RefCell<Vec<&'static str>>) -> i32 {
         log.borrow_mut().push("B");
         2
     }
     fn construct() -> Self {
-        Self {}
+        Self {
+            base: UIElement::construct(),
+        }
     }
 }
 
-#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeMultiBase)]
-pub(crate) struct BridgeMultiC {}
+#[elwindui_macros::class(inherits = crate::ui::testsupport::ChainMultiBase)]
+pub(crate) struct ChainMultiC {}
 
 #[elwindui_macros::class]
-impl BridgeMultiC {
+impl ChainMultiC {
     #[overrides]
     fn first(&self, log: &RefCell<Vec<&'static str>>) -> i32 {
         log.borrow_mut().push("C");
@@ -281,16 +258,16 @@ impl BridgeMultiC {
     }
     fn construct() -> Self {
         Self {
-            base: BridgeMultiBase::construct(),
+            base: ChainMultiBase::construct(),
         }
     }
 }
 
-#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeMultiC)]
-pub(crate) struct BridgeMultiD {}
+#[elwindui_macros::class(inherits = crate::ui::testsupport::ChainMultiC)]
+pub(crate) struct ChainMultiD {}
 
 #[elwindui_macros::class]
-impl BridgeMultiD {
+impl ChainMultiD {
     #[overrides]
     fn second(&self, log: &RefCell<Vec<&'static str>>) -> i32 {
         log.borrow_mut().push("D");
@@ -298,16 +275,16 @@ impl BridgeMultiD {
     }
     fn construct() -> Self {
         Self {
-            base: BridgeMultiC::construct(),
+            base: ChainMultiC::construct(),
         }
     }
 }
 
-#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeMultiD)]
-pub(crate) struct BridgeMultiE {}
+#[elwindui_macros::class(inherits = crate::ui::testsupport::ChainMultiD)]
+pub(crate) struct ChainMultiE {}
 
 #[elwindui_macros::class]
-impl BridgeMultiE {
+impl ChainMultiE {
     #[overrides]
     fn first(&self, log: &RefCell<Vec<&'static str>>) -> i32 {
         log.borrow_mut().push("E");
@@ -315,246 +292,8 @@ impl BridgeMultiE {
     }
     fn construct() -> Self {
         Self {
-            base: BridgeMultiD::construct(),
+            base: ChainMultiD::construct(),
         }
-    }
-}
-
-/// Issue #128 remediation, T4: a same-crate `struct_only` implementor whose own bare name does
-/// *not* match the interface it implements (unlike `BridgeConcreteBase`/`BridgeBase`, which happen
-/// to share a naming convention by construction) — proves `ancestor_own_trait`'s `__ElwindUIOwnExt`
-/// alias mechanism needs no naming convention and no manually-authored `{ConcreteName}Ext` alias
-/// (review finding A2).
-#[elwindui_macros::class(trait_only)]
-pub(crate) trait BridgeDifferentNameInterface {
-    #[overridable]
-    fn value(&self) -> i32;
-}
-
-#[elwindui_macros::class(struct_only = crate::ui::testsupport::BridgeDifferentNameInterfaceExt)]
-pub(crate) struct BridgeOddlyNamedConcrete {}
-
-#[elwindui_macros::class]
-impl BridgeOddlyNamedConcrete {
-    fn value(&self) -> i32 {
-        1
-    }
-    fn construct() -> Self {
-        Self {}
-    }
-}
-
-#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeOddlyNamedConcrete)]
-pub(crate) struct BridgeDifferentNameDerived {}
-
-#[elwindui_macros::class]
-impl BridgeDifferentNameDerived {
-    #[overrides]
-    fn value(&self) -> i32 {
-        self.base.value() + 100
-    }
-    fn construct() -> Self {
-        Self {
-            base: BridgeOddlyNamedConcrete::construct(),
-        }
-    }
-}
-
-/// Issue #128 remediation, T6: a generic `struct_only<T>` type, with its own `where` bound,
-/// proving the bridge's members-only arm (`@impl_struct_only_members`) never drops the caller's own
-/// `impl_generics`/`ty_generics`/`where_clause` (review finding A3) — a naive bridge that owned the
-/// outer `impl` header itself would lose `<T: BridgeGenericSource>` here.
-pub(crate) trait BridgeGenericSource: 'static {
-    fn source_value(&self) -> i32;
-}
-
-#[elwindui_macros::class(trait_only)]
-pub(crate) trait BridgeGenericInterface {
-    #[overridable]
-    fn value(&self) -> i32;
-}
-
-#[elwindui_macros::class(struct_only = crate::ui::testsupport::BridgeGenericInterfaceExt)]
-pub(crate) struct BridgeGenericConcrete<T: BridgeGenericSource> {
-    source: T,
-}
-
-#[elwindui_macros::class]
-impl<T: BridgeGenericSource> BridgeGenericConcrete<T> {
-    fn value(&self) -> i32 {
-        self.source.source_value()
-    }
-    fn construct(source: T) -> Self {
-        Self { source }
-    }
-}
-
-pub(crate) struct BridgeGenericSourceImpl(pub(crate) i32);
-
-impl BridgeGenericSource for BridgeGenericSourceImpl {
-    fn source_value(&self) -> i32 {
-        self.0
-    }
-}
-
-#[elwindui_macros::class(
-    inherits = crate::ui::testsupport::BridgeGenericConcrete<crate::ui::testsupport::BridgeGenericSourceImpl>
-)]
-pub(crate) struct BridgeGenericDerived {}
-
-#[elwindui_macros::class]
-impl BridgeGenericDerived {
-    #[overrides]
-    fn value(&self) -> i32 {
-        self.base.value() + 100
-    }
-    fn construct() -> Self {
-        Self {
-            base: BridgeGenericConcrete::construct(BridgeGenericSourceImpl(1)),
-        }
-    }
-}
-
-/// Issue #128 remediation, T2: `struct_only` targeting an *ordinary* (non-root) class's own
-/// generated `{ClassName}Ext` — not a `trait_only` interface — proving the bridge an ordinary class
-/// now generates for itself (review finding A1) is consumed identically to a `trait_only` one.
-/// `BridgeOrdinaryMid` inherits the existing `BridgeConcreteBase` fixture purely to give its own
-/// generated `BridgeOrdinaryMidExt` a real (non-`AsAny`-only) supertrait bound to satisfy; the
-/// `struct_only` implementor below composes the same base (`inherits = BridgeConcreteBase`) to
-/// satisfy that supertrait, exactly like `FakeNativeControl` does for `NativeControlExt`/`UIElement`.
-#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeConcreteBase)]
-pub(crate) struct BridgeOrdinaryMid {}
-
-#[elwindui_macros::class]
-impl BridgeOrdinaryMid {
-    #[overridable]
-    fn extra(&self) -> i32 {
-        7
-    }
-    fn construct() -> Self {
-        Self {
-            base: BridgeConcreteBase::construct(),
-        }
-    }
-}
-
-#[elwindui_macros::class(
-    struct_only = crate::ui::testsupport::BridgeOrdinaryMidExt,
-    inherits = crate::ui::testsupport::BridgeConcreteBase
-)]
-pub(crate) struct BridgeOrdinaryMidConcrete {}
-
-#[elwindui_macros::class]
-impl BridgeOrdinaryMidConcrete {
-    fn extra(&self) -> i32 {
-        70
-    }
-    fn construct() -> Self {
-        Self {
-            base: BridgeConcreteBase::construct(),
-        }
-    }
-}
-
-#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeOrdinaryMidConcrete)]
-pub(crate) struct BridgeOrdinaryMidDerived {}
-
-#[elwindui_macros::class]
-impl BridgeOrdinaryMidDerived {
-    #[overrides]
-    fn extra(&self) -> i32 {
-        self.base.extra() + 1000
-    }
-    fn construct() -> Self {
-        Self {
-            base: BridgeOrdinaryMidConcrete::construct(),
-        }
-    }
-}
-
-/// PR #164 final remediation round, T3/T9/T12 (finding C2): `struct_only` targeting a *root*-mode
-/// interface — a real *runtime* fixture, superseding this file's own earlier note (this remediation
-/// round's own class-model.md/macro_class_spec.md docs) that this combination was architecturally
-/// impossible. A root class's own `as_ui_element(&self) -> &Self` is a required trait method whose
-/// return type is hard-pinned to the declaring root struct's own concrete type — no `struct_only`
-/// implementor can conjure a reference to that type out of nothing, but *can* compose it directly by
-/// also using `inherits = <the same root class>` (the *only* accepted shape — enforced by a
-/// dedicated `#[class]`-level diagnostic otherwise, see `class_interface_bridge_tests`'s own
-/// `root_bridge_missing_matching_base_is_a_clear_diagnostic`), forwarding `as_ui_element` to
-/// `self.base.as_ui_element()`. `BridgeRootConcrete` below also proves T12 (no duplicate `impl
-/// BridgeRootBaseExt for BridgeRootConcrete`, `E0119`) — the ordinary `inherits = BridgeRootBase`
-/// forwarding path is routed into `_skip!` instead of independently re-generating the same `impl`.
-#[elwindui_macros::class]
-pub(crate) struct BridgeRootBase {
-    value: Cell<i32>,
-}
-
-#[elwindui_macros::class]
-impl BridgeRootBase {
-    #[overridable]
-    fn value(&self) -> i32 {
-        self.value.get()
-    }
-    fn construct() -> Self {
-        Self {
-            value: Cell::new(1),
-        }
-    }
-}
-
-#[elwindui_macros::class(
-    struct_only = crate::ui::testsupport::BridgeRootBaseExt,
-    inherits = crate::ui::testsupport::BridgeRootBase
-)]
-pub(crate) struct BridgeRootConcrete {}
-
-#[elwindui_macros::class]
-impl BridgeRootConcrete {
-    fn value(&self) -> i32 {
-        1
-    }
-    fn construct() -> Self {
-        Self {
-            base: BridgeRootBase::construct(),
-        }
-    }
-}
-
-#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeRootConcrete)]
-pub(crate) struct BridgeRootDerived {}
-
-#[elwindui_macros::class]
-impl BridgeRootDerived {
-    #[overrides]
-    fn value(&self) -> i32 {
-        self.base.value() + 100
-    }
-    fn construct() -> Self {
-        Self {
-            base: BridgeRootConcrete::construct(),
-        }
-    }
-}
-
-/// Issue #128 remediation, T8: `no_ancestor_forward` explicit regression coverage — a `struct_only`
-/// implementor of a hand-written trait (not a `#[class]`-generated `*Ext`) bypasses the bridge
-/// entirely; this flag's pre-#128 behavior (direct `impl` of the hand-written trait, no
-/// `#[overridable]`/`#[overrides]` propagation machinery involved at all) must still work unchanged.
-/// No fixture exercising this flag existed anywhere in the repo before this remediation.
-pub(crate) trait BridgeHandWrittenTrait {
-    fn hand_value(&self) -> i32;
-}
-
-#[elwindui_macros::class(struct_only = crate::ui::testsupport::BridgeHandWrittenTrait, no_ancestor_forward)]
-pub(crate) struct BridgeNoForwardConcrete {}
-
-#[elwindui_macros::class]
-impl BridgeNoForwardConcrete {
-    fn hand_value(&self) -> i32 {
-        1
-    }
-    fn construct() -> Self {
-        Self {}
     }
 }
 
@@ -682,7 +421,7 @@ pub(crate) fn split(tree: RenderTree) -> (Vec<(FakeHandle, Rect)>, Vec<(RenderCo
 /// Deliberately not built on `FakeHandle`/`FakeNativeControl` — `FakeHandle` derives `PartialEq`
 /// and is compared structurally by several other tests, so adding a recording field there would
 /// need every one of those to account for it too.
-#[elwindui_macros::class(struct_only = crate::ui::NativeControlExt, inherits = crate::ui::UIElement)]
+#[elwindui_macros::class(inherits = crate::ui::NativeControl)]
 pub(crate) struct MeasureProbe {
     pub(crate) calls: RefCell<Vec<Size>>,
     reported: Size,
@@ -697,7 +436,7 @@ impl MeasureProbe {
     }
     fn construct(reported: Size) -> Self {
         Self {
-            base: UIElement::construct(),
+            base: NativeControl::construct(None),
             calls: RefCell::new(Vec::new()),
             reported,
         }
@@ -717,7 +456,7 @@ impl MeasureProbe {
 /// A wrapping-text stand-in: its desired height grows with the number of `line_height` lines a
 /// `natural_width` run needs at the available width, so tests can observe whether a Grid measured
 /// it at its resolved column width or unconstrained.
-#[elwindui_macros::class(struct_only = crate::ui::NativeControlExt, inherits = crate::ui::UIElement)]
+#[elwindui_macros::class(inherits = crate::ui::NativeControl)]
 pub(crate) struct WrapProbe {
     natural_width: f32,
     line_height: f32,
@@ -741,7 +480,7 @@ impl WrapProbe {
     }
     fn construct(natural_width: f32, line_height: f32) -> Self {
         Self {
-            base: UIElement::construct(),
+            base: NativeControl::construct(None),
             natural_width,
             line_height,
         }
@@ -954,107 +693,53 @@ mod tests {
         assert_eq!(OverridableBaseExt::label(&*leaf), "mid");
     }
 
-    /// Issue #128, 7.1: no override anywhere below the `struct_only` bridge reaches the concrete
-    /// base implementation.
+    /// Issue #128, 7.1: with no override anywhere below it, `ChainBase`'s own implementation runs.
     #[test]
-    fn bridge_two_hop_no_override_reaches_concrete_base() {
-        let leaf = BridgeNoOverride::new();
-        assert_eq!(BridgeBaseExt::value(&*leaf), 1);
+    fn chain_two_hop_no_override_reaches_the_base() {
+        let leaf = ChainNoOverride::new();
+        assert_eq!(ChainBaseExt::value(&*leaf), 1);
     }
 
-    /// Issue #128, 7.2/9.1: the exact minimal repro — an ordinary `#[overrides]` descendant reached
-    /// through a `struct_only` bridge dispatches to itself, and `self.base.value()` reaches the
-    /// concrete `struct_only` implementation.
+    /// Issue #128, 7.2/9.1: an `#[overrides]` descendant dispatches to itself, and
+    /// `self.base.value()` reaches the base implementation.
     #[test]
-    fn bridge_two_hop_override_dispatches_through_struct_only() {
-        let derived = BridgeDerived::new();
-        assert_eq!(BridgeBaseExt::value(&*derived), 101);
+    fn chain_two_hop_override_dispatches_to_the_descendant() {
+        let derived = ChainDerived::new();
+        assert_eq!(ChainBaseExt::value(&*derived), 101);
     }
 
-    /// Issue #128, 7.3/7.4/9.2: arbitrary ordinary-descendant depth below the `struct_only` bridge,
-    /// with an intermediate hop (`BridgeDepthD`) that overrides nothing — dispatch must still land
-    /// on the nearest real override (`BridgeDepthC`), and the deepest override (`BridgeDepthE`)
+    /// Issue #128, 7.3/7.4/9.2: arbitrary descendant depth,
+    /// with an intermediate hop (`ChainDepthD`) that overrides nothing — dispatch must still land
+    /// on the nearest real override (`ChainDepthC`), and the deepest override (`ChainDepthE`)
     /// must still be able to forward all the way back to the concrete base. No code anywhere in the
     /// fix is specific to this depth.
     #[test]
-    fn bridge_four_hop_override_chain_requires_no_new_code() {
-        let d = BridgeDepthD::new();
-        assert_eq!(BridgeBaseExt::value(&*d), 11);
+    fn chain_four_hop_override_chain_requires_no_new_code() {
+        let d = ChainDepthD::new();
+        assert_eq!(ChainBaseExt::value(&*d), 11);
 
-        let e = BridgeDepthE::new();
-        assert_eq!(BridgeBaseExt::value(&*e), 1011);
+        let e = ChainDepthE::new();
+        assert_eq!(ChainBaseExt::value(&*e), 1011);
     }
 
-    /// Issue #128, 7.5/9.4: two independent `#[overridable]` methods on the same `trait_only`
-    /// interface, overridden at different descendant depths, must resolve independently.
+    /// Issue #128, 7.5/9.4: two independent `#[overridable]` methods on the same class, overridden at different descendant depths, must resolve independently.
     #[test]
-    fn bridge_independent_override_slots_resolve_independently() {
-        let e = BridgeMultiE::new();
+    fn chain_independent_override_slots_resolve_independently() {
+        let e = ChainMultiE::new();
         let log = RefCell::new(Vec::new());
-        assert_eq!(BridgeMultiExt::first(&*e, &log), 111);
-        assert_eq!(BridgeMultiExt::second(&*e, &log), 22);
+        assert_eq!(ChainMultiBaseExt::first(&*e, &log), 111);
+        assert_eq!(ChainMultiBaseExt::second(&*e, &log), 22);
     }
 
     /// Issue #128, 9.3: forwarding order through `self.base.*()` for a method overridden at two
     /// different hops must visit the closest override first, then each ancestor's own override or
     /// concrete implementation in turn.
     #[test]
-    fn bridge_override_chain_order_log_matches_expected_sequence() {
-        let e = BridgeMultiE::new();
+    fn chain_override_chain_order_log_matches_expected_sequence() {
+        let e = ChainMultiE::new();
         let log = RefCell::new(Vec::new());
-        BridgeMultiExt::first(&*e, &log);
+        ChainMultiBaseExt::first(&*e, &log);
         assert_eq!(*log.borrow(), vec!["E", "C", "B"]);
-    }
-
-    /// Issue #128 remediation, T4 (review finding A2): a same-crate `struct_only` implementor whose
-    /// bare name doesn't match the interface it implements resolves with no manually-authored
-    /// `{ConcreteName}Ext` alias.
-    #[test]
-    fn bridge_same_crate_different_name_struct_only_resolves_without_alias() {
-        let derived = BridgeDifferentNameDerived::new();
-        assert_eq!(BridgeDifferentNameInterfaceExt::value(&*derived), 101);
-    }
-
-    /// Issue #128 remediation, T6 (review finding A3): a generic `struct_only<T>` type compiles with
-    /// its own generic parameter/bound intact and dispatches correctly.
-    #[test]
-    fn bridge_generic_struct_only_preserves_impl_generics_and_dispatches() {
-        let derived = BridgeGenericDerived::new();
-        assert_eq!(BridgeGenericInterfaceExt::value(&*derived), 101);
-    }
-
-    /// Issue #128 remediation, T2 (review finding A1): `struct_only` targeting an *ordinary*
-    /// (non-root) class's own generated `{ClassName}Ext` dispatches through the bridge that
-    /// ordinary class now generates for itself, exactly like a `trait_only` interface's.
-    #[test]
-    fn bridge_ordinary_interface_struct_only_dispatches_through_generated_bridge() {
-        let derived = BridgeOrdinaryMidDerived::new();
-        assert_eq!(BridgeOrdinaryMidExt::extra(&*derived), 1070);
-        // The supertrait slot (`value`, from `BridgeConcreteBase`'s own `trait_only` interface)
-        // still resolves normally through the same composed base.
-        assert_eq!(BridgeBaseExt::value(&*derived), 1);
-    }
-
-    /// PR #164 final remediation round, T3/T9/T12 (finding C2): `struct_only` targeting a
-    /// *root*-mode interface, composing the exact same root concrete storage via a matching
-    /// `inherits = ..` — dispatches through the bridge that root-mode class generates for itself,
-    /// and `as_ui_element` reaches the composed root base (not the struct_only concrete
-    /// reinterpreted as the root type).
-    #[test]
-    fn bridge_root_interface_struct_only_dispatches_through_generated_bridge() {
-        let derived = BridgeRootDerived::new();
-        assert_eq!(BridgeRootBaseExt::value(&*derived), 101);
-        let root_ref: &BridgeRootBase = BridgeRootBaseExt::as_ui_element(&*derived);
-        assert_eq!(root_ref.value(), 1);
-    }
-
-    /// Issue #128 remediation, T8: `no_ancestor_forward` bypasses the bridge entirely — a
-    /// `struct_only` implementor of a hand-written trait dispatches via a plain, direct `impl`, with
-    /// none of the `#[overridable]`/`#[overrides]` machinery involved.
-    #[test]
-    fn bridge_no_ancestor_forward_dispatches_directly_with_no_bridge_involved() {
-        let concrete = BridgeNoForwardConcrete::new();
-        assert_eq!(BridgeHandWrittenTrait::hand_value(&*concrete), 1);
     }
 }
 

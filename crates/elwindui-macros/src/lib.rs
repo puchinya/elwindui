@@ -134,15 +134,15 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
             return quote::quote! { compile_error!(#msg); }.into();
         }
     };
-    // A Core interface: `#[component(trait_only, ..)] trait Name { .. }`.
+    // A `trait` item: rejected, `trait_only` was removed by Issue #313.
     if let Ok(item_trait) = syn::parse::<syn::ItemTrait>(item.clone()) {
-        return component_class::expand_trait(&args, item_trait).into();
+        return component_class::expand_trait(item_trait).into();
     }
     let item_struct = match syn::parse::<syn::ItemStruct>(item) {
         Ok(item_struct) => item_struct,
         Err(e) => {
             let msg = format!(
-                "#[elwindui::component]: expected `struct Name {{ .. }}`, `impl Name {{ .. }}` or                  (with `trait_only`) `trait Name {{ .. }}`: {e}"
+                "#[elwindui::component]: expected `struct Name {{ .. }}` or `impl Name {{ .. }}`: {e}"
             );
             return quote::quote! { compile_error!(#msg); }.into();
         }
@@ -387,7 +387,7 @@ fn path_to_string(path: &syn::Path) -> String {
     s
 }
 
-/// `#[elwindui_macros::class(inherits = SuperClass, struct_only = existing::TraitPath, trait_only, abstract_class, sealed)]`
+/// `#[elwindui_macros::class(inherits = SuperClass, abstract_class, sealed)]`
 /// applied to a bare `struct ClassName { .. }` and, separately, a bare `impl ClassName { .. }`
 /// (no `for`) — automates the H.2.1a class-hierarchy convention (docs/design/runtime/ui_tree_design.md).
 /// See `class::expand`'s own doc comment for the full design and its deliberate simplifications

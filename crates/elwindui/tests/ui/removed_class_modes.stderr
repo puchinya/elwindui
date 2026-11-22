@@ -1,0 +1,67 @@
+error: #[elwindui::component]: `trait_only` was removed (Issue #313). Declare the class once as an ordinary class-backed component and inherit it with `inherits`; a native control keeps its OS widget in a backend peer (docs/design/runtime/native_peer_design.md)
+ --> tests/ui/removed_class_modes.rs:7:1
+  |
+7 | #[elwindui::component(trait_only)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `elwindui::component` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: #[elwindui::component]: `struct_only` was removed (Issue #313). Declare the class once as an ordinary class-backed component and inherit it with `inherits`; a native control keeps its OS widget in a backend peer (docs/design/runtime/native_peer_design.md)
+  --> tests/ui/removed_class_modes.rs:10:1
+   |
+10 | #[elwindui::component(struct_only = elwindui::core::ui::ButtonExt)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `elwindui::component` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: #[elwindui::component]: `abi_props` was removed (Issue #313). Declare the class once as an ordinary class-backed component and inherit it with `inherits`; a native control keeps its OS widget in a backend peer (docs/design/runtime/native_peer_design.md)
+  --> tests/ui/removed_class_modes.rs:13:1
+   |
+13 | #[elwindui::component(inherits VerticalLayout, abi_props = elwindui::core::__elwindui_props_Button)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `elwindui::component` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: #[elwindui::component]: `no_ancestor_forward` was removed (Issue #313). Declare the class once as an ordinary class-backed component and inherit it with `inherits`; a native control keeps its OS widget in a backend peer (docs/design/runtime/native_peer_design.md)
+  --> tests/ui/removed_class_modes.rs:17:1
+   |
+17 | #[elwindui::component(inherits VerticalLayout, no_ancestor_forward)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `elwindui::component` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: #[elwindui::component]: a `trait` interface is no longer a Component shape (`trait_only` was removed by Issue #313); declare the Component once as a `struct` with its paired `impl`
+  --> tests/ui/removed_class_modes.rs:22:11
+   |
+22 | pub trait ComponentTraitItem {}
+   |           ^^^^^^^^^^^^^^^^^^
+
+error: #[class]: `trait_only` was removed (Issue #313). Declare the class once as an ordinary class-backed component and inherit it with `inherits`; a native control keeps its OS widget in a backend peer (docs/design/runtime/native_peer_design.md)
+  --> tests/ui/removed_class_modes.rs:24:19
+   |
+24 | #[elwindui::class(trait_only)]
+   |                   ^^^^^^^^^^
+
+error: #[class]: `struct_only` was removed (Issue #313). Declare the class once as an ordinary class-backed component and inherit it with `inherits`; a native control keeps its OS widget in a backend peer (docs/design/runtime/native_peer_design.md)
+  --> tests/ui/removed_class_modes.rs:27:19
+   |
+27 | #[elwindui::class(struct_only = elwindui::core::ui::ButtonExt)]
+   |                   ^^^^^^^^^^^
+
+error: #[class]: `abi_props` was removed (Issue #313). Declare the class once as an ordinary class-backed component and inherit it with `inherits`; a native control keeps its OS widget in a backend peer (docs/design/runtime/native_peer_design.md)
+  --> tests/ui/removed_class_modes.rs:30:19
+   |
+30 | #[elwindui::class(abi_props = elwindui::core::__elwindui_props_Button)]
+   |                   ^^^^^^^^^
+
+error: #[class]: `no_ancestor_forward` was removed (Issue #313). Declare the class once as an ordinary class-backed component and inherit it with `inherits`; a native control keeps its OS widget in a backend peer (docs/design/runtime/native_peer_design.md)
+  --> tests/ui/removed_class_modes.rs:33:19
+   |
+33 | #[elwindui::class(no_ancestor_forward)]
+   |                   ^^^^^^^^^^^^^^^^^^^
+
+error: #[class]: a `trait ClassName { .. }` interface is no longer a class shape (`trait_only` was removed by Issue #313) — declare `struct ClassName { .. }` and its paired `impl ClassName { .. }` instead
+  --> tests/ui/removed_class_modes.rs:37:1
+   |
+37 | pub trait ClassTraitItem {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^

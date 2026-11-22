@@ -150,8 +150,8 @@ into a host.
   once, which also lets `try_as_native_control` return a borrow of the handle) and
   `self_weak: Weak<dyn NativeControlExt>` captured from `__self_weak` in `construct`.
 - `NativeControl::construct(peer: Option<Rc<dyn NativePeer>>)` is internal (no constructor inputs).
-  `None` is the lazy path. `Some(peer)` is the transitional eager path for controls not yet migrated
-  (their backend `struct_only` implementors wrap their handle in a `HandlePeer`).
+  `None` is the lazy path, used by every builtin. `Some(peer)` installs an already-created peer; no
+  builtin uses it since the migration completed.
 - Realization reaches the most-derived control's `#[doc(hidden)] #[overridable]` hooks
   `__create_native_peer` and `__initialize_native_peer` (§6) through `self_weak`, because a method running
   on the base storage cannot dispatch to an override by itself.
@@ -480,10 +480,13 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   2. `Window`.
   3. `CheckBox`, `RadioButton`, `Slider`, `ToggleSwitch`, `TextBox`, `TextArea`, `PasswordBox`.
   4. `Dropdown`(+`Item`), `Menu`/`MenuBar`/`MenuItem`/`MenuBarItem`, `ScrollView`, `TabView`(+`Item`).
-  5. Remove `trait_only`/`struct_only`/`abi_props` from `#[component]` and `#[class]` parsing and
-     expansion. Using them becomes a compile error that names the mode and points to this design. Also
-     migrate `bridge-fixture-{iface,backend}`, `class_bridge_cross_crate.rs`, `testsupport.rs` and docs,
-     and add negative trybuild cases.
+  5. Remove `trait_only`/`struct_only`/`abi_props` (and `no_ancestor_forward`, which only applied to
+     `struct_only`) from `#[component]` and `#[class]` parsing and expansion, together with the
+     class-interface bridge and the skip entry point that served them. Using a removed mode is a compile
+     error that names the mode and points to this design. The bridge fixtures, the cross-crate test
+     (now `class_chain_cross_crate.rs`) and `testsupport.rs` become ordinary class chains, and negative
+     trybuild cases cover every removed mode (`tests/ui/removed_class_modes.rs`). Done; a generic class
+     in the middle of a chain, which only `struct_only` could express, is no longer supported.
 - Compatibility: user code that only uses `elwindui::ui::*`, `view!`, `new!`, `#[component(inherits ..)]` and
   `#[overrides]` keeps compiling. User code that names a backend concrete type
   (`elwindui::backend::Button`) or that authored its own `trait_only`/`struct_only` classes breaks. That

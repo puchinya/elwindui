@@ -772,11 +772,12 @@ impl TreeHost {
         match resolved.definition {
             ResolvedContextDefinition::Menu { menu, presentation } => match presentation {
                 ContextMenuPresentation::Native => {
-                    let appkit_menu = menu
+                    let menu_peer = elwindui_core::ui::__menu_peer_of(&*menu);
+                    let appkit_menu = menu_peer
                         .as_any()
-                        .downcast_ref::<crate::native_ui::Menu>()
-                        .expect("AppKit MenuExt: menu must be this backend's Menu");
-                    Retained::autorelease_return(appkit_menu.inner_ns())
+                        .downcast_ref::<crate::native_ui::menu::AppKitMenuPeer>()
+                        .expect("AppKit menu peer");
+                    Retained::autorelease_return(appkit_menu.ns())
                 }
                 ContextMenuPresentation::Custom => {
                     let host = crate::inner::AppKitPopupHost::new(self.window());

@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 /// Raw `NSScrollView` + nested `TreeHost` (`ElwinduiContentRoot`) — composed by
-/// `native_ui::ScrollView`. See `elwindui_core::ui::ScrollView`'s own doc comment for the
+/// the ScrollView peer (`native_ui::scroll_view`). See `elwindui_core::ui::ScrollView`'s own doc comment for the
 /// `ScrollView -> NativeScrollHost -> ElwinduiContentRoot -> content` structure this implements.
 /// `content_host` is a second, independent `TreeHost` instance — the same nested-hosting
 /// pattern `InnerTabView::insert_tab`'s own per-tab `TreeHost::new()` already establishes, not a

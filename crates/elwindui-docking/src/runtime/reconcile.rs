@@ -2997,31 +2997,19 @@ fn add_tab_context_item(
             owner.handle_tab_context_action(item.clone(), action);
         }
     }));
-    // Keep the Rust menu-item wrapper alive for as long as the native NSMenu retains the
-    // NSMenuItem. AppKit does not retain an NSMenuItem target, so using the backend-only
-    // `add_item` helper here drops `MenuItemTarget` immediately after construction; the menu
-    // remains visible, but Close/Float actions become inert when selected.
+    // The menu's item list keeps the Core `MenuItem` (and so its native peer and AppKit target)
+    // alive for as long as the menu exists.
     menu.items().add(menu_item);
 }
 
-#[cfg(all(not(test), target_os = "macos"))]
+#[cfg(not(test))]
 fn new_docking_menu() -> Option<Rc<dyn MenuExt>> {
-    Some(elwindui_backend_appkit::Menu::new() as Rc<dyn MenuExt>)
+    Some(crate::core::ui::Menu::new() as Rc<dyn MenuExt>)
 }
 
-#[cfg(all(not(test), target_os = "windows"))]
-fn new_docking_menu() -> Option<Rc<dyn MenuExt>> {
-    Some(elwindui_backend_winui3::Menu::new() as Rc<dyn MenuExt>)
-}
-
-#[cfg(all(not(test), target_os = "macos"))]
+#[cfg(not(test))]
 fn new_docking_menu_item() -> Rc<dyn MenuItemExt> {
-    elwindui_backend_appkit::MenuItem::new() as Rc<dyn MenuItemExt>
-}
-
-#[cfg(all(not(test), target_os = "windows"))]
-fn new_docking_menu_item() -> Rc<dyn MenuItemExt> {
-    elwindui_backend_winui3::MenuItem::new() as Rc<dyn MenuItemExt>
+    crate::core::ui::MenuItem::new() as Rc<dyn MenuItemExt>
 }
 
 fn detach_runtime_node(node: &RuntimeNode) {

@@ -88,7 +88,8 @@ pub trait ButtonPeer: NativePeer {
     fn set_is_default(&self, is_default: bool);
     fn set_on_click(&self, callback: Option<Box<dyn Fn()>>);
 }
-// TextBoxPeer, CheckBoxPeer, ... ScrollViewPeer, TabViewPeer, MenuBarPeer, ... WindowPeer
+// TextBoxPeer, CheckBoxPeer, ... DropdownPeer, ScrollViewPeer, TabViewPeer, WindowPeer
+// MenuItemPeer, MenuPeer, MenuBarItemPeer, MenuBarPeer (not NativePeer: no measure/handle)
 ```
 
 Rules:
@@ -283,8 +284,8 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   `configure_floating_title` (default `Ok(())`, used by Docking) and `dispose`.
   `NativePeerFactory::create_window(owner: Weak<dyn WindowExt>)` creates it; `owner` is the most-derived
   Window (`__self_weak`), and the default body reports `Window` unsupported.
-- **Transitional:** `set_menu_bar` takes `Rc<dyn MenuBarExt>` and the backend downcasts it to its own
-  `MenuBar`, because `MenuBar` becomes a Core-owned Component only in stage 4. `set_content` takes the
+- `set_menu_bar` takes the realized `Rc<dyn MenuBarPeer>` (§7c): Core realizes the `MenuBar` when it
+  pushes it, and the backend downcasts the peer to its own menu-bar peer. `set_content` takes the
   element directly (no `Option`): Core never clears a Window's content today.
 - **Realization** happens once, on the first of: `show()`; `set_content()`; a bounds getter whose value
   was never set logically; `__configure_floating_title()`. `set_content` realizes because hosting the
@@ -383,20 +384,62 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   on every measure (`refresh_text_style_on_measure`), and `TextArea` measures through its
   `NSScrollView`-hosted text view. Both are cross-checked only (#316, D5).
 
+## 7c. Containers and menus (stage ④)
 
-
-- `ScrollView`: Core owns `content`. `ScrollViewPeer::set_content(Option<Rc<dyn UIElementExt>>, owner: Weak<..>)`
-  hosts it in the backend's nested `TreeHost`. The peer's unmount hook (`unmount_hosted_tree`) is
-  installed by Core at realization through `add_unmount_hook` and calls `peer.unmount_content()`.
-- `TabView`/`TabViewItem`: Core owns `children: Vec<Rc<TabViewItem>>`, `selected_index` and the item
-  props. `TabViewItem` is a Core class-backed non-`UIElement` value. The peer receives the full ordered
-  item list (`set_items`) plus per-item header/closable updates. Per-tab `TreeHost`s, active-host
-  switching, `rebuilding` select suppression and the `Weak` wiring move into the backend peer unchanged.
-  Close/select/new-tab notifications reach Core through `Weak` callbacks.
-- `Menu`/`MenuBar`/`MenuItem`/`MenuBarItem` and `Dropdown`/`DropdownItem`: Core owns the logical item
-  lists (`ListExt` stays on the Core type). Peers reconcile by `Rc::ptr_eq` (existing algorithm) through
-  `set_items(&[Rc<dyn MenuItemPeerSource>])`. Item peers are realized by their parent peer, not by mount,
-  because items are not `UIElement`s. `Menu::create_flyout` for context menus becomes a `MenuPeer` method.
+- `Dropdown`, `ScrollView` and `TabView` are Core-owned Components that inherit `NativeControl`, with
+  typed peers `DropdownPeer`, `ScrollViewPeer` and `TabViewPeer`. `DropdownItem`, `TabViewItem`,
+  `Menu`, `MenuItem`, `MenuBar` and `MenuBarItem` are Core-owned Components without a `UIElement`
+  base. All of them are `sealed`; the old backend types and their `struct_only` implementors are gone.
+- **Item lists are Core state.** `Dropdown::items`, `TabView::children`, `Menu::items` and
+  `MenuBar::items` are `ChildList`s on the Core type, and the Core type implements `ListExt`. Every
+  list change pushes the **full ordered list** to a realized peer; the peer reconciles by identity and
+  the native list always ends in the pushed order (an insertion before a kept entry and a reorder
+  included). A peer whose native list can only append and remove uses Core's
+  `reconcile_ordered_peers`: kept entries stay untouched while new ones only need appending;
+  otherwise every entry is removed and re-added in order.
+- **An item appears at most once in a list** (`ui_spec.md` item-list rules), because a native entry
+  cannot be in two places. `Menu`, `MenuBar` and `TabView` check this with
+  `ChildList::assert_absent` (`add`/`insert`) and `assert_distinct_items` (`TabView::set_children`)
+  before any change, and panic with a diagnostic naming the list. `reconcile_ordered_peers` still never
+  slices out of range for a list that breaks the rule: it takes the full-rebuild path.
+- **Dropdown:** realization pushes the item texts, the selected index, `enabled`, then the change
+  callback last. Every list change pushes the texts and then the stored selection, because a rebuilt
+  native list loses it. A user selection follows the §5 two-way rule: an echo of the stored index is
+  dropped; a new index is stored, becomes the accessibility `value` (the selected item's text) and is
+  notified once. `DropdownItem` has no peer: its `text` is read when the list is pushed.
+- **ScrollView:** Core keeps `content` and both scroll axes (vertical only by default). Realization
+  pushes the axes, then the stored content. `ScrollViewPeer::set_content(content, owner)` hosts the
+  content in the backend's nested tree host, which owns the hosted-content lifecycle (replacing content
+  retires the previous tree first; reentrant requests keep the newest). Core installs one unmount hook
+  at construction that calls `peer.unmount_content()` when a peer exists, so an unrealized ScrollView
+  hosts and retires nothing.
+- **TabView:** Core owns the item list, `selected_index` and the **selection policy** after a removal
+  (`ui_spec.md` TabView): the selected tab survives by identity; if it was removed, the tab now at its
+  index is selected, or the new last tab. `TabViewPeer::set_items(items, owner)` reconciles tabs by
+  `Rc::as_ptr` identity: removed tabs retire their content (popup, unmount, native detach) before their
+  native tab is removed, new tabs get a content host for the item's content, kept tabs are **moved** to
+  their pushed position with their own content host (a reorder never retires or re-hosts content), and
+  every tab's header and closable state are refreshed. After the list, Core pushes the stored selection.
+  - A list change made reentrantly from inside `set_items` (a content `on_unmount` hook) only updates
+    Core's list and the peer's pending list; the peer repeats its diff until no newer list arrived, and
+    only the **outermost** Core push applies the final selection (§6 last-write-wins).
+  - Core reports a selection change to `on_select` (shared with the `selected_index` binding write-back)
+    exactly once, after the change completes, by comparing with the last reported index. A programmatic
+    `set_selected_index` updates that index and is not reported.
+  - A user selection is shown by the peer first (it activates that tab's content host), then reported;
+    an echo of the stored index is dropped. A close request runs the item's own `on_close`, or else the
+    TabView's `on_close(index)`. Header and closable changes of a displayed item are forwarded through
+    a `Weak` listener to `set_tab_header`/`set_tab_closable`.
+  - Core installs the same kind of unmount hook as ScrollView, calling `peer.unmount_content()`.
+- **Menus:** `MenuItemPeer`, `MenuPeer`, `MenuBarItemPeer` and `MenuBarPeer` are not `NativePeer`s (no
+  measure or handle). A menu object is realized on demand, the first time a backend presents it
+  natively, through `__menu_peer_of` / `__menu_bar_peer_of`: a realized `Window` pushing its menu bar,
+  or a native context menu. Realizing a menu realizes each item's peer once; an item's peer is shared by
+  every native menu that shows it. Custom-rendered context menus read the logical state and never
+  realize a peer, so they need no backend. A native activation calls Core's `MenuItem::select` through a
+  `Weak` callback; dropping a `MenuItem` disposes its peer.
+- Each backend peer owns its callback-registry entries (WinUI3 `UiCallbackRegistryOwner`) and calls
+  stored callbacks with the slot unborrowed (`invoke_slot`), as in §7b.
 - The generic public properties of these types (`enabled`, `selected_index`, etc.) follow §5 unchanged.
 
 ## 9. Macro, constructor ABI and migration order

@@ -1,156 +1,63 @@
-//! `elwindui::ui::Dropdown` — the `DropdownExt` implementation. Mirrors
-//! `elwindui_backend_appkit::native_ui::dropdown`'s own doc comment and structure; dynamic item
-//! rebuild and two-way selection are verified on Windows.
+//! The WinUI 3 peer behind `elwindui::ui::Dropdown` (a Core-owned Component, Issue #313).
 
-use super::dropdown_item::DropdownItem;
-use super::{NativeControl, base_accessibility_semantics, sync_intrinsic_enabled};
-use crate::AnyView;
+use super::control::HandlePeer;
 use crate::inner::InnerDropdown;
-use elwindui_core::accessibility::{AccessibilityActionKind, AccessibilityRole};
-use elwindui_core::ui::UIElementExt;
-use std::cell::Cell;
-use std::rc::Rc;
+use elwindui_core::base::Size;
+use elwindui_core::graphics::{Brush, CascadedTextStyle};
+use elwindui_core::ui::native::{DropdownPeer, NativePeer};
+use std::any::Any;
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::DropdownExt, inherits = elwindui_core::ui::NativeControl)]
-pub struct Dropdown {
+/// [`DropdownPeer`] over a XAML `ComboBox`. Created by [`super::WinUi3PeerFactory`].
+pub(crate) struct WinUi3DropdownPeer {
+    base: HandlePeer,
     inner: InnerDropdown,
-    children: elwindui_core::ui::ChildList<dyn elwindui_core::ui::DropdownItemExt>,
-    selected_index: Cell<usize>,
 }
 
-#[elwindui_macros::class]
-impl Dropdown {
-    #[inherent]
-    pub fn into_any_view(&self) -> AnyView {
-        self.inner.handle()
+impl WinUi3DropdownPeer {
+    pub(crate) fn new() -> Self {
+        let inner = InnerDropdown::new();
+        Self {
+            base: HandlePeer::new(inner.handle()),
+            inner,
+        }
     }
+}
 
-    fn set_selected_index(&self, selected_index: usize) {
-        self.selected_index.set(selected_index);
-        self.inner.set_selected_index(selected_index);
-        self.update_accessibility_value();
+impl NativePeer for WinUi3DropdownPeer {
+    fn handle(&self) -> &dyn Any {
+        self.base.handle()
     }
-    fn set_on_change(&self, callback: Box<dyn Fn(usize)>) {
-        self.inner.set_on_change(callback);
+    fn measure(&self, available: Size) -> Size {
+        self.base.measure(available)
+    }
+    fn apply_background(&self, background: Option<&Brush>) -> bool {
+        self.base.apply_background(background)
+    }
+    fn set_tooltip(&self, tooltip: Option<&str>) {
+        self.base.set_tooltip(tooltip);
+    }
+    fn supports_text_style(&self) -> bool {
+        self.base.supports_text_style()
+    }
+    fn apply_text_style(&self, style: &CascadedTextStyle) -> bool {
+        self.base.apply_text_style(style)
+    }
+    fn dispose(&self) {
+        self.inner.set_on_change(None);
+    }
+}
+
+impl DropdownPeer for WinUi3DropdownPeer {
+    fn set_items(&self, texts: &[String]) {
+        self.inner.rebuild_items(texts);
+    }
+    fn set_selected_index(&self, index: usize) {
+        self.inner.set_selected_index(index);
     }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
-        sync_intrinsic_enabled(self.base.as_ui_element(), enabled);
     }
-    fn items(&self) -> &dyn elwindui_core::ui::ListExt<dyn elwindui_core::ui::DropdownItemExt> {
-        self
-    }
-
-    fn construct() -> Self {
-        let inner = InnerDropdown::new();
-        let handle = inner.handle();
-        Self {
-            base: NativeControl::construct(super::control::handle_peer(handle)),
-            inner,
-            children: elwindui_core::ui::ChildList::new(),
-            selected_index: Cell::new(0),
-        }
-    }
-
-    fn on_constructed(&self) {
-        self.base
-            .set_intrinsic_accessibility_semantics(base_accessibility_semantics(
-                AccessibilityRole::ComboBox,
-                &[AccessibilityActionKind::Focus],
-            ));
-        self.set_tab_stop(true);
-    }
-
-    /// `codegen` calls exactly `set_on_{field}_change` for a `#[two_way]` prop.
-    #[inherent]
-    pub fn set_on_selected_index_change(&self, callback: Box<dyn Fn(usize)>) {
+    fn set_on_change(&self, callback: Option<Box<dyn Fn(usize)>>) {
         self.inner.set_on_change(callback);
-    }
-
-    /// `#[content(items)]`'s bulk setter — mirrors
-    /// `elwindui_backend_appkit::native_ui::Dropdown::set_items`'s own signature exactly.
-    #[inherent]
-    pub fn set_items(&self, items: Vec<Rc<DropdownItem>>) {
-        self.children.replace_all(
-            items
-                .into_iter()
-                .map(|item| item as Rc<dyn elwindui_core::ui::DropdownItemExt>)
-                .collect(),
-        );
-        self.sync_items();
-    }
-
-    #[inherent]
-    fn sync_items(&self) {
-        let texts: Vec<String> = self
-            .children
-            .to_vec()
-            .iter()
-            .map(|item| downcast_dropdown_item(&**item).text())
-            .collect();
-        self.inner.rebuild_items(&texts);
-        self.inner.set_selected_index(self.selected_index.get());
-        self.update_accessibility_value();
-    }
-
-    #[inherent]
-    fn update_accessibility_value(&self) {
-        let mut semantics = self
-            .base
-            .intrinsic_accessibility_semantics()
-            .unwrap_or_else(|| {
-                base_accessibility_semantics(
-                    AccessibilityRole::ComboBox,
-                    &[AccessibilityActionKind::Focus],
-                )
-            });
-        semantics.value = self
-            .children
-            .to_vec()
-            .get(self.selected_index.get())
-            .map(|item| downcast_dropdown_item(&**item).text());
-        self.base.set_intrinsic_accessibility_semantics(semantics);
-    }
-}
-
-fn downcast_dropdown_item(item: &dyn elwindui_core::ui::DropdownItemExt) -> &DropdownItem {
-    item.as_any()
-        .downcast_ref::<DropdownItem>()
-        .expect("DropdownExt: item must be this backend's DropdownItem")
-}
-
-impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::DropdownItemExt> for Dropdown {
-    fn add(&self, item: Rc<dyn elwindui_core::ui::DropdownItemExt>) {
-        self.children.add(item);
-        self.sync_items();
-    }
-    fn insert(&self, index: usize, item: Rc<dyn elwindui_core::ui::DropdownItemExt>) {
-        self.children.insert(index, item);
-        self.sync_items();
-    }
-    fn remove(&self, item: &Rc<dyn elwindui_core::ui::DropdownItemExt>) -> bool {
-        let removed = self.children.remove(item);
-        if removed {
-            self.sync_items();
-        }
-        removed
-    }
-    fn remove_at(&self, index: usize) -> Rc<dyn elwindui_core::ui::DropdownItemExt> {
-        let item = self.children.remove_at(index);
-        self.sync_items();
-        item
-    }
-    fn clear(&self) {
-        self.children.clear();
-        self.sync_items();
-    }
-    fn len(&self) -> usize {
-        self.children.len()
-    }
-    fn is_empty(&self) -> bool {
-        self.children.is_empty()
-    }
-    fn to_vec(&self) -> Vec<Rc<dyn elwindui_core::ui::DropdownItemExt>> {
-        self.children.to_vec()
     }
 }

@@ -833,7 +833,7 @@ pub trait PopupHost {
 mod tests {
     use super::*;
     use crate::graphics::{Brush, IconSource, ImageSource, SystemIcon, VectorNode, VectorPaint};
-    use crate::ui::testsupport::FakeMenu;
+    use crate::ui::Menu as FakeMenu;
     use crate::ui::{
         HorizontalLayout, IconSourceElement, LayoutExt, ListExt, MenuItemExt, TextBlock,
         VerticalLayout,
@@ -1039,7 +1039,7 @@ mod tests {
         let host = FakePopupHost::new();
         let menu = FakeMenu::new();
 
-        let item = crate::ui::testsupport::FakeMenuItem::new();
+        let item = crate::ui::MenuItem::new();
         item.set_text("Selectable Item");
         let selected = Rc::new(Cell::new(false));
         let sel_clone = Rc::clone(&selected);
@@ -1801,21 +1801,21 @@ mod tests {
     fn custom_menu_keyboard_navigation_and_item_state() {
         let menu = FakeMenu::new();
 
-        let item1 = crate::ui::testsupport::FakeMenuItem::new();
+        let item1 = crate::ui::MenuItem::new();
         item1.set_text("Item 1");
         item1.set_shortcut("1");
         let item1_selected = Rc::new(Cell::new(false));
         let item1_sel_clone = Rc::clone(&item1_selected);
         item1.set_on_select(Box::new(move || item1_sel_clone.set(true)));
 
-        let item2_disabled = crate::ui::testsupport::FakeMenuItem::new();
+        let item2_disabled = crate::ui::MenuItem::new();
         item2_disabled.set_text("Item 2 Disabled");
         item2_disabled.set_enabled(false);
         let item2_selected = Rc::new(Cell::new(false));
         let item2_sel_clone = Rc::clone(&item2_selected);
         item2_disabled.set_on_select(Box::new(move || item2_sel_clone.set(true)));
 
-        let item3 = crate::ui::testsupport::FakeMenuItem::new();
+        let item3 = crate::ui::MenuItem::new();
         item3.set_text("Item 3");
         item3.set_shortcut("3");
         let item3_selected = Rc::new(Cell::new(false));
@@ -1878,7 +1878,7 @@ mod tests {
     /// §8.2: `set_icon` replaces then clears, and never touches `text`/`shortcut`/`enabled`.
     #[test]
     fn menu_item_icon_set_replace_clear_preserves_other_state() {
-        let item = crate::ui::testsupport::FakeMenuItem::new();
+        let item = crate::ui::MenuItem::new();
         item.set_text("Item");
         item.set_shortcut("X");
         item.set_enabled(true);
@@ -1929,7 +1929,7 @@ mod tests {
     fn build_menu_view_reserves_icon_column_only_when_any_item_has_icon() {
         // No icons anywhere: no row gets a leading icon slot.
         let plain_menu = FakeMenu::new();
-        let plain_item = crate::ui::testsupport::FakeMenuItem::new();
+        let plain_item = crate::ui::MenuItem::new();
         plain_item.set_text("Plain");
         plain_menu.add(Rc::clone(&plain_item) as Rc<dyn MenuItemExt>);
         let plain_view = ContextMenuPresenter::build_menu_view(&*plain_menu, Rc::new(|| {}));
@@ -1947,12 +1947,12 @@ mod tests {
         // Mixed menu: SystemIcon item, icon-less item, user ImageSource item — all three rows must
         // reserve the same leading IconSourceElement slot.
         let mixed_menu = FakeMenu::new();
-        let with_system_icon = crate::ui::testsupport::FakeMenuItem::new();
+        let with_system_icon = crate::ui::MenuItem::new();
         with_system_icon.set_text("System");
         with_system_icon.set_icon(Some(IconSource::System(SystemIcon::Copy)));
-        let without_icon = crate::ui::testsupport::FakeMenuItem::new();
+        let without_icon = crate::ui::MenuItem::new();
         without_icon.set_text("No Icon");
-        let with_user_icon = crate::ui::testsupport::FakeMenuItem::new();
+        let with_user_icon = crate::ui::MenuItem::new();
         with_user_icon.set_text("User");
         let bitmap = crate::graphics::BitmapImage::from_rgba8(
             1,
@@ -1993,7 +1993,7 @@ mod tests {
     #[test]
     fn build_menu_view_disabled_system_icon_uses_disabled_color() {
         let menu = FakeMenu::new();
-        let disabled_item = crate::ui::testsupport::FakeMenuItem::new();
+        let disabled_item = crate::ui::MenuItem::new();
         disabled_item.set_text("Disabled");
         disabled_item.set_enabled(false);
         disabled_item.set_icon(Some(IconSource::System(SystemIcon::Delete)));
@@ -2051,14 +2051,14 @@ mod tests {
     fn custom_menu_keyboard_navigation_still_works_with_icons_present() {
         let menu = FakeMenu::new();
 
-        let item1 = crate::ui::testsupport::FakeMenuItem::new();
+        let item1 = crate::ui::MenuItem::new();
         item1.set_text("Item 1");
         item1.set_icon(Some(IconSource::System(SystemIcon::Cut)));
         let item1_selected = Rc::new(Cell::new(false));
         let item1_sel_clone = Rc::clone(&item1_selected);
         item1.set_on_select(Box::new(move || item1_sel_clone.set(true)));
 
-        let item2_disabled = crate::ui::testsupport::FakeMenuItem::new();
+        let item2_disabled = crate::ui::MenuItem::new();
         item2_disabled.set_text("Item 2 Disabled");
         item2_disabled.set_enabled(false);
         item2_disabled.set_icon(Some(IconSource::System(SystemIcon::Delete)));
@@ -2066,7 +2066,7 @@ mod tests {
         let item2_sel_clone = Rc::clone(&item2_selected);
         item2_disabled.set_on_select(Box::new(move || item2_sel_clone.set(true)));
 
-        let item3 = crate::ui::testsupport::FakeMenuItem::new();
+        let item3 = crate::ui::MenuItem::new();
         item3.set_text("Item 3");
         // Deliberately icon-less, to also cover a mixed icon/no-icon row during keyboard nav.
         let item3_selected = Rc::new(Cell::new(false));

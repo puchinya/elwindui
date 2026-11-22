@@ -6,7 +6,6 @@
 mod button;
 mod check_box;
 mod dropdown;
-mod dropdown_item;
 pub(crate) mod menu;
 pub(crate) mod popup;
 mod radio_button;
@@ -20,7 +19,6 @@ mod window;
 pub(crate) use button::InnerButton;
 pub(crate) use check_box::InnerCheckBox;
 pub(crate) use dropdown::InnerDropdown;
-pub(crate) use dropdown_item::InnerDropdownItem;
 pub(crate) use menu::{InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuFlyout, InnerMenuItem};
 pub use popup::{WinUI3PopupHandle, WinUI3PopupHost};
 pub(crate) use radio_button::InnerRadioButton;

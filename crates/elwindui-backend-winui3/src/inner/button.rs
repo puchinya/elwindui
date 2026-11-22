@@ -884,6 +884,8 @@ mod hosted_xaml_regression_tests {
 
                 assert_text_style_round_trip(&canvas);
                 crate::native_ui::input_lifecycle_tests::input_peers_release_every_registration();
+                crate::native_ui::input_lifecycle_tests::container_peers_release_every_registration(
+                );
                 crate::native_ui::input_lifecycle_tests::
                     input_peer_released_by_its_own_event_is_safe();
                 crate::inner::menu::live_menu_item_icon_tests::
@@ -920,6 +922,8 @@ mod hosted_xaml_regression_tests {
                     tab_removal_never_reattaches_reentrant_requests();
                 crate::native_ui::tab_view::hosted_lifecycle_tests::
                     removing_the_selected_tab_selects_a_consistent_replacement();
+                crate::native_ui::tab_view::hosted_lifecycle_tests::
+                    reordering_tabs_keeps_hosts_and_follows_core_order();
                 crate::app::reset_window_lifecycle_test_state();
                 // Issue #254: `InnerWindow` stores only the final owner's `Weak<dyn WindowExt>`;
                 // the application registry becomes the strong lifetime authority after show().

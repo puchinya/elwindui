@@ -132,7 +132,10 @@ struct、`construct`だけで判定されるstruct)を、引数を`#[class]`の�
 (`inherits = Path`など)に変えてこの層(`class::expand`)へそのまま渡す(`component_class.rs`)。`#[class]`自体の
 展開は変えない。struct側の情報(抽象か、`#[constructor_inputs]`)はimpl側でconstructor ABIを
 生成するために保存する(トークンはマクロ呼び出しをまたいで保持できないので文字列で保存する)。
-`#[constructor_inputs(..)]`は`@required_params`の答えにもなる。
+`#[constructor_inputs(..)]`は`@required_params`の答えにもなる。このため`#[constructor_inputs(..)]`(空の
+`#[constructor_inputs()]`を含む)は、それだけでproperty-shape macro(`__elwindui_props_<Name>!`)を出力する
+宣言として扱う。`inherits`のないrootでも同じで、constructor ABIと派生componentはこのmacroに問い合わせる
+(Issue #313 review A1、回帰テストは`crates/elwindui/tests/constructor_inputs_only_root.rs`)。
 
 ## Validation boundary
 

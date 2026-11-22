@@ -342,3 +342,27 @@ impl ExternalRawMiddle {
         }
     }
 }
+
+/// Issue #313 review A1: a class-backed middle whose only class-shape marker is
+/// `#[constructor_inputs]` (publishing its generated base's required input), so a downstream
+/// generated Component forwards that input through it.
+#[component(inherits crate::ExternalDefaultsBase)]
+#[constructor_inputs(title)]
+pub struct ExternalInputsOnlyMiddle {
+    title: std::cell::RefCell<String>,
+}
+
+#[component]
+impl ExternalInputsOnlyMiddle {
+    #[inherent]
+    pub fn current_title(&self) -> String {
+        self.title.borrow().clone()
+    }
+
+    fn construct(title: String) -> Self {
+        Self {
+            base: ExternalDefaultsBase::construct(title.clone()),
+            title: std::cell::RefCell::new(title),
+        }
+    }
+}

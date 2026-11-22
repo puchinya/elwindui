@@ -1143,6 +1143,11 @@ struct PropDecls {
     /// `@required_params` with this list, empty for a class that declares none (every builtin), so
     /// a derived Component in another crate asks any base the same way.
     constructor_inputs: Vec<Ident>,
+    /// Whether `#[constructor_inputs(..)]` is present at all — including an explicit empty
+    /// `#[constructor_inputs()]`. The marker alone makes a class-backed Component (see
+    /// `component_class::is_class_shape_attr`), so it must also emit the property-shape macro a
+    /// generated descendant asks for `@required_params` (Issue #313 review A1).
+    constructor_inputs_declared: bool,
     /// `#[content(children)]` — which property receives bare nested child elements. Routinely names
     /// a property an *ancestor* declares (`VerticalLayout`'s content is `Layout`'s `children`), so
     /// it is validated by the deferred `@assert_declared` probe rather than locally.
@@ -1158,6 +1163,7 @@ impl PropDecls {
     fn is_declared(&self) -> bool {
         !self.props.is_empty()
             || !self.fixed.is_empty()
+            || self.constructor_inputs_declared
             || self.content_field.is_some()
             || self.text_style
     }
@@ -1215,6 +1221,7 @@ fn take_prop_decls(attrs: &[syn::Attribute]) -> syn::Result<(PropDecls, Vec<syn:
             }
             shape.fixed.push(name);
         } else if attr.path().is_ident("constructor_inputs") {
+            shape.constructor_inputs_declared = true;
             shape.constructor_inputs = attr
                 .parse_args_with(
                     syn::punctuated::Punctuated::<Ident, syn::Token![,]>::parse_terminated,

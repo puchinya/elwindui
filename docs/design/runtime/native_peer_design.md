@@ -397,6 +397,11 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   included). A peer whose native list can only append and remove uses Core's
   `reconcile_ordered_peers`: kept entries stay untouched while new ones only need appending;
   otherwise every entry is removed and re-added in order.
+- **An item appears at most once in a list** (`ui_spec.md` item-list rules), because a native entry
+  cannot be in two places. `Menu`, `MenuBar` and `TabView` check this with
+  `ChildList::assert_absent` (`add`/`insert`) and `assert_distinct_items` (`TabView::set_children`)
+  before any change, and panic with a diagnostic naming the list. `reconcile_ordered_peers` still never
+  slices out of range for a list that breaks the rule: it takes the full-rebuild path.
 - **Dropdown:** realization pushes the item texts, the selected index, `enabled`, then the change
   callback last. Every list change pushes the texts and then the stored selection, because a rebuilt
   native list loses it. A user selection follows the §5 two-way rule: an echo of the stored index is

@@ -559,10 +559,13 @@ pub fn reconcile_ordered_peers<T: ?Sized>(
         .iter()
         .filter(|entry| new.iter().any(|candidate| same(entry, candidate)))
         .collect();
-    let kept_is_prefix = kept
-        .iter()
-        .zip(new.iter())
-        .all(|(kept, candidate)| same(kept, candidate));
+    // Lists are distinct by contract (`ChildList::assert_absent`). The length check keeps a list
+    // that breaks it on the full-rebuild path instead of slicing `new` out of range.
+    let kept_is_prefix = kept.len() <= new.len()
+        && kept
+            .iter()
+            .zip(new.iter())
+            .all(|(kept, candidate)| same(kept, candidate));
     if kept_is_prefix {
         for entry in old
             .iter()

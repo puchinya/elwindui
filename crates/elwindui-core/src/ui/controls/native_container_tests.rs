@@ -743,3 +743,80 @@ fn ordered_peer_reconcile_matches_the_pushed_order() {
     push(Vec::new());
     assert!(native.borrow().is_empty());
 }
+
+/// Runs `action`, which must panic with the duplicate-item diagnostic for `owner`.
+fn expect_duplicate_panic(owner: &str, action: impl FnOnce()) {
+    let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action))
+        .expect_err("a duplicate item must be rejected");
+    let message = error
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| error.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
+    assert!(
+        message.contains(&format!("already in the `{owner}`'s list")),
+        "diagnostic names the list: {message}"
+    );
+}
+
+#[test]
+fn duplicate_items_are_rejected_before_any_change() {
+    let factory = install_mock();
+
+    // Menu: `add` and `insert` of an item already present (review case: add twice, remove once).
+    let menu = Menu::new();
+    let item = MenuItem::new();
+    menu.add(item.clone());
+    __menu_peer_of(&*menu);
+    factory.take_log();
+    expect_duplicate_panic("Menu", || menu.add(item.clone()));
+    expect_duplicate_panic("Menu", || ListExt::insert(&*menu, 0, item.clone()));
+    assert_eq!(menu.len(), 1, "the list is unchanged");
+    assert!(factory.take_log().is_empty(), "nothing was pushed");
+    assert!(ListExt::remove(
+        &*menu,
+        &(item.clone() as Rc<dyn MenuItemExt>)
+    ));
+    assert!(menu.is_empty());
+    // After removal, the same item can be inserted again.
+    ListExt::insert(&*menu, 0, item.clone());
+    assert_eq!(menu.len(), 1);
+
+    // MenuBar.
+    let menu_bar = MenuBar::new();
+    let bar_item = MenuBarItem::new();
+    menu_bar.add(bar_item.clone());
+    __menu_bar_peer_of(&*menu_bar);
+    factory.take_log();
+    expect_duplicate_panic("MenuBar", || {
+        ListExt::insert(&*menu_bar, 1, bar_item.clone())
+    });
+    assert_eq!(menu_bar.len(), 1);
+    assert!(factory.take_log().is_empty());
+
+    // TabView: `add`, `insert` and a `set_children` list holding one item twice.
+    let tab_view = TabView::new();
+    realize(&*tab_view);
+    let first = TabViewItem::new();
+    let second = TabViewItem::new();
+    tab_view.set_children(vec![first.clone(), second.clone()]);
+    factory.take_log();
+    expect_duplicate_panic("TabView", || tab_view.add(first.clone()));
+    expect_duplicate_panic("TabView", || ListExt::insert(&*tab_view, 0, second.clone()));
+    expect_duplicate_panic("TabView", || {
+        tab_view.set_children(vec![first.clone(), first.clone()])
+    });
+    assert_eq!(tab_view.len(), 2, "the tabs are unchanged");
+    assert!(factory.take_log().is_empty());
+    clear_native_peer_factory();
+}
+
+#[test]
+fn ordered_peer_reconcile_never_slices_out_of_range() {
+    // A list that breaks the distinct-items contract must not panic in the helper: it takes the
+    // full-rebuild path (review case `old = [a, a]`, `new = [a]`).
+    let a: Rc<str> = Rc::from("A");
+    let native = RefCell::new(vec![a.clone(), a.clone()]);
+    reconcile_into(&native, &[a.clone(), a.clone()], &[a.clone()]);
+    assert_eq!(native.borrow().len(), 1);
+}

@@ -75,10 +75,12 @@ impl MenuBar {
 
 impl ListExt<dyn MenuBarItemExt> for MenuBar {
     fn add(&self, item: Rc<dyn MenuBarItemExt>) {
+        self.items.assert_absent(&item, "MenuBar");
         self.items.add(item);
         self.push_items();
     }
     fn insert(&self, index: usize, item: Rc<dyn MenuBarItemExt>) {
+        self.items.assert_absent(&item, "MenuBar");
         self.items.insert(index, item);
         self.push_items();
     }

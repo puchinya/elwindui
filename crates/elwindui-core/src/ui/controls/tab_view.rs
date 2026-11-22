@@ -150,7 +150,7 @@ impl TabView {
         *self.on_new_tab.borrow_mut() = Some(Rc::from(callback));
     }
 
-    /// Replaces every tab at once.
+    /// Replaces every tab at once. Panics if `children` holds the same item twice (`ui_spec.md`).
     #[inherent]
     pub fn set_children(&self, children: Vec<Rc<TabViewItem>>) {
         let before = self.selected_key();
@@ -159,6 +159,7 @@ impl TabView {
             .into_iter()
             .map(|item| item as Rc<dyn TabViewItemExt>)
             .collect();
+        crate::ui::collections::assert_distinct_items(&new, "TabView");
         let removed = old
             .iter()
             .any(|old| !new.iter().any(|new| Rc::ptr_eq(old, new)));
@@ -292,12 +293,14 @@ impl TabView {
 
 impl ListExt<dyn TabViewItemExt> for TabView {
     fn add(&self, item: Rc<dyn TabViewItemExt>) {
+        self.children.assert_absent(&item, "TabView");
         self.attach_item(&item);
         let before = self.selected_key();
         self.children.add(item);
         self.items_changed(before, false);
     }
     fn insert(&self, index: usize, item: Rc<dyn TabViewItemExt>) {
+        self.children.assert_absent(&item, "TabView");
         self.attach_item(&item);
         let before = self.selected_key();
         self.children.insert(index, item);

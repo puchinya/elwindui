@@ -1,26 +1,18 @@
-//! The public façade: one class per builtin this backend provides, each implementing the
-//! matching `elwindui_core::ui` `*Ext` trait by delegating to its `crate::inner` twin.
+//! This backend's native peers (Issue #313, `docs/design/runtime/native_peer_design.md`).
 //!
-//! Deliberately free of XAML calls — every bit of genuinely toolkit-specific complexity
-//! lives one layer down in `inner`. That boundary is why this layer is ~70% identical between
-//! the two backends and is the natural candidate if it is ever shared outright.
+//! Every native builtin (`Button`, `TabView`, `Window`, the menus, ...) is a Core-owned
+//! Component in `elwindui_core::ui`. This module provides only the peers that put each one on
+//! screen, and the [`WinUi3PeerFactory`] that creates them. Each peer delegates to its
+//! `crate::inner` twin, which holds the XAML calls.
 //!
-//! `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have no type here at
-//! all: they are plain `elwindui_core::ui::UIElement` values that `elwindui-codegen` builds
-//! directly, reflected into native views by `crate::host`.
-
-// Deliberately *not* `use elwindui_core::base::AsAny;` here — see
-// `elwindui_backend_appkit::native_ui::MenuBarItem::set_submenu`'s doc comment (the one place that
-// pattern is explained in full) for why importing `AsAny` directly, rather than relying on it as
-// `MenuBarItemExt`/`MenuExt`/etc.'s own supertrait, silently breaks every
-// `.as_any().downcast_ref::<T>()` call in this file.
+//! `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have no peer: they are
+//! plain `elwindui_core::ui::UIElement` values reflected into native views by `crate::host`.
 
 pub use elwindui_core::ui::NativeControlExt;
-// The submodules' native leaves inherit Core's `NativeControl` (Issue #313).
-use elwindui_core::ui::NativeControl;
 
 use elwindui_core::ui::native::{
-    ButtonPeer, CheckBoxPeer, NativePeerFactory, PasswordBoxPeer, RadioButtonPeer, SliderPeer,
+    ButtonPeer, CheckBoxPeer, DropdownPeer, MenuBarItemPeer, MenuBarPeer, MenuItemPeer, MenuPeer,
+    NativePeerFactory, PasswordBoxPeer, RadioButtonPeer, ScrollViewPeer, SliderPeer, TabViewPeer,
     TextAreaPeer, TextBoxPeer, ToggleSwitchPeer, WindowPeer,
 };
 use std::rc::{Rc, Weak};
@@ -56,6 +48,27 @@ impl NativePeerFactory for WinUi3PeerFactory {
     fn create_password_box(&self) -> Rc<dyn PasswordBoxPeer> {
         Rc::new(text::WinUi3PasswordBoxPeer::new())
     }
+    fn create_dropdown(&self) -> Rc<dyn DropdownPeer> {
+        Rc::new(dropdown::WinUi3DropdownPeer::new())
+    }
+    fn create_scroll_view(&self) -> Rc<dyn ScrollViewPeer> {
+        Rc::new(scroll_view::WinUi3ScrollViewPeer::new())
+    }
+    fn create_tab_view(&self) -> Rc<dyn TabViewPeer> {
+        Rc::new(tab_view::WinUi3TabViewPeer::new())
+    }
+    fn create_menu_item(&self) -> Rc<dyn MenuItemPeer> {
+        Rc::new(menu::WinUi3MenuItemPeer::new())
+    }
+    fn create_menu(&self) -> Rc<dyn MenuPeer> {
+        Rc::new(menu::WinUi3MenuPeer::new())
+    }
+    fn create_menu_bar_item(&self) -> Rc<dyn MenuBarItemPeer> {
+        Rc::new(menu::WinUi3MenuBarItemPeer::new())
+    }
+    fn create_menu_bar(&self) -> Rc<dyn MenuBarPeer> {
+        Rc::new(menu::WinUi3MenuBarPeer::new())
+    }
     fn create_window(&self, owner: Weak<dyn elwindui_core::ui::WindowExt>) -> Rc<dyn WindowPeer> {
         window::WinUi3WindowPeer::create(owner)
     }
@@ -84,79 +97,13 @@ impl<T: NativeControlExt + ?Sized> __IntoAnyView for Rc<T> {
     }
 }
 
-pub(crate) fn base_accessibility_semantics(
-    role: elwindui_core::accessibility::AccessibilityRole,
-    actions: &[elwindui_core::accessibility::AccessibilityActionKind],
-) -> elwindui_core::accessibility::AccessibilitySemantics {
-    let mut semantics = elwindui_core::accessibility::AccessibilitySemantics::new(role);
-    semantics.actions = actions.to_vec();
-    semantics
-}
-
-pub(crate) fn sync_intrinsic_enabled(node: &dyn elwindui_core::ui::UIElementExt, enabled: bool) {
-    let Some(mut semantics) = node.intrinsic_accessibility_semantics() else {
-        return;
-    };
-    semantics.state.disabled = !enabled;
-    node.set_intrinsic_accessibility_semantics(semantics);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use elwindui_core::accessibility::{
-        AccessibilityAction, AccessibilityActionKind, AccessibilityRole,
-    };
-    use elwindui_core::ui::{UIElementExt, VerticalLayout};
-    use std::cell::Cell;
-    use std::rc::Rc;
-
-    #[test]
-    fn disabled_intrinsic_semantics_reject_actions_until_reenabled() {
-        let node = VerticalLayout::new();
-        let mut semantics = base_accessibility_semantics(
-            AccessibilityRole::Button,
-            &[AccessibilityActionKind::Activate],
-        );
-        node.set_intrinsic_accessibility_semantics(semantics.clone());
-        let calls = Rc::new(Cell::new(0));
-        node.set_on_accessibility_action(Box::new({
-            let calls = calls.clone();
-            move |_| calls.set(calls.get() + 1)
-        }));
-
-        sync_intrinsic_enabled(node.as_ui_element(), false);
-        semantics = node
-            .intrinsic_accessibility_semantics()
-            .expect("intrinsic semantics");
-        assert!(semantics.state.disabled);
-        let runtime = elwindui_core::accessibility::AccessibilityRuntime::new();
-        let owner: Rc<dyn UIElementExt> = node.clone();
-        let id = runtime.rebuild(&owner).roots[0].id;
-        assert!(!runtime.dispatch_action(id, AccessibilityAction::Activate));
-        assert_eq!(calls.get(), 0);
-
-        sync_intrinsic_enabled(node.as_ui_element(), true);
-        assert!(
-            !node
-                .intrinsic_accessibility_semantics()
-                .expect("intrinsic semantics")
-                .state
-                .disabled
-        );
-        assert!(runtime.dispatch_action(id, AccessibilityAction::Activate));
-        assert_eq!(calls.get(), 1);
-    }
-}
-
 mod button;
 mod check_box;
 mod control;
 mod dropdown;
-mod dropdown_item;
 #[cfg(test)]
 pub(crate) mod input_lifecycle_tests;
-mod menu;
+pub(crate) mod menu;
 mod radio_button;
 pub(crate) mod scroll_view;
 mod slider;
@@ -164,13 +111,3 @@ pub(crate) mod tab_view;
 mod text;
 mod toggle_switch;
 pub(crate) mod window;
-
-// Glob re-exports, not a named list: `#[class]` generates a companion `__elwindui_macros_of_*`
-// path alias next to each class, which downstream `#[component(inherits ..)]` resolves as
-// `elwindui::ui::__elwindui_macros_of_Window`. Naming only the types here would leave those
-// aliases behind in the submodule and break every inheriting user component.
-pub use dropdown::*;
-pub use dropdown_item::*;
-pub use menu::*;
-pub use scroll_view::*;
-pub use tab_view::*;

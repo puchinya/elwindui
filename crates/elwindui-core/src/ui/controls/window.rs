@@ -75,7 +75,7 @@ impl Window {
     fn set_menu_bar(&self, menu_bar: Rc<dyn MenuBarExt>) {
         *self.as_ui_element().menu_bar.borrow_mut() = Some(menu_bar.clone());
         if let Some(peer) = self.as_ui_element().peer.get() {
-            peer.set_menu_bar(menu_bar);
+            peer.set_menu_bar(__menu_bar_peer_of(&*menu_bar));
         }
     }
 
@@ -279,7 +279,7 @@ impl Window {
         }
         let menu_bar = self.menu_bar.borrow().clone();
         if let Some(menu_bar) = menu_bar {
-            peer.set_menu_bar(menu_bar);
+            peer.set_menu_bar(__menu_bar_peer_of(&*menu_bar));
         }
         if self.transparent.get() {
             peer.set_transparent(true);
@@ -475,7 +475,7 @@ mod tests {
         fn set_title(&self, title: &str) {
             self.record(format!("title:{title}"));
         }
-        fn set_menu_bar(&self, _menu_bar: Rc<dyn MenuBarExt>) {
+        fn set_menu_bar(&self, _menu_bar: Rc<dyn crate::ui::native::MenuBarPeer>) {
             self.record("menu_bar");
         }
         fn set_content(&self, _content: Rc<dyn UIElementExt>) {

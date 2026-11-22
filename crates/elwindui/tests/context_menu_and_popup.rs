@@ -117,51 +117,9 @@ fn context_menu_dsl_and_components_type_check() {
     let _ = type_checked_context_menu_and_custom_views as fn();
 }
 
-#[elwindui::class(struct_only = elwindui::core::ui::MenuExt)]
-struct TestMenu {
-    items: elwindui::core::ui::ChildList<dyn elwindui::core::ui::MenuItemExt>,
-}
-
-#[elwindui::class]
-impl TestMenu {
-    fn construct() -> Self {
-        Self {
-            items: elwindui::core::ui::ChildList::new(),
-        }
-    }
-    fn add_item(&self, _item: &dyn elwindui::core::ui::MenuItemExt) {}
-    fn remove_item(&self, _item: &dyn elwindui::core::ui::MenuItemExt) {}
-    fn items(&self) -> &dyn elwindui::core::ui::ListExt<dyn elwindui::core::ui::MenuItemExt> {
-        self
-    }
-}
-
-impl elwindui::core::ui::ListExt<dyn elwindui::core::ui::MenuItemExt> for TestMenu {
-    fn add(&self, item: Rc<dyn elwindui::core::ui::MenuItemExt>) {
-        self.items.add(item);
-    }
-    fn insert(&self, index: usize, item: Rc<dyn elwindui::core::ui::MenuItemExt>) {
-        self.items.insert(index, item);
-    }
-    fn remove(&self, item: &Rc<dyn elwindui::core::ui::MenuItemExt>) -> bool {
-        self.items.remove(item)
-    }
-    fn remove_at(&self, index: usize) -> Rc<dyn elwindui::core::ui::MenuItemExt> {
-        self.items.remove_at(index)
-    }
-    fn clear(&self) {
-        self.items.clear();
-    }
-    fn len(&self) -> usize {
-        self.items.len()
-    }
-    fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-    fn to_vec(&self) -> Vec<Rc<dyn elwindui::core::ui::MenuItemExt>> {
-        self.items.to_vec()
-    }
-}
+// Core's own `Menu`/`MenuItem` are plain logical values: the custom presenter never realizes a
+// native peer, so these tests need no backend.
+use elwindui::core::ui::{ListExt as _, Menu as TestMenu, MenuItem as TestMenuItem};
 
 #[test]
 fn custom_context_menu_service_opens_and_closes_popup() {
@@ -240,65 +198,6 @@ fn rich_context_popup_displays_arbitrary_layout_and_controls() {
     }
 }
 
-#[elwindui::class(struct_only = elwindui::core::ui::MenuItemExt)]
-struct TestMenuItem {
-    text: RefCell<String>,
-    icon: RefCell<Option<elwindui::core::graphics::IconSource>>,
-    enabled: Cell<bool>,
-    shortcut: RefCell<Option<String>>,
-    on_select: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
-}
-
-#[elwindui::class]
-impl TestMenuItem {
-    fn construct() -> Self {
-        Self {
-            text: RefCell::new(String::new()),
-            icon: RefCell::new(None),
-            enabled: Cell::new(true),
-            shortcut: RefCell::new(None),
-            on_select: Rc::new(RefCell::new(None)),
-        }
-    }
-    fn text(&self) -> String {
-        self.text.borrow().clone()
-    }
-    fn set_text(&self, text: &str) {
-        *self.text.borrow_mut() = text.to_string();
-    }
-    fn icon(&self) -> Option<elwindui::core::graphics::IconSource> {
-        self.icon.borrow().clone()
-    }
-    fn set_icon(&self, icon: Option<elwindui::core::graphics::IconSource>) {
-        *self.icon.borrow_mut() = icon;
-    }
-    fn enabled(&self) -> bool {
-        self.enabled.get()
-    }
-    fn set_enabled(&self, enabled: bool) {
-        self.enabled.set(enabled);
-    }
-    fn shortcut(&self) -> Option<String> {
-        self.shortcut.borrow().clone()
-    }
-    fn set_shortcut(&self, key_equivalent: &str) {
-        *self.shortcut.borrow_mut() = if key_equivalent.is_empty() {
-            None
-        } else {
-            Some(key_equivalent.to_string())
-        };
-    }
-    fn set_on_select(&self, callback: Box<dyn Fn()>) {
-        *self.on_select.borrow_mut() = Some(Rc::from(callback));
-    }
-    fn select(&self) {
-        let cb = self.on_select.borrow().clone();
-        if let Some(cb) = cb {
-            cb();
-        }
-    }
-}
-
 #[test]
 fn custom_menu_items_support_enabled_and_shortcut_semantics() {
     let item = TestMenuItem::new();
@@ -324,14 +223,14 @@ fn custom_menu_keyboard_dispatcher_navigates_and_selects() {
     let sel1 = Rc::new(Cell::new(false));
     let sel1_clone = Rc::clone(&sel1);
     item1.set_on_select(Box::new(move || sel1_clone.set(true)));
-    menu.items.add(Rc::clone(&item1) as Rc<dyn MenuItemExt>);
+    menu.add(Rc::clone(&item1) as Rc<dyn MenuItemExt>);
 
     let item2 = TestMenuItem::new();
     item2.set_text("Second");
     let sel2 = Rc::new(Cell::new(false));
     let sel2_clone = Rc::clone(&sel2);
     item2.set_on_select(Box::new(move || sel2_clone.set(true)));
-    menu.items.add(Rc::clone(&item2) as Rc<dyn MenuItemExt>);
+    menu.add(Rc::clone(&item2) as Rc<dyn MenuItemExt>);
 
     let anchor = PopupAnchor::Point(Point { x: 50.0, y: 50.0 });
     let work_area = Rect {
@@ -595,7 +494,7 @@ fn custom_menu_callback_mutates_state_and_resyncs_without_panic() {
         item_clone.set_text("Updated");
         assert_eq!(item_clone.text(), "Updated");
     }));
-    menu.items.add(Rc::clone(&item) as Rc<dyn MenuItemExt>);
+    menu.add(Rc::clone(&item) as Rc<dyn MenuItemExt>);
 
     let anchor = PopupAnchor::Point(Point { x: 50.0, y: 50.0 });
     let work_area = Rect {

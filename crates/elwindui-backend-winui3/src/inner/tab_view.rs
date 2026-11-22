@@ -1,5 +1,6 @@
 //! `TabView` and its per-tab content hosting.
 
+use super::{CallbackSlot, invoke_slot, new_callback_slot};
 use crate::bindings;
 use crate::bindings::Microsoft::UI::Xaml::Controls::SelectionChangedEventHandler;
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
@@ -11,7 +12,6 @@ use crate::ffi::{
     AnyView, UiCallbackRegistryOwner, invoke_ui_event_callback, invoke_ui_index_event_callback,
 };
 use crate::host::{TreeHost, TreeHostViewport};
-use std::cell::RefCell;
 use std::rc::Rc;
 use windows::Foundation::{PropertyValue, TypedEventHandler};
 use windows::core::{HSTRING, Interface};
@@ -20,19 +20,19 @@ use windows::core::{HSTRING, Interface};
 /// tabbed-document control (unlike AppKit, which has none — `elwindui_backend_appkit::inner`'s
 /// `TabStripImpl`/`TabChipImpl` hand-roll one from `Button`s), so this wraps it directly instead of
 /// assembling a strip from scratch. Each tab's `TabViewItem.Content` is a `TreeHost` holding
-/// that tab's whole widget tree — composed by `native_ui::TabView`, which owns the mapping from
+/// that tab's whole widget tree — composed by the TabView peer (`native_ui::tab_view`), which owns the mapping from
 /// `items_source`/static `TabViewItem`s to entries; this type only knows about "N tabs, each with a
 /// title and a content host", the same division AppKit's `InnerTabView` keeps.
 pub(crate) struct InnerTabView {
     handle: AnyView,
     xaml: XamlTabView,
-    on_select: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
-    on_close: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
-    on_new_tab: Rc<RefCell<Option<Box<dyn Fn()>>>>,
-    /// Delivers the current content viewport to `native_ui::TabView`, which owns the ordered host
+    on_select: CallbackSlot<usize>,
+    on_close: CallbackSlot<usize>,
+    on_new_tab: CallbackSlot<()>,
+    /// Delivers the current content viewport to the TabView peer, which owns the ordered host
     /// collection and can therefore resize only its active host. Keeping that ownership above this
     /// raw-toolkit layer is what lets close remove the matching host deterministically.
-    on_content_size_changed: Rc<RefCell<Option<Box<dyn Fn(f64, f64)>>>>,
+    on_content_size_changed: CallbackSlot<(f64, f64)>,
     /// Owns every TLS callback id installed by this native TabView. Several callbacks capture the
     /// XAML control strongly; releasing the final `InnerTabView` now removes those entries instead
     /// of leaving the whole control reachable from the registry.
@@ -58,10 +58,10 @@ impl InnerTabView {
         let this = Self {
             handle,
             xaml,
-            on_select: Rc::new(RefCell::new(None)),
-            on_close: Rc::new(RefCell::new(None)),
-            on_new_tab: Rc::new(RefCell::new(None)),
-            on_content_size_changed: Rc::new(RefCell::new(None)),
+            on_select: new_callback_slot(),
+            on_close: new_callback_slot(),
+            on_new_tab: new_callback_slot(),
+            on_content_size_changed: new_callback_slot(),
             callback_owner: UiCallbackRegistryOwner::default(),
         };
 
@@ -69,10 +69,7 @@ impl InnerTabView {
             let on_content_size_changed = this.on_content_size_changed.clone();
             let xaml_for_resize = this.xaml.clone();
             let callback_id = this.callback_owner.register_event(Rc::new(move || {
-                let (width, height) = content_size(&xaml_for_resize);
-                if let Some(callback) = on_content_size_changed.borrow().as_ref() {
-                    callback(width, height);
-                }
+                invoke_slot(&on_content_size_changed, content_size(&xaml_for_resize));
             }));
             let _ = this
                 .xaml
@@ -84,11 +81,9 @@ impl InnerTabView {
 
         {
             let on_select = this.on_select.clone();
-            let callback_id = this.callback_owner.register_index(Rc::new(move |index| {
-                if let Some(callback) = on_select.borrow().as_ref() {
-                    callback(index);
-                }
-            }));
+            let callback_id = this
+                .callback_owner
+                .register_index(Rc::new(move |index| invoke_slot(&on_select, index)));
             let _ = this
                 .xaml
                 .SelectionChanged(&SelectionChangedEventHandler::new(move |sender, _| {
@@ -107,11 +102,9 @@ impl InnerTabView {
 
         {
             let on_close = this.on_close.clone();
-            let callback_id = this.callback_owner.register_index(Rc::new(move |index| {
-                if let Some(callback) = on_close.borrow().as_ref() {
-                    callback(index);
-                }
-            }));
+            let callback_id = this
+                .callback_owner
+                .register_index(Rc::new(move |index| invoke_slot(&on_close, index)));
             let _ = this.xaml.TabCloseRequested(&TypedEventHandler::<
                 XamlTabView,
                 TabViewTabCloseRequestedEventArgs,
@@ -138,11 +131,9 @@ impl InnerTabView {
 
         {
             let on_new_tab = this.on_new_tab.clone();
-            let callback_id = this.callback_owner.register_event(Rc::new(move || {
-                if let Some(callback) = on_new_tab.borrow().as_ref() {
-                    callback();
-                }
-            }));
+            let callback_id = this
+                .callback_owner
+                .register_event(Rc::new(move || invoke_slot(&on_new_tab, ())));
             let _ = this
                 .xaml
                 .AddTabButtonClick(&TypedEventHandler::new(move |_, _| {
@@ -158,8 +149,8 @@ impl InnerTabView {
         self.handle.clone()
     }
 
-    pub(crate) fn set_on_select(&self, callback: Box<dyn Fn(usize)>) {
-        *self.on_select.borrow_mut() = Some(callback);
+    pub(crate) fn set_on_select(&self, callback: Option<Rc<dyn Fn(usize)>>) {
+        *self.on_select.borrow_mut() = callback;
     }
 
     /// The native `SelectedIndex` (-1 when nothing is selected).
@@ -171,24 +162,22 @@ impl InnerTabView {
     /// Invokes the selection callback as a native `SelectionChanged` would.
     #[cfg(test)]
     pub(crate) fn emit_select_for_test(&self, index: usize) {
-        if let Some(callback) = self.on_select.borrow().as_ref() {
-            callback(index);
-        }
+        invoke_slot(&self.on_select, index);
     }
 
-    pub(crate) fn set_on_close(&self, callback: Box<dyn Fn(usize)>) {
-        *self.on_close.borrow_mut() = Some(callback);
+    pub(crate) fn set_on_close(&self, callback: Option<Rc<dyn Fn(usize)>>) {
+        *self.on_close.borrow_mut() = callback;
     }
 
-    pub(crate) fn set_on_new_tab(&self, callback: Box<dyn Fn()>) {
-        *self.on_new_tab.borrow_mut() = Some(callback);
+    pub(crate) fn set_on_new_tab(&self, callback: Option<Rc<dyn Fn(())>>) {
+        *self.on_new_tab.borrow_mut() = callback;
     }
 
     /// Installs the native-ui owner callback that receives each new content viewport size. Only
     /// that layer knows which persistent host is selected, so this replaces the old append-only
     /// `content_hosts` list and its resize-all behavior.
-    pub(crate) fn set_on_content_size_changed(&self, callback: Box<dyn Fn(f64, f64)>) {
-        *self.on_content_size_changed.borrow_mut() = Some(callback);
+    pub(crate) fn set_on_content_size_changed(&self, callback: Option<Rc<dyn Fn((f64, f64))>>) {
+        *self.on_content_size_changed.borrow_mut() = callback;
     }
 
     /// Returns the content viewport derived from the live XAML TabView bounds.
@@ -209,7 +198,7 @@ impl InnerTabView {
 
     pub(crate) fn insert_tab(&self, index: usize, title: &str, closable: bool) -> TreeHost {
         let content_host = TreeHost::new();
-        // A tab host must be suppressed before `native_ui::TabView::rebuild` attaches its tree;
+        // A tab host must be suppressed before the TabView peer's rebuild attaches its tree;
         // otherwise `set_tree` would build a full RenderTree for every never-selected tab once.
         content_host.set_active(false);
         let item = TabViewItem::new().expect("TabViewItem::new");
@@ -231,7 +220,7 @@ impl InnerTabView {
         // it isn't the visible one, so its `SizeChanged` may simply never fire — including for the
         // very first tab, before any selection change has ever happened. `TabView` itself, though,
         // reliably resizes with the window (confirmed — its own tab strip renders correctly), so
-        // `native_ui::TabView` owns this host after return. Set its initial viewport here while it
+        // the TabView peer (`native_ui::tab_view`) owns this host after return. Set its initial viewport here while it
         // is still suppressed; the selected entry's later activation performs the first layout.
         let (width, height) = self.content_size();
         self.resize_content_host(&content_host, width, height);
@@ -250,6 +239,36 @@ impl InnerTabView {
         }
     }
 
+    /// Moves the existing XAML tab at `from` to `to` (a keyed reorder). The same `TabViewItem`,
+    /// and with it the same content host, is reinserted, so the tab's widget tree is kept.
+    pub(crate) fn move_tab(&self, from: usize, to: usize) {
+        if from == to {
+            return;
+        }
+        if let Ok(items) = self.xaml.TabItems() {
+            if let Ok(item) = items.GetAt(from as u32) {
+                let _ = items.RemoveAt(from as u32);
+                let _ = items.InsertAt(to as u32, &item);
+            }
+        }
+    }
+
+    /// The header text of every native tab, in display order.
+    #[cfg(test)]
+    pub(crate) fn tab_titles_for_test(&self) -> Vec<String> {
+        let Ok(items) = self.xaml.TabItems() else {
+            return Vec::new();
+        };
+        (0..items.Size().unwrap_or(0))
+            .filter_map(|index| items.GetAt(index).ok())
+            .filter_map(|item| item.cast::<TabViewItem>().ok())
+            .filter_map(|item| item.Header().ok())
+            .filter_map(|header| header.cast::<windows::Foundation::IPropertyValue>().ok())
+            .filter_map(|value| value.GetString().ok())
+            .map(|title| title.to_string())
+            .collect()
+    }
+
     pub(crate) fn set_tab_title(&self, index: usize, title: &str) {
         if let Ok(items) = self.xaml.TabItems() {
             if let Ok(item) = items.GetAt(index as u32) {
@@ -257,6 +276,16 @@ impl InnerTabView {
                     if let Ok(value) = PropertyValue::CreateString(&HSTRING::from(title)) {
                         let _ = item.SetHeader(&value);
                     }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn set_tab_closable(&self, index: usize, closable: bool) {
+        if let Ok(items) = self.xaml.TabItems() {
+            if let Ok(item) = items.GetAt(index as u32) {
+                if let Ok(item) = item.cast::<TabViewItem>() {
+                    let _ = item.SetIsClosable(closable);
                 }
             }
         }

@@ -9,7 +9,7 @@ use crate::bindings::Microsoft::UI::Xaml::Input::KeyboardAccelerator;
 use crate::bindings::Microsoft::UI::Xaml::Media::ImageSource as XamlImageSource;
 use crate::bindings::Microsoft::UI::Xaml::Media::Imaging::BitmapImage as XamlBitmapImage;
 use crate::bindings::Microsoft::UI::Xaml::RoutedEventHandler;
-use crate::ffi::{UiCallbackRegistryOwner, invoke_ui_event_callback, register_ui_event_callback};
+use crate::ffi::{UiCallbackRegistryOwner, invoke_ui_event_callback};
 use elwindui_core::graphics::{IconSource, ImageData, ImageSource, SystemIcon};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -19,12 +19,14 @@ use windows::core::{HSTRING, Interface};
 
 /// See `elwindui_backend_appkit::inner::InnerMenuItem`'s doc comment — same role, backed by a
 /// `MenuFlyoutItem` (WinUI3's `MenuBarItem.Items` collection holds `MenuFlyoutItemBase`s).
-/// Composed by `native_ui::MenuItem`.
+/// Composed by the menu item peer (`native_ui::menu`).
 #[derive(Clone)]
 pub(crate) struct InnerMenuItem {
     xaml: MenuFlyoutItem,
     shortcut: Rc<RefCell<Option<String>>>,
     on_select: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    /// Owns the `Click` registry entry; shared by every clone and released with the last one.
+    _callbacks: Rc<UiCallbackRegistryOwner>,
     /// Semantic `MenuItem.icon` state — shared across `Clone`s (see AppKit's `InnerMenuItem::icon`
     /// doc comment for why) and read by `InnerMenu::create_flyout` to snapshot the icon onto each
     /// newly-realized Context Menu `MenuFlyoutItem` (§2.13 of `icon_source_design.md`).
@@ -34,26 +36,28 @@ pub(crate) struct InnerMenuItem {
 impl InnerMenuItem {
     pub(crate) fn new() -> Self {
         let xaml = MenuFlyoutItem::new().expect("MenuFlyoutItem::new");
-        let this = Self {
-            xaml,
-            shortcut: Rc::new(RefCell::new(None)),
-            on_select: Rc::new(RefCell::new(None)),
-            icon: Rc::new(RefCell::new(None)),
-        };
+        let on_select: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+        let callbacks = UiCallbackRegistryOwner::default();
         {
-            let callback = this.on_select.clone();
-            let callback_id = register_ui_event_callback(Rc::new(move || {
+            let callback = on_select.clone();
+            let callback_id = callbacks.register_event(Rc::new(move || {
                 let cb = callback.borrow().clone();
                 if let Some(cb) = cb {
                     cb();
                 }
             }));
-            let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
+            let _ = xaml.Click(&RoutedEventHandler::new(move |_, _| {
                 invoke_ui_event_callback(callback_id);
                 Ok(())
             }));
         }
-        this
+        Self {
+            xaml,
+            shortcut: Rc::new(RefCell::new(None)),
+            on_select,
+            _callbacks: Rc::new(callbacks),
+            icon: Rc::new(RefCell::new(None)),
+        }
     }
 
     /// A real title setter — construction takes no title argument, so this is the only way a menu
@@ -111,8 +115,8 @@ impl InnerMenuItem {
         }
     }
 
-    pub(crate) fn set_on_select(&self, callback: Box<dyn Fn()>) {
-        *self.on_select.borrow_mut() = Some(Rc::from(callback));
+    pub(crate) fn set_on_select(&self, callback: Option<Box<dyn Fn()>>) {
+        *self.on_select.borrow_mut() = callback.map(Rc::from);
     }
 
     pub(crate) fn icon(&self) -> Option<IconSource> {
@@ -508,7 +512,7 @@ impl InnerMenuFlyout {
 /// comment. `items` is a plain `Vec` (not the native `MenuFlyoutItemBase` collection directly)
 /// since a `Menu` only ever becomes real XAML elements once installed into a `MenuBarItem`
 /// (`InnerMenuBarItem::set_submenu`) — `add_item`/`remove_item` mutate this `Vec` and, if already
-/// installed, the live XAML collection too. Composed by `native_ui::Menu`.
+/// installed, the live XAML collection too. Composed by the menu peer (`native_ui::menu`).
 ///
 /// `installed_into` (deferred-install tracking) has no AppKit counterpart — `NSMenu` needs no such
 /// bookkeeping — so this type's shape is a genuine, backend-specific divergence from
@@ -529,7 +533,7 @@ impl InnerMenu {
 
     /// A real `IVector<MenuFlyoutItemBase>.Append`-style call once this `Menu` is installed into a
     /// `MenuBarItem` (see `installed_into`'s doc comment), reachable post-construction so
-    /// `native_ui::Menu::set_children` can reconcile a changed child list without rebuilding the
+    /// the menu peer (`native_ui::menu`) can reconcile a changed child list without rebuilding the
     /// native menu from scratch.
     pub(crate) fn add_item(&self, item: &InnerMenuItem) {
         self.items.borrow_mut().push(item.clone());
@@ -599,7 +603,7 @@ impl InnerMenu {
 }
 
 /// One top-level entry in the menu bar (e.g. "File"), holding its dropdown `InnerMenu` — composed
-/// by `native_ui::MenuBarItem`.
+/// by the menu bar item peer (`native_ui::menu`).
 #[derive(Clone)]
 pub(crate) struct InnerMenuBarItem {
     xaml: bindings::Microsoft::UI::Xaml::Controls::MenuBarItem,
@@ -628,7 +632,7 @@ impl InnerMenuBarItem {
 }
 
 /// The whole top menu bar, installed via `WindowPeer::set_menu_bar` (`native_ui::window`) — composed by
-/// `native_ui::MenuBar`. Unlike AppKit (one global `NSApplication.mainMenu`), WinUI3's `MenuBar`
+/// the menu bar peer (`native_ui::menu`). Unlike AppKit (one global `NSApplication.mainMenu`), WinUI3's `MenuBar`
 /// is a per-window element — installed by `InnerWindow::set_menu_bar` above, not a shared
 /// process-wide singleton, so (unlike the AppKit backend) there's no app-menu-slot/Quit-item
 /// special-casing needed here.
@@ -762,7 +766,7 @@ pub(crate) mod live_menu_item_icon_tests {
         item.set_shortcut("c");
         let selected = std::rc::Rc::new(std::cell::Cell::new(false));
         let selected_clone = std::rc::Rc::clone(&selected);
-        item.set_on_select(Box::new(move || selected_clone.set(true)));
+        item.set_on_select(Some(Box::new(move || selected_clone.set(true))));
 
         // 1. SystemIcon::Copy -> the live native Icon must actually be a SymbolIcon carrying
         //    Symbol::Copy, not merely "something non-null" (second PR #171 review delta §A2 — a
@@ -922,9 +926,9 @@ pub(crate) mod live_menu_item_icon_tests {
         item.set_text("Broken Icon Action");
         let selected = std::rc::Rc::new(std::cell::Cell::new(0u32));
         let selected_clone = std::rc::Rc::clone(&selected);
-        item.set_on_select(Box::new(move || {
+        item.set_on_select(Some(Box::new(move || {
             selected_clone.set(selected_clone.get() + 1)
-        }));
+        })));
 
         let incompatible = elwindui_core::graphics::BitmapImage::from_backend_handle(
             elwindui_core::graphics::BackendImageHandle(std::sync::Arc::new(42u32)),

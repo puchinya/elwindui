@@ -59,7 +59,7 @@ fn boxed_bool(value: bool) -> Option<IReference<bool>> {
 /// still-alive XAML control is a no-op.
 fn assert_self_release(
     name: &str,
-    baseline: (usize, usize, usize),
+    baseline: (usize, usize, usize, usize),
     peer: Rc<dyn NativePeer>,
     fire: &dyn Fn(),
 ) {
@@ -121,6 +121,49 @@ pub(crate) fn input_peers_release_every_registration() {
         input_control_callback_counts(),
         baseline,
         "dropping input peers must return the callback registries to their baseline"
+    );
+}
+
+/// The stage ④ peers (Dropdown, ScrollView, TabView, the menus) own every registration they make
+/// as well: creating, wiring and dropping them three times returns the registries to baseline.
+pub(crate) fn container_peers_release_every_registration() {
+    use super::dropdown::WinUi3DropdownPeer;
+    use super::menu::{
+        WinUi3MenuBarItemPeer, WinUi3MenuBarPeer, WinUi3MenuItemPeer, WinUi3MenuPeer,
+    };
+    use super::scroll_view::WinUi3ScrollViewPeer;
+    use super::tab_view::WinUi3TabViewPeer;
+    use elwindui_core::ui::native::{
+        DropdownPeer, MenuBarItemPeer, MenuBarPeer, MenuItemPeer, MenuPeer, TabViewPeer,
+    };
+
+    let baseline = input_control_callback_counts();
+    for _ in 0..3 {
+        let dropdown = WinUi3DropdownPeer::new();
+        dropdown.set_on_change(Some(Box::new(|_| {})));
+        let scroll_view = WinUi3ScrollViewPeer::new();
+        let tab_view = WinUi3TabViewPeer::new();
+        tab_view.set_on_select(Some(Box::new(|_| {})));
+        tab_view.set_on_close(Some(Box::new(|_| {})));
+        tab_view.set_on_new_tab(Some(Box::new(|| {})));
+        let item: Rc<dyn MenuItemPeer> = Rc::new(WinUi3MenuItemPeer::new());
+        item.set_on_select(Some(Box::new(|| {})));
+        let menu: Rc<dyn MenuPeer> = Rc::new(WinUi3MenuPeer::new());
+        menu.set_items(std::slice::from_ref(&item));
+        let bar_item: Rc<dyn MenuBarItemPeer> = Rc::new(WinUi3MenuBarItemPeer::new());
+        bar_item.set_submenu(menu.clone());
+        let bar = WinUi3MenuBarPeer::new();
+        bar.set_items(std::slice::from_ref(&bar_item));
+        assert_ne!(input_control_callback_counts(), baseline);
+        dropdown.dispose();
+        tab_view.dispose();
+        item.dispose();
+        drop((dropdown, scroll_view, tab_view, item, menu, bar_item, bar));
+    }
+    assert_eq!(
+        input_control_callback_counts(),
+        baseline,
+        "dropping container and menu peers must return the callback registries to their baseline"
     );
 }
 

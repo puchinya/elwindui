@@ -9,10 +9,8 @@ use elwindui_core::base::Size;
 use elwindui_core::graphics::{Brush, CascadedTextStyle};
 use elwindui_core::ui::native::NativePeer;
 use std::any::Any;
-use std::rc::Rc;
 
-/// A [`NativePeer`] over one XAML element. Controls not yet migrated to Core-owned Components
-/// create one eagerly and pass it to `NativeControl::construct(Some(..))`.
+/// The [`NativePeer`] plumbing over one XAML element, embedded by every typed peer.
 pub(crate) struct HandlePeer {
     handle: AnyView,
 }
@@ -21,11 +19,6 @@ impl HandlePeer {
     pub(crate) fn new(handle: AnyView) -> Self {
         Self { handle }
     }
-}
-
-/// Wraps `handle` as the eagerly created peer of a native control's `NativeControl` base.
-pub(crate) fn handle_peer(handle: AnyView) -> Option<Rc<dyn NativePeer>> {
-    Some(Rc::new(HandlePeer::new(handle)))
 }
 
 impl NativePeer for HandlePeer {

@@ -93,7 +93,7 @@ fn top_rounded_rect_path(rect: NSRect, radius: f64) -> Retained<NSBezierPath> {
 
 /// Visual/native-interaction state owned by a single chip's own backing view — never
 /// `TabViewItem`, `TreeHost`, selected index, or ElwindUI callbacks, which stay with their
-/// existing owners (`TabChipImpl`/`native_ui::TabView`).
+/// existing owners (`TabChipImpl`/the TabView peer (`native_ui::tab_view`)).
 pub(crate) struct TabChipViewIvars {
     selected: Cell<bool>,
     hovered: Cell<bool>,
@@ -449,6 +449,15 @@ impl TabStripImpl {
         chip
     }
 
+    /// Moves an existing chip to `index` in the strip (a keyed reorder).
+    fn move_tab(&self, chip: &TabChipImpl, index: usize) {
+        let view: Retained<NSView> = Retained::into_super(Retained::into_super(chip.ns.clone()));
+        self.chips_stack.removeArrangedSubview(&view);
+        view.removeFromSuperview();
+        self.chips_stack
+            .insertArrangedSubview_atIndex(&view, index as isize);
+    }
+
     fn remove_tab(&self, chip: &TabChipImpl) {
         let view: Retained<NSView> = Retained::into_super(Retained::into_super(chip.ns.clone()));
         self.chips_stack.removeArrangedSubview(&view);
@@ -457,7 +466,7 @@ impl TabStripImpl {
 }
 
 /// See docs/specs/ui_spec.md#tabs. Vertical stack of `[TabStripImpl, separator, content_container]`
-/// — composed by `native_ui::TabView`, which owns the mapping from its `children` collection's
+/// — composed by the TabView peer (`native_ui::tab_view`), which owns the mapping from its `children` collection's
 /// `TabViewItem`s to `TabChipImpl`s + content hosts. This type only holds the widget areas — it has
 /// no notion of "the list of tabs" on its own.
 ///
@@ -560,8 +569,8 @@ impl InnerTabView {
         // `set_tab_content_visible(host, true)` below ever reactivates one, including the very
         // first time a tab becomes selected (see that method's own doc comment). Suppressing here
         // rather than leaving the default `active: true` matters even for a tab that never gets
-        // selected at all: without it, the `host.set_tree(content)` call `native_ui::TabView::
-        // rebuild` makes right after `insert_tab` returns would run a full, wasted `relayout()`
+        // selected at all: without it, the `host.set_tree(content)` call the TabView peer's
+        // rebuild makes right after `insert_tab` returns would run a full, wasted `relayout()`
         // (measure/arrange/RenderTree/CALayer build) before this tab's actual visibility is even
         // decided.
         host.set_active(false);
@@ -570,6 +579,12 @@ impl InnerTabView {
     }
 
     /// Removes a tab's chip and its persistent content host together.
+    /// Moves an existing tab's chip to `index` in the strip. Its content host is an overlaid
+    /// subview of the content area, whose order does not matter, so it is kept as it is.
+    pub(crate) fn move_tab(&self, chip: &TabChipImpl, index: usize) {
+        self.strip.move_tab(chip, index);
+    }
+
     pub(crate) fn remove_tab(&self, chip: &TabChipImpl, host: &TreeHost) {
         self.strip.remove_tab(chip);
         // Explicit rather than relying on the last `Retained<TreeHost>` being dropped by the

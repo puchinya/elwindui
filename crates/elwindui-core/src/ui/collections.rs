@@ -462,6 +462,39 @@ impl<T: ?Sized> ChildList<T> {
     pub fn to_vec(&self) -> Vec<Rc<T>> {
         self.items.borrow().clone()
     }
+
+    /// Panics with a diagnostic when `item` is already in this list. For lists whose items are
+    /// shown as native entries (`Menu`, `MenuBar`, `TabView`): a native entry can only be in one
+    /// place, so an item may appear at most once (`ui_spec.md`). Call it before any mutation.
+    pub fn assert_absent(&self, item: &Rc<T>, owner: &str) {
+        if self
+            .items
+            .borrow()
+            .iter()
+            .any(|existing| Rc::ptr_eq(existing, item))
+        {
+            duplicate_item_panic(owner);
+        }
+    }
+}
+
+/// Panics with the same diagnostic as [`ChildList::assert_absent`] when `items` holds the same
+/// `Rc` more than once (a whole-list replacement such as `TabView::set_children`).
+pub(crate) fn assert_distinct_items<T: ?Sized>(items: &[Rc<T>], owner: &str) {
+    for (index, item) in items.iter().enumerate() {
+        if items[..index]
+            .iter()
+            .any(|earlier| Rc::ptr_eq(earlier, item))
+        {
+            duplicate_item_panic(owner);
+        }
+    }
+}
+
+fn duplicate_item_panic(owner: &str) -> ! {
+    panic!(
+        "elwindui: this item is already in the `{owner}`'s list. An item can appear only once in          one list, because its native entry cannot be shown in two places; remove it before          inserting it again."
+    )
 }
 
 /// State owned by a generated dynamic child range. It is deliberately not a `UIElement`: callers

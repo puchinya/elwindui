@@ -1,30 +1,55 @@
-//! `elwindui::ui::ScrollView` — the `ScrollViewExt` implementation.
+//! The WinUI 3 peer behind `elwindui::ui::ScrollView` (a Core-owned Component, Issue #313).
 
-use super::NativeControl;
-use crate::AnyView;
+use super::control::HandlePeer;
 use crate::inner::InnerScrollView;
+use elwindui_core::base::Size;
+use elwindui_core::graphics::{Brush, CascadedTextStyle};
 use elwindui_core::ui::UIElementExt;
+use elwindui_core::ui::native::{NativePeer, ScrollViewPeer};
+use std::any::Any;
 use std::rc::Rc;
 
-/// `content: std::rc::Rc<dyn UIElement>` (`ScrollView`'s `#[class]` declaration, `#[content(content)]`)
-/// resolves to `Rc<dyn UIElementExt>` here — the same type every other `visual_children()`/
-/// `#[content(..)]` slot in this crate already uses. Mirrors
-/// `elwindui_backend_appkit::native_ui::ScrollView`.
-#[elwindui_macros::class(struct_only = elwindui_core::ui::ScrollViewExt, inherits = elwindui_core::ui::NativeControl)]
-pub struct ScrollView {
-    inner: InnerScrollView,
+/// [`ScrollViewPeer`] over a XAML `ScrollViewer` whose content is a nested `TreeHost`. The host
+/// owns the hosted-content lifecycle (`TreeHost::set_hosted_tree`/`unmount_hosted_tree`).
+pub(crate) struct WinUi3ScrollViewPeer {
+    base: HandlePeer,
+    pub(crate) inner: InnerScrollView,
 }
 
-#[elwindui_macros::class]
-impl ScrollView {
-    #[inherent]
-    pub fn into_any_view(&self) -> AnyView {
-        self.inner.handle()
+impl WinUi3ScrollViewPeer {
+    pub(crate) fn new() -> Self {
+        let inner = InnerScrollView::new();
+        Self {
+            base: HandlePeer::new(inner.handle()),
+            inner,
+        }
     }
+}
 
-    fn set_content(&self, content: Rc<dyn UIElementExt>) {
-        self.inner
-            .set_content(content, self.as_ui_element().visual_collection.owner_rc());
+impl NativePeer for WinUi3ScrollViewPeer {
+    fn handle(&self) -> &dyn Any {
+        self.base.handle()
+    }
+    fn measure(&self, available: Size) -> Size {
+        self.base.measure(available)
+    }
+    fn apply_background(&self, background: Option<&Brush>) -> bool {
+        self.base.apply_background(background)
+    }
+    fn set_tooltip(&self, tooltip: Option<&str>) {
+        self.base.set_tooltip(tooltip);
+    }
+    fn supports_text_style(&self) -> bool {
+        self.base.supports_text_style()
+    }
+    fn apply_text_style(&self, style: &CascadedTextStyle) -> bool {
+        self.base.apply_text_style(style)
+    }
+}
+
+impl ScrollViewPeer for WinUi3ScrollViewPeer {
+    fn set_content(&self, content: Rc<dyn UIElementExt>, owner: Option<Rc<dyn UIElementExt>>) {
+        self.inner.set_content(content, owner);
     }
     fn set_horizontal_scroll_enabled(&self, enabled: bool) {
         self.inner.set_horizontal_scroll_enabled(enabled);
@@ -32,21 +57,11 @@ impl ScrollView {
     fn set_vertical_scroll_enabled(&self, enabled: bool) {
         self.inner.set_vertical_scroll_enabled(enabled);
     }
-
-    /// The content lives in a nested host outside the Visual tree, so it is unmounted (popups
-    /// first) when this ScrollView unmounts — see `TreeHost::unmount_hosted_tree`.
-    fn on_constructed(&self) {
-        let content_host = self.inner.content_host();
-        self.add_unmount_hook(Box::new(move || content_host.unmount_hosted_tree()));
+    fn unmount_content(&self) {
+        self.inner.unmount_content();
     }
-
-    fn construct() -> Self {
-        let inner = InnerScrollView::new();
-        let handle = inner.handle();
-        Self {
-            base: NativeControl::construct(super::control::handle_peer(handle)),
-            inner,
-        }
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -59,13 +74,25 @@ pub(crate) mod hosted_lifecycle_tests {
     use crate::host::hosted_context_lifecycle_tests::{
         Log, capture_events, count, open_recording_popup, probe_content,
     };
-    use elwindui_core::ui::ScrollViewExt;
+    use elwindui_core::ui::{ScrollView, ScrollViewExt};
     use std::cell::RefCell;
+
+    /// The realized peer's nested content host. Realizing first makes every later
+    /// `set_content` reach the host immediately, as these lifecycle cases require.
+    fn content_host_of(scroll_view: &ScrollView) -> crate::host::TreeHost {
+        scroll_view
+            .__scroll_view_peer()
+            .as_any()
+            .downcast_ref::<WinUi3ScrollViewPeer>()
+            .expect("WinUI 3 ScrollView peer")
+            .inner
+            .content_host()
+    }
 
     pub(crate) fn content_replacement_retires_previous_content() {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let scroll_view = ScrollView::new();
-        let host = scroll_view.inner.content_host();
+        let host = content_host_of(&scroll_view);
         let a = probe_content(&log, "A");
         let b = probe_content(&log, "B");
         let c = probe_content(&log, "C");
@@ -117,7 +144,7 @@ pub(crate) mod hosted_lifecycle_tests {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let _events = capture_events(&log);
         let scroll_view = ScrollView::new();
-        let host = scroll_view.inner.content_host();
+        let host = content_host_of(&scroll_view);
         let a = probe_content(&log, "A");
         let b = probe_content(&log, "B");
         let c = probe_content(&log, "C");
@@ -187,7 +214,7 @@ pub(crate) mod hosted_lifecycle_tests {
     pub(crate) fn reentrant_same_content_is_not_unmounted() {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let scroll_view = ScrollView::new();
-        let host = scroll_view.inner.content_host();
+        let host = content_host_of(&scroll_view);
         let a = probe_content(&log, "A");
         let b = probe_content(&log, "B");
         scroll_view.set_content(Rc::clone(&a));
@@ -256,7 +283,7 @@ pub(crate) mod hosted_lifecycle_tests {
         for same_rc in [false, true] {
             let log: Log = Rc::new(RefCell::new(Vec::new()));
             let scroll_view = ScrollView::new();
-            let host = scroll_view.inner.content_host();
+            let host = content_host_of(&scroll_view);
             let a = probe_content(&log, "A");
             let b = probe_content(&log, "B");
             let c = probe_content(&log, "C");
@@ -321,7 +348,7 @@ pub(crate) mod hosted_lifecycle_tests {
     pub(crate) fn owner_close_never_reattaches_reentrant_requests() {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let scroll_view = ScrollView::new();
-        let host = scroll_view.inner.content_host();
+        let host = content_host_of(&scroll_view);
         let a = probe_content(&log, "A");
         let b = probe_content(&log, "B");
         let c = probe_content(&log, "C");
@@ -367,7 +394,7 @@ pub(crate) mod hosted_lifecycle_tests {
         // (1)
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let scroll_view = ScrollView::new();
-        let host = scroll_view.inner.content_host();
+        let host = content_host_of(&scroll_view);
         let a = probe_content(&log, "A");
         let b = probe_content(&log, "B");
         let c = probe_content(&log, "C");
@@ -407,7 +434,7 @@ pub(crate) mod hosted_lifecycle_tests {
         // (2)
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let scroll_view = ScrollView::new();
-        let host = scroll_view.inner.content_host();
+        let host = content_host_of(&scroll_view);
         let a = probe_content(&log, "A");
         let b = probe_content(&log, "B");
         let c = probe_content(&log, "C");
@@ -432,7 +459,7 @@ pub(crate) mod hosted_lifecycle_tests {
         // (3)
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let scroll_view = ScrollView::new();
-        let host = scroll_view.inner.content_host();
+        let host = content_host_of(&scroll_view);
         let a = probe_content(&log, "A");
         let b = probe_content(&log, "B");
         scroll_view.set_content(Rc::clone(&a));
@@ -462,7 +489,7 @@ pub(crate) mod hosted_lifecycle_tests {
             let label = if same_rc { "C/D same Rc" } else { "distinct" };
             let log: Log = Rc::new(RefCell::new(Vec::new()));
             let scroll_view = ScrollView::new();
-            let host = scroll_view.inner.content_host();
+            let host = content_host_of(&scroll_view);
             let a = probe_content(&log, "A");
             let b = probe_content(&log, "B");
             let c = probe_content(&log, "C");
@@ -530,8 +557,8 @@ pub(crate) mod hosted_lifecycle_tests {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let x = ScrollView::new();
         let y = ScrollView::new();
-        let x_host = x.inner.content_host();
-        let y_host = y.inner.content_host();
+        let x_host = content_host_of(&x);
+        let y_host = content_host_of(&y);
         let a = probe_content(&log, "A");
         let b = probe_content(&log, "B");
         x.set_content(Rc::clone(&a));

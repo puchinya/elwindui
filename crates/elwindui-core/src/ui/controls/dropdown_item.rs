@@ -1,11 +1,32 @@
 //! `elwindui::ui::DropdownItem` — one entry in a `Dropdown`.
 
-/// `DropdownItem`'s own class trait. No `inherits`: like `MenuItem`/`TabViewItem`, a `DropdownItem`
-/// has no native view of its own — `Dropdown` reads each item's `text` to rebuild its native
-/// widget's item list, the same way `Menu` reads `MenuItem`'s own state rather than the item
-/// carrying an independent `AnyView`.
-#[elwindui_macros::class(trait_only, sealed)]
+use super::*;
+
+/// `elwindui::ui::DropdownItem`, one entry of a [`Dropdown`]. Declared once here as a Core-owned
+/// Component (Issue #313). It has no native view of its own: the `Dropdown` pushes every item's
+/// `text` to its peer whenever its item list changes.
+#[elwindui_macros::component(sealed)]
 #[prop(text: String)]
-pub trait DropdownItem {
-    fn set_text(&self, text: &str);
+pub struct DropdownItem {
+    text: RefCell<String>,
+}
+
+#[elwindui_macros::component]
+impl DropdownItem {
+    fn set_text(&self, text: &str) {
+        *self.as_ui_element().text.borrow_mut() = text.to_string();
+    }
+
+    fn construct() -> Self {
+        Self {
+            text: RefCell::new(String::new()),
+        }
+    }
+}
+
+impl DropdownItem {
+    /// The entry's caption.
+    pub fn text(&self) -> String {
+        self.text.borrow().clone()
+    }
 }

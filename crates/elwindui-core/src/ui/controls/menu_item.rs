@@ -9,9 +9,10 @@ use std::cell::OnceCell;
 /// Component (Issue #313, `native_peer_design.md` §7c).
 ///
 /// Core keeps the caption, icon, shortcut, enabled state and `on_select` handler. A native menu
-/// that shows the item realizes its [`MenuItemPeer`] once, through the backend factory, and
-/// shares it with every other native menu showing the same item. A custom-rendered context menu
-/// reads the logical state directly and never realizes a peer.
+/// that shows the item realizes its [`MenuItemPeer`] once, through the backend factory. The item
+/// belongs to at most one [`Menu`] at a time (`ui_spec.md` §9, Issue #323): adding it to another
+/// live `Menu` panics until it is removed. A custom-rendered context menu reads the logical state
+/// directly and never realizes a peer.
 #[elwindui_macros::component(sealed)]
 #[prop(text: String)]
 #[prop(icon: Option<crate::graphics::IconSource>)]
@@ -21,6 +22,8 @@ use std::cell::OnceCell;
 pub struct MenuItem {
     self_weak: Weak<dyn MenuItemExt>,
     peer: OnceCell<Rc<dyn MenuItemPeer>>,
+    /// The `Menu` this item belongs to (Issue #323 single-parent lease).
+    owner: crate::ui::collections::ParentLease<dyn MenuExt>,
     text: RefCell<String>,
     icon: RefCell<Option<IconSource>>,
     shortcut: RefCell<Option<String>>,
@@ -92,6 +95,7 @@ impl MenuItem {
         Self {
             self_weak: __self_weak.clone(),
             peer: OnceCell::new(),
+            owner: crate::ui::collections::ParentLease::new(),
             text: RefCell::new(String::new()),
             icon: RefCell::new(None),
             shortcut: RefCell::new(None),
@@ -105,6 +109,11 @@ impl MenuItem {
     /// This item as an owned trait object, while it is alive.
     pub(crate) fn self_rc(&self) -> Option<Rc<dyn MenuItemExt>> {
         self.self_weak.upgrade()
+    }
+
+    /// The single-parent lease the owning `Menu` checks, claims and releases.
+    pub(crate) fn menu_lease(&self) -> &crate::ui::collections::ParentLease<dyn MenuExt> {
+        &self.owner
     }
 
     /// Returns this item's native peer, realizing it on first use: create, push the logical

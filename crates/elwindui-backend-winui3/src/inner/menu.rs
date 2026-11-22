@@ -538,9 +538,11 @@ impl InnerMenu {
     pub(crate) fn add_item(&self, item: &InnerMenuItem) {
         self.items.borrow_mut().push(item.clone());
         if let Some(items) = self.installed_into.borrow().as_ref() {
-            if let Ok(base) = item.xaml.cast::<MenuFlyoutItemBase>() {
-                let _ = items.Append(&base);
-            }
+            let base = structural(
+                item.xaml.cast::<MenuFlyoutItemBase>(),
+                "MenuFlyoutItem cast to MenuFlyoutItemBase",
+            );
+            structural(items.Append(&base), "MenuBarItem.Items().Append");
         }
     }
     pub(crate) fn remove_item(&self, item: &InnerMenuItem) {
@@ -549,12 +551,16 @@ impl InnerMenu {
             items.remove(pos);
         }
         if let Some(native_items) = self.installed_into.borrow().as_ref() {
-            let Ok(base) = item.xaml.cast::<MenuFlyoutItemBase>() else {
-                return;
-            };
+            let base = structural(
+                item.xaml.cast::<MenuFlyoutItemBase>(),
+                "MenuFlyoutItem cast to MenuFlyoutItemBase",
+            );
             let mut index = 0;
-            if native_items.IndexOf(&base, &mut index) == Ok(true) {
-                let _ = native_items.RemoveAt(index);
+            if structural(
+                native_items.IndexOf(&base, &mut index),
+                "MenuBarItem.Items().IndexOf",
+            ) {
+                structural(native_items.RemoveAt(index), "MenuBarItem.Items().RemoveAt");
             }
         }
     }
@@ -593,7 +599,7 @@ impl InnerMenu {
                 Ok(())
             }));
             let base: MenuFlyoutItemBase = flyout_item.cast()?;
-            let _ = items.Append(&base);
+            items.Append(&base)?;
         }
         Ok(InnerMenuFlyout {
             flyout,
@@ -620,14 +626,15 @@ impl InnerMenuBarItem {
         let _ = self.xaml.SetTitle(&HSTRING::from(text));
     }
     pub(crate) fn set_submenu(&self, submenu: &InnerMenu) {
-        if let Ok(items) = self.xaml.Items() {
-            for item in submenu.items.borrow().iter() {
-                if let Ok(base) = item.xaml.cast::<MenuFlyoutItemBase>() {
-                    let _ = items.Append(&base);
-                }
-            }
-            *submenu.installed_into.borrow_mut() = Some(items);
+        let items = structural(self.xaml.Items(), "MenuBarItem.Items");
+        for item in submenu.items.borrow().iter() {
+            let base = structural(
+                item.xaml.cast::<MenuFlyoutItemBase>(),
+                "MenuFlyoutItem cast to MenuFlyoutItemBase",
+            );
+            structural(items.Append(&base), "MenuBarItem.Items().Append");
         }
+        *submenu.installed_into.borrow_mut() = Some(items);
     }
 }
 
@@ -648,18 +655,30 @@ impl InnerMenuBar {
     }
 
     pub(crate) fn add_item(&self, item: &InnerMenuBarItem) {
-        if let Ok(items) = self.xaml.Items() {
-            let _ = items.Append(&item.xaml);
-        }
+        let items = structural(self.xaml.Items(), "MenuBar.Items");
+        structural(items.Append(&item.xaml), "MenuBar.Items().Append");
     }
     pub(crate) fn remove_item(&self, item: &InnerMenuBarItem) {
-        if let Ok(items) = self.xaml.Items() {
-            let mut index = 0;
-            if items.IndexOf(&item.xaml, &mut index) == Ok(true) {
-                let _ = items.RemoveAt(index);
-            }
+        let items = structural(self.xaml.Items(), "MenuBar.Items");
+        let mut index = 0;
+        if structural(
+            items.IndexOf(&item.xaml, &mut index),
+            "MenuBar.Items().IndexOf",
+        ) {
+            structural(items.RemoveAt(index), "MenuBar.Items().RemoveAt");
         }
     }
+}
+
+/// Unwraps a native menu *structure* operation (`Items`, the `MenuFlyoutItemBase` cast, `Append`,
+/// `IndexOf`, `RemoveAt`). A failure here means the native menu no longer matches Core's list (for
+/// example an entry already parented elsewhere), so it fails fast with the operation name instead
+/// of being ignored (Issue #323). Best-effort decoration (icons, accelerators, text) does not use
+/// this.
+fn structural<T>(result: windows::core::Result<T>, operation: &str) -> T {
+    result.unwrap_or_else(|error| {
+        panic!("elwindui(winui3): native menu structure operation `{operation}` failed: {error}")
+    })
 }
 
 #[cfg(test)]

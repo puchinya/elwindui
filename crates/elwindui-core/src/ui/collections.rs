@@ -495,6 +495,82 @@ fn duplicate_item_panic(owner: &str) -> ! {
     )
 }
 
+/// The single-parent lease of a list item whose native entry can be attached to only one native
+/// parent (`MenuItem` in a `Menu`, `MenuBarItem` in a `MenuBar`, `TabViewItem` in a `TabView`;
+/// `ui_spec.md` §9, Issue #323). The item stores only a `Weak` to its owner, so there is no strong
+/// cycle and a dropped owner frees the lease. The owning list checks the lease before any change,
+/// claims it once the item is accepted, and releases it only after its native push for a removal has
+/// completed and only while it still owns the item (see [`ParentLease::release`]).
+///
+/// The borrow is never held across a backend or user call.
+pub(crate) struct ParentLease<P: ?Sized> {
+    owner: RefCell<Option<Weak<P>>>,
+}
+
+impl<P: ?Sized> ParentLease<P> {
+    pub(crate) fn new() -> Self {
+        Self {
+            owner: RefCell::new(None),
+        }
+    }
+
+    /// Panics with a diagnostic when the item belongs to a live owner other than `owner`. Changes
+    /// nothing.
+    pub(crate) fn check(&self, owner: &Weak<P>, item: &str, parent: &str) {
+        let foreign = match &*RefCell::borrow(&self.owner) {
+            Some(current) => {
+                !Weak::<P>::ptr_eq(current, owner) && Weak::<P>::strong_count(current) > 0
+            }
+            None => false,
+        };
+        if foreign {
+            foreign_owner_panic(item, parent);
+        }
+    }
+
+    /// Records `owner` as the item's owner. Call it after [`ParentLease::check`] passed.
+    pub(crate) fn claim(&self, owner: &Weak<P>) {
+        *RefCell::borrow_mut(&self.owner) = Some(owner.clone());
+    }
+
+    /// Frees the lease if `owner` still holds it. The caller releases only items absent from its
+    /// final list, after the native detach / content retirement of the removal completed.
+    /// Returns whether the lease was released.
+    pub(crate) fn release(&self, owner: &Weak<P>) -> bool {
+        let mut current = RefCell::borrow_mut(&self.owner);
+        let held = matches!(&*current, Some(current) if Weak::<P>::ptr_eq(current, owner));
+        if held {
+            *current = None;
+        }
+        held
+    }
+}
+
+/// Releases the lease of every item of `removed` that is absent from `remaining` (a reentrant push
+/// may have inserted it again) and still owned by `owner`; `on_release` runs for each released item.
+pub(crate) fn release_removed_items<T: ?Sized, P: ?Sized>(
+    removed: &[Rc<T>],
+    remaining: &[Rc<T>],
+    owner: &Weak<P>,
+    lease: impl Fn(&T) -> &ParentLease<P>,
+    on_release: impl Fn(&T),
+) {
+    for item in removed {
+        if remaining.iter().any(|kept| Rc::ptr_eq(kept, item)) {
+            continue;
+        }
+        if lease(item).release(owner) {
+            on_release(item);
+        }
+    }
+}
+
+fn foreign_owner_panic(item: &str, parent: &str) -> ! {
+    panic!(
+        "elwindui: this `{item}` already belongs to another `{parent}`. An item can belong to only          one `{parent}` at a time, because its native entry cannot be shown in two places; remove it          from that `{parent}` (`remove`, `remove_at` or `clear`) before adding it here. To share a          command, create a separate `{item}` with the same handler."
+    )
+}
+
 /// State owned by a generated dynamic child range. It is deliberately not a `UIElement`: callers
 /// pass the resolved parent collection on every update, so `for`/`if`/`match` insert their actual
 /// children directly into that collection. For `Vec<Rc<U>>` sources, unchanged source identities

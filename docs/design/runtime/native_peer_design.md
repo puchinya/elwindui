@@ -451,10 +451,29 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
 - **Menus:** `MenuItemPeer`, `MenuPeer`, `MenuBarItemPeer` and `MenuBarPeer` are not `NativePeer`s (no
   measure or handle). A menu object is realized on demand, the first time a backend presents it
   natively, through `__menu_peer_of` / `__menu_bar_peer_of`: a realized `Window` pushing its menu bar,
-  or a native context menu. Realizing a menu realizes each item's peer once; an item's peer is shared by
-  every native menu that shows it. Custom-rendered context menus read the logical state and never
-  realize a peer, so they need no backend. A native activation calls Core's `MenuItem::select` through a
-  `Weak` callback; dropping a `MenuItem` disposes its peer.
+  or a native context menu. Realizing a menu realizes each item's peer once; a `MenuItem` has at most one
+  peer and that peer is attached to at most one native parent (see the single-parent lease below).
+  Custom-rendered context menus read the logical state and never realize a peer, so they need no
+  backend. A native activation calls Core's `MenuItem::select` through a `Weak` callback; dropping a
+  `MenuItem` disposes its peer.
+- **Single-parent lease (Issue #323):** a `MenuItem` belongs to at most one `Menu`, a `MenuBarItem` to at
+  most one `MenuBar`, a `TabViewItem` to at most one `TabView` (`ui_spec.md` §9). The item holds a Core
+  `Weak` to its owner (no strong cycle, a dropped owner frees the lease). `add`/`insert`/`set_children`
+  check the lease before any list, listener, selection or native change (`set_children` checks every
+  new item first and rejects the whole call), then claim it; the check does not depend on whether a
+  peer exists. `remove`/`remove_at`/`clear` release the lease only after the list push has detached the
+  native entry or retired the tab content, and only for an item the owner still holds and that is
+  absent from the final list, so a reentrant push cannot hand it to another parent mid-sync. A removed
+  `TabViewItem` also loses its change listener; kept items keep theirs. Unmount does not release a
+  lease. This is a structural ownership rule, not a per-parent peer: no proxy peers, peer maps, clones
+  or global registry. Reusing one `Menu` model as the context menu of several elements is not affected:
+  the WinUI 3 native context menu builds a fresh flyout per open, and the custom presentation builds
+  its own tree. `DropdownItem` has no native entry and may be shared by several `Dropdown`s. Assigning
+  one `Menu` as several `MenuBarItem.submenu`s or installing one `MenuBar` into several Windows is a
+  separate ownership problem outside this rule.
+- WinUI 3 structural menu operations (`Items()`, the `MenuFlyoutItemBase` cast, `Append`, `IndexOf`,
+  `RemoveAt`) fail fast with the operation name instead of being ignored; best-effort decoration
+  (icons, accelerators, text) keeps its silent fallback.
 - Each backend peer owns its callback-registry entries (WinUI3 `UiCallbackRegistryOwner`) and calls
   stored callbacks with the slot unborrowed (`invoke_slot`), as in §7b.
 - The generic public properties of these types (`enabled`, `selected_index`, etc.) follow §5 unchanged.

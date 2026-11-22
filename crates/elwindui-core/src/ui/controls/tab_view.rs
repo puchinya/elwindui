@@ -160,14 +160,28 @@ impl TabView {
             .map(|item| item as Rc<dyn TabViewItemExt>)
             .collect();
         crate::ui::collections::assert_distinct_items(&new, "TabView");
+        let added: Vec<Rc<dyn TabViewItemExt>> = new
+            .iter()
+            .filter(|new| !old.iter().any(|old| Rc::ptr_eq(old, new)))
+            .cloned()
+            .collect();
+        // Every incoming tab is checked before anything changes: one conflict rejects the call.
+        let owner = self.lease_owner();
+        for item in &added {
+            item.as_ui_element()
+                .tab_view_lease()
+                .check(&owner, "TabViewItem", "TabView");
+        }
         let removed = old
             .iter()
             .any(|old| !new.iter().any(|new| Rc::ptr_eq(old, new)));
-        for item in &new {
+        for item in &added {
+            item.as_ui_element().tab_view_lease().claim(&owner);
             self.attach_item(item);
         }
         self.children.replace_all(new);
         self.items_changed(before, removed);
+        self.release(&old);
     }
 }
 
@@ -188,6 +202,39 @@ impl TabView {
             .to_vec()
             .get(self.selected_index.get())
             .map(item_key)
+    }
+
+    /// This TabView, as the owner recorded in its tabs' single-parent leases (Issue #323).
+    fn lease_owner(&self) -> Weak<dyn UIElementExt> {
+        let owner = self
+            .as_ui_element()
+            .visual_collection
+            .owner_rc()
+            .expect("elwindui: a live TabView has an owner");
+        Rc::downgrade(&owner)
+    }
+
+    /// Rejects `item` before any change when it is already in this list or belongs to another
+    /// live `TabView`; otherwise claims it and installs its change listener.
+    fn accept(&self, item: &Rc<dyn TabViewItemExt>) {
+        self.children.assert_absent(item, "TabView");
+        let owner = self.lease_owner();
+        let lease = item.as_ui_element().tab_view_lease();
+        lease.check(&owner, "TabViewItem", "TabView");
+        lease.claim(&owner);
+        self.attach_item(item);
+    }
+
+    /// After the push retired the removed tabs' content, releases each removed tab this TabView
+    /// still owns and drops its change listener. Kept tabs are untouched.
+    fn release(&self, removed: &[Rc<dyn TabViewItemExt>]) {
+        crate::ui::collections::release_removed_items(
+            removed,
+            &self.children.to_vec(),
+            &self.lease_owner(),
+            |item| item.as_ui_element().tab_view_lease(),
+            |item| item.as_ui_element().set_change_listener(None),
+        );
     }
 
     /// Forwards header/closable changes of a displayed item to the peer.
@@ -293,15 +340,13 @@ impl TabView {
 
 impl ListExt<dyn TabViewItemExt> for TabView {
     fn add(&self, item: Rc<dyn TabViewItemExt>) {
-        self.children.assert_absent(&item, "TabView");
-        self.attach_item(&item);
+        self.accept(&item);
         let before = self.selected_key();
         self.children.add(item);
         self.items_changed(before, false);
     }
     fn insert(&self, index: usize, item: Rc<dyn TabViewItemExt>) {
-        self.children.assert_absent(&item, "TabView");
-        self.attach_item(&item);
+        self.accept(&item);
         let before = self.selected_key();
         self.children.insert(index, item);
         self.items_changed(before, false);
@@ -312,19 +357,24 @@ impl ListExt<dyn TabViewItemExt> for TabView {
             return false;
         }
         self.items_changed(before, true);
+        self.release(std::slice::from_ref(item));
         true
     }
     fn remove_at(&self, index: usize) -> Rc<dyn TabViewItemExt> {
         let before = self.selected_key();
         let item = self.children.remove_at(index);
         self.items_changed(before, true);
+        self.release(std::slice::from_ref(&item));
         item
     }
     fn clear(&self) {
         let before = self.selected_key();
-        let removed = !self.children.is_empty();
+        // The snapshot keeps every removed tab alive until its content is retired.
+        let removed_items = self.children.to_vec();
+        let removed = !removed_items.is_empty();
         self.children.clear();
         self.items_changed(before, removed);
+        self.release(&removed_items);
     }
     fn len(&self) -> usize {
         self.children.len()

@@ -22,6 +22,8 @@ pub struct TabViewItem {
     on_close: RefCell<Option<Rc<dyn Fn()>>>,
     /// Installed by the owning `TabView`; captures only a `Weak` to it.
     on_changed: RefCell<Option<Rc<dyn Fn()>>>,
+    /// The `TabView` this tab belongs to (Issue #323 single-parent lease).
+    owner: crate::ui::collections::ParentLease<dyn UIElementExt>,
 }
 
 #[elwindui_macros::component]
@@ -59,6 +61,7 @@ impl TabViewItem {
             closable: Cell::new(true),
             on_close: RefCell::new(None),
             on_changed: RefCell::new(None),
+            owner: crate::ui::collections::ParentLease::new(),
         }
     }
 }
@@ -82,6 +85,11 @@ impl TabViewItem {
     /// The per-tab close handler, if any.
     pub(crate) fn close_handler(&self) -> Option<Rc<dyn Fn()>> {
         self.on_close.borrow().clone()
+    }
+
+    /// The single-parent lease the owning `TabView` checks, claims and releases.
+    pub(crate) fn tab_view_lease(&self) -> &crate::ui::collections::ParentLease<dyn UIElementExt> {
+        &self.owner
     }
 
     pub(crate) fn set_change_listener(&self, listener: Option<Rc<dyn Fn()>>) {

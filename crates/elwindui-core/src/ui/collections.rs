@@ -339,12 +339,10 @@ impl ListExt<dyn UIElementExt> for UIElementCollection {
 /// doc comment), minus the `UIElement`-tree-specific `parent`-pointer wiring `add`/`insert`/
 /// `remove`/`remove_at` do there — `ListExt<T>` items aren't necessarily `UIElement`s at all (e.g.
 /// `Menu::items`/`MenuBar::items` hold `Rc<dyn MenuItemExt>`/`Rc<dyn MenuBarItemExt>`, neither of
-/// which is part of the `UIElement` visual tree). A plain hand-written trait, not `#[class]`-managed
-/// (the macro's `trait_only`/`struct_only` shapes are for the concrete elwindui class hierarchy;
-/// `ListExt<T>` is a generic utility type, one level below that, the same way `UIElementCollection`
-/// itself is a plain hand-written struct rather than a `#[class]`-managed one). Each backend
-/// provides its own concrete implementor per `Menu`/`MenuBar` (see `Menu::items`/`MenuBar::items`'s
-/// own doc comment) — `elwindui-core` only declares the shape.
+/// which is part of the `UIElement` visual tree). A plain hand-written trait, not `#[class]`-managed:
+/// `ListExt<T>` is a generic utility type, one level below the class hierarchy, the same way
+/// `UIElementCollection` itself is a plain hand-written struct. Core's `Menu`, `MenuBar`, `TabView`
+/// and `Dropdown` implement it over their own `ChildList`.
 pub trait ListExt<T: ?Sized> {
     fn add(&self, item: Rc<T>);
     fn insert(&self, index: usize, item: Rc<T>);

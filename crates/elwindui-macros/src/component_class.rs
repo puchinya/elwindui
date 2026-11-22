@@ -5,15 +5,14 @@
 //! source shape alone — there is no `manual` flag — and are expanded by the existing `#[class]`
 //! layer (`crate::class::expand`), unchanged:
 //!
-//! - `#[component(trait_only, inherits Path)] trait Name { .. }` — a Core interface;
-//! - `#[component(struct_only = TraitPath, inherits Path)] struct Name { .. }` — a backend
-//!   implementor of such an interface;
 //! - a `struct` carrying `#[class]` shape attributes at the struct level (`#[prop(name: Type)]`,
 //!   `#[text_style]`, `#[fixed(..)]`, `#[constructor_inputs(..)]`) — hand-written storage;
-//! - and the paired `#[component] impl Name { .. }` of any of these, with `fn construct(..) -> Self`
+//! - and the paired `#[component] impl Name { .. }` of such a struct, with `fn construct(..) -> Self`
 //!   and the usual `#[class]` methods.
 //!
 //! Every other `struct` stays a declarative Component (`elwindui_codegen`), exactly as before.
+//! The `trait_only`, `struct_only`, `abi_props` and `no_ancestor_forward` modes were removed by
+//! Issue #313 and are rejected by name.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -37,8 +36,6 @@ struct ClassBackedStruct {
     /// `#[constructor_inputs(..)]`, when declared. Kept as text: tokens must not outlive the
     /// macro invocation that produced them.
     constructor_inputs: Option<Vec<String>>,
-    /// `abi_props = <path>` of a `struct_only` implementor, as text.
-    abi_props: Option<String>,
 }
 
 /// The crate being compiled, so the process-wide registries below (rust-analyzer's proc-macro
@@ -111,24 +108,15 @@ fn class_backed_info(name: &str) -> Option<ClassBackedStruct> {
 #[derive(Default)]
 pub(crate) struct ComponentArgs {
     pub(crate) base: Option<syn::Path>,
-    pub(crate) trait_only: bool,
-    pub(crate) struct_only: Option<syn::Path>,
-    pub(crate) abi_props: Option<syn::Path>,
     pub(crate) abstract_class: bool,
     pub(crate) sealed: bool,
-    pub(crate) no_ancestor_forward: bool,
 }
 
 impl ComponentArgs {
     /// Whether any argument other than `inherits` was given — they only exist for class-backed
     /// forms.
     fn has_class_modifiers(&self) -> bool {
-        self.trait_only
-            || self.struct_only.is_some()
-            || self.abi_props.is_some()
-            || self.abstract_class
-            || self.sealed
-            || self.no_ancestor_forward
+        self.abstract_class || self.sealed
     }
 
     /// The equivalent `#[class(..)]` argument list.
@@ -137,20 +125,11 @@ impl ComponentArgs {
         if let Some(base) = &self.base {
             args.push(quote! { inherits = #base });
         }
-        if let Some(path) = &self.struct_only {
-            args.push(quote! { struct_only = #path });
-        }
-        if self.trait_only {
-            args.push(quote! { trait_only });
-        }
         if self.abstract_class {
             args.push(quote! { abstract_class });
         }
         if self.sealed {
             args.push(quote! { sealed });
-        }
-        if self.no_ancestor_forward {
-            args.push(quote! { no_ancestor_forward });
         }
         quote! { #(#args),* }
     }
@@ -177,19 +156,8 @@ pub(crate) fn parse_component_args(attr: TokenStream2) -> syn::Result<ComponentA
                     duplicate(args.base.is_some())?;
                     args.base = Some(input.parse()?);
                 }
-                "trait_only" => {
-                    duplicate(args.trait_only)?;
-                    args.trait_only = true;
-                }
-                "struct_only" => {
-                    duplicate(args.struct_only.is_some())?;
-                    input.parse::<syn::Token![=]>()?;
-                    args.struct_only = Some(input.parse()?);
-                }
-                "abi_props" => {
-                    duplicate(args.abi_props.is_some())?;
-                    input.parse::<syn::Token![=]>()?;
-                    args.abi_props = Some(input.parse()?);
+                removed if crate::class::REMOVED_CLASS_MODES.contains(&removed) => {
+                    return Err(crate::class::removed_mode_error(kw.span(), removed, ""));
                 }
                 "abstract_class" => {
                     duplicate(args.abstract_class)?;
@@ -198,10 +166,6 @@ pub(crate) fn parse_component_args(attr: TokenStream2) -> syn::Result<ComponentA
                 "sealed" => {
                     duplicate(args.sealed)?;
                     args.sealed = true;
-                }
-                "no_ancestor_forward" => {
-                    duplicate(args.no_ancestor_forward)?;
-                    args.no_ancestor_forward = true;
                 }
                 "template" => {
                     return Err(syn::Error::new(
@@ -213,9 +177,8 @@ pub(crate) fn parse_component_args(attr: TokenStream2) -> syn::Result<ComponentA
                     return Err(syn::Error::new(
                         kw.span(),
                         format!(
-                            "unknown argument `{kw}`; expected `inherits <Base>`, `trait_only`, \
-                             `struct_only = <Trait>`, `abi_props = <macro path>`, `abstract_class`, \
-                             `sealed` or `no_ancestor_forward`"
+                            "unknown argument `{kw}`; expected `inherits <Base>`, `abstract_class` \
+                             or `sealed`"
                         ),
                     ));
                 }
@@ -228,19 +191,6 @@ pub(crate) fn parse_component_args(attr: TokenStream2) -> syn::Result<ComponentA
         Ok(())
     })
     .parse2(attr)?;
-    if args.trait_only && args.struct_only.is_some() {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "`trait_only` and `struct_only` are mutually exclusive",
-        ));
-    }
-    if args.abi_props.is_some() && args.struct_only.is_none() {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "`abi_props` names the interface that declares a `struct_only` implementor's \
-             properties; it is only valid together with `struct_only`",
-        ));
-    }
     Ok(args)
 }
 
@@ -280,31 +230,18 @@ fn is_view_field(field: &syn::Field) -> bool {
 /// Whether `item` is a class-backed struct (hand-written storage). A mix of the class-backed and
 /// the declarative shape is an error rather than a guess.
 pub(crate) fn classify_struct(args: &ComponentArgs, item: &syn::ItemStruct) -> syn::Result<bool> {
-    if args.trait_only {
-        return Err(syn::Error::new(
-            item.ident.span(),
-            "`trait_only` declares a Core interface and attaches to a `trait Name { .. }` item, \
-             not a `struct`",
-        ));
-    }
-    let class_shape_attr = item.attrs.iter().find(|attr| is_class_shape_attr(attr));
-    let class_backed = args.struct_only.is_some() || class_shape_attr.is_some();
+    let class_backed = item.attrs.iter().any(is_class_shape_attr);
     if !class_backed {
         if args.has_class_modifiers() {
             return Err(syn::Error::new(
                 item.ident.span(),
-                "`abstract_class`, `sealed`, `no_ancestor_forward` and `abi_props` apply to a \
-                 Component with hand-written storage (struct-level `#[prop(name: Type)]` or \
-                 `struct_only`); a declarative Component does not take them",
+                "`abstract_class` and `sealed` apply to a Component with hand-written storage \
+                 (struct-level `#[prop(name: Type)]`); a declarative Component does not take them",
             ));
         }
         return Ok(false);
     }
-    let reason = if args.struct_only.is_some() {
-        "`struct_only`"
-    } else {
-        "a struct-level class shape attribute"
-    };
+    let reason = "a struct-level class shape attribute";
     for field in &item.fields {
         if is_view_field(field) {
             return Err(syn::Error::new(
@@ -358,10 +295,6 @@ pub(crate) fn expand_struct(args: &ComponentArgs, item: syn::ItemStruct) -> Toke
         base_path: args.base.as_ref().map(|path| quote! { #path }.to_string()),
         struct_src: quote! { #item }.to_string(),
         constructor_inputs,
-        abi_props: args
-            .abi_props
-            .as_ref()
-            .map(|path| quote! { #path }.to_string()),
     };
     class_backed()
         .lock()
@@ -461,7 +394,6 @@ fn rust_analyzer_shape_stub(
     let base_inherit = exported(quote! { #base_macros_of::#inherit_base });
     let base_alias = exported(quote! { #base_macros_of::__ElwindUIOwnExt });
     let base_concrete = exported(quote! { #base });
-    let base_trait = exported(quote! { #base_ext });
     let base_capability_exported = exported(base_capability.clone());
     quote! {
         #[cfg(rust_analyzer)]
@@ -487,7 +419,7 @@ fn rust_analyzer_shape_stub(
 
         #[cfg(rust_analyzer)]
         #[allow(unexpected_cfgs)]
-        #base_macros_of::#inherit_base!(#ident, #base_macros_of::__ElwindUIOwnExt, #base, #base, #base_ext;);
+        #base_macros_of::#inherit_base!(#ident, #base_macros_of::__ElwindUIOwnExt, #base, #base;);
 
         #[cfg(rust_analyzer)]
         #[allow(unexpected_cfgs)]
@@ -495,9 +427,9 @@ fn rust_analyzer_shape_stub(
         #[macro_export]
         #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
         macro_rules! #inherit {
-            ($SubType:ty, $OwnTrait:path, $OwnConcrete:path, $RootConcrete:path, $BridgePath:path; $($overrides:tt)*) => {
+            ($SubType:ty, $OwnTrait:path, $OwnConcrete:path, $RootConcrete:path; $($overrides:tt)*) => {
                 impl $OwnTrait for $SubType {}
-                #base_inherit!($SubType, #base_alias, #base_concrete, #base_concrete, #base_trait;);
+                #base_inherit!($SubType, #base_alias, #base_concrete, #base_concrete;);
             };
         }
 
@@ -633,23 +565,16 @@ fn rust_analyzer_shadow(info: &ClassBackedStruct, item: &syn::ItemImpl) -> Token
     }
 }
 
-/// Expands a `trait` (a Core interface) through the `#[class]` layer.
-pub(crate) fn expand_trait(args: &ComponentArgs, item: syn::ItemTrait) -> TokenStream2 {
-    if !args.trait_only {
-        return syn::Error::new(
-            item.ident.span(),
-            "a `trait` is a Core interface: write `#[component(trait_only, ..)]`",
-        )
-        .to_compile_error();
-    }
-    if args.abi_props.is_some() {
-        return syn::Error::new(
-            item.ident.span(),
-            "`abi_props` is only valid on a `struct_only` implementor",
-        )
-        .to_compile_error();
-    }
-    crate::class::expand(args.class_attr(), quote! { #item })
+/// A `trait` item is no longer a Component shape: `trait_only` interfaces were removed by
+/// Issue #313.
+pub(crate) fn expand_trait(item: syn::ItemTrait) -> TokenStream2 {
+    let error = syn::Error::new(
+        item.ident.span(),
+        "#[elwindui::component]: a `trait` interface is no longer a Component shape (`trait_only` was \
+         removed by Issue #313); declare the Component once as a `struct` with its paired `impl`",
+    )
+    .to_compile_error();
+    quote! { #error #item }
 }
 
 fn impl_type_name(item: &syn::ItemImpl) -> Option<String> {
@@ -952,7 +877,7 @@ fn constructor_abi(item: &syn::ItemImpl) -> syn::Result<TokenStream2> {
     };
     // Without the struct registration (an out-of-order rust-analyzer expansion; real builds always
     // expand the struct first) the struct-side facts are unknown: assume a concrete class without
-    // `#[constructor_inputs]` or `abi_props`, which is enough for analysis.
+    // `#[constructor_inputs]`, which is enough for analysis.
     let info = class_backed_info(&name).unwrap_or(ClassBackedStruct {
         abstract_class: false,
         has_base: false,
@@ -960,7 +885,6 @@ fn constructor_abi(item: &syn::ItemImpl) -> syn::Result<TokenStream2> {
         base_path: None,
         struct_src: String::new(),
         constructor_inputs: None,
-        abi_props: None,
     });
     let construct = item.items.iter().find_map(|impl_item| match impl_item {
         syn::ImplItem::Fn(f) if f.sig.ident == "construct" => Some(f),
@@ -1013,24 +937,8 @@ fn constructor_abi(item: &syn::ItemImpl) -> syn::Result<TokenStream2> {
         }
         None => {}
     }
-    let (props_macro, abi_props_reexport) = match &info.abi_props {
-        Some(path) => {
-            let path: syn::Path = syn::parse_str(path)?;
-            let alias = quote::format_ident!("__elwindui_abi_props_{name}");
-            (
-                quote! { $crate::#alias },
-                quote! {
-                    #[doc(hidden)]
-                    #[allow(unused_imports)]
-                    pub use #path as #alias;
-                },
-            )
-        }
-        None => {
-            let own = quote::format_ident!("__elwindui_props_{name}");
-            (quote! { $crate::#own }, TokenStream2::new())
-        }
-    };
+    let own = quote::format_ident!("__elwindui_props_{name}");
+    let props_macro = quote! { $crate::#own };
     // `@environment` calls this on the type: its path to Core resolves here, in the defining
     // crate (`crate` inside Core itself).
     let application_environment = elwindui_codegen::codegen::application_environment_fn(
@@ -1039,7 +947,6 @@ fn constructor_abi(item: &syn::ItemImpl) -> syn::Result<TokenStream2> {
     );
     let abi = elwindui_codegen::codegen::class_constructor_abi(&name, &args, props_macro);
     Ok(quote! {
-        #abi_props_reexport
         #application_environment
         #abi
     })

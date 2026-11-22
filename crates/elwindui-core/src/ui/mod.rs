@@ -61,8 +61,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // a cross-invocation "same crate classes" table as it expands, and a derived class that expands
 // *before* its base is registered falls back to emitting
 // `crate::ui::__elwindui_macros_of_Base::__elwindui_props_Base` — a path that does not exist, since
-// that wrapper module only re-exports the inherit trio and `trait_only` classes never emit it at
-// all. So bases must be declared before anything that `inherits` them. (`pub use` order below is
+// that wrapper module only re-exports the inherit macros. So bases must be declared before anything that `inherits` them. (`pub use` order below is
 // irrelevant — only `mod` order drives expansion order.)
 //
 // The submodules deliberately open with `use super::*;` rather than repeating this file's import
@@ -81,8 +80,7 @@ pub mod popup;
 mod text_style;
 
 // Last on purpose: several fixtures in here are `#[class]` declarations that inherit real classes
-// (`OverridableBase` inherits `UIElement`, the `Fake*` widgets are `struct_only` implementors of
-// the `NativeControl` family), so they must expand after every class above is registered.
+// (`OverridableBase` inherits `UIElement`, the `Fake*` widgets inherit `NativeControl`), so they must expand after every class above is registered.
 #[cfg(test)]
 pub(crate) mod testsupport;
 

@@ -395,16 +395,14 @@ impl ContentControl {
 
 - 次のいずれかに当たる型は手書きストレージを持つ。元のRustフィールド(`Cell`・`RefCell`・ネイティブhandleなど)はそのまま残り、既存の`#[class]`層で展開される。
   - (i) structの段に`#[class]`の形の属性(`#[prop(name: Type)]`・`#[text_style]`・`#[fixed(..)]`・`#[constructor_inputs(..)]`)がある。
-  - (ii) `struct_only = Trait`の宣言である。
-  - (iii) `view!`/`template_view!`フィールドもフィールドのDSL属性もなく、companion `impl`に`fn construct(..) -> Self`がある。これは`impl`を読んだ時点で決まる。
+  - (ii) `view!`/`template_view!`フィールドもフィールドのDSL属性もなく、companion `impl`に`fn construct(..) -> Self`がある。これは`impl`を読んだ時点で決まる。
 - それ以外は従来どおり宣言的componentである(viewを持たず無属性フィールドだけのstructと空の`impl`も、従来どおり宣言的)。
-- 引数は`inherits Path`(`=`なし)、`trait_only`、`struct_only = Trait`、`abi_props = <props macro path>`、`abstract_class`、`sealed`、`no_ancestor_forward`。`trait_only`と`struct_only`は同時に指定できない。`abi_props`は`struct_only`でのみ指定できる。
-- **廃止予定(Issue #313)**: 次の`trait_only`/`struct_only`/`abi_props`の形は、native builtinをCoreの単一concrete Component(手書きストレージ+backend Peer)へ移行した後に削除され、指定するとcompile-time errorになる。native builtinの公開型・`view!`/`new!`・継承経路は変わらない。詳細は[`macro_class_spec.md`](macro_class_spec.md) §2と[`native_peer_design.md`](../design/runtime/native_peer_design.md)を参照する。
-- Core interfaceは`#[component(trait_only, inherits Path)] trait Name { .. }`と書く。backendの実装は`#[component(struct_only = TraitPath, inherits Path, abi_props = elwindui_core::__elwindui_props_Name)] struct Name { .. }`と書く。公開property(`#[prop]`/`#[content]`)はCore interfaceが宣言し、`abi_props`がその宣言元を明示する(trait名から推測しない)。
-- 手書きストレージの形と宣言的componentの形(`view!`フィールド、フィールドのDSL属性)を混ぜるとエラーになる。`trait_only`をstructに、`struct_only`をtraitに付けてもエラーになる。
+- 引数は`inherits Path`(`=`なし)、`abstract_class`、`sealed`。
+- **削除済み(Issue #313)**: `trait_only`・`struct_only`・`abi_props`・`no_ancestor_forward`を指定するとcompile-time errorになり、そのerrorは指定されたmode名を示す。`trait`項目に`#[component]`を付けてもエラーになる。native builtinはCoreの単一concrete Component(手書きストレージ+backend Peer)で、公開型・`view!`/`new!`・継承経路は変わらない。詳細は[`macro_class_spec.md`](macro_class_spec.md) §2と[`native_peer_design.md`](../design/runtime/native_peer_design.md)を参照する。
+- 手書きストレージの形と宣言的componentの形(`view!`フィールド、フィールドのDSL属性)を混ぜるとエラーになる。
 - `construct`はcompanion `impl`の無属性の関連関数で、仮想メソッドではない。`self`レシーバ・`async`・`unsafe`・ジェネリクス・`Self`以外の戻り値・重複・`#[overridable]`/`#[overrides]`はエラーになる。手書きストレージのcomponentでは、`impl`に`#[class]`と同じメソッド(無属性のメソッド、`#[inherent]`、`#[overridable]`/`#[overrides]`、`on_constructed`)を書ける。
 - 宣言的componentも`construct`を書ける。生成されるストレージの初期化は`Self::__elwindui_generated_construct(__self_weak, <コンストラクタ入力>)`になり、`construct`はそれを呼んで`Self`を作る。`construct`の引数は、componentのコンストラクタ入力(基底の必須入力が先、自分の必須入力が後)と同じ名前・同じ順でなければならない。
-- 手書きストレージのcomponentの公開コンストラクタ入力は、`#[constructor_inputs(a, b, ..)]`に列挙した`construct`の引数だけである(名前と順が一致しなければエラー)。引数のない`construct`は入力なしで公開構築できる。`#[constructor_inputs]`なしで引数を取る`construct`(ネイティブhandleを受け取る`NativeControl::construct(handle)`など)は内部専用で、`new!`やviewからは構築できない。抽象class・trait_onlyも同様である。手書きのRustから`Base::construct(handle)`を呼ぶのは従来どおりできる。
+- 手書きストレージのcomponentの公開コンストラクタ入力は、`#[constructor_inputs(a, b, ..)]`に列挙した`construct`の引数だけである(名前と順が一致しなければエラー)。引数のない`construct`は入力なしで公開構築できる。`#[constructor_inputs]`なしで引数を取る`construct`(ネイティブhandleを受け取る`NativeControl::construct(handle)`など)は内部専用で、`new!`やviewからは構築できない。抽象classも同様である。手書きのRustから`Base::construct(handle)`を呼ぶのは従来どおりできる。
 - 手書きストレージのcomponentは生成componentの間に置ける(生成componentがそれを継承する、それが生成componentを継承する。同一crateでも別crateでもよい)。viewからはqualified path(`crate::Name { .. }`)で構築できる。基底の必須入力は`#[constructor_inputs]`に列挙すれば、派生へ自動転送される。
 
 ### Lifecycle hooks

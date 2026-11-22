@@ -437,7 +437,6 @@ pub(crate) fn build_component_struct_shadow(
         let component_ext_ident = format_ident!("{ident}Ext");
         let component_inherit_ident = format_ident!("__elwindui_inherit_{ident}");
         let component_macro_mod_ident = format_ident!("__elwindui_macros_of_{ident}");
-        let base_trait = base_ext_trait_path(component, base_name);
         let base_forward = if component.base_path.is_none() && base_name == "Window" {
             window_extension_forward_impl(quote! { $SubType })
         } else {
@@ -446,14 +445,12 @@ pub(crate) fn build_component_struct_shadow(
             let base_macro = exported_macro_path(base_inherit_macro_path(component, base_name));
             let base_alias = exported_macro_path(base_own_trait_alias_path(component, base_name));
             let base_concrete = exported_macro_path(base_type_path(component, base_name));
-            let base_trait = exported_macro_path(base_trait.clone());
             quote! {
                 #base_macro!(
                     $SubType,
                     #base_alias,
                     #base_concrete,
-                    #base_concrete,
-                    #base_trait;
+                    #base_concrete;
                 );
             }
         };
@@ -462,7 +459,7 @@ pub(crate) fn build_component_struct_shadow(
             #[macro_export]
             #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
             macro_rules! #component_inherit_ident {
-                ($SubType:ty, $OwnTrait:path, $OwnConcrete:path, $RootConcrete:path, $BridgePath:path; $($overrides:tt)*) => {
+                ($SubType:ty, $OwnTrait:path, $OwnConcrete:path, $RootConcrete:path; $($overrides:tt)*) => {
                     impl $OwnTrait for $SubType {}
                     #base_forward
                 };
@@ -487,7 +484,6 @@ pub(crate) fn build_component_struct_shadow(
         .filter(|base_name| *base_name != "Window")
         .map(|base_name| {
             let base_path = base_type_path(component, base_name);
-            let base_trait = base_ext_trait_path(component, base_name);
             let inherit_macro = base_inherit_macro_path(component, base_name);
             let own_trait_alias = base_own_trait_alias_path(component, base_name);
             quote! {
@@ -495,8 +491,7 @@ pub(crate) fn build_component_struct_shadow(
                     #ident,
                     #own_trait_alias,
                     #base_path,
-                    #base_path,
-                    #base_trait;
+                    #base_path;
                 );
             }
         });
@@ -547,10 +542,8 @@ fn base_type_path(component: &ComponentDef, base_name: &str) -> TokenStream {
 /// `#[class(inherits = Base)]` expansion derives `BaseExt` from the same concrete path; preserve
 /// qualified same-crate/external paths and only replace the final segment here.
 fn base_ext_trait_path(component: &ComponentDef, base_name: &str) -> TokenStream {
-    // `Window` is the one virtual builtin whose concrete backend façade deliberately shares the
-    // same name as the core `trait_only` declaration.  Host composition stores the façade from
-    // `elwindui::ui`, while its implemented extension trait is the core interface from
-    // `elwindui::core::ui` (the real generator makes this distinction before invoking `#[class]`).
+    // `Window` is a virtual builtin: host composition stores it from `elwindui::ui`, while its
+    // extension trait is named through `elwindui::core::ui`, where Core declares it.
     if component.base_path.is_none() && base_name == "Window" {
         return quote! { elwindui::core::ui::WindowExt };
     }

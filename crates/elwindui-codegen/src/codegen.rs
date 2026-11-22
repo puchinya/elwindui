@@ -1216,8 +1216,7 @@ pub fn application_environment_fn(target: &syn::Ident, framework: &TokenStream) 
 /// class-backed Component — hand-written storage built by its own `construct`. It is the same
 /// builder every generated Component uses; only the property surface differs: the ABI lists just
 /// the public constructor inputs (`#[constructor_inputs(..)]`, in `construct`'s order), and every
-/// other name goes to `props_macro`, the class property shape that declares it (the class's own,
-/// or a Core interface's for a `struct_only` implementor).
+/// other name goes to `props_macro`, the class's own property shape.
 pub fn class_constructor_abi(
     type_name: &str,
     inputs: &[(syn::Ident, syn::Type)],
@@ -8399,8 +8398,7 @@ fn generate_view(
     // Issue #128 migrated `Window::show`/`hide`/`close` from the CI-8 inherent-method/UFCS
     // workaround (`elwindui_core::ui::controls::window.rs`'s three methods were plain,
     // non-`#[overridable]`, because `#[overridable]`/`#[overrides]` did not propagate across the
-    // `trait_only` (Window) -> `struct_only` (each backend's concrete Window) -> ordinary (this
-    // generated component) chain) to normal `#[overridable]`/`#[overrides]`, once #128 fixed that
+    // then-split Core-interface -> backend-concrete -> generated-component chain) to normal `#[overridable]`/`#[overrides]`, once #128 fixed that
     // propagation generically in `#[class]` itself. `window_show_hide_close_overrides` below now
     // emits ordinary `#[overrides]` methods routed through the real ancestor-forwarding chain
     // (`self.base.show()`, not UFCS) — see that binding's own comment.
@@ -8511,11 +8509,9 @@ fn generate_view(
     });
     // Issue #128: normal `#[overrides]` methods (not `mark_inherent`-wrapped — these must reach
     // `#[class]`'s own `override_methods` collection, unlike `__unmount_local`/`unmount` above,
-    // which are framework-internal and never part of `WindowExt`) — `self.base.show()` reaches the
-    // backend's own concrete `impl WindowExt for BackendWindow` directly, exactly like any other
-    // ordinary ancestor call at this layer (see `docs/agents/class-model.md`); no UFCS needed now
-    // that #128 restored the normal override chain across the `trait_only -> struct_only ->
-    // ordinary` boundary.
+    // which are framework-internal and never part of `WindowExt`) — `self.base.show()` reaches
+    // Core's own `Window` directly, exactly like any other ordinary ancestor call at this layer
+    // (see `docs/agents/class-model.md`); no UFCS is needed.
     let window_show_hide_close_overrides = is_host_composition.then(|| {
         quote! {
             #[overrides]

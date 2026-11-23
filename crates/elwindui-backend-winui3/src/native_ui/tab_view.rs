@@ -534,9 +534,6 @@ pub(crate) mod hosted_lifecycle_tests {
             && !e.starts_with("c3")));
     }
 
-    /// Removing the selected tab itself selects the tab now at its index, or the new last tab;
-    /// native `SelectedIndex`, `selected_index`, the active host and the user/binding callback agree;
-    /// removing the only tab leaves an empty TabView with no active host.
     /// Issue #304: the native TabView hides its built-in `Ctrl+F4` accelerator tooltip, which
     /// otherwise appears over the whole tab content and lingers after a context menu closes.
     pub(crate) fn native_tab_view_hides_its_accelerator_tooltip() {
@@ -608,6 +605,9 @@ pub(crate) mod hosted_lifecycle_tests {
         assert_consistent("insert + reorder");
     }
 
+    /// Removing the selected tab itself selects the tab now at its index, or the new last tab;
+    /// native `SelectedIndex`, `selected_index`, the active host and the user/binding callback agree;
+    /// removing the only tab leaves an empty TabView with no active host.
     pub(crate) fn removing_the_selected_tab_selects_a_consistent_replacement() {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let (tab_view, _contents) = tab_view_with(&log, &["s0", "s1", "s2"]);

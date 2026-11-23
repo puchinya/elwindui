@@ -463,8 +463,11 @@ Created --mount (host bindings installed)--> Realized --unmount--> Realized(deta
   new item first and rejects the whole call), then claim it; the check does not depend on whether a
   peer exists. `remove`/`remove_at`/`clear` release the lease only after the list push has detached the
   native entry or retired the tab content, and only for an item the owner still holds and that is
-  absent from the final list, so a reentrant push cannot hand it to another parent mid-sync. A removed
-  `TabViewItem` also loses its change listener; kept items keep theirs. Unmount does not release a
+  absent from the final list, so a reentrant push cannot hand it to another parent mid-sync. A
+  `TabView` removal made reentrantly from a content unmount hook only parks the removed tab: a
+  backend may merely queue that nested list (WinUI 3 `TabViewState::rebuild`), so parked tabs are
+  released when the TabView's outermost list push returns. A removed `TabViewItem` also loses its
+  change listener; kept items keep theirs. Unmount does not release a
   lease. This is a structural ownership rule, not a per-parent peer: no proxy peers, peer maps, clones
   or global registry. Reusing one `Menu` model as the context menu of several elements is not affected:
   the WinUI 3 native context menu builds a fresh flyout per open, and the custom presentation builds

@@ -116,6 +116,11 @@ struct MockTabView {
     on_new_tab: Slot<()>,
     /// Runs inside the next `set_items`, like a content `on_unmount` hook re-entering Core.
     reenter: RefCell<Option<Box<dyn FnOnce()>>>,
+    /// When set, behaves like WinUI 3's `TabViewState::rebuild`: a `set_items` that arrives while
+    /// an outer one is still rebuilding is only queued (the outer call processes it before
+    /// returning), so the removed tab's content is not yet retired when the nested call returns.
+    queue_nested: Cell<bool>,
+    rebuilding: Cell<bool>,
 }
 mock_native_peer!(MockTabView);
 
@@ -128,9 +133,20 @@ impl TabViewPeer for MockTabView {
         self.log
             .borrow_mut()
             .push(format!("items:{}:{}", headers.join(","), owner.is_some()));
+        if self.queue_nested.get() && self.rebuilding.get() {
+            self.log
+                .borrow_mut()
+                .push(format!("queued:{}", headers.join(",")));
+            return;
+        }
+        self.rebuilding.set(true);
         let reenter = self.reenter.borrow_mut().take();
         if let Some(reenter) = reenter {
             reenter();
+        }
+        self.rebuilding.set(false);
+        if self.queue_nested.get() {
+            self.log.borrow_mut().push("retired".to_string());
         }
     }
     fn set_selected_index(&self, index: usize) {
@@ -299,6 +315,8 @@ impl NativePeerFactory for MockFactory {
             on_close: RefCell::new(None),
             on_new_tab: RefCell::new(None),
             reenter: RefCell::new(None),
+            queue_nested: Cell::new(false),
+            rebuilding: Cell::new(false),
         });
         self.tab_views.borrow_mut().push(peer.clone());
         peer
@@ -1091,5 +1109,66 @@ fn a_tab_cannot_be_taken_by_another_tab_view_during_its_removal_push() {
     // After the push, the lease is free.
     b.add(shared.clone());
     assert_eq!(b.len(), 1);
+    clear_native_peer_factory();
+}
+
+#[test]
+fn a_reentrant_removal_keeps_the_lease_until_the_outermost_push_retired_the_tab() {
+    // Review case (PR #325): A holds x and y. Removing x runs x's unmount hook inside A's push;
+    // the hook removes y from A and immediately tries B.add(y). The WinUI 3 peer only queues that
+    // nested list, so y's content is still hosted by A: B.add(y) must be rejected until the
+    // outermost push of A has returned, and must succeed afterwards.
+    let factory = install_mock();
+    let a = TabView::new();
+    let b = TabView::new();
+    realize(&*a);
+    realize(&*b);
+    let x = TabViewItem::new();
+    x.set_header("X");
+    let y = TabViewItem::new();
+    y.set_header("Y");
+    a.set_children(vec![x.clone(), y.clone()]);
+    let peer_a = factory.tab_views.borrow()[0].clone();
+    peer_a.queue_nested.set(true);
+    factory.take_log();
+
+    let taken_during_push = Rc::new(Cell::new(None::<bool>));
+    {
+        let a = a.clone();
+        let b = b.clone();
+        let y = y.clone();
+        let taken = taken_during_push.clone();
+        *peer_a.reenter.borrow_mut() = Some(Box::new(move || {
+            let y_dyn: Rc<dyn TabViewItemExt> = y.clone();
+            assert!(ListExt::remove(&*a, &y_dyn));
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.add(y.clone())));
+            taken.set(Some(result.is_ok()));
+        }));
+    }
+    let x_dyn: Rc<dyn TabViewItemExt> = x.clone();
+    assert!(ListExt::remove(&*a, &x_dyn));
+    assert_eq!(
+        taken_during_push.get(),
+        Some(false),
+        "B.add(y) is rejected while A's outermost push is still retiring y"
+    );
+    let log = factory.take_log();
+    assert!(
+        log.iter().any(|entry| entry == "queued:") && log.iter().any(|entry| entry == "retired"),
+        "the nested list was only queued: {log:?}"
+    );
+    assert!(a.is_empty());
+    assert!(b.is_empty());
+
+    // After the outermost push both tabs are free, and y's listener no longer reaches A.
+    y.set_header("Y2");
+    assert!(
+        factory.take_log().is_empty(),
+        "a released tab notifies nobody"
+    );
+    b.add(y.clone());
+    b.add(x.clone());
+    assert_eq!(b.len(), 2);
     clear_native_peer_factory();
 }

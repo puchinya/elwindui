@@ -33,6 +33,11 @@ pub struct TabView {
     /// Nesting depth of list pushes: a list change made reentrantly from a peer push (a content
     /// unmount hook) only updates the list; the outermost push applies the final selection.
     push_depth: Cell<u32>,
+    /// Tabs removed while a list push of this TabView was still running (a content unmount hook
+    /// re-entering `remove`). Their leases and listeners are released only once the outermost
+    /// push has returned, i.e. after the backend retired every removed tab's content (Issue #323).
+    /// Holding the `Rc`s also keeps them alive until then.
+    pending_release: RefCell<Vec<Rc<dyn TabViewItemExt>>>,
     on_select: RefCell<Option<Rc<dyn Fn(usize)>>>,
     on_close: RefCell<Option<Rc<dyn Fn(usize)>>>,
     on_new_tab: RefCell<Option<Rc<dyn Fn()>>>,
@@ -81,6 +86,7 @@ impl TabView {
             selected_index: Cell::new(0),
             reported_index: Cell::new(0),
             push_depth: Cell::new(0),
+            pending_release: RefCell::new(Vec::new()),
             on_select: RefCell::new(None),
             on_close: RefCell::new(None),
             on_new_tab: RefCell::new(None),
@@ -225,11 +231,29 @@ impl TabView {
         self.attach_item(item);
     }
 
-    /// After the push retired the removed tabs' content, releases each removed tab this TabView
-    /// still owns and drops its change listener. Kept tabs are untouched.
+    /// Called after a removal's list push. Inside another push of this TabView (a reentrant
+    /// removal from a content unmount hook) the backend may only have queued that list, so the
+    /// removed tabs are parked; the outermost removal then releases every parked tab that this
+    /// TabView still owns and that is absent from the final list, and drops its change listener.
+    /// Kept tabs are untouched. No borrow is held while releasing.
     fn release(&self, removed: &[Rc<dyn TabViewItemExt>]) {
+        self.pending_release
+            .borrow_mut()
+            .extend(removed.iter().cloned());
+        self.release_parked();
+    }
+
+    /// Releases the parked tabs once no list push of this TabView is running.
+    fn release_parked(&self) {
+        if self.push_depth.get() != 0 {
+            return;
+        }
+        let parked = std::mem::take(&mut *self.pending_release.borrow_mut());
+        if parked.is_empty() {
+            return;
+        }
         crate::ui::collections::release_removed_items(
-            removed,
+            &parked,
             &self.children.to_vec(),
             &self.lease_owner(),
             |item| item.as_ui_element().tab_view_lease(),
@@ -300,6 +324,8 @@ impl TabView {
         self.push_depth.set(self.push_depth.get() - 1);
         if self.push_depth.get() == 0 {
             peer.set_selected_index(self.selected_index.get());
+            // Tabs removed reentrantly during this push are retired by now.
+            self.release_parked();
         }
     }
 

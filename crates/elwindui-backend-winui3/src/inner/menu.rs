@@ -108,6 +108,15 @@ impl InnerMenuItem {
         self.xaml.Text().map(|h| h.to_string()).unwrap_or_default()
     }
 
+    /// The live `MenuFlyoutItem` as the base type a `MenuBarItem.Items` collection holds, for
+    /// native identity checks in host tests.
+    #[cfg(test)]
+    pub(crate) fn xaml_base_for_test(&self) -> MenuFlyoutItemBase {
+        self.xaml
+            .cast()
+            .expect("MenuFlyoutItem is a MenuFlyoutItemBase")
+    }
+
     pub(crate) fn select(&self) {
         let cb = self.on_select.borrow().clone();
         if let Some(callback) = cb {
@@ -624,6 +633,12 @@ impl InnerMenuBarItem {
 
     pub(crate) fn set_text(&self, text: &str) {
         let _ = self.xaml.SetTitle(&HSTRING::from(text));
+    }
+
+    /// The live native dropdown entries, for host tests.
+    #[cfg(test)]
+    pub(crate) fn items_for_test(&self) -> windows_collections::IVector<MenuFlyoutItemBase> {
+        self.xaml.Items().expect("MenuBarItem.Items")
     }
     pub(crate) fn set_submenu(&self, submenu: &InnerMenu) {
         let items = structural(self.xaml.Items(), "MenuBarItem.Items");

@@ -10,8 +10,7 @@ mod build_support;
 
 use build_support::{
     ExportDirError, NativeBuildMode, PREBUILT_ARTIFACT_FILES, SUPPORTED_PREBUILT_TARGETS,
-    export_dir_conflicts, missing_prebuilt_message, parse_build_mode, prebuilt_target_dir,
-    resolve_export_dir,
+    missing_prebuilt_message, parse_build_mode, prebuilt_target_dir, resolve_export_dir,
 };
 use std::path::{Path, PathBuf};
 
@@ -134,6 +133,9 @@ fn export_dir_requires_source_mode() {
     );
 }
 
+// The fixtures are Windows paths: `Path::components()` splits on `\` and recognizes `C:` prefixes
+// only on Windows, so on other hosts each path is a single component and the check is meaningless.
+#[cfg(windows)]
 #[test]
 fn export_destination_inside_equal_to_or_above_tracked_tree_conflicts() {
     let tracked = Path::new(r"C:\repo\crates\elwindui-backend-winui3\native\prebuilt");
@@ -147,7 +149,7 @@ fn export_destination_inside_equal_to_or_above_tracked_tree_conflicts() {
         r"C:\",
     ] {
         assert!(
-            export_dir_conflicts(Path::new(requested), tracked),
+            build_support::export_dir_conflicts(Path::new(requested), tracked),
             "{requested}"
         );
     }
@@ -158,7 +160,7 @@ fn export_destination_inside_equal_to_or_above_tracked_tree_conflicts() {
         r"D:\a\_temp\winui3-native",
     ] {
         assert!(
-            !export_dir_conflicts(Path::new(requested), tracked),
+            !build_support::export_dir_conflicts(Path::new(requested), tracked),
             "{requested}"
         );
     }

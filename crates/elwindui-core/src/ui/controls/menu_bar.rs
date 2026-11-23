@@ -11,6 +11,8 @@ use std::cell::OnceCell;
 #[content(items)]
 #[prop(items: crate::ui::ListExt<dyn crate::ui::MenuBarItemExt>)]
 pub struct MenuBar {
+    /// This menu bar, as the owner recorded in its entries' single-parent leases (Issue #323).
+    self_weak: Weak<dyn MenuBarExt>,
     peer: OnceCell<Rc<dyn MenuBarPeer>>,
     items: ChildList<dyn MenuBarItemExt>,
 }
@@ -38,6 +40,7 @@ impl MenuBar {
 
     fn construct() -> Self {
         Self {
+            self_weak: __self_weak.clone(),
             peer: OnceCell::new(),
             items: ChildList::new(),
         }
@@ -71,16 +74,36 @@ impl MenuBar {
             .collect();
         peer.set_items(&items);
     }
+
+    /// Rejects `item` before any change when it is already in this list or belongs to another
+    /// live `MenuBar`; otherwise claims it for this menu bar.
+    fn accept(&self, item: &Rc<dyn MenuBarItemExt>) {
+        self.items.assert_absent(item, "MenuBar");
+        let lease = item.as_ui_element().menu_bar_lease();
+        lease.check(&self.self_weak, "MenuBarItem", "MenuBar");
+        lease.claim(&self.self_weak);
+    }
+
+    /// Releases the removed entries still owned by this menu bar, after the push detached them.
+    fn release(&self, removed: &[Rc<dyn MenuBarItemExt>]) {
+        crate::ui::collections::release_removed_items(
+            removed,
+            &self.items.to_vec(),
+            &self.self_weak,
+            |item| item.as_ui_element().menu_bar_lease(),
+            |_| {},
+        );
+    }
 }
 
 impl ListExt<dyn MenuBarItemExt> for MenuBar {
     fn add(&self, item: Rc<dyn MenuBarItemExt>) {
-        self.items.assert_absent(&item, "MenuBar");
+        self.accept(&item);
         self.items.add(item);
         self.push_items();
     }
     fn insert(&self, index: usize, item: Rc<dyn MenuBarItemExt>) {
-        self.items.assert_absent(&item, "MenuBar");
+        self.accept(&item);
         self.items.insert(index, item);
         self.push_items();
     }
@@ -88,17 +111,22 @@ impl ListExt<dyn MenuBarItemExt> for MenuBar {
         let removed = self.items.remove(item);
         if removed {
             self.push_items();
+            self.release(std::slice::from_ref(item));
         }
         removed
     }
     fn remove_at(&self, index: usize) -> Rc<dyn MenuBarItemExt> {
         let item = self.items.remove_at(index);
         self.push_items();
+        self.release(std::slice::from_ref(&item));
         item
     }
     fn clear(&self) {
+        // The snapshot keeps every removed entry alive until its native entry is detached.
+        let removed = self.items.to_vec();
         self.items.clear();
         self.push_items();
+        self.release(&removed);
     }
     fn len(&self) -> usize {
         self.items.len()

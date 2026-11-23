@@ -13,6 +13,8 @@ use std::cell::OnceCell;
 pub struct MenuBarItem {
     self_weak: Weak<dyn MenuBarItemExt>,
     peer: OnceCell<Rc<dyn MenuBarItemPeer>>,
+    /// The `MenuBar` this entry belongs to (Issue #323 single-parent lease).
+    owner: crate::ui::collections::ParentLease<dyn MenuBarExt>,
     text: RefCell<String>,
     submenu: RefCell<Option<Rc<dyn MenuExt>>>,
 }
@@ -37,6 +39,7 @@ impl MenuBarItem {
         Self {
             self_weak: __self_weak.clone(),
             peer: OnceCell::new(),
+            owner: crate::ui::collections::ParentLease::new(),
             text: RefCell::new(String::new()),
             submenu: RefCell::new(None),
         }
@@ -47,6 +50,11 @@ impl MenuBarItem {
     /// This item as an owned trait object, while it is alive.
     pub(crate) fn self_rc(&self) -> Option<Rc<dyn MenuBarItemExt>> {
         self.self_weak.upgrade()
+    }
+
+    /// The single-parent lease the owning `MenuBar` checks, claims and releases.
+    pub(crate) fn menu_bar_lease(&self) -> &crate::ui::collections::ParentLease<dyn MenuBarExt> {
+        &self.owner
     }
 
     /// The caption.

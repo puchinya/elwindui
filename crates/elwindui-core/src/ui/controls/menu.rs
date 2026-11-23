@@ -15,6 +15,8 @@ use std::cell::OnceCell;
 #[content(items)]
 #[prop(items: crate::ui::ListExt<dyn crate::ui::MenuItemExt>)]
 pub struct Menu {
+    /// This menu, as the owner recorded in its items' single-parent leases (Issue #323).
+    self_weak: Weak<dyn MenuExt>,
     peer: OnceCell<Rc<dyn MenuPeer>>,
     items: ChildList<dyn MenuItemExt>,
 }
@@ -43,6 +45,7 @@ impl Menu {
 
     fn construct() -> Self {
         Self {
+            self_weak: __self_weak.clone(),
             peer: OnceCell::new(),
             items: ChildList::new(),
         }
@@ -78,16 +81,36 @@ impl Menu {
             .collect();
         peer.set_items(&items);
     }
+
+    /// Rejects `item` before any change when it is already in this list or belongs to another
+    /// live `Menu`; otherwise claims it for this menu.
+    fn accept(&self, item: &Rc<dyn MenuItemExt>) {
+        self.items.assert_absent(item, "Menu");
+        let lease = item.as_ui_element().menu_lease();
+        lease.check(&self.self_weak, "MenuItem", "Menu");
+        lease.claim(&self.self_weak);
+    }
+
+    /// Releases the removed items still owned by this menu, after the push detached them.
+    fn release(&self, removed: &[Rc<dyn MenuItemExt>]) {
+        crate::ui::collections::release_removed_items(
+            removed,
+            &self.items.to_vec(),
+            &self.self_weak,
+            |item| item.as_ui_element().menu_lease(),
+            |_| {},
+        );
+    }
 }
 
 impl ListExt<dyn MenuItemExt> for Menu {
     fn add(&self, item: Rc<dyn MenuItemExt>) {
-        self.items.assert_absent(&item, "Menu");
+        self.accept(&item);
         self.items.add(item);
         self.push_items();
     }
     fn insert(&self, index: usize, item: Rc<dyn MenuItemExt>) {
-        self.items.assert_absent(&item, "Menu");
+        self.accept(&item);
         self.items.insert(index, item);
         self.push_items();
     }
@@ -95,17 +118,22 @@ impl ListExt<dyn MenuItemExt> for Menu {
         let removed = self.items.remove(item);
         if removed {
             self.push_items();
+            self.release(std::slice::from_ref(item));
         }
         removed
     }
     fn remove_at(&self, index: usize) -> Rc<dyn MenuItemExt> {
         let item = self.items.remove_at(index);
         self.push_items();
+        self.release(std::slice::from_ref(&item));
         item
     }
     fn clear(&self) {
+        // The snapshot keeps every removed item alive until its native entry is detached.
+        let removed = self.items.to_vec();
         self.items.clear();
         self.push_items();
+        self.release(&removed);
     }
     fn len(&self) -> usize {
         self.items.len()

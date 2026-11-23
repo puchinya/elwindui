@@ -272,8 +272,10 @@ pub trait TabViewPeer: NativePeer {
 /// The native menu entry behind `elwindui::ui::MenuItem`.
 ///
 /// Not a [`NativePeer`]: menu objects are not `UIElement`s. The peer of a `MenuItem` is created
-/// once, by the first native menu or menu bar that shows it, and shared by every native menu the
-/// item appears in. `select()` from Core is not routed through the peer.
+/// once, by the first native menu or menu bar that shows it. Core lets a `MenuItem` belong to only
+/// one `Menu` at a time, so the peer is attached to at most one native parent (Issue #323); a native
+/// context menu that builds its own per-open entries does not attach this peer. `select()` from Core
+/// is not routed through the peer.
 pub trait MenuItemPeer {
     /// Sets the caption.
     fn set_text(&self, text: &str);

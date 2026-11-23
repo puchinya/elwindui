@@ -537,6 +537,20 @@ pub(crate) mod hosted_lifecycle_tests {
     /// Removing the selected tab itself selects the tab now at its index, or the new last tab;
     /// native `SelectedIndex`, `selected_index`, the active host and the user/binding callback agree;
     /// removing the only tab leaves an empty TabView with no active host.
+    /// Issue #304: the native TabView hides its built-in `Ctrl+F4` accelerator tooltip, which
+    /// otherwise appears over the whole tab content and lingers after a context menu closes.
+    pub(crate) fn native_tab_view_hides_its_accelerator_tooltip() {
+        use crate::bindings::Microsoft::UI::Xaml::Input::KeyboardAcceleratorPlacementMode;
+        let tab_view = TabView::new();
+        assert_eq!(
+            winui(&peer_of(&tab_view))
+                .state
+                .inner
+                .keyboard_accelerator_placement_mode_for_test(),
+            KeyboardAcceleratorPlacementMode::Hidden
+        );
+    }
+
     /// Review fix (PR #320): `set_children` with the existing items in a new order (and an
     /// insertion before a kept tab) moves the native tabs into Core's order, keeps every tab's
     /// content host and content (nothing is retired or re-hosted), and leaves the native

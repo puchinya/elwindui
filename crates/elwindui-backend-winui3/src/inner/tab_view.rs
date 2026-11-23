@@ -7,6 +7,7 @@ use crate::bindings::Microsoft::UI::Xaml::Controls::{
     TabView as XamlTabView, TabViewCloseButtonOverlayMode, TabViewItem,
     TabViewTabCloseRequestedEventArgs,
 };
+use crate::bindings::Microsoft::UI::Xaml::Input::KeyboardAcceleratorPlacementMode;
 use crate::bindings::Microsoft::UI::Xaml::SizeChangedEventHandler;
 use crate::ffi::{
     AnyView, UiCallbackRegistryOwner, invoke_ui_event_callback, invoke_ui_index_event_callback,
@@ -53,6 +54,12 @@ impl InnerTabView {
         );
         let _ = xaml.SetCloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Always);
         let _ = xaml.SetIsAddTabButtonVisible(true);
+        // WinUI's TabView registers its own `Ctrl+F4` close-tab accelerator. With the default
+        // `Auto` placement it shows that accelerator as a tooltip whenever the pointer rests
+        // anywhere over the TabView -- i.e. over the whole tab content -- and the tooltip then
+        // lingers after a context menu/popup opened there closes (Issue #304). `Hidden` only hides
+        // the tooltip; the accelerator keeps working, and descendants do not inherit the mode.
+        let _ = xaml.SetKeyboardAcceleratorPlacementMode(KeyboardAcceleratorPlacementMode::Hidden);
 
         let handle = AnyView::from(xaml.clone());
         let this = Self {
@@ -157,6 +164,16 @@ impl InnerTabView {
     #[cfg(test)]
     pub(crate) fn native_selected_index_for_test(&self) -> i32 {
         self.xaml.SelectedIndex().unwrap_or(-1)
+    }
+
+    /// The native `KeyboardAcceleratorPlacementMode` (Issue #304).
+    #[cfg(test)]
+    pub(crate) fn keyboard_accelerator_placement_mode_for_test(
+        &self,
+    ) -> KeyboardAcceleratorPlacementMode {
+        self.xaml
+            .KeyboardAcceleratorPlacementMode()
+            .expect("TabView.KeyboardAcceleratorPlacementMode")
     }
 
     /// Invokes the selection callback as a native `SelectionChanged` would.

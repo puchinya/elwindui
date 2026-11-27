@@ -116,6 +116,11 @@ struct MockTabView {
     on_new_tab: Slot<()>,
     /// Runs inside the next `set_items`, like a content `on_unmount` hook re-entering Core.
     reenter: RefCell<Option<Box<dyn FnOnce()>>>,
+    /// When set, behaves like WinUI 3's `TabViewState::rebuild`: a `set_items` that arrives while
+    /// an outer one is still rebuilding is only queued (the outer call processes it before
+    /// returning), so the removed tab's content is not yet retired when the nested call returns.
+    queue_nested: Cell<bool>,
+    rebuilding: Cell<bool>,
 }
 mock_native_peer!(MockTabView);
 
@@ -128,9 +133,20 @@ impl TabViewPeer for MockTabView {
         self.log
             .borrow_mut()
             .push(format!("items:{}:{}", headers.join(","), owner.is_some()));
+        if self.queue_nested.get() && self.rebuilding.get() {
+            self.log
+                .borrow_mut()
+                .push(format!("queued:{}", headers.join(",")));
+            return;
+        }
+        self.rebuilding.set(true);
         let reenter = self.reenter.borrow_mut().take();
         if let Some(reenter) = reenter {
             reenter();
+        }
+        self.rebuilding.set(false);
+        if self.queue_nested.get() {
+            self.log.borrow_mut().push("retired".to_string());
         }
     }
     fn set_selected_index(&self, index: usize) {
@@ -299,6 +315,8 @@ impl NativePeerFactory for MockFactory {
             on_close: RefCell::new(None),
             on_new_tab: RefCell::new(None),
             reenter: RefCell::new(None),
+            queue_nested: Cell::new(false),
+            rebuilding: Cell::new(false),
         });
         self.tab_views.borrow_mut().push(peer.clone());
         peer
@@ -819,4 +837,338 @@ fn ordered_peer_reconcile_never_slices_out_of_range() {
     let native = RefCell::new(vec![a.clone(), a.clone()]);
     reconcile_into(&native, &[a.clone(), a.clone()], &[a.clone()]);
     assert_eq!(native.borrow().len(), 1);
+}
+
+/// Asserts that `action` panics with the Issue #323 foreign-owner diagnostic for `item` / `parent`.
+fn expect_foreign_owner_panic(item: &str, parent: &str, action: impl FnOnce()) {
+    let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action))
+        .expect_err("an item owned by another parent must be rejected");
+    let message = error
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| error.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
+    assert!(
+        message.contains(&format!(
+            "this `{item}` already belongs to another `{parent}`"
+        )) && message.contains("`remove`, `remove_at` or `clear`"),
+        "diagnostic names the item, the parent and the way out: {message}"
+    );
+}
+
+fn as_menu_item(item: &Rc<MenuItem>) -> Rc<dyn MenuItemExt> {
+    item.clone()
+}
+
+#[test]
+fn menu_item_in_two_unrealized_menus_is_rejected_without_side_effects() {
+    let factory = install_mock();
+    let a = Menu::new();
+    let b = Menu::new();
+    let item = MenuItem::new();
+    a.add(item.clone());
+    expect_foreign_owner_panic("MenuItem", "Menu", || b.add(item.clone()));
+    expect_foreign_owner_panic("MenuItem", "Menu", || ListExt::insert(&*b, 0, item.clone()));
+    assert_eq!(a.len(), 1, "A keeps the item");
+    assert!(b.is_empty(), "B is unchanged");
+    assert_eq!(factory.created("MenuItem"), 0, "no peer was realized");
+    assert_eq!(factory.created("Menu"), 0);
+    assert!(factory.take_log().is_empty(), "nothing was pushed");
+
+    // Unrealized move: remove from A, then B accepts it.
+    assert!(ListExt::remove(&*a, &as_menu_item(&item)));
+    b.add(item.clone());
+    assert_eq!(b.len(), 1);
+    // The lease now belongs to B: A cannot take it back.
+    expect_foreign_owner_panic("MenuItem", "Menu", || a.add(item.clone()));
+    assert!(a.is_empty());
+    clear_native_peer_factory();
+}
+
+#[test]
+fn realized_menu_item_moves_only_after_removal_and_keeps_its_one_peer() {
+    let factory = install_mock();
+    let a = Menu::new();
+    let b = Menu::new();
+    let item = MenuItem::new();
+    let (selected, sink) = recorder::<()>();
+    item.set_on_select(Box::new(move || sink(())));
+    a.add(item.clone());
+    __menu_peer_of(&*a);
+    __menu_peer_of(&*b);
+    assert_eq!(factory.created("MenuItem"), 1);
+    factory.take_log();
+
+    expect_foreign_owner_panic("MenuItem", "Menu", || b.add(item.clone()));
+    assert_eq!((a.len(), b.len()), (1, 0));
+    assert!(factory.take_log().is_empty(), "no native change");
+
+    // remove_at → add: A's native detach is pushed before B's attach; the peer is reused.
+    let removed = ListExt::remove_at(&*a, 0);
+    assert!(Rc::ptr_eq(&removed, &as_menu_item(&item)));
+    b.add(item.clone());
+    assert_eq!(factory.take_log(), ["menu_items:0", "menu_items:1"]);
+    assert_eq!(
+        factory.created("MenuItem"),
+        1,
+        "the item's peer is never recreated"
+    );
+
+    // The native activation still reaches the item once.
+    let peer = factory.menu_items.borrow()[0].clone();
+    fire(&peer.on_select, ());
+    assert_eq!(selected.borrow().len(), 1);
+
+    // Repeated removal is a no-op and does not release B's lease on someone else's behalf.
+    assert!(!ListExt::remove(&*a, &as_menu_item(&item)));
+    expect_foreign_owner_panic("MenuItem", "Menu", || a.add(item.clone()));
+
+    // clear releases too.
+    ListExt::clear(&*b);
+    factory.take_log();
+    a.add(item.clone());
+    assert_eq!(factory.take_log(), ["menu_items:1"]);
+
+    // Same-list duplicates keep their own diagnostic.
+    expect_duplicate_panic("Menu", || a.add(item.clone()));
+
+    // Dropping the item disposes its peer once; the stale native callback is a no-op.
+    ListExt::clear(&*a);
+    drop(removed);
+    drop(item);
+    assert_eq!(
+        factory
+            .take_log()
+            .iter()
+            .filter(|entry| *entry == "item_dispose")
+            .count(),
+        1
+    );
+    fire(&peer.on_select, ());
+    assert_eq!(selected.borrow().len(), 1, "stale callback does nothing");
+    clear_native_peer_factory();
+}
+
+#[test]
+fn dropped_menu_frees_its_items() {
+    let _factory = install_mock();
+    let item = MenuItem::new();
+    {
+        let a = Menu::new();
+        a.add(item.clone());
+    }
+    let b = Menu::new();
+    b.add(item.clone());
+    assert_eq!(b.len(), 1);
+    clear_native_peer_factory();
+}
+
+#[test]
+fn menu_bar_item_belongs_to_one_menu_bar() {
+    let factory = install_mock();
+    let a = MenuBar::new();
+    let b = MenuBar::new();
+    let entry = MenuBarItem::new();
+    a.add(entry.clone());
+    expect_foreign_owner_panic("MenuBarItem", "MenuBar", || b.add(entry.clone()));
+    __menu_bar_peer_of(&*a);
+    __menu_bar_peer_of(&*b);
+    factory.take_log();
+    expect_foreign_owner_panic("MenuBarItem", "MenuBar", || {
+        ListExt::insert(&*b, 0, entry.clone())
+    });
+    assert_eq!((a.len(), b.len()), (1, 0));
+    assert!(factory.take_log().is_empty());
+
+    let entry_dyn: Rc<dyn MenuBarItemExt> = entry.clone();
+    assert!(ListExt::remove(&*a, &entry_dyn));
+    b.add(entry.clone());
+    assert_eq!(factory.take_log(), ["bar_items:0", "bar_items:1"]);
+    assert_eq!(factory.created("MenuBarItem"), 1);
+    clear_native_peer_factory();
+}
+
+#[test]
+fn tab_view_item_belongs_to_one_tab_view() {
+    let factory = install_mock();
+    let a = TabView::new();
+    let b = TabView::new();
+    realize(&*a);
+    realize(&*b);
+    let shared = TabViewItem::new();
+    shared.set_header("Shared");
+    let kept = TabViewItem::new();
+    kept.set_header("Kept");
+    a.set_children(vec![kept.clone(), shared.clone()]);
+    a.set_selected_index(1);
+    let other = TabViewItem::new();
+    other.set_header("Other");
+    b.add(other.clone());
+    factory.take_log();
+
+    expect_foreign_owner_panic("TabViewItem", "TabView", || b.add(shared.clone()));
+    expect_foreign_owner_panic("TabViewItem", "TabView", || {
+        ListExt::insert(&*b, 0, shared.clone())
+    });
+    // set_children with one conflicting tab among new ones is rejected as a whole.
+    let fresh = TabViewItem::new();
+    expect_foreign_owner_panic("TabViewItem", "TabView", || {
+        b.set_children(vec![fresh.clone(), shared.clone()])
+    });
+    assert_eq!(b.len(), 1);
+    assert_eq!(b.selected_index(), 0);
+    assert!(
+        factory.take_log().is_empty(),
+        "no list, selection or native change"
+    );
+    // A's listener still reaches A's peer, and the rejected fresh tab got none.
+    shared.set_header("Shared2");
+    assert_eq!(factory.take_log(), ["header:1:Shared2", "closable:1:true"]);
+    assert_eq!(a.selected_index(), 1);
+    fresh.set_header("Fresh");
+    assert!(factory.take_log().is_empty());
+    // The rejected fresh tab is still free to join B.
+    b.add(fresh.clone());
+    factory.take_log();
+
+    // Move: remove from A (content retired first), then B accepts it.
+    let shared_dyn: Rc<dyn TabViewItemExt> = shared.clone();
+    assert!(ListExt::remove(&*a, &shared_dyn));
+    b.add(shared.clone());
+    let log = factory.take_log();
+    let detach = log.iter().position(|e| e == "items:Kept:true").unwrap();
+    let attach = log
+        .iter()
+        .position(|e| e == "items:Other,Fresh,Shared2:true")
+        .unwrap();
+    assert!(detach < attach, "A's detach precedes B's attach: {log:?}");
+    // The listener now points at B only.
+    shared.set_header("Shared3");
+    assert_eq!(factory.take_log(), ["header:2:Shared3", "closable:2:true"]);
+
+    // set_children that drops a tab releases it and clears its listener; kept tabs keep theirs.
+    b.set_children(vec![other.clone(), fresh.clone()]);
+    factory.take_log();
+    shared.set_header("Shared4");
+    assert!(
+        factory.take_log().is_empty(),
+        "a removed tab notifies nobody"
+    );
+    other.set_header("Other2");
+    assert_eq!(factory.take_log(), ["header:0:Other2", "closable:0:true"]);
+    a.add(shared.clone());
+
+    // clear releases every tab.
+    ListExt::clear(&*b);
+    a.add(other.clone());
+    assert_eq!(a.len(), 3);
+    clear_native_peer_factory();
+}
+
+#[test]
+fn dropdown_item_may_be_shared_by_several_dropdowns() {
+    let _factory = install_mock();
+    let a = Dropdown::new();
+    let b = Dropdown::new();
+    let item = dropdown_item("Shared");
+    a.add(item.clone());
+    b.add(item.clone());
+    assert_eq!((a.len(), b.len()), (1, 1));
+    clear_native_peer_factory();
+}
+
+#[test]
+fn a_tab_cannot_be_taken_by_another_tab_view_during_its_removal_push() {
+    let factory = install_mock();
+    let a = TabView::new();
+    let b = TabView::new();
+    realize(&*a);
+    realize(&*b);
+    let shared = TabViewItem::new();
+    a.add(shared.clone());
+    // The reentrant `B.add` runs inside A's removal push, before the old detach completes.
+    let rejected = Rc::new(Cell::new(false));
+    {
+        let b = b.clone();
+        let shared = shared.clone();
+        let rejected = rejected.clone();
+        let peer_a = factory.tab_views.borrow()[0].clone();
+        *peer_a.reenter.borrow_mut() = Some(Box::new(move || {
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.add(shared.clone())));
+            rejected.set(result.is_err());
+        }));
+    }
+    let shared_dyn: Rc<dyn TabViewItemExt> = shared.clone();
+    assert!(ListExt::remove(&*a, &shared_dyn));
+    assert!(
+        rejected.get(),
+        "the lease stays with A until its push completes"
+    );
+    assert!(b.is_empty());
+    // After the push, the lease is free.
+    b.add(shared.clone());
+    assert_eq!(b.len(), 1);
+    clear_native_peer_factory();
+}
+
+#[test]
+fn a_reentrant_removal_keeps_the_lease_until_the_outermost_push_retired_the_tab() {
+    // Review case (PR #325): A holds x and y. Removing x runs x's unmount hook inside A's push;
+    // the hook removes y from A and immediately tries B.add(y). The WinUI 3 peer only queues that
+    // nested list, so y's content is still hosted by A: B.add(y) must be rejected until the
+    // outermost push of A has returned, and must succeed afterwards.
+    let factory = install_mock();
+    let a = TabView::new();
+    let b = TabView::new();
+    realize(&*a);
+    realize(&*b);
+    let x = TabViewItem::new();
+    x.set_header("X");
+    let y = TabViewItem::new();
+    y.set_header("Y");
+    a.set_children(vec![x.clone(), y.clone()]);
+    let peer_a = factory.tab_views.borrow()[0].clone();
+    peer_a.queue_nested.set(true);
+    factory.take_log();
+
+    let taken_during_push = Rc::new(Cell::new(None::<bool>));
+    {
+        let a = a.clone();
+        let b = b.clone();
+        let y = y.clone();
+        let taken = taken_during_push.clone();
+        *peer_a.reenter.borrow_mut() = Some(Box::new(move || {
+            let y_dyn: Rc<dyn TabViewItemExt> = y.clone();
+            assert!(ListExt::remove(&*a, &y_dyn));
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.add(y.clone())));
+            taken.set(Some(result.is_ok()));
+        }));
+    }
+    let x_dyn: Rc<dyn TabViewItemExt> = x.clone();
+    assert!(ListExt::remove(&*a, &x_dyn));
+    assert_eq!(
+        taken_during_push.get(),
+        Some(false),
+        "B.add(y) is rejected while A's outermost push is still retiring y"
+    );
+    let log = factory.take_log();
+    assert!(
+        log.iter().any(|entry| entry == "queued:") && log.iter().any(|entry| entry == "retired"),
+        "the nested list was only queued: {log:?}"
+    );
+    assert!(a.is_empty());
+    assert!(b.is_empty());
+
+    // After the outermost push both tabs are free, and y's listener no longer reaches A.
+    y.set_header("Y2");
+    assert!(
+        factory.take_log().is_empty(),
+        "a released tab notifies nobody"
+    );
+    b.add(y.clone());
+    b.add(x.clone());
+    assert_eq!(b.len(), 2);
+    clear_native_peer_factory();
 }

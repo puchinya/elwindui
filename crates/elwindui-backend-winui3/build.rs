@@ -323,6 +323,8 @@ fn main() {
         "Microsoft.UI.Xaml.Media.Brush".to_owned(),
         "Microsoft.UI.Xaml.Input.KeyboardAccelerator".to_owned(),
         "Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs".to_owned(),
+        // `TabView` hides its built-in `Ctrl+F4` accelerator tooltip (Issue #304).
+        "Microsoft.UI.Xaml.Input.KeyboardAcceleratorPlacementMode".to_owned(),
         "Microsoft.UI.Xaml.Controls.ToolTipService".to_owned(),
         "Microsoft.UI.Xaml.Controls.ToolTip".to_owned(),
         // `CheckBox`/`RadioButton`/`ToggleSwitch` (selection controls). `CheckBox.IsChecked`/

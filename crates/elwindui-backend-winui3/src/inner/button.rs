@@ -894,6 +894,8 @@ mod hosted_xaml_regression_tests {
                     create_flyout_snapshots_icon_onto_a_distinct_realization();
                 crate::inner::menu::live_menu_item_icon_tests::
                     failed_icon_conversion_does_not_remove_the_action();
+                crate::native_ui::menu::hosted_ownership_tests::
+                    a_menu_item_in_another_native_menu_is_rejected_before_any_xaml_change();
                 crate::host::hosted_context_lifecycle_tests::
                     context_host_resolution_follows_nearest_active_host();
                 crate::native_ui::tab_view::hosted_lifecycle_tests::
@@ -924,6 +926,8 @@ mod hosted_xaml_regression_tests {
                     removing_the_selected_tab_selects_a_consistent_replacement();
                 crate::native_ui::tab_view::hosted_lifecycle_tests::
                     reordering_tabs_keeps_hosts_and_follows_core_order();
+                crate::native_ui::tab_view::hosted_lifecycle_tests::
+                    native_tab_view_hides_its_accelerator_tooltip();
                 crate::app::reset_window_lifecycle_test_state();
                 // Issue #254: `InnerWindow` stores only the final owner's `Weak<dyn WindowExt>`;
                 // the application registry becomes the strong lifetime authority after show().

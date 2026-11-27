@@ -1223,10 +1223,50 @@ impl PointerGestureHost for WinUI3PointerGestureHost {
     }
 }
 
+/// Test view of one projected accessibility child position (see
+/// [`TreeHost::accessibility_entries_for_test`]).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccessibilityEntryForTest {
+    Semantic(u64),
+    /// A spliced nested host, identified by [`TreeHost::accessibility_identity_for_test`].
+    Nested(usize),
+}
+
 impl TreeHost {
     #[cfg(test)]
     pub(crate) fn focus_tracker_for_test(&self) -> &elwindui_core::focus::FocusTracker {
         &self.keyboard.focus
+    }
+
+    #[cfg(test)]
+    pub(crate) fn accessibility_identity_for_test(&self) -> usize {
+        Rc::as_ptr(&self.accessibility) as usize
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rebuild_accessibility_for_test(&self) {
+        self.accessibility.rebuild();
+    }
+
+    /// The child positions the C++ peer bridge would enumerate under `parent` (`0` = root).
+    #[cfg(test)]
+    pub(crate) fn accessibility_entries_for_test(
+        &self,
+        parent: u64,
+    ) -> Vec<AccessibilityEntryForTest> {
+        self.accessibility
+            .child_entries(parent)
+            .into_iter()
+            .map(|entry| match entry {
+                accessibility::AccessibilityChildEntry::Semantic(id) => {
+                    AccessibilityEntryForTest::Semantic(id.raw())
+                }
+                accessibility::AccessibilityChildEntry::Nested(state) => {
+                    AccessibilityEntryForTest::Nested(Rc::as_ptr(&state) as usize)
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn new() -> Self {
@@ -2103,6 +2143,9 @@ impl TreeHost {
         if self.active.replace(active) == active {
             return;
         }
+        // An inactive nested host (a TabView page that is not selected) leaves the public
+        // accessibility tree of the host it is spliced into.
+        self.accessibility.set_active(active);
         if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
             eprintln!("[elwindui-winui3] TreeHost active={active}");
         }
@@ -2377,6 +2420,7 @@ impl TreeHost {
         }
         if self.hosted_terminal.get() {
             self.hosted_phase.set(HostedPhase::Closed);
+            self.accessibility.set_hosted_owner(None);
             return;
         }
         self.hosted_phase.set(HostedPhase::Idle);
@@ -2391,10 +2435,12 @@ impl TreeHost {
             !self.was_retired(content) && !self.owned_elsewhere(content, owner.as_ref())
         });
         if let Some((content, owner)) = candidate {
-            if let Some(owner) = owner {
-                *content.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&owner));
+            if let Some(owner) = owner.as_ref() {
+                *content.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(owner));
             }
             self.set_tree(content);
+            // Spliced into the owning host's accessibility tree at the owner's position.
+            self.accessibility.set_hosted_owner(owner.as_ref());
         }
     }
 

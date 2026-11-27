@@ -180,6 +180,18 @@ pub struct AccessibilitySnapshot {
     pub roots: Vec<AccessibilitySnapshotNode>,
 }
 
+/// Where an owner's nested hosted tree (a native TabView page or ScrollView content hosted
+/// separately) is spliced into the owning host's semantic tree; see
+/// [`AccessibilityRuntime::hosted_anchor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccessibilityHostedAnchor {
+    /// Nearest snapshot node that is the owner or one of its visual ancestors; `None` is the
+    /// host root itself.
+    pub parent: Option<AccessibilityId>,
+    /// Number of `parent`'s semantic children that precede the owner in traversal order.
+    pub index: usize,
+}
+
 /// Backend-owned route for coalesced semantic invalidation.
 pub trait AccessibilityHost {
     fn request_accessibility_update(&self);
@@ -191,6 +203,9 @@ pub trait AccessibilityHost {
 pub struct AccessibilityRuntime {
     snapshot: RefCell<AccessibilitySnapshot>,
     owners: RefCell<HashMap<AccessibilityId, Weak<dyn UIElementExt>>>,
+    /// Pre-order position of every participating element visited by the last rebuild, semantic
+    /// or transparent. Used only to anchor nested hosted trees.
+    order: RefCell<HashMap<AccessibilityId, usize>>,
     root_id: Cell<Option<AccessibilityId>>,
     revision: Cell<u64>,
 }
@@ -200,6 +215,7 @@ impl AccessibilityRuntime {
         Rc::new(Self {
             snapshot: RefCell::new(AccessibilitySnapshot::default()),
             owners: RefCell::new(HashMap::new()),
+            order: RefCell::new(HashMap::new()),
             root_id: Cell::new(None),
             revision: Cell::new(0),
         })
@@ -217,6 +233,7 @@ impl AccessibilityRuntime {
         let changed = !self.snapshot.borrow().roots.is_empty() || !self.owners.borrow().is_empty();
         self.snapshot.borrow_mut().roots.clear();
         self.owners.borrow_mut().clear();
+        self.order.borrow_mut().clear();
         self.root_id.set(None);
         if changed {
             self.revision.set(self.revision.get().wrapping_add(1));
@@ -226,16 +243,69 @@ impl AccessibilityRuntime {
     pub fn rebuild(&self, root: &Rc<dyn UIElementExt>) -> AccessibilitySnapshot {
         let mut seen = HashSet::new();
         let mut owners = HashMap::new();
-        let roots = semantic_children(root, &mut seen, &mut owners);
+        let mut order = HashMap::new();
+        let roots = semantic_children(root, &mut seen, &mut owners, &mut order);
         let snapshot = AccessibilitySnapshot { roots };
         let changed = *self.snapshot.borrow() != snapshot;
         *self.snapshot.borrow_mut() = snapshot.clone();
         *self.owners.borrow_mut() = owners;
+        *self.order.borrow_mut() = order;
         self.root_id.set(Some(root.accessibility_id()));
         if changed {
             self.revision.set(self.revision.get().wrapping_add(1));
         }
         snapshot
+    }
+
+    /// Locates where the semantic content of a nested hosted tree owned by `owner` belongs in
+    /// this host's last snapshot: under the nearest snapshot node among `owner` and its visual
+    /// ancestors (`None` = the host root), after that node's semantic children that precede
+    /// `owner` in traversal order. The nested root itself stays transparent.
+    ///
+    /// Returns `None` when the last rebuild did not visit `owner` (it is hidden, collapsed,
+    /// exiting, under an `Ignore` node, or in another host), or when `owner` is itself a
+    /// semantic node whose child behavior is `Ignore`.
+    pub fn hosted_anchor(&self, owner: &Rc<dyn UIElementExt>) -> Option<AccessibilityHostedAnchor> {
+        let root_id = self.root_id.get()?;
+        let owner_order = *self.order.borrow().get(&owner.accessibility_id())?;
+        if !belongs_to_root(owner, root_id) {
+            return None;
+        }
+        let parent = {
+            let owners = self.owners.borrow();
+            let mut current = Some(Rc::clone(owner));
+            let mut found = None;
+            while let Some(item) = current {
+                if owners.contains_key(&item.accessibility_id()) {
+                    found = Some(item.accessibility_id());
+                    break;
+                }
+                if item.accessibility_id() == root_id {
+                    break;
+                }
+                current = item.visual_parent();
+            }
+            found
+        };
+        let snapshot = self.snapshot.borrow();
+        let children = match parent {
+            None => &snapshot.roots,
+            Some(id) => {
+                let node = find_node(&snapshot.roots, id)?;
+                if id == owner.accessibility_id()
+                    && node.semantics.child_behavior == AccessibilityChildBehavior::Ignore
+                {
+                    return None;
+                }
+                &node.children
+            }
+        };
+        let order = self.order.borrow();
+        let index = children
+            .iter()
+            .filter(|child| order.get(&child.id).is_some_and(|&o| o < owner_order))
+            .count();
+        Some(AccessibilityHostedAnchor { parent, index })
     }
 
     pub fn dispatch_action(&self, id: AccessibilityId, action: AccessibilityAction) -> bool {
@@ -288,14 +358,30 @@ fn belongs_to_root(node: &Rc<dyn UIElementExt>, root_id: AccessibilityId) -> boo
     false
 }
 
+fn find_node(
+    nodes: &[AccessibilitySnapshotNode],
+    id: AccessibilityId,
+) -> Option<&AccessibilitySnapshotNode> {
+    nodes.iter().find_map(|node| {
+        if node.id == id {
+            Some(node)
+        } else {
+            find_node(&node.children, id)
+        }
+    })
+}
+
 fn semantic_children(
     node: &Rc<dyn UIElementExt>,
     seen: &mut HashSet<AccessibilityId>,
     owners: &mut HashMap<AccessibilityId, Weak<dyn UIElementExt>>,
+    order: &mut HashMap<AccessibilityId, usize>,
 ) -> Vec<AccessibilitySnapshotNode> {
     if !is_accessible_participant(node) || !seen.insert(node.accessibility_id()) {
         return Vec::new();
     }
+    let position = order.len();
+    order.insert(node.accessibility_id(), position);
 
     let semantics = node.accessibility_semantics();
     // A transparent node has no public semantics from which Ignore or Contain could be
@@ -315,7 +401,7 @@ fn semantic_children(
     };
     let semantic_children = child_nodes
         .iter()
-        .flat_map(|child| semantic_children(child, seen, owners))
+        .flat_map(|child| semantic_children(child, seen, owners, order))
         .collect::<Vec<_>>();
 
     let Some(semantics) = semantics else {
@@ -675,5 +761,111 @@ mod tests {
             "semantic bounds use this frame's shown position"
         );
         assert_eq!(bounds_in_root(&d).y, visible_y(&d));
+    }
+
+    fn plain_owner() -> Rc<dyn UIElementExt> {
+        native(
+            "hosted-owner",
+            Size {
+                width: 40.0,
+                height: 20.0,
+            },
+        )
+    }
+
+    #[test]
+    fn hosted_anchor_places_nested_content_at_the_owner_position_under_the_root() {
+        let (a, owner, b) = (button("a"), plain_owner(), button("b"));
+        let root = stack(
+            Orientation::Vertical,
+            0.0,
+            vec![a.clone(), owner.clone(), b.clone()],
+        );
+        let runtime = AccessibilityRuntime::new();
+        assert_eq!(runtime.hosted_anchor(&owner), None, "no rebuild yet");
+        runtime.rebuild(&root);
+        assert_eq!(
+            runtime.hosted_anchor(&owner),
+            Some(AccessibilityHostedAnchor {
+                parent: None,
+                index: 1
+            })
+        );
+    }
+
+    #[test]
+    fn hosted_anchor_uses_the_nearest_semantic_ancestor() {
+        let (x, owner, y) = (button("x"), plain_owner(), button("y"));
+        let inner = stack(Orientation::Vertical, 0.0, vec![owner.clone(), y.clone()]);
+        let group = button("group");
+        group.as_ui_element().visual_collection.add(x.clone());
+        group.as_ui_element().visual_collection.add(inner);
+        let root = stack(
+            Orientation::Vertical,
+            0.0,
+            vec![button("first"), group.clone()],
+        );
+        let runtime = AccessibilityRuntime::new();
+        runtime.rebuild(&root);
+        assert_eq!(
+            runtime.hosted_anchor(&owner),
+            Some(AccessibilityHostedAnchor {
+                parent: Some(group.accessibility_id()),
+                index: 1
+            })
+        );
+    }
+
+    #[test]
+    fn hosted_anchor_on_a_semantic_owner_honors_its_child_behavior() {
+        let owner = button("owner");
+        let root = stack(Orientation::Vertical, 0.0, vec![owner.clone()]);
+        let runtime = AccessibilityRuntime::new();
+        runtime.rebuild(&root);
+        assert_eq!(
+            runtime.hosted_anchor(&owner),
+            Some(AccessibilityHostedAnchor {
+                parent: Some(owner.accessibility_id()),
+                index: 0
+            })
+        );
+        owner.set_accessibility_children(AccessibilityChildBehavior::Ignore);
+        runtime.rebuild(&root);
+        assert_eq!(runtime.hosted_anchor(&owner), None);
+    }
+
+    #[test]
+    fn hosted_anchor_is_none_for_owners_the_rebuild_did_not_visit() {
+        let owner = plain_owner();
+        let group = button("group");
+        group.as_ui_element().visual_collection.add(owner.clone());
+        let root = stack(Orientation::Vertical, 0.0, vec![group.clone()]);
+        let runtime = AccessibilityRuntime::new();
+        runtime.rebuild(&root);
+        assert!(runtime.hosted_anchor(&owner).is_some());
+
+        group.set_accessibility_children(AccessibilityChildBehavior::Ignore);
+        runtime.rebuild(&root);
+        assert_eq!(runtime.hosted_anchor(&owner), None, "Ignore ancestor");
+        group.set_accessibility_children(AccessibilityChildBehavior::Automatic);
+
+        owner.set_visibility(Visibility::Collapsed);
+        runtime.rebuild(&root);
+        assert_eq!(runtime.hosted_anchor(&owner), None, "collapsed owner");
+        owner.set_visibility(Visibility::Visible);
+
+        owner.set_accessibility_hidden(true);
+        runtime.rebuild(&root);
+        assert_eq!(runtime.hosted_anchor(&owner), None, "hidden owner");
+        owner.set_accessibility_hidden(false);
+
+        let foreign = plain_owner();
+        let _other_root = stack(Orientation::Vertical, 0.0, vec![foreign.clone()]);
+        runtime.rebuild(&root);
+        assert!(runtime.hosted_anchor(&owner).is_some());
+        assert_eq!(runtime.hosted_anchor(&foreign), None, "other host's owner");
+
+        runtime.clear();
+        assert_eq!(runtime.hosted_anchor(&owner), None, "cleared runtime");
     }
 }

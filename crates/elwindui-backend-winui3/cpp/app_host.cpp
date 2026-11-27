@@ -98,7 +98,7 @@ struct App : ApplicationT<App, IXamlMetadataProvider> {
 // `NATIVE_ABI_VERSION` in `build_support.rs` whenever an exported C function name/signature/calling
 // convention, `ElwinduiAccessibilityNodeRecord`, `ElwinduiAccessibilityCallbacks`, or another
 // native ABI assumption used by Rust call sites changes incompatibly.
-extern "C" __declspec(dllexport) void elwindui_winui3_native_abi_v1() noexcept {}
+extern "C" __declspec(dllexport) void elwindui_winui3_native_abi_v2() noexcept {}
 
 extern "C" __declspec(dllexport) void elwindui_winui3_run(void (*startup)()) {
     g_startup = startup;

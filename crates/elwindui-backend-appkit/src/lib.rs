@@ -73,6 +73,8 @@ pub mod diagnostics;
 mod ffi;
 mod host;
 mod inner;
+#[cfg(all(feature = "native-peer-regression", target_os = "macos"))]
+mod native_peer_regression;
 mod native_ui;
 pub mod platform;
 mod render;
@@ -248,6 +250,21 @@ fn run_menu_single_parent_regression() {
         "menu_single_parent_runtime: PASS (rejected_add_insert=2, native_unchanged=true, moved_same_nsmenuitem=true, select_count={})",
         selected.get()
     );
+}
+
+/// Runs the executable AppKit main-thread regression for the native input, menu, TabView and
+/// Dropdown peers (Issue #313 PRs #319/#320, verified on macOS for Issue #316). Hidden from the
+/// ordinary backend API; only the focused `native_peer_runtime` example calls it.
+#[cfg(all(feature = "native-peer-regression", target_os = "macos"))]
+#[doc(hidden)]
+pub fn run_native_peer_regression() {
+    let _ = init();
+    application::run(|| {
+        native_peer_regression::run_all();
+        dispatch2::DispatchQueue::main().exec_async(|| {
+            objc2_app_kit::NSApplication::sharedApplication(crate::ffi::mtm()).terminate(None);
+        });
+    });
 }
 
 /// Runs the executable AppKit main-thread regression for inactive-host accessibility semantics.

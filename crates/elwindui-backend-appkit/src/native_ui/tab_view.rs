@@ -4,8 +4,8 @@
 //! (`crate::inner::InnerTabView`). Each displayed tab owns a chip and a persistent content host;
 //! selecting a tab shows its host and hides the previous one without touching either one's
 //! content. Core owns the item list, the selected index and the selection policy; this peer owns
-//! the chips, the hosts and which host is visible. Cross-checked only; macOS verification is
-//! tracked by #316.
+//! the chips, the hosts and which host is visible. Reorder, content-host retention and removal are
+//! verified on macOS by the `native_peer_runtime` example and the #316 host run.
 
 use super::control::HandlePeer;
 use crate::host::TreeHost;
@@ -265,6 +265,29 @@ impl NativePeer for AppKitTabViewPeer {
         *self.state.on_select.borrow_mut() = None;
         *self.state.on_close.borrow_mut() = None;
         *self.state.on_new_tab.borrow_mut() = None;
+    }
+}
+
+#[cfg(all(feature = "native-peer-regression", target_os = "macos"))]
+impl AppKitTabViewPeer {
+    /// `(title, content host identity, host visible)` per chip, in the native strip's arranged
+    /// order. Only the `native_peer_runtime` regression reads it.
+    pub(crate) fn regression_snapshot(&self) -> Vec<(String, usize, bool)> {
+        let chips = self.state.chips.borrow();
+        let refs: Vec<&TabChipImpl> = chips.iter().map(|(chip, _)| chip).collect();
+        self.state
+            .inner
+            .native_chip_order(&refs)
+            .into_iter()
+            .map(|index| {
+                let (chip, host) = &chips[index];
+                (
+                    chip.title_button.native_button().title().to_string(),
+                    Retained::as_ptr(host) as usize,
+                    !host.isHidden(),
+                )
+            })
+            .collect()
     }
 }
 

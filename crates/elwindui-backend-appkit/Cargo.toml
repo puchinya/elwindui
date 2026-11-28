@@ -5,6 +5,8 @@ edition.workspace = true
 
 [features]
 accessibility-regression = []
+menu-lifetime-regression = []
+native-peer-regression = []
 
 # Enables `render::stats` counters (Core Animation mutation traffic, resource creation, memory
 # footprint) in an optimized build. Already on for free under `cfg(test)`/`cfg(debug_assertions)`
@@ -15,6 +17,16 @@ render-stats = []
 name = "accessibility_active_host_regression"
 path = "examples/accessibility_active_host_regression.rs"
 required-features = ["accessibility-regression"]
+
+[[example]]
+name = "menu_lifetime_runtime"
+path = "examples/menu_lifetime_runtime.rs"
+required-features = ["menu-lifetime-regression"]
+
+[[example]]
+name = "native_peer_runtime"
+path = "examples/native_peer_runtime.rs"
+required-features = ["native-peer-regression"]
 
 [[example]]
 name = "appkit-memory-baseline"

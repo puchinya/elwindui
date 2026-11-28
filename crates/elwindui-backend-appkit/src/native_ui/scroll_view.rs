@@ -10,7 +10,7 @@ use std::any::Any;
 use std::rc::Rc;
 
 /// [`ScrollViewPeer`] over an `NSScrollView` whose document view is a nested `TreeHost`.
-/// Cross-checked only; macOS verification is tracked by #316.
+/// Wheel scrolling and clipping were verified on a macOS host in #316.
 pub(crate) struct AppKitScrollViewPeer {
     base: HandlePeer,
     inner: InnerScrollView,

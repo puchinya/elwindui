@@ -6,17 +6,21 @@
 
 use super::TreeHost;
 use elwindui_core::accessibility::{
-    AccessibilityAction, AccessibilityHost, AccessibilityId, AccessibilityRole,
-    AccessibilitySnapshot, AccessibilitySnapshotNode,
+    AccessibilityAction, AccessibilityHost, AccessibilityHostedAnchor, AccessibilityId,
+    AccessibilityRole, AccessibilitySnapshot, AccessibilitySnapshotNode,
 };
 use elwindui_core::base::{Point, Rect};
+use elwindui_core::ui::UIElementExt;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{NSAccessibilityElement, NSAccessibilityRole, NSScreen};
+use objc2_app_kit::{NSAccessibilityLayoutChangedNotification, NSAccessibilityPostNotification};
 use objc2_foundation::{
     NSArray, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSValue,
 };
+use std::cell::RefCell;
+use std::rc::Rc;
 
 pub(crate) struct AppKitAccessibilityHost(pub(crate) Weak<TreeHost>);
 
@@ -288,20 +292,121 @@ fn child_ids(
     }
 }
 
+thread_local! {
+    /// Every `TreeHost` on this UI thread, so an owning host can find the nested hosted trees
+    /// anchored in it and a nested host can notify the host that owns it (Issue #330). Weak only.
+    static LIVE_HOSTS: RefCell<Vec<Weak<TreeHost>>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn register_host(host: &Retained<TreeHost>) {
+    LIVE_HOSTS.with(|hosts| hosts.borrow_mut().push(Weak::from_retained(host)));
+}
+
+/// The live hosts, pruning released ones. The registry borrow ends before any host is queried.
+fn live_hosts() -> Vec<Retained<TreeHost>> {
+    LIVE_HOSTS.with(|hosts| {
+        let mut live = Vec::new();
+        hosts.borrow_mut().retain(|host| match host.load() {
+            Some(host) => {
+                live.push(host);
+                true
+            }
+            None => false,
+        });
+        live
+    })
+}
+
+/// Every active nested host whose owner anchors in `host`, with that anchor, in registration
+/// order. `host` itself is never included.
+fn anchored_nested_hosts(host: &TreeHost) -> Vec<(AccessibilityHostedAnchor, Retained<TreeHost>)> {
+    live_hosts()
+        .into_iter()
+        .filter(|nested| !std::ptr::eq::<TreeHost>(&**nested, host))
+        .filter_map(|nested| {
+            let owner = nested.nested_owner()?;
+            let anchor = host.ivars().accessibility_runtime.hosted_anchor(&owner)?;
+            Some((anchor, nested))
+        })
+        .collect()
+}
+
+/// Posts a layout change on every host (other than `nested`) whose tree anchors `owner`.
+fn notify_hosts_anchoring(nested: &TreeHost, owner: &Rc<dyn UIElementExt>) {
+    for host in live_hosts() {
+        if std::ptr::eq::<TreeHost>(&*host, nested) {
+            continue;
+        }
+        if host
+            .ivars()
+            .accessibility_runtime
+            .hosted_anchor(owner)
+            .is_some()
+        {
+            unsafe {
+                NSAccessibilityPostNotification(
+                    &*host as &AnyObject,
+                    NSAccessibilityLayoutChangedNotification,
+                );
+            }
+        }
+    }
+}
+
+/// Lets the host `nested` is spliced into re-enumerate after `nested` changed.
+pub(crate) fn notify_owning_hosts(nested: &TreeHost) {
+    let owner = nested
+        .ivars()
+        .hosted_owner
+        .borrow()
+        .as_ref()
+        .and_then(std::rc::Weak::upgrade);
+    if let Some(owner) = owner {
+        notify_hosts_anchoring(nested, &owner);
+    }
+}
+
+/// The public children of `parent` (`None` = the host root): this host's own semantic children,
+/// with the root children of every active nested host anchored under `parent` spliced in at the
+/// anchor's position. A nested root is transparent, so its nested-in-nested hosts expand too.
+fn child_objects(host: &TreeHost, parent: Option<AccessibilityId>) -> Vec<Retained<AnyObject>> {
+    let snapshot = host.ivars().accessibility_runtime.snapshot();
+    let ids = child_ids(&snapshot, parent);
+    let mut nested: Vec<(usize, Retained<TreeHost>)> = anchored_nested_hosts(host)
+        .into_iter()
+        .filter(|(anchor, _)| anchor.parent == parent)
+        .map(|(anchor, nested)| (anchor.index, nested))
+        .collect();
+    // Stable: nested hosts sharing an index keep registration order.
+    nested.sort_by_key(|(index, _)| *index);
+    let mut nested = nested.into_iter().peekable();
+    let mut children = Vec::new();
+    for (position, id) in ids.into_iter().enumerate() {
+        while let Some((_, nested_host)) = nested.next_if(|(index, _)| *index <= position) {
+            children.extend(child_objects(&nested_host, None));
+        }
+        children.push(element_as_any(host.accessibility_element_for(id)));
+    }
+    for (_, nested_host) in nested {
+        children.extend(child_objects(&nested_host, None));
+    }
+    children
+}
+
 pub(crate) fn children_for_host(
     host: &TreeHost,
     parent: Option<AccessibilityId>,
 ) -> Option<Retained<NSArray>> {
-    let snapshot = host.ivars().accessibility_runtime.snapshot();
-    let children = child_ids(&snapshot, parent)
-        .into_iter()
-        .map(|id| host.accessibility_element_for(id))
-        .map(element_as_any)
-        .collect::<Vec<Retained<AnyObject>>>();
-    Some(NSArray::from_retained_slice(&children))
+    Some(NSArray::from_retained_slice(&child_objects(host, parent)))
 }
 
 pub(crate) fn hit_test_host(host: &TreeHost, point: NSPoint) -> Option<Retained<AnyObject>> {
+    // Nested content is drawn inside its owner, in front of it.
+    for (_, nested) in anchored_nested_hosts(host) {
+        if let Some(hit) = hit_test_host(&nested, point) {
+            return Some(hit);
+        }
+    }
     let primary_height = NSScreen::screens(super::mtm())
         .firstObject()
         .or_else(|| NSScreen::mainScreen(super::mtm()))
@@ -427,14 +532,63 @@ impl TreeHost {
     ) -> Option<Retained<AnyObject>> {
         let snapshot = self.ivars().accessibility_runtime.snapshot();
         if snapshot.roots.iter().any(|node| node.id == id) {
-            let host_view = self.ivars().weak_self.borrow().load()?;
-            let host_view: Retained<objc2_app_kit::NSView> = Retained::into_super(host_view);
-            let host_view: Retained<objc2_app_kit::NSResponder> = Retained::into_super(host_view);
-            let host_view: Retained<NSObject> = Retained::into_super(host_view);
-            return Some(Retained::into_super(host_view));
+            return self.root_level_parent();
         }
         let parent = find_parent(&snapshot, id)?;
         Some(element_as_any(self.accessibility_element_for(parent)))
+    }
+
+    /// The public parent of this host's root-level nodes: for a spliced nested host, its anchor
+    /// node in the owning host (or, at that host's root, that host's own root-level parent);
+    /// otherwise this host view itself.
+    fn root_level_parent(&self) -> Option<Retained<AnyObject>> {
+        if let Some(owner) = self.nested_owner() {
+            for host in live_hosts() {
+                if std::ptr::eq::<TreeHost>(&*host, self) {
+                    continue;
+                }
+                let anchor = host.ivars().accessibility_runtime.hosted_anchor(&owner);
+                if let Some(anchor) = anchor {
+                    return match anchor.parent {
+                        Some(parent) => {
+                            Some(element_as_any(host.accessibility_element_for(parent)))
+                        }
+                        None => host.root_level_parent(),
+                    };
+                }
+            }
+        }
+        let host_view = self.ivars().weak_self.borrow().load()?;
+        let host_view: Retained<objc2_app_kit::NSView> = Retained::into_super(host_view);
+        let host_view: Retained<objc2_app_kit::NSResponder> = Retained::into_super(host_view);
+        let host_view: Retained<NSObject> = Retained::into_super(host_view);
+        Some(Retained::into_super(host_view))
+    }
+
+    /// Records (or clears) the control owning this nested host, then lets the hosts that anchor
+    /// the previous and the new owner re-enumerate (Issue #330).
+    pub(crate) fn set_hosted_owner(&self, owner: Option<&Rc<dyn UIElementExt>>) {
+        let previous = self
+            .ivars()
+            .hosted_owner
+            .replace(owner.map(Rc::downgrade))
+            .and_then(|owner| owner.upgrade());
+        if let Some(previous) = previous {
+            notify_hosts_anchoring(self, &previous);
+        }
+        notify_owning_hosts(self);
+    }
+
+    /// The owner of this host while it is an active nested hosted tree.
+    fn nested_owner(&self) -> Option<Rc<dyn UIElementExt>> {
+        if !self.ivars().active.get() {
+            return None;
+        }
+        self.ivars()
+            .hosted_owner
+            .borrow()
+            .as_ref()
+            .and_then(std::rc::Weak::upgrade)
     }
 
     pub(crate) fn accessibility_frame_for(&self, id: AccessibilityId) -> NSRect {

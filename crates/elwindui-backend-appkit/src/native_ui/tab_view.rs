@@ -47,6 +47,8 @@ struct TabViewState {
     /// The key whose host is currently visible.
     visible: Cell<Option<usize>>,
     selected_index: Cell<usize>,
+    /// The Core `TabView` the page hosts are nested hosted trees of (Issue #330). Weak only.
+    owner: RefCell<Option<Weak<dyn UIElementExt>>>,
     on_select: Slot<usize>,
     on_close: Slot<usize>,
     on_new_tab: Slot<()>,
@@ -69,6 +71,7 @@ impl AppKitTabViewPeer {
             chips: RefCell::new(Vec::new()),
             visible: Cell::new(None),
             selected_index: Cell::new(0),
+            owner: RefCell::new(None),
             on_select: RefCell::new(None),
             on_close: RefCell::new(None),
             on_new_tab: RefCell::new(None),
@@ -133,6 +136,7 @@ impl TabViewState {
             if !new_keys.contains(&key) {
                 let (chip, host) = self.chips.borrow_mut().remove(i);
                 self.displayed.borrow_mut().remove(i);
+                host.set_hosted_owner(None);
                 self.inner.remove_tab(&chip, &host);
                 if self.visible.get() == Some(key) {
                     self.visible.set(None);
@@ -178,6 +182,8 @@ impl TabViewState {
             if let Some(content) = item.content() {
                 host.set_tree(content);
             }
+            let owner = self.owner.borrow().as_ref().and_then(Weak::upgrade);
+            host.set_hosted_owner(owner.as_ref());
         }
         // Keyed reorder: move each kept chip (with its host) to its pushed position, so the strip
         // order, `selected_index` and the visible host agree with Core's list.
@@ -293,8 +299,19 @@ impl AppKitTabViewPeer {
 
 impl TabViewPeer for AppKitTabViewPeer {
     fn set_items(&self, items: &[Rc<dyn TabViewItemExt>], owner: Option<Rc<dyn UIElementExt>>) {
-        // The AppKit content hosts have no logical-parent link yet (unchanged by #313).
-        let _ = owner;
+        // The AppKit content hosts have no logical-parent link yet (unchanged by #313), but each
+        // page host is spliced into the accessibility tree at the owner's position (Issue #330).
+        *self.state.owner.borrow_mut() = owner.as_ref().map(Rc::downgrade);
+        let hosts: Vec<Retained<TreeHost>> = self
+            .state
+            .chips
+            .borrow()
+            .iter()
+            .map(|(_, host)| host.clone())
+            .collect();
+        for host in hosts {
+            host.set_hosted_owner(owner.as_ref());
+        }
         *self.state.items.borrow_mut() = items.to_vec();
         self.state.generation.set(self.state.generation.get() + 1);
         self.state.rebuild();

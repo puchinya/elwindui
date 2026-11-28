@@ -71,6 +71,10 @@ pub struct TreeHostIvars {
         >,
     >,
     pub(crate) accessibility_runtime: Rc<elwindui_core::accessibility::AccessibilityRuntime>,
+    /// The control (native `TabView` / `ScrollView`) whose nested hosted tree this host is;
+    /// `None` for a host that is not nested content (a window root, a popup). Weak only, so it
+    /// never extends the control's lifetime (Issue #330).
+    pub(crate) hosted_owner: RefCell<Option<std::rc::Weak<dyn UIElementExt>>>,
     /// Native islands whose owning Core Visual is currently not eligible for input/focus. They
     /// remain visible during an exit transition, while `hitTest:` routes their mouse events back
     /// to this host so Core's presentation-aware hit test can choose the active tree instead.
@@ -896,6 +900,7 @@ impl TreeHost {
             native_owner_ids: RefCell::new(HashMap::new()),
             accessibility_elements: RefCell::new(HashMap::new()),
             accessibility_runtime: elwindui_core::accessibility::AccessibilityRuntime::new(),
+            hosted_owner: RefCell::new(None),
             suppressed_native_ids: RefCell::new(HashSet::new()),
             replay_state: RefCell::new(ReplayState::default()),
             weak_self: RefCell::new(objc2::rc::Weak::default()),
@@ -929,6 +934,7 @@ impl TreeHost {
             .host
             .store(Retained::as_ptr(&this) as usize, Ordering::Release);
         *this.ivars().weak_self.borrow_mut() = objc2::rc::Weak::from_retained(&this);
+        accessibility::register_host(&this);
         let notifications = NSNotificationCenter::defaultCenter();
         unsafe {
             notifications.addObserver_selector_name_object(
@@ -1167,6 +1173,8 @@ impl TreeHost {
                     NSAccessibilityLayoutChangedNotification,
                 );
             }
+            // A nested host's root is not public: the host it is spliced into re-enumerates.
+            accessibility::notify_owning_hosts(self);
         }
     }
 

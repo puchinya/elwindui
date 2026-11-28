@@ -79,8 +79,13 @@ impl InnerScrollView {
         self.handle.clone()
     }
 
-    pub(crate) fn set_content(&self, content: Rc<dyn UIElementExt>) {
+    pub(crate) fn set_content(
+        &self,
+        content: Rc<dyn UIElementExt>,
+        owner: Option<&Rc<dyn UIElementExt>>,
+    ) {
         self.content_host.set_tree(content);
+        self.content_host.set_hosted_owner(owner);
     }
 
     pub(crate) fn set_horizontal_scroll_enabled(&self, enabled: bool) {

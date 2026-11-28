@@ -3235,19 +3235,6 @@ impl TreeHost {
             .unwrap_or((0.0, 0.0))
     }
 
-    /// [`Self::popup_offset`] in physical pixels.
-    pub(crate) fn popup_offset_physical(
-        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
-    ) -> (f32, f32) {
-        let (x, y) = Self::popup_offset(canvas);
-        let scale = canvas
-            .XamlRoot()
-            .and_then(|root| root.RasterizationScale())
-            .unwrap_or(1.0);
-        let scale = if scale <= 0.0 { 1.0 } else { scale as f32 };
-        (x * scale, y * scale)
-    }
-
     /// Converts canvas-local logical DIPs to desktop screen physical coordinates.
     ///
     /// The XAML root/content transform and ContentCoordinateConverter are the only source of
@@ -3278,6 +3265,27 @@ impl TreeHost {
             )
             .ok()?;
         let screen_phys = converter.ConvertLocalToScreenWithPoint(local_dip).ok()?;
+        Some(Point {
+            x: screen_phys.X as f32,
+            y: screen_phys.Y as f32,
+        })
+    }
+
+    /// Desktop screen physical position of the origin of `canvas`'s XAML content root (the
+    /// window content, not the canvas itself).
+    pub(crate) fn content_origin_screen_physical_point(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+    ) -> Option<Point> {
+        let xaml_root = canvas.XamlRoot().ok()?;
+        let island = xaml_root.ContentIslandEnvironment().ok()?;
+        let converter =
+            crate::bindings::Microsoft::UI::Content::ContentCoordinateConverter::CreateForWindowId(
+                island.AppWindowId().ok()?,
+            )
+            .ok()?;
+        let screen_phys = converter
+            .ConvertLocalToScreenWithPoint(windows::Foundation::Point { X: 0.0, Y: 0.0 })
+            .ok()?;
         Some(Point {
             x: screen_phys.X as f32,
             y: screen_phys.Y as f32,

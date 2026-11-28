@@ -115,10 +115,20 @@ thread_local! {
 }
 
 fn live_states() -> Vec<Rc<WinUI3AccessibilityState>> {
-    STATES.with(|states| {
-        let mut states = states.borrow_mut();
-        states.retain(|state| state.strong_count() > 0);
-        states.iter().filter_map(Weak::upgrade).collect()
+    STATES.with(|states: &RefCell<Vec<Weak<WinUI3AccessibilityState>>>| {
+        let mut states: std::cell::RefMut<'_, Vec<Weak<WinUI3AccessibilityState>>> =
+            RefCell::borrow_mut(states);
+        let mut live: Vec<Rc<WinUI3AccessibilityState>> = Vec::new();
+        states.retain(|state: &Weak<WinUI3AccessibilityState>| {
+            match Weak::<WinUI3AccessibilityState>::upgrade(state) {
+                Some(state) => {
+                    live.push(state);
+                    true
+                }
+                None => false,
+            }
+        });
+        live
     })
 }
 
@@ -681,13 +691,14 @@ fn physical_canvas_bounds(state: &WinUI3AccessibilityState) -> Option<Rect> {
         },
     )?;
     let mut bounds = physical_bounds_from_points(top_left, bottom_right);
-    // Virtual child peers return `record - parent bounds`, and WinUI adds back the origin it
-    // measures for the semantic root element. For a canvas inside a windowed `Popup` that
-    // measured origin omits the popup offset, so the root reports the same origin (without the
-    // offset) and the children's absolute records then compose to their true screen position.
-    let (offset_x, offset_y) = super::TreeHost::popup_offset_physical(&canvas);
-    bounds.x -= offset_x;
-    bounds.y -= offset_y;
+    // Virtual child peers return `record - parent bounds`, and WinUI composes the result against
+    // an origin it measures from the XAML content root, not from where the semantic root Canvas
+    // sits inside that content (below a MenuBar, inside a windowed `Popup`, ...). The root
+    // therefore reports its frame at the content origin, so every descendant's absolute record
+    // -- including peers spliced in from nested hosts -- composes to its true screen position.
+    let origin = super::TreeHost::content_origin_screen_physical_point(&canvas)?;
+    bounds.x = origin.x;
+    bounds.y = origin.y;
     Some(bounds)
 }
 

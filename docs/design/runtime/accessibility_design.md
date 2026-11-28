@@ -162,9 +162,11 @@ Core contract supplies group/container semantics.
 
 AutomationId is copied from the Core identifier. Semantic bounds are converted from Canvas/root
 coordinates through the XAML content island's `ContentCoordinateConverter` to desktop physical
-screen pixels; a failed conversion yields an empty rectangle. The synthetic root peer carries the
-physical Canvas frame so WinUI's parent-relative virtual-peer composition does not re-add the
-window origin. The logical-DIP conversion used by input and popup placement is layered on the same
+screen pixels; a failed conversion yields an empty rectangle. The synthetic root peer reports its
+frame at the physical origin of the XAML content root rather than where the Canvas sits inside it
+(below a MenuBar, inside a windowed Popup), because WinUI composes the parent-relative
+virtual-peer rectangles against that content origin; every virtual descendant, including peers
+spliced from nested hosts, then reports its true screen position. The logical-DIP conversion used by input and popup placement is layered on the same
 physical helper. UIA Focus invokes Core Focus, and post-action properties are obtained by fresh
 snapshot queries.
 

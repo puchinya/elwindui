@@ -388,9 +388,113 @@ fn dropdown_selection_survives_item_changes() {
     eprintln!("native_peer_runtime: PASS dropdown_selection (add/remove keep index, pick=2 once)");
 }
 
+/// Issue #329: an unmodified Return reaching a first-responder `TreeHost` (outer or nested) fires
+/// the window's `is_default` button exactly once; a modified Return or another key does not, and a
+/// window without a default button ignores Return.
+fn default_button_answers_return_from_tree_host() {
+    use crate::host::TreeHost;
+    use objc2::MainThreadOnly;
+    use objc2_app_kit::{
+        NSBackingStoreType, NSButton, NSEvent, NSEventModifierFlags, NSEventType, NSWindow,
+        NSWindowStyleMask,
+    };
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let mtm = crate::ffi::mtm();
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(240.0, 120.0)),
+            NSWindowStyleMask::Titled,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    unsafe { window.setReleasedWhenClosed(false) };
+    let outer = TreeHost::new();
+    let nested = TreeHost::new();
+    window.setContentView(Some(&outer));
+    outer.addSubview(&nested);
+
+    let key = |code: u16, chars: &str, flags: NSEventModifierFlags| -> Retained<NSEvent> {
+        let chars = NSString::from_str(chars);
+        NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            NSEventType::KeyDown,
+            NSPoint::new(0.0, 0.0),
+            flags,
+            0.0,
+            window.windowNumber(),
+            None,
+            &chars,
+            &chars,
+            false,
+            code,
+        )
+        .expect("synthetic key event")
+    };
+    let press = |host: &TreeHost, event: &NSEvent| {
+        assert!(
+            window.makeFirstResponder(Some(host)),
+            "host becomes first responder"
+        );
+        unsafe {
+            let _: () = msg_send![host, keyDown: event];
+        }
+    };
+    let none = NSEventModifierFlags::empty();
+
+    // No default button yet: Return is a no-op.
+    press(&outer, &key(36, "\r", none));
+
+    let clicks = Rc::new(Cell::new(0_u32));
+    let button = Button::new();
+    button.set_text("OK");
+    button.set_is_default(true);
+    let clicks_cb = Rc::clone(&clicks);
+    button.set_on_click(Box::new(move || clicks_cb.set(clicks_cb.get() + 1)));
+    let ns: Retained<NSButton> = native(&button);
+    outer.addSubview(&ns);
+
+    press(&outer, &key(36, "\r", none));
+    assert_eq!(
+        clicks.get(),
+        1,
+        "Return on the outer host fires the default button once"
+    );
+    press(&nested, &key(36, "\r", none));
+    assert_eq!(
+        clicks.get(),
+        2,
+        "Return on a nested host fires the default button once"
+    );
+    press(&outer, &key(36, "\r", NSEventModifierFlags::Shift));
+    press(&outer, &key(36, "\r", NSEventModifierFlags::Command));
+    press(&outer, &key(0, "a", none));
+    press(&outer, &key(53, "\u{1b}", none));
+    assert_eq!(
+        clicks.get(),
+        2,
+        "modified Return and other keys do not fire it"
+    );
+
+    button.set_is_default(false);
+    press(&outer, &key(36, "\r", none));
+    assert_eq!(
+        clicks.get(),
+        2,
+        "a button that is no longer default ignores Return"
+    );
+
+    window.close();
+    eprintln!(
+        "native_peer_runtime: PASS default_button_return (outer=1, nested=1, filtered=4, unset=0)"
+    );
+}
+
 pub(crate) fn run_all() {
     input_controls_release_themselves_mid_callback();
     menu_order_follows_core_list();
     tab_view_reorder_keeps_hosts_and_selection();
     dropdown_selection_survives_item_changes();
+    default_button_answers_return_from_tree_host();
 }

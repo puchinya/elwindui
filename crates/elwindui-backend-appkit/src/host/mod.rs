@@ -609,6 +609,7 @@ define_class!(
             }
             self.dispatch_key(event, true);
             self.dispatch_text_input(event);
+            self.forward_default_button_key(event);
         }
 
         #[unsafe(method(keyUp:))]
@@ -709,6 +710,12 @@ define_class!(
 
 fn is_pointer_cancel_key(key: Option<Key>) -> bool {
     key == Some(Key::Escape)
+}
+
+/// The Return key (`keyCode` 36) with no Shift/Control/Option/Command: the key a window's default
+/// button answers to. WinUI3's default-button `KeyboardAccelerator` is the same unmodified Enter.
+fn is_default_button_key(key_code: u16, modifiers: KeyModifiers) -> bool {
+    key_code == 36 && modifiers == KeyModifiers::default()
 }
 
 impl Drop for TreeHost {
@@ -1052,6 +1059,20 @@ impl TreeHost {
                 timestamp_ms: event.timestamp() * 1000.0,
             },
         );
+    }
+
+    /// Hands an unmodified Return on to the window's key equivalents after Core has seen it, so a
+    /// native `is_default` button (`keyEquivalent "\r"`) fires even while this view is first
+    /// responder (Issue #329). Like WinUI3, whose host never marks the XAML key event handled, the
+    /// default button fires whether or not Core handled the key. No other key goes on: this view
+    /// still never returns keys to `super`, so unhandled keys do not beep.
+    fn forward_default_button_key(&self, event: &NSEvent) {
+        if !is_default_button_key(event.keyCode(), nsevent_modifiers(event)) {
+            return;
+        }
+        if let Some(window) = self.window() {
+            let _ = window.performKeyEquivalent(event);
+        }
     }
 
     /// `event.characters()` (post-modifier, pre-IME — see `nsevent_key`'s own doc comment on the
@@ -1824,6 +1845,30 @@ mod coordinate_conversion_tests {
         assert!(is_pointer_cancel_key(Some(Key::Escape)));
         assert!(!is_pointer_cancel_key(Some(Key::Enter)));
         assert!(!is_pointer_cancel_key(None));
+    }
+
+    #[test]
+    fn only_an_unmodified_return_reaches_the_default_button() {
+        let none = KeyModifiers::default();
+        assert!(is_default_button_key(36, none));
+        for modifiers in [
+            KeyModifiers {
+                shift: true,
+                ..none
+            },
+            KeyModifiers {
+                control: true,
+                ..none
+            },
+            KeyModifiers { alt: true, ..none },
+            KeyModifiers { meta: true, ..none },
+        ] {
+            assert!(!is_default_button_key(36, modifiers), "{modifiers:?}");
+        }
+        // Keypad Enter, Escape, Space and Tab stay with Core alone.
+        for key_code in [76, 53, 49, 48] {
+            assert!(!is_default_button_key(key_code, none), "{key_code}");
+        }
     }
 }
 

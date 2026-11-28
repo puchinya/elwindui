@@ -125,6 +125,16 @@ cleared before host teardown. `NativeIslandView` remains the transform/input/nat
 boundary, but returns no public accessibility children in both Active and Exiting states once the
 synthetic host is active. Its raw inner native controls cannot appear as duplicate public children.
 
+Nested hosted trees are spliced in Rust: each `TreeHost` records, weakly, the control that owns it
+as nested content (set by the native `TabView` and `ScrollView` peers), and a thread-local weak
+registry of live hosts lets an owning host find the active nested hosts whose owner anchors in it.
+A projected node's `accessibilityChildren` lists its semantic children with each anchored nested
+host's root children (recursively) inserted at the anchor index. A nested root-level node reports
+its anchor node in the owning host (or that host's own root-level parent) as `accessibilityParent`,
+and `accessibilityHitTest:` tries anchored nested hosts before the owning snapshot. A nested
+host's snapshot or owner change posts `NSAccessibilityLayoutChangedNotification` on the host its
+owner anchors in.
+
 ## WinUI 3 projection and C++ boundary
 
 The actual `TreeHost` backing element is a Canvas-compatible C++/WinRT XAML subclass. Its

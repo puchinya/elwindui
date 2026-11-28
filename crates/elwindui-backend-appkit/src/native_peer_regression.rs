@@ -388,9 +388,161 @@ fn dropdown_selection_survives_item_changes() {
     eprintln!("native_peer_runtime: PASS dropdown_selection (add/remove keep index, pick=2 once)");
 }
 
+/// Issue #330: the content of a native TabView's selected page and of a native ScrollView is
+/// reachable from the owning host's accessibility tree at the owner's position; an unselected
+/// page is not; switching tabs switches what is exposed; a nested root-level node's parent is in
+/// the owning host's tree.
+fn nested_hosted_trees_are_spliced_into_the_owner() {
+    use crate::host::TreeHost;
+    use objc2::MainThreadOnly;
+    use objc2_app_kit::{NSBackingStoreType, NSWindow, NSWindowStyleMask};
+    use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize};
+
+    fn children(object: &AnyObject) -> Vec<Retained<AnyObject>> {
+        let children: Option<Retained<NSArray<AnyObject>>> =
+            unsafe { msg_send![object, accessibilityChildren] };
+        children.map(|c| c.to_vec()).unwrap_or_default()
+    }
+    fn label(object: &AnyObject) -> Option<String> {
+        let label: Option<Retained<NSString>> = unsafe { msg_send![object, accessibilityLabel] };
+        label.map(|l| l.to_string())
+    }
+    /// Labels in depth-first public order, each with its parent's label path checked.
+    fn labels(object: &AnyObject, out: &mut Vec<(String, Retained<AnyObject>)>) {
+        for child in children(object) {
+            if let Some(text) = label(&child) {
+                out.push((text, child.clone()));
+            }
+            labels(&child, out);
+        }
+    }
+    let button = |text: &str| {
+        let button = Button::new();
+        button.set_text(text);
+        button as Rc<dyn UIElementExt>
+    };
+    let page = |header: &str, content: &str| {
+        let item = TabViewItem::new();
+        item.set_header(header);
+        let layout = VerticalLayout::new();
+        layout.children().add(button(content));
+        item.set_content(layout as Rc<dyn UIElementExt>);
+        item
+    };
+
+    let mtm = crate::ffi::mtm();
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(480.0, 360.0)),
+            NSWindowStyleMask::Titled,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    unsafe { window.setReleasedWhenClosed(false) };
+    let outer = TreeHost::new();
+    window.setContentView(Some(&outer));
+
+    let tab_view = TabView::new();
+    tab_view.set_children(vec![page("A", "page-a-button"), page("B", "page-b-button")]);
+    tab_view.set_selected_index(0);
+    tab_view.set_height(160.0);
+    let scroll = ScrollView::new();
+    scroll.set_height(80.0);
+    let scrolled = VerticalLayout::new();
+    scrolled.children().add(button("scrolled-button"));
+    scroll.set_content(scrolled as Rc<dyn UIElementExt>);
+    let root = VerticalLayout::new();
+    root.children().add(button("before"));
+    root.children()
+        .add(tab_view.clone() as Rc<dyn UIElementExt>);
+    root.children().add(scroll.clone() as Rc<dyn UIElementExt>);
+    root.children().add(button("after"));
+    outer.set_tree(root as Rc<dyn UIElementExt>);
+    let settle = || {
+        outer.setNeedsLayout(true);
+        outer.layoutSubtreeIfNeeded();
+    };
+    settle();
+
+    let collect = || {
+        let mut out = Vec::new();
+        labels(&outer, &mut out);
+        out
+    };
+    let names = |found: &[(String, Retained<AnyObject>)]| {
+        found.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>()
+    };
+    let found = collect();
+    let order = names(&found);
+    let position = |name: &str| order.iter().position(|t| t == name);
+    assert!(
+        position("page-a-button").is_some(),
+        "selected page is exposed: {order:?}"
+    );
+    assert!(
+        position("page-b-button").is_none(),
+        "unselected page is hidden: {order:?}"
+    );
+    assert!(
+        position("scrolled-button").is_some(),
+        "ScrollView content is exposed: {order:?}"
+    );
+    assert!(
+        position("before") < position("page-a-button")
+            && position("page-a-button") < position("scrolled-button")
+            && position("scrolled-button") < position("after"),
+        "nested content sits at its owner's position: {order:?}"
+    );
+
+    // A nested root-level node's parent is in the owning host's tree, never the nested host.
+    let (_, page_a) = found
+        .iter()
+        .find(|(t, _)| t == "page-a-button")
+        .expect("page a");
+    let mut parent: Option<Retained<AnyObject>> =
+        unsafe { msg_send![&**page_a, accessibilityParent] };
+    let outer_ptr = Retained::as_ptr(&outer) as *const AnyObject;
+    let mut reached_outer = false;
+    for _ in 0..16 {
+        let Some(current) = parent else { break };
+        if Retained::as_ptr(&current) == outer_ptr {
+            reached_outer = true;
+            break;
+        }
+        assert!(
+            children(&current)
+                .iter()
+                .any(|c| label(c).is_some() || !children(c).is_empty())
+                || label(&current).is_some(),
+            "every ancestor is a public element"
+        );
+        parent = unsafe { msg_send![&*current, accessibilityParent] };
+    }
+    assert!(
+        reached_outer,
+        "the parent chain of nested content reaches the owning host"
+    );
+
+    tab_view.set_selected_index(1);
+    settle();
+    let order = names(&collect());
+    assert!(
+        order.iter().any(|t| t == "page-b-button") && !order.iter().any(|t| t == "page-a-button"),
+        "switching tabs switches the exposed page: {order:?}"
+    );
+
+    window.close();
+    eprintln!(
+        "native_peer_runtime: PASS nested_hosted_trees (TabView page + ScrollView spliced in order, parent chain, tab switch)"
+    );
+}
+
 pub(crate) fn run_all() {
     input_controls_release_themselves_mid_callback();
     menu_order_follows_core_list();
     tab_view_reorder_keeps_hosts_and_selection();
     dropdown_selection_survives_item_changes();
+    nested_hosted_trees_are_spliced_into_the_owner();
 }

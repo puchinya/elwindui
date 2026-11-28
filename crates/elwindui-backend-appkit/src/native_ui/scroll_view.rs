@@ -50,9 +50,8 @@ impl NativePeer for AppKitScrollViewPeer {
 impl ScrollViewPeer for AppKitScrollViewPeer {
     fn set_content(&self, content: Rc<dyn UIElementExt>, owner: Option<Rc<dyn UIElementExt>>) {
         // The AppKit nested host has no logical-parent link or retirement protocol yet
-        // (unchanged by #313); `owner` is unused here.
-        let _ = owner;
-        self.inner.set_content(content);
+        // (unchanged by #313); `owner` only splices it into the accessibility tree (Issue #330).
+        self.inner.set_content(content, owner.as_ref());
     }
     fn set_horizontal_scroll_enabled(&self, enabled: bool) {
         self.inner.set_horizontal_scroll_enabled(enabled);

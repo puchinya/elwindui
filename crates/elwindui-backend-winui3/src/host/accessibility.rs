@@ -10,7 +10,7 @@ use elwindui_core::accessibility::{
     AccessibilitySnapshotNode,
 };
 use elwindui_core::ui::UIElementExt;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::{Rc, Weak};
 
@@ -55,6 +55,9 @@ struct AccessibilityCallbacks {
     child_id: extern "C" fn(*mut c_void, u64, u32) -> u64,
     get_node: extern "C" fn(*mut c_void, u64, *mut AccessibilityNodeRecord) -> u32,
     dispatch_action: extern "C" fn(*mut c_void, u64, u32, f64, *const u16, u32) -> u32,
+    /// Bridge key of the nested host spliced at this child position, or null for a semantic
+    /// child (whose ID `child_id` returns).
+    child_bridge: extern "C" fn(*mut c_void, u64, u32) -> *mut c_void,
 }
 
 #[cfg(windows)]
@@ -97,9 +100,49 @@ impl Drop for CppAccessibilityBridge {
     }
 }
 
+/// One child position of a projected semantic node: a node of this host's own snapshot, or the
+/// (transparent) root of an active nested hosted tree spliced at its owner's position.
+#[derive(Clone)]
+pub(crate) enum AccessibilityChildEntry {
+    Semantic(AccessibilityId),
+    Nested(Rc<WinUI3AccessibilityState>),
+}
+
+thread_local! {
+    /// Every live projection state on this UI thread, so an owning host can find the nested
+    /// hosted trees anchored in it and a nested host can notify the host that owns it.
+    static STATES: RefCell<Vec<Weak<WinUI3AccessibilityState>>> = const { RefCell::new(Vec::new()) };
+}
+
+fn live_states() -> Vec<Rc<WinUI3AccessibilityState>> {
+    STATES.with(|states: &RefCell<Vec<Weak<WinUI3AccessibilityState>>>| {
+        let mut states: std::cell::RefMut<'_, Vec<Weak<WinUI3AccessibilityState>>> =
+            RefCell::borrow_mut(states);
+        let mut live: Vec<Rc<WinUI3AccessibilityState>> = Vec::new();
+        states.retain(|state: &Weak<WinUI3AccessibilityState>| {
+            match Weak::<WinUI3AccessibilityState>::upgrade(state) {
+                Some(state) => {
+                    live.push(state);
+                    true
+                }
+                None => false,
+            }
+        });
+        live
+    })
+}
+
 pub(crate) struct WinUI3AccessibilityState {
     pub(crate) runtime: Rc<AccessibilityRuntime>,
     tree: Weak<RefCell<Option<Rc<dyn UIElementExt>>>>,
+    /// The control (native TabView / ScrollView) whose nested host this is; `None` for a host
+    /// that is not nested content (a window root, a popup).
+    hosted_owner: RefCell<Option<Weak<dyn UIElementExt>>>,
+    /// Mirrors `TreeHost::set_active`: an inactive nested host is never spliced into its owner.
+    active: Cell<bool>,
+    /// Child listing of the parent C++ is currently enumerating (`child_count` followed by
+    /// per-index `child_id`/`child_bridge`); dropped on every refresh.
+    listing: RefCell<Option<(u64, Vec<AccessibilityChildEntry>)>>,
     #[cfg(windows)]
     canvas: RefCell<Option<windows::core::Weak<Canvas>>>,
     #[cfg(windows)]
@@ -114,14 +157,100 @@ fn canonical_bridge_key(canvas: &Canvas) -> Option<*mut c_void> {
 
 impl WinUI3AccessibilityState {
     pub(crate) fn new(tree: Weak<RefCell<Option<Rc<dyn UIElementExt>>>>) -> Rc<Self> {
-        Rc::new(Self {
+        let state = Rc::new(Self {
             runtime: AccessibilityRuntime::new(),
             tree,
+            hosted_owner: RefCell::new(None),
+            active: Cell::new(true),
+            listing: RefCell::new(None),
             #[cfg(windows)]
             canvas: RefCell::new(None),
             #[cfg(windows)]
             cpp_bridge: CppAccessibilityBridge::new(),
-        })
+        });
+        STATES.with(|states| states.borrow_mut().push(Rc::downgrade(&state)));
+        state
+    }
+
+    /// Records (or clears) the control owning this nested host, then lets the host that owned
+    /// the previous or owns the new owner re-enumerate its children.
+    pub(crate) fn set_hosted_owner(&self, owner: Option<&Rc<dyn UIElementExt>>) {
+        let previous = self.hosted_owner.replace(owner.map(Rc::downgrade));
+        if let Some(previous) = previous.and_then(|owner| owner.upgrade()) {
+            notify_owning_hosts(self, &previous);
+        }
+        self.notify_owner_host();
+    }
+
+    /// Mirrors `TreeHost::set_active`.
+    pub(crate) fn set_active(&self, active: bool) {
+        if self.active.replace(active) != active {
+            self.notify_owner_host();
+        }
+    }
+
+    fn nested_owner(&self) -> Option<Rc<dyn UIElementExt>> {
+        if !self.active.get() {
+            return None;
+        }
+        self.hosted_owner.borrow().as_ref().and_then(Weak::upgrade)
+    }
+
+    fn notify_owner_host(&self) {
+        let owner = self.hosted_owner.borrow().as_ref().and_then(Weak::upgrade);
+        if let Some(owner) = owner {
+            notify_owning_hosts(self, &owner);
+        }
+    }
+
+    /// The ordered children of `parent` (`0` = the semantic root): this host's own semantic
+    /// children, with every active nested host whose owner lies in this host's tree spliced at
+    /// the position [`AccessibilityRuntime::hosted_anchor`] gives for that owner.
+    pub(crate) fn child_entries(&self, parent: u64) -> Vec<AccessibilityChildEntry> {
+        let snapshot = self.runtime.snapshot();
+        let parent_id = (parent != 0).then(|| AccessibilityId::from_raw(parent));
+        let mut entries: Vec<AccessibilityChildEntry> = match parent_id {
+            None => snapshot
+                .roots
+                .iter()
+                .map(|node| node.id)
+                .collect::<Vec<_>>(),
+            Some(id) => find_children(&snapshot.roots, id).unwrap_or_default(),
+        }
+        .into_iter()
+        .map(AccessibilityChildEntry::Semantic)
+        .collect();
+        let mut nested: Vec<(usize, Rc<WinUI3AccessibilityState>)> = live_states()
+            .into_iter()
+            .filter(|state| !std::ptr::eq(Rc::as_ptr(state), self))
+            .filter_map(|state| {
+                let owner = state.nested_owner()?;
+                let anchor = self.runtime.hosted_anchor(&owner)?;
+                (anchor.parent == parent_id).then_some((anchor.index, state))
+            })
+            .collect();
+        // Insert from the back so earlier anchor indices still refer to semantic positions;
+        // nested hosts sharing an index keep registration order.
+        nested.sort_by_key(|(index, _)| *index);
+        for (index, state) in nested.into_iter().rev() {
+            let position = semantic_position(&entries, index);
+            entries.insert(position, AccessibilityChildEntry::Nested(state));
+        }
+        entries
+    }
+
+    fn cached_child_entry(&self, parent: u64, index: u32) -> Option<AccessibilityChildEntry> {
+        let cached = {
+            let listing = self.listing.borrow();
+            listing
+                .as_ref()
+                .filter(|(cached_parent, _)| *cached_parent == parent)
+                .map(|(_, entries)| entries.get(index as usize).cloned())
+        };
+        match cached {
+            Some(entry) => entry,
+            None => self.child_entries(parent).get(index as usize).cloned(),
+        }
     }
 
     #[cfg(windows)]
@@ -142,6 +271,7 @@ impl WinUI3AccessibilityState {
             child_id: callback_child_id,
             get_node: callback_get_node,
             dispatch_action: callback_dispatch_action,
+            child_bridge: callback_child_bridge,
         };
         let result =
             unsafe { elwindui_winui3_accessibility_canvas_set_callbacks(bridge_key, &callbacks) };
@@ -173,6 +303,7 @@ impl WinUI3AccessibilityState {
     }
 
     fn refresh_after_update(&self, old_revision: u64, old_snapshot: AccessibilitySnapshot) {
+        self.listing.borrow_mut().take();
         let new_snapshot = self.runtime.snapshot();
         let Some(structure_changed) = refresh_decision(
             old_revision,
@@ -187,6 +318,18 @@ impl WinUI3AccessibilityState {
         self.refresh_tree(structure_changed);
         #[cfg(not(windows))]
         let _ = structure_changed;
+        // A nested host's own root peer is not in the public tree; the host it is spliced into
+        // must announce the change instead.
+        if structure_changed {
+            self.notify_owner_host();
+        }
+    }
+
+    /// Re-enumeration request from a nested host spliced into this host.
+    fn nested_structure_changed(&self) {
+        self.listing.borrow_mut().take();
+        #[cfg(windows)]
+        self.refresh_tree(true);
     }
 
     #[cfg(windows)]
@@ -199,6 +342,47 @@ impl WinUI3AccessibilityState {
                     u32::from(structure_changed),
                 )
             };
+        }
+    }
+}
+
+/// Index in `entries` just before the `semantic_index`-th semantic entry (or the end).
+fn semantic_position(entries: &[AccessibilityChildEntry], semantic_index: usize) -> usize {
+    let mut seen = 0;
+    for (position, entry) in entries.iter().enumerate() {
+        if matches!(entry, AccessibilityChildEntry::Semantic(_)) {
+            if seen == semantic_index {
+                return position;
+            }
+            seen += 1;
+        }
+    }
+    entries.len()
+}
+
+fn find_children(
+    nodes: &[AccessibilitySnapshotNode],
+    id: AccessibilityId,
+) -> Option<Vec<AccessibilityId>> {
+    for node in nodes {
+        if node.id == id {
+            return Some(node.children.iter().map(|child| child.id).collect());
+        }
+        if let Some(found) = find_children(&node.children, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Tells every host whose tree contains `owner` that the nested host `nested` changed.
+fn notify_owning_hosts(nested: &WinUI3AccessibilityState, owner: &Rc<dyn UIElementExt>) {
+    for state in live_states() {
+        if std::ptr::eq(Rc::as_ptr(&state), nested) {
+            continue;
+        }
+        if state.runtime.hosted_anchor(owner).is_some() {
+            state.nested_structure_changed();
         }
     }
 }
@@ -279,30 +463,6 @@ fn snapshot_node(
         &state.runtime.snapshot().roots,
         AccessibilityId::from_raw(id),
     )
-}
-
-#[cfg(windows)]
-fn children_for(state: &WinUI3AccessibilityState, parent: u64) -> Vec<AccessibilityId> {
-    fn find(
-        nodes: &[elwindui_core::accessibility::AccessibilitySnapshotNode],
-        id: AccessibilityId,
-    ) -> Option<Vec<AccessibilityId>> {
-        for node in nodes {
-            if node.id == id {
-                return Some(node.children.iter().map(|child| child.id).collect());
-            }
-            if let Some(found) = find(&node.children, id) {
-                return Some(found);
-            }
-        }
-        None
-    }
-    let snapshot = state.runtime.snapshot();
-    if parent == 0 {
-        snapshot.roots.iter().map(|node| node.id).collect()
-    } else {
-        find(&snapshot.roots, AccessibilityId::from_raw(parent)).unwrap_or_default()
-    }
 }
 
 #[cfg(windows)]
@@ -531,13 +691,14 @@ fn physical_canvas_bounds(state: &WinUI3AccessibilityState) -> Option<Rect> {
         },
     )?;
     let mut bounds = physical_bounds_from_points(top_left, bottom_right);
-    // Virtual child peers return `record - parent bounds`, and WinUI adds back the origin it
-    // measures for the semantic root element. For a canvas inside a windowed `Popup` that
-    // measured origin omits the popup offset, so the root reports the same origin (without the
-    // offset) and the children's absolute records then compose to their true screen position.
-    let (offset_x, offset_y) = super::TreeHost::popup_offset_physical(&canvas);
-    bounds.x -= offset_x;
-    bounds.y -= offset_y;
+    // Virtual child peers return `record - parent bounds`, and WinUI composes the result against
+    // an origin it measures from the XAML content root, not from where the semantic root Canvas
+    // sits inside that content (below a MenuBar, inside a windowed `Popup`, ...). The root
+    // therefore reports its frame at the content origin, so every descendant's absolute record
+    // -- including peers spliced in from nested hosts -- composes to its true screen position.
+    let origin = super::TreeHost::content_origin_screen_physical_point(&canvas)?;
+    bounds.x = origin.x;
+    bounds.y = origin.y;
     Some(bounds)
 }
 
@@ -563,14 +724,29 @@ extern "C" fn callback_revision(context: *mut c_void) -> u64 {
 
 #[cfg(windows)]
 extern "C" fn callback_child_count(context: *mut c_void, parent: u64) -> u32 {
-    state_from_context(context).map_or(0, |state| children_for(state, parent).len() as u32)
+    let Some(state) = state_from_context(context) else {
+        return 0;
+    };
+    let entries = state.child_entries(parent);
+    let count = entries.len() as u32;
+    *state.listing.borrow_mut() = Some((parent, entries));
+    count
 }
 
 #[cfg(windows)]
 extern "C" fn callback_child_id(context: *mut c_void, parent: u64, index: u32) -> u64 {
-    state_from_context(context)
-        .and_then(|state| children_for(state, parent).get(index as usize).copied())
-        .map_or(0, AccessibilityId::raw)
+    match state_from_context(context).and_then(|state| state.cached_child_entry(parent, index)) {
+        Some(AccessibilityChildEntry::Semantic(id)) => id.raw(),
+        _ => 0,
+    }
+}
+
+#[cfg(windows)]
+extern "C" fn callback_child_bridge(context: *mut c_void, parent: u64, index: u32) -> *mut c_void {
+    match state_from_context(context).and_then(|state| state.cached_child_entry(parent, index)) {
+        Some(AccessibilityChildEntry::Nested(nested)) => nested.cpp_bridge.bridge_key.get(),
+        _ => std::ptr::null_mut(),
+    }
 }
 
 #[cfg(windows)]

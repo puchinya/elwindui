@@ -136,6 +136,15 @@ more than one presentation path, its `AccessibilityId` is emitted once.
 Logical removal removes semantics immediately. An exit transition may retain visuals, but the
 exiting element is absent from the snapshot and cannot receive an accessibility action.
 
+Content a control hosts in its own nested hosted tree (a native `TabView` page, native
+`ScrollView` content) keeps its own runtime and snapshot, but is projected as part of the owning
+host's semantic tree: the semantic nodes of an active nested hosted tree appear at the owner's
+position, under the nearest semantic node among the owner and its visual ancestors and after that
+node's semantic children that precede the owner. The nested root itself is transparent. An
+inactive or retired nested host contributes nothing, and an owner the owning host's traversal
+excludes (collapsed, hidden, `Exiting`, under `Ignore`, or itself `Ignore`) suppresses its nested
+content.
+
 ## 5. Built-in semantics
 
 The minimum 0.1.0 mapping is:

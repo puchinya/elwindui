@@ -79,7 +79,7 @@ pub(crate) mod hosted_lifecycle_tests {
 
     /// The realized peer's nested content host. Realizing first makes every later
     /// `set_content` reach the host immediately, as these lifecycle cases require.
-    fn content_host_of(scroll_view: &ScrollView) -> crate::host::TreeHost {
+    pub(crate) fn content_host_of(scroll_view: &ScrollView) -> crate::host::TreeHost {
         scroll_view
             .__scroll_view_peer()
             .as_any()

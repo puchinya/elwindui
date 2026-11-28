@@ -90,6 +90,28 @@ completion. This gives immediate semantic removal with deferred visual cleanup. 
 removal and host deactivation clear owners from the next/current runtime state; stale adapter
 objects remain safe but unqueryable.
 
+## Nested hosted trees
+
+A native `TabView` page or native `ScrollView` content lives in its own nested `TreeHost` with its
+own `AccessibilityRuntime`; the owning control is that content's logical parent, not a visual
+parent, so the owning host's walk stops at the control. Projection therefore splices nested
+hosts in by backend composition rather than by merging runtimes (each host keeps its own IDs,
+root-relative bounds, and action dispatch).
+
+The shared anchoring rule lives in Core: every rebuild records the pre-order position of each
+visited element, and `AccessibilityRuntime::hosted_anchor(owner)` returns the nearest snapshot node
+among the owner and its visual ancestors (`None` = host root) plus the number of that node's
+semantic children preceding the owner. It returns `None` when the last rebuild did not visit the
+owner, when the owner belongs to another host, or when the owner is itself an `Ignore` node.
+
+A backend lists a projected node's children as an ordered sequence of semantic children and nested
+hosts: every nested host that is active, has a published tree, and whose owner anchors in this
+host is inserted at its anchor. A nested root is transparent, so its own children (including
+nested-in-nested hosts) are enumerated in its place. A nested host's activation change, hosted
+attach/retire, and structural refresh request a structure-change notification on the host its
+owner anchors in, because the nested root peer itself is not part of the public tree. Popup content
+hosts are not nested hosted trees.
+
 ## AppKit projection
 
 `TreeHost` owns a cache of synthetic `NSAccessibilityElement` instances keyed by
@@ -116,6 +138,13 @@ own IDs, mutate controls, or invoke user callbacks directly. Rust owns the runti
 semantic values, and dispatch. No `Rc`, Rust reference, native pointer, or borrowed string crosses
 the ABI; values are copied into caller-owned buffers or structs.
 
+Nested hosted trees are spliced by the same enumeration: Rust lists a node's children as semantic
+IDs and nested bridge keys (`child_id` / `child_bridge`), and the C++ helper shared by the root and
+virtual peers appends a nested bridge's root children in place, parented to the enumerating peer,
+with a depth guard. The spliced peers stay cached in, and read records from, their own bridge;
+bounds compose correctly because every virtual peer returns its record relative to its current
+parent. Native `TabView`/`ScrollView` XAML peers remain `Raw`.
+
 The bridge detaches its callback context before XAML host destruction. Late UIA calls return empty
 or unavailable values. UI mutation is scheduled on the WinUI UI thread. The narrowest XAML
 accessibility-view suppression is applied to native projection children so the custom host peer is
@@ -133,9 +162,11 @@ Core contract supplies group/container semantics.
 
 AutomationId is copied from the Core identifier. Semantic bounds are converted from Canvas/root
 coordinates through the XAML content island's `ContentCoordinateConverter` to desktop physical
-screen pixels; a failed conversion yields an empty rectangle. The synthetic root peer carries the
-physical Canvas frame so WinUI's parent-relative virtual-peer composition does not re-add the
-window origin. The logical-DIP conversion used by input and popup placement is layered on the same
+screen pixels; a failed conversion yields an empty rectangle. The synthetic root peer reports its
+frame at the physical origin of the XAML content root rather than where the Canvas sits inside it
+(below a MenuBar, inside a windowed Popup), because WinUI composes the parent-relative
+virtual-peer rectangles against that content origin; every virtual descendant, including peers
+spliced from nested hosts, then reports its true screen position. The logical-DIP conversion used by input and popup placement is layered on the same
 physical helper. UIA Focus invokes Core Focus, and post-action properties are obtained by fresh
 snapshot queries.
 

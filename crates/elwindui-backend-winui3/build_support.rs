@@ -16,7 +16,7 @@ pub const PREBUILT_EXPORT_DIR_ENV: &str = "ELWINDUI_WINUI3_PREBUILT_EXPORT_DIR";
 
 /// Native C ABI generation. Must match the `elwindui_winui3_native_abi_v<N>` anchor exported by
 /// `cpp/app_host.cpp` and referenced by `src/app.rs`, and `native_abi` in the prebuilt manifest.
-pub const NATIVE_ABI_VERSION: u32 = 1;
+pub const NATIVE_ABI_VERSION: u32 = 2;
 
 /// Exact Cargo `TARGET` triples that have checked-in prebuilt native artifacts.
 pub const SUPPORTED_PREBUILT_TARGETS: [&str; 2] =

@@ -13,7 +13,7 @@ $script:Winui3ArtifactFiles = @(
     "Elwindui.WinUI3.Accessibility.winmd",
     "resources.pri"
 )
-$script:Winui3AbiAnchor = "elwindui_winui3_native_abi_v1"
+$script:Winui3AbiAnchor = "elwindui_winui3_native_abi_v2"
 
 # Exact Cargo TARGET <-> native architecture <-> GitHub-hosted runner mapping.
 $script:Winui3Targets = [ordered]@{

@@ -44,6 +44,10 @@ struct ElwinduiAccessibilityCallbacks {
         double numeric_value,
         const char16_t* text,
         std::uint32_t text_length);
+    // Bridge key of an active nested host spliced at this child position, or null when the
+    // position holds a semantic child (whose ID `child_id` returns). The nested root is
+    // transparent: its own semantic children are enumerated in its place.
+    void* (*child_bridge)(void* context, std::uint64_t parent_id, std::uint32_t index);
 };
 
 extern "C" __declspec(dllexport) void* elwindui_winui3_accessibility_canvas_create();

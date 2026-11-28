@@ -148,6 +148,16 @@ char const* pattern_name(PatternInterface const& pattern_interface) {
     }
 }
 
+// Appends the public children of `parent_id` in `bridge_key`'s host to `out`, parented to
+// `parent`. A nested hosted tree spliced at a child position contributes its root's children in
+// place (the nested root stays transparent); `depth` bounds nested-in-nested recursion.
+void append_semantic_children(
+    void* bridge_key,
+    std::uint64_t parent_id,
+    AutomationPeer const& parent,
+    std::vector<AutomationPeer>& out,
+    int depth);
+
 }  // namespace
 
 namespace winrt::Elwindui::WinUI3::Accessibility::implementation {
@@ -398,26 +408,8 @@ struct SemanticPeer : SemanticPeerT<SemanticPeer> {
         winrt::Microsoft::UI::Xaml::Automation::Peers::AutomationPeer>
     GetChildrenCore() {
         std::vector<winrt::Microsoft::UI::Xaml::Automation::Peers::AutomationPeer> children;
-        auto bridge = bridge_for(m_bridge_key);
-        if (!bridge || !bridge->callbacks.child_count || !bridge->callbacks.child_id) {
-            return single_threaded_vector<
-                winrt::Microsoft::UI::Xaml::Automation::Peers::AutomationPeer>(
-                std::move(children));
-        }
-        auto count = bridge->callbacks.child_count(bridge->callbacks.context, m_id);
-        children.reserve(count);
         auto parent = get_strong().as<winrt::Microsoft::UI::Xaml::Automation::Peers::AutomationPeer>();
-        for (std::uint32_t index = 0; index < count; ++index) {
-            auto child = bridge->callbacks.child_id(bridge->callbacks.context, m_id, index);
-            if (child == 0) continue;
-            auto it = bridge->peers.find(child);
-            if (it == bridge->peers.end()) {
-                it = bridge->peers.emplace(child, make<SemanticPeer>(m_bridge_key, child)).first;
-            }
-            // Virtual peers have no visual owner from which WinUI can infer this relationship.
-            it->second.SetParent(parent);
-            children.push_back(it->second);
-        }
+        append_semantic_children(m_bridge_key, m_id, parent, children, 0);
         return single_threaded_vector<
             winrt::Microsoft::UI::Xaml::Automation::Peers::AutomationPeer>(std::move(children));
     }
@@ -558,6 +550,44 @@ namespace {
 
 using SemanticPeer = winrt::Elwindui::WinUI3::Accessibility::implementation::SemanticPeer;
 
+// Deep enough for any realistic TabView/ScrollView nesting; it only stops a malformed cycle.
+constexpr int kMaxNestedHostDepth = 32;
+
+void append_semantic_children(
+    void* bridge_key,
+    std::uint64_t parent_id,
+    AutomationPeer const& parent,
+    std::vector<AutomationPeer>& out,
+    int depth) {
+    auto bridge = bridge_for(bridge_key);
+    if (!bridge || !bridge->callbacks.child_count || !bridge->callbacks.child_id ||
+        depth > kMaxNestedHostDepth) {
+        return;
+    }
+    auto const& callbacks = bridge->callbacks;
+    auto count = callbacks.child_count(callbacks.context, parent_id);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        if (callbacks.child_bridge) {
+            if (auto nested = callbacks.child_bridge(callbacks.context, parent_id, index)) {
+                if (nested != bridge_key) {
+                    append_semantic_children(nested, 0, parent, out, depth + 1);
+                }
+                continue;
+            }
+        }
+        auto child = callbacks.child_id(callbacks.context, parent_id, index);
+        if (child == 0) continue;
+        auto it = bridge->peers.find(child);
+        if (it == bridge->peers.end()) {
+            it = bridge->peers.emplace(child, make<SemanticPeer>(bridge_key, child)).first;
+        }
+        // Virtual peers have no visual owner from which WinUI can infer this relationship, and a
+        // spliced nested peer's public parent is the node it is spliced under.
+        it->second.SetParent(parent);
+        out.push_back(it->second);
+    }
+}
+
 struct SemanticRootPeer : FrameworkElementAutomationPeerT<SemanticRootPeer> {
     SemanticRootPeer(FrameworkElement const& owner, void* bridge_key)
         : FrameworkElementAutomationPeerT<SemanticRootPeer>(owner), m_bridge_key(bridge_key) {}
@@ -578,25 +608,9 @@ struct SemanticRootPeer : FrameworkElementAutomationPeerT<SemanticRootPeer> {
 
     Windows::Foundation::Collections::IVector<AutomationPeer> GetChildrenCore() {
         std::vector<AutomationPeer> children;
-        auto bridge = bridge_for(m_bridge_key);
-        if (!bridge || !bridge->callbacks.child_count || !bridge->callbacks.child_id) {
-            return single_threaded_vector<AutomationPeer>(std::move(children));
-        }
-        auto count = bridge->callbacks.child_count(bridge->callbacks.context, 0);
-        children.reserve(count);
-        auto parent = get_strong().as<AutomationPeer>();
-        for (std::uint32_t index = 0; index < count; ++index) {
-            auto id = bridge->callbacks.child_id(bridge->callbacks.context, 0, index);
-            if (id == 0) continue;
-            auto it = bridge->peers.find(id);
-            if (it == bridge->peers.end()) {
-                it = bridge->peers.emplace(id, make<SemanticPeer>(m_bridge_key, id)).first;
-            }
-            // Keep the virtual peer graph connected even though semantic nodes are not native
-            // XAML children.
-            it->second.SetParent(parent);
-            children.push_back(it->second);
-        }
+        // Keep the virtual peer graph connected even though semantic nodes are not native XAML
+        // children; active nested hosts are spliced in at their owners' positions.
+        append_semantic_children(m_bridge_key, 0, get_strong().as<AutomationPeer>(), children, 0);
         return single_threaded_vector<AutomationPeer>(std::move(children));
     }
 

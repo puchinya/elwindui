@@ -548,6 +548,108 @@ pub(crate) mod hosted_lifecycle_tests {
         );
     }
 
+    /// Issue #332: the host containing a native TabView splices exactly the selected tab's
+    /// nested host into its accessibility children, at the TabView's position; a non-selected
+    /// or removed tab's host is never spliced, and a ScrollView inside a page is spliced into
+    /// that page's host in turn (nested-in-nested).
+    pub(crate) fn outer_accessibility_splices_only_the_selected_tab_host() {
+        use crate::host::AccessibilityEntryForTest::{Nested, Semantic};
+        use elwindui_core::ui::{
+            LayoutExt, ScrollView, ScrollViewExt, TextBlock, TextBlockExt, VerticalLayout,
+        };
+        let text = |value: &str| -> Rc<dyn UIElementExt> {
+            let block = TextBlock::new();
+            block.set_text(value);
+            block
+        };
+        let tab_view = TabView::new();
+        peer_of(&tab_view);
+        let scroll_view = ScrollView::new();
+        let scrolled = text("scrolled");
+        scroll_view.set_content(Rc::clone(&scrolled));
+        let pages: Vec<Rc<dyn UIElementExt>> = vec![text("page a"), scroll_view.clone()];
+        let items: Vec<Rc<TabViewItem>> = ["a", "b"]
+            .iter()
+            .zip(&pages)
+            .map(|(name, page)| {
+                let item = TabViewItem::new();
+                item.set_header(name);
+                item.set_content(Rc::clone(page));
+                item
+            })
+            .collect();
+        tab_view.set_children(items.clone());
+
+        let (before, after) = (text("before"), text("after"));
+        let root = VerticalLayout::new();
+        LayoutExt::children(&*root).add(Rc::clone(&before));
+        LayoutExt::children(&*root).add(tab_view.clone() as Rc<dyn UIElementExt>);
+        LayoutExt::children(&*root).add(Rc::clone(&after));
+        let outer = TreeHost::new();
+        outer.set_tree(root as Rc<dyn UIElementExt>);
+        let rebuild_all = || {
+            outer.rebuild_accessibility_for_test();
+            for host in hosts_of(&tab_view) {
+                host.rebuild_accessibility_for_test();
+            }
+        };
+        let expected = |host: &TreeHost| {
+            vec![
+                Semantic(before.accessibility_id().raw()),
+                Nested(host.accessibility_identity_for_test()),
+                Semantic(after.accessibility_id().raw()),
+            ]
+        };
+
+        emit_select(&tab_view, 0);
+        rebuild_all();
+        let hosts = hosts_of(&tab_view);
+        assert_eq!(
+            outer.accessibility_entries_for_test(0),
+            expected(&hosts[0]),
+            "only the selected page, at the TabView's position"
+        );
+        assert_eq!(
+            hosts[0].accessibility_entries_for_test(0),
+            [Semantic(pages[0].accessibility_id().raw())]
+        );
+
+        emit_select(&tab_view, 1);
+        rebuild_all();
+        assert_eq!(
+            outer.accessibility_entries_for_test(0),
+            expected(&hosts[1]),
+            "switching tabs swaps the spliced host"
+        );
+        let scroll_host =
+            super::super::scroll_view::hosted_lifecycle_tests::content_host_of(&scroll_view);
+        scroll_host.rebuild_accessibility_for_test();
+        assert_eq!(
+            hosts[1].accessibility_entries_for_test(0),
+            [Nested(scroll_host.accessibility_identity_for_test())],
+            "a ScrollView inside the page splices its own nested host"
+        );
+        assert_eq!(
+            scroll_host.accessibility_entries_for_test(0),
+            [Semantic(scrolled.accessibility_id().raw())]
+        );
+
+        tab_view.remove_at(1);
+        rebuild_all();
+        let remaining = hosts_of(&tab_view);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            outer.accessibility_entries_for_test(0),
+            expected(&remaining[0]),
+            "a removed tab's host is gone and the replacement selection is spliced"
+        );
+        assert!(
+            !outer
+                .accessibility_entries_for_test(0)
+                .contains(&Nested(hosts[1].accessibility_identity_for_test()))
+        );
+    }
+
     /// Review fix (PR #320): `set_children` with the existing items in a new order (and an
     /// insertion before a kept tab) moves the native tabs into Core's order, keeps every tab's
     /// content host and content (nothing is retired or re-hosted), and leaves the native

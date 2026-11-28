@@ -73,6 +73,8 @@ pub mod diagnostics;
 mod ffi;
 mod host;
 mod inner;
+#[cfg(all(feature = "native-peer-regression", target_os = "macos"))]
+mod native_peer_regression;
 mod native_ui;
 pub mod platform;
 mod render;
@@ -92,6 +94,177 @@ pub use ffi::AnyView;
 /// backends. See `app`'s module doc.
 pub mod application {
     pub use crate::app::run;
+}
+
+/// Runs the executable AppKit main-thread regression for the native menu-item ownership boundary.
+///
+/// A Core `MenuItem` added to a Core `Menu` and then dropped by the caller must keep its native
+/// `NSMenuItem` and target alive, keep its explicit enabled state, and fire its callback exactly
+/// once through the native `NSMenu::performActionForItemAtIndex` path. Hidden from the ordinary
+/// backend API; only the focused `menu_lifetime_runtime` example calls it.
+#[cfg(all(feature = "menu-lifetime-regression", target_os = "macos"))]
+#[doc(hidden)]
+pub fn run_menu_lifetime_regression() {
+    use elwindui_core::ui::{Menu, MenuExt, MenuItem, MenuItemExt};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let _ = init();
+    application::run(|| {
+        let menu = Menu::new();
+        let callback_count = Rc::new(Cell::new(0_u32));
+
+        let item = MenuItem::new();
+        item.set_text("Lifetime regression");
+        item.set_enabled(true);
+        let callback_count_for_item = Rc::clone(&callback_count);
+        item.set_on_select(Box::new(move || {
+            callback_count_for_item.set(callback_count_for_item.get() + 1);
+        }));
+        menu.items().add(Rc::clone(&item) as Rc<dyn MenuItemExt>);
+        drop(item);
+
+        let menu_peer = elwindui_core::ui::__menu_peer_of(&*menu);
+        let native_menu = menu_peer
+            .as_any()
+            .downcast_ref::<native_ui::menu::AppKitMenuPeer>()
+            .expect("AppKit menu peer")
+            .ns();
+        let native_item = native_menu
+            .itemAtIndex(0)
+            .expect("menu must retain its native item");
+        assert!(
+            native_item.target().is_some(),
+            "native target must remain alive"
+        );
+        assert!(
+            native_item.isEnabled(),
+            "explicit enabled state must remain authoritative"
+        );
+
+        native_menu.performActionForItemAtIndex(0);
+        assert_eq!(
+            callback_count.get(),
+            1,
+            "native menu selection must fire exactly once"
+        );
+
+        eprintln!(
+            "menu_lifetime_runtime: PASS (native_item_retained=true, callback_count={})",
+            callback_count.get()
+        );
+        drop(menu);
+
+        run_menu_single_parent_regression();
+
+        dispatch2::DispatchQueue::main().exec_async(|| {
+            objc2_app_kit::NSApplication::sharedApplication(crate::ffi::mtm()).terminate(None);
+        });
+    });
+}
+
+/// Issue #323 on AppKit: a `MenuItem` that belongs to native `NSMenu` A is rejected by Core
+/// before `NSMenu addItem:` could raise its second-parent exception for B, both native menus stay
+/// unchanged, and after an explicit `remove` the same `NSMenuItem` moves to B and still fires.
+#[cfg(all(feature = "menu-lifetime-regression", target_os = "macos"))]
+fn run_menu_single_parent_regression() {
+    use elwindui_core::ui::{__menu_peer_of, ListExt, Menu, MenuItem, MenuItemExt};
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSMenu, NSMenuItem};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    fn native(menu: &Menu) -> Retained<NSMenu> {
+        __menu_peer_of(menu)
+            .as_any()
+            .downcast_ref::<native_ui::menu::AppKitMenuPeer>()
+            .expect("AppKit menu peer")
+            .ns()
+    }
+    fn entries(menu: &NSMenu) -> Vec<Retained<NSMenuItem>> {
+        (0..menu.numberOfItems())
+            .map(|index| menu.itemAtIndex(index).expect("native entry"))
+            .collect()
+    }
+    fn rejection(action: impl FnOnce()) -> String {
+        let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action))
+            .expect_err("adding an item owned by another live Menu must be rejected");
+        error
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| error.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    }
+
+    let menu_a = Menu::new();
+    let menu_b = Menu::new();
+    let item = MenuItem::new();
+    item.set_text("Shared");
+    let selected = Rc::new(Cell::new(0_u32));
+    let selected_for_callback = Rc::clone(&selected);
+    item.set_on_select(Box::new(move || {
+        selected_for_callback.set(selected_for_callback.get() + 1)
+    }));
+    menu_a.add(item.clone());
+
+    let (native_a, native_b) = (native(&menu_a), native(&menu_b));
+    let native_item = entries(&native_a).pop().expect("A holds the native entry");
+    assert_eq!(entries(&native_a).len(), 1);
+    assert!(entries(&native_b).is_empty());
+
+    for message in [
+        rejection(|| menu_b.add(item.clone())),
+        rejection(|| ListExt::insert(&*menu_b, 0, item.clone())),
+    ] {
+        assert!(
+            message.contains("this `MenuItem` already belongs to another `Menu`"),
+            "Core diagnostic: {message}"
+        );
+    }
+    assert_eq!((menu_a.len(), menu_b.len()), (1, 0));
+    let a_after = entries(&native_a);
+    assert!(
+        a_after.len() == 1 && Retained::as_ptr(&a_after[0]) == Retained::as_ptr(&native_item),
+        "A's native entries are unchanged"
+    );
+    assert!(
+        entries(&native_b).is_empty(),
+        "nothing was added to B natively"
+    );
+    native_a.performActionForItemAtIndex(0);
+    assert_eq!(selected.get(), 1, "A still activates the item once");
+
+    let item_dyn: Rc<dyn MenuItemExt> = item.clone();
+    assert!(ListExt::remove(&*menu_a, &item_dyn));
+    menu_b.add(item.clone());
+    assert!(entries(&native_a).is_empty(), "A detached the native entry");
+    let b_after = entries(&native_b);
+    assert!(
+        b_after.len() == 1 && Retained::as_ptr(&b_after[0]) == Retained::as_ptr(&native_item),
+        "B holds the same NSMenuItem"
+    );
+    native_b.performActionForItemAtIndex(0);
+    assert_eq!(selected.get(), 2, "B activates the moved item once");
+
+    eprintln!(
+        "menu_single_parent_runtime: PASS (rejected_add_insert=2, native_unchanged=true, moved_same_nsmenuitem=true, select_count={})",
+        selected.get()
+    );
+}
+
+/// Runs the executable AppKit main-thread regression for the native input, menu, TabView and
+/// Dropdown peers (Issue #313 PRs #319/#320, verified on macOS for Issue #316). Hidden from the
+/// ordinary backend API; only the focused `native_peer_runtime` example calls it.
+#[cfg(all(feature = "native-peer-regression", target_os = "macos"))]
+#[doc(hidden)]
+pub fn run_native_peer_regression() {
+    let _ = init();
+    application::run(|| {
+        native_peer_regression::run_all();
+        dispatch2::DispatchQueue::main().exec_async(|| {
+            objc2_app_kit::NSApplication::sharedApplication(crate::ffi::mtm()).terminate(None);
+        });
+    });
 }
 
 /// Runs the executable AppKit main-thread regression for inactive-host accessibility semantics.

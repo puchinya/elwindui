@@ -474,6 +474,25 @@ impl TabStripImpl {
 /// overlaid subview of `content_container` and shown/hidden via `set_tab_content_visible` rather
 /// than destroyed and rebuilt — a single shared pane would have no way to restore a previously-
 /// shown-then-hidden tab's content after switching away from it.
+#[cfg(all(feature = "native-peer-regression", target_os = "macos"))]
+impl InnerTabView {
+    /// For each chip view in the strip's native arranged order, its index in `chips`.
+    pub(crate) fn native_chip_order(&self, chips: &[&TabChipImpl]) -> Vec<usize> {
+        self.strip
+            .chips_stack
+            .arrangedSubviews()
+            .iter()
+            .map(|view| {
+                let view_ptr = Retained::as_ptr(&view).cast::<()>();
+                chips
+                    .iter()
+                    .position(|chip| Retained::as_ptr(&chip.ns).cast::<()>() == view_ptr)
+                    .expect("every arranged chip view belongs to a known chip")
+            })
+            .collect()
+    }
+}
+
 pub(crate) struct InnerTabView {
     handle: AnyView,
     pub(crate) strip: TabStripImpl,

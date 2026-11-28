@@ -112,7 +112,7 @@ pub(crate) mod menu;
 mod radio_button;
 mod scroll_view;
 mod slider;
-mod tab_view;
+pub(crate) mod tab_view;
 mod text;
 mod toggle_switch;
 mod window;
